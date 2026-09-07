@@ -1,0 +1,7 @@
+data/
+caddy_data/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+.venv/
+__pycache__/

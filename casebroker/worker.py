@@ -1,0 +1,284 @@
+"""The client half: lease a case, simulate it, report, repeat.
+
+Runs anywhere that can reach the broker over HTTPS. Measured 2026-09-07, ICE
+compute nodes have outbound internet (``https://api.github.com`` answered 200 in
+57 ms from ``atl1-1-01-005-1-2``), so a SLURM job can talk to the broker directly
+and no login-node relay is needed.
+
+Three things here are not optional at campaign scale:
+
+* **A heartbeat thread.** A case takes hours; a lease that cannot outlive one
+  network hiccup is useless, and a lease long enough to cover the whole solve
+  would strand a dead worker's case for that same duration. Renewing on a timer
+  gives a short TTL and a long job at once.
+* **SIGTERM -> release.** Phoenix's free ``embers`` QOS preempts after an hour.
+  SLURM sends SIGTERM before SIGKILL, so the case goes straight back to the pool
+  with its retry refunded instead of waiting out its TTL.
+* **Refusing to finish a case whose lease is gone.** If the heartbeat ever comes
+  back 409, another worker owns the case now and this one's result would be a
+  duplicate write racing the real owner. It stops immediately.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import signal
+import socket
+import subprocess
+import sys
+import threading
+import time
+import uuid
+from typing import Any, Callable
+
+import httpx
+
+LeaseDict = dict[str, Any]
+Runner = Callable[[LeaseDict, "Worker"], dict[str, Any]]
+
+
+class LeaseLost(RuntimeError):
+    """The broker says this worker no longer owns the case."""
+
+
+class Worker:
+    def __init__(self, broker: str, token: str | None, worker_id: str | None = None,
+                 lease_seconds: int = 1800, heartbeat_seconds: int = 300,
+                 timeout: float = 30.0):
+        self.broker = broker.rstrip("/")
+        self.worker_id = worker_id or f"{socket.gethostname()}-{os.getpid()}-{uuid.uuid4().hex[:6]}"
+        self.lease_seconds = lease_seconds
+        self.heartbeat_seconds = heartbeat_seconds
+        headers = {"Authorization": f"Bearer {token}"} if token else {}
+        self.http = httpx.Client(base_url=self.broker, headers=headers, timeout=timeout)
+        self._stop = threading.Event()
+        self._current_lease: str | None = None
+        self._lease_lost = threading.Event()
+
+    # -- transport ------------------------------------------------------------
+
+    def _post(self, path: str, payload: dict[str, Any], retries: int = 4) -> httpx.Response:
+        """POST with backoff on transport errors and 5xx.
+
+        A 409 is NOT retried: it is a definitive answer ("you no longer own this")
+        and retrying it would only delay the worker noticing.
+        """
+        delay = 2.0
+        last: Exception | None = None
+        for _ in range(retries):
+            try:
+                r = self.http.post(path, json=payload)
+                if r.status_code < 500:
+                    return r
+                last = RuntimeError(f"{r.status_code} {r.text[:200]}")
+            except httpx.HTTPError as e:
+                last = e
+            time.sleep(delay)
+            delay = min(delay * 2, 60)
+        raise RuntimeError(f"broker unreachable for {path}: {last}")
+
+    # -- lease lifecycle ------------------------------------------------------
+
+    def lease(self, count: int = 1, splits: list[str] | None = None) -> list[LeaseDict]:
+        r = self._post("/v1/lease", {
+            "worker_id": self.worker_id, "count": count,
+            "lease_seconds": self.lease_seconds, "splits": splits})
+        r.raise_for_status()
+        return r.json()
+
+    def heartbeat(self, detail: str | None = None) -> None:
+        if not self._current_lease:
+            return
+        r = self._post("/v1/heartbeat", {
+            "lease_id": self._current_lease,
+            "lease_seconds": self.lease_seconds, "detail": detail}, retries=2)
+        if r.status_code == 409:
+            self._lease_lost.set()
+            raise LeaseLost(r.text[:200])
+        r.raise_for_status()
+
+    def complete(self, result_uri: str, sha256: str | None = None,
+                 nbytes: int | None = None, metrics: dict[str, Any] | None = None) -> None:
+        r = self._post("/v1/complete", {
+            "lease_id": self._current_lease, "result_uri": result_uri,
+            "sha256": sha256, "bytes": nbytes, "metrics": metrics or {}})
+        if r.status_code == 409:
+            raise LeaseLost(r.text[:200])
+        r.raise_for_status()
+
+    def fail(self, error: str, retryable: bool = True) -> None:
+        self._post("/v1/fail", {"lease_id": self._current_lease,
+                                "error": error, "retryable": retryable})
+
+    def release(self, reason: str = "released") -> None:
+        if self._current_lease:
+            try:
+                self._post("/v1/release", {"lease_id": self._current_lease,
+                                           "reason": reason}, retries=2)
+            except Exception as e:                       # best effort by design
+                # A failed release is survivable: the lease TTL reclaims the case
+                # anyway. Losing the exit path over it would not be.
+                print(f"[warn] release failed ({e}); lease will expire instead",
+                      file=sys.stderr)
+
+    # -- main loop ------------------------------------------------------------
+
+    def _heartbeat_loop(self) -> None:
+        while not self._stop.wait(self.heartbeat_seconds):
+            if not self._current_lease:
+                continue
+            try:
+                self.heartbeat("alive")
+            except LeaseLost:
+                print("[warn] lease lost; abandoning current case", file=sys.stderr)
+                return
+            except Exception as e:
+                print(f"[warn] heartbeat failed: {e}", file=sys.stderr)
+
+    def install_signal_handlers(self) -> None:
+        def on_term(signum, _frame):
+            name = signal.Signals(signum).name
+            print(f"[info] {name} received - releasing lease and exiting", file=sys.stderr)
+            self._stop.set()
+            self.release(f"preempted ({name})")
+            os._exit(0)
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            try:
+                signal.signal(sig, on_term)
+            except (ValueError, OSError):
+                pass                                  # not on the main thread
+
+    def run_forever(self, runner: Runner, splits: list[str] | None = None,
+                    max_cases: int | None = None, idle_backoff: int = 60,
+                    max_idle_polls: int = 10) -> int:
+        self.install_signal_handlers()
+        hb = threading.Thread(target=self._heartbeat_loop, daemon=True)
+        hb.start()
+
+        done = idle = 0
+        while not self._stop.is_set():
+            if max_cases is not None and done >= max_cases:
+                print(f"[info] reached max_cases={max_cases}")
+                break
+            try:
+                got = self.lease(count=1, splits=splits)
+            except Exception as e:
+                print(f"[warn] lease failed: {e}", file=sys.stderr)
+                time.sleep(idle_backoff)
+                continue
+
+            if not got:
+                idle += 1
+                if idle >= max_idle_polls:
+                    print("[info] queue drained; exiting so the allocation is freed")
+                    break
+                time.sleep(idle_backoff)
+                continue
+
+            idle = 0
+            lease = got[0]
+            self._current_lease = lease["lease_id"]
+            self._lease_lost.clear()
+            t0 = time.time()
+            print(f"[info] leased {lease['case_id']} (attempt {lease['attempt']})")
+            try:
+                out = runner(lease, self)
+                if self._lease_lost.is_set():
+                    raise LeaseLost("heartbeat reported the lease was taken")
+                metrics = dict(out.get("metrics", {}))
+                metrics["wall_seconds"] = round(time.time() - t0, 1)
+                metrics["worker"] = self.worker_id
+                self.complete(out["result_uri"], out.get("sha256"),
+                              out.get("bytes"), metrics)
+                done += 1
+                print(f"[info] completed {lease['case_id']} in {metrics['wall_seconds']}s")
+            except LeaseLost as e:
+                print(f"[warn] lease lost on {lease['case_id']}: {e}", file=sys.stderr)
+            except Exception as e:
+                # retryable unless the runner explicitly says the case itself is
+                # broken -- a bad STL will fail identically on every machine, and
+                # cycling it through the fleet three times helps nobody.
+                retryable = not getattr(e, "fatal", False)
+                print(f"[error] {lease['case_id']}: {e}", file=sys.stderr)
+                try:
+                    self.fail(str(e)[:2000], retryable=retryable)
+                except Exception as e2:
+                    print(f"[warn] could not report failure: {e2}", file=sys.stderr)
+            finally:
+                self._current_lease = None
+
+        self._stop.set()
+        return done
+
+
+# -- runners ------------------------------------------------------------------
+
+class FatalCaseError(RuntimeError):
+    """Raised by a runner when the case can never succeed anywhere."""
+    fatal = True
+
+
+def echo_runner(lease: LeaseDict, worker: Worker) -> dict[str, Any]:
+    """Test runner: pretends to simulate. Used by the integration test and to
+    smoke a new deployment without burning CFD time."""
+    time.sleep(float(os.environ.get("CASEBROKER_FAKE_SECONDS", "0.05")))
+    return {"result_uri": f"memory://{lease['case_id']}", "bytes": 0,
+            "metrics": {"fake": True}}
+
+
+def script_runner(script: str) -> Runner:
+    """Run an external script per case.
+
+    The case spec arrives as JSON on stdin and in ``$CASE_SPEC``; the script must
+    print a JSON object with at least ``result_uri`` as its LAST line of stdout.
+    This is the seam where ``eddy3d-cli build-case`` + mesh + solve + sample
+    plugs in, so the broker never needs to know what OpenFOAM is.
+    """
+    def run(lease: LeaseDict, worker: Worker) -> dict[str, Any]:
+        env = dict(os.environ)
+        env["CASE_ID"] = lease["case_id"]
+        env["CASE_SPEC"] = json.dumps(lease["spec"])
+        env["LEASE_ID"] = lease["lease_id"]
+        proc = subprocess.run([script], input=json.dumps(lease), text=True,
+                              capture_output=True, env=env, shell=False)
+        if proc.returncode != 0:
+            tail = (proc.stderr or proc.stdout)[-2000:]
+            # 64 is the campaign's agreed "this case is broken, do not retry"
+            # code, so a bad tile is quarantined on its first attempt.
+            err = FatalCaseError if proc.returncode == 64 else RuntimeError
+            raise err(f"runner exited {proc.returncode}: {tail}")
+        lines = [ln for ln in proc.stdout.strip().splitlines() if ln.strip()]
+        if not lines:
+            raise RuntimeError("runner produced no output; expected a JSON result line")
+        try:
+            return json.loads(lines[-1])
+        except json.JSONDecodeError as e:
+            raise RuntimeError(f"last stdout line is not JSON ({e}): {lines[-1][:200]}")
+    return run
+
+
+def main(argv: list[str] | None = None) -> int:
+    p = argparse.ArgumentParser(description="Case-broker worker")
+    p.add_argument("--broker", default=os.environ.get("CASEBROKER_URL", "http://127.0.0.1:8000"))
+    p.add_argument("--token", default=os.environ.get("CASEBROKER_TOKEN"))
+    p.add_argument("--worker-id", default=os.environ.get("CASEBROKER_WORKER_ID"))
+    p.add_argument("--runner", help="path to a per-case script; omit for the echo test runner")
+    p.add_argument("--splits", nargs="*", default=None)
+    p.add_argument("--max-cases", type=int, default=None)
+    p.add_argument("--lease-seconds", type=int, default=1800)
+    p.add_argument("--heartbeat-seconds", type=int, default=300)
+    p.add_argument("--idle-backoff", type=int, default=60)
+    a = p.parse_args(argv)
+
+    w = Worker(a.broker, a.token, a.worker_id, a.lease_seconds, a.heartbeat_seconds)
+    runner = script_runner(a.runner) if a.runner else echo_runner
+    n = w.run_forever(runner, splits=a.splits, max_cases=a.max_cases,
+                      idle_backoff=a.idle_backoff)
+    print(f"[info] worker {w.worker_id} finished {n} case(s)")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

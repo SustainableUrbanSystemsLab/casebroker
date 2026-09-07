@@ -1,0 +1,26 @@
+# Cloud-VM deployment. `docker compose up -d` after setting CASEBROKER_TOKENS in
+# a .env file beside this one.
+#
+# Caddy terminates TLS and gets a certificate automatically, because the bearer
+# token is sent in a header and must never cross plain HTTP.
+services:
+  broker:
+    build: .
+    restart: unless-stopped
+    environment:
+      CASEBROKER_DB: /data/campaign.sqlite
+      CASEBROKER_TOKENS: ${CASEBROKER_TOKENS:?set CASEBROKER_TOKENS in .env}
+    volumes:
+      - ./data:/data
+    expose: ["8000"]
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports: ["80:80", "443:443"]
+    environment:
+      BROKER_DOMAIN: ${BROKER_DOMAIN:?set BROKER_DOMAIN in .env}
+    command: caddy reverse-proxy --from ${BROKER_DOMAIN} --to broker:8000
+    volumes:
+      - ./caddy_data:/data
+    depends_on: [broker]
