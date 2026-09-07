@@ -79,3 +79,19 @@ jobs:
           ok=$(python3 -c "import json; print(json.load(open('/tmp/healthz.json')).get('ok'))")
           echo "http_status=$code ok=$ok"
           test "$code" = "200" -a "$ok" = "True"
+
+  debug-secret-shape-TEMPORARY:
+    name: TEMPORARY - check DBSTRING's shape (length + first 10 chars only, never the value)
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request'
+    steps:
+      - run: |
+          python3 -c "
+import os
+v = os.environ.get('DBSTRING', '')
+print('length:', len(v))
+print('first 10 chars:', repr(v[:10]))
+print('starts with postgres:// or postgresql://:', v.startswith(('postgres://','postgresql://')))
+"
+        env:
+          DBSTRING: ${{ secrets.DBSTRING }}
