@@ -117,3 +117,33 @@ def test_a_fatal_runner_quarantines_the_case_on_its_first_attempt(tmp_path):
     assert row["state"] == "quarantined"
     assert row["attempts"] == 1, "a fatal case must not consume three workers first"
     assert db.lease(conn, "w2") == [], "and it must not be handed out again"
+
+
+def test_run_forever_maps_a_fatal_runner_error_to_a_non_retryable_failure(tmp_path):
+    """The link the other tests leave untested: run_forever must translate
+    FatalCaseError into fail(retryable=False), not into an ordinary retry. If it
+    does not, a broken tile burns three workers on every machine in the fleet."""
+    from fastapi.testclient import TestClient
+    from casebroker.app import create_app
+    from casebroker.worker import Worker
+
+    app = create_app(db_path=str(tmp_path / "w.sqlite"), tokens=None)
+    client = TestClient(app)
+    client.post("/v1/cases", json=[{"lat": 1.0, "lon": 2.0, "recipe": "r",
+                                    "city_cluster": "c", "spec": {}}])
+
+    w = Worker("http://testserver", None, worker_id="w1", heartbeat_seconds=3600)
+    w.http = client                      # drive the app in-process, no socket
+    w._post = lambda path, payload, retries=4: client.post(path, json=payload)
+
+    def boom(lease, worker):
+        raise FatalCaseError("STL is not watertight")
+
+    w.run_forever(boom, idle_backoff=0, max_idle_polls=1)
+
+    from casebroker import db as dbm
+    row = dbm.connect(app.state.db_path).execute(
+        "SELECT state, attempts, last_error FROM cases").fetchone()
+    assert row["state"] == "quarantined", "a fatal runner error must not be retried"
+    assert row["attempts"] == 1
+    assert "not watertight" in row["last_error"]
