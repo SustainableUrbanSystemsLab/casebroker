@@ -172,6 +172,11 @@
     display: flex;
     align-items: center;
     gap: 12px;
+    text-decoration: none;
+    color: inherit;
+  }
+  .brand-group:hover .brand-title {
+    color: var(--primary);
   }
   .brand-logo {
     width: 32px;
@@ -787,7 +792,7 @@
 
 <header>
   <div class="header-inner">
-    <div class="brand-group">
+    <a class="brand-group" href="https://casebroker.onrender.com/" target="_blank" rel="noopener noreferrer" title="Open live dashboard">
       <div class="brand-logo" aria-hidden="true">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M17.7 7.7a2.5 2.5 0 1 1 1.8 4.3H2"/>
@@ -801,7 +806,7 @@
           <span class="brand-badge" id="brokerDbBadge">v0.1.0</span>
         </h1>
       </div>
-    </div>
+    </a>
 
     <div class="header-meta">
       <span class="conn-pill" id="connPill">
