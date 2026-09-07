@@ -90,10 +90,17 @@ PSTORE="$SCRATCH/pstore"; mkdir -p "$PSTORE"
 POD="podman --root $PSTORE --runroot $XDG_RUNTIME_DIR/run --storage-driver overlay --storage-opt overlay.ignore_chown_errors=true --storage-opt overlay.mount_program=/usr/bin/fuse-overlayfs"
 $POD pull "$IMG" >/dev/null 2>&1 || { log "image pull failed"; exit 1; }
 
+# The "done and converged" gate lives in its own file, sourced here AND by
+# tests/test_solve_gate.py against bare bash -- one function, so a change to
+# what counts as "converged" cannot drift between what runs and what is tested.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cp "$SCRIPT_DIR/lib/solve_gate.sh" "$SCRATCH/solve_gate.sh"
+
 cat > "$SCRATCH/inner.sh" <<'INNER'
 #!/bin/bash
 set -uo pipefail
 STUDY=$1; NP=$2
+source /s/solve_gate.sh
 cd "$STUDY" || exit 1
 for m in mesh mesh_*; do
   [ -d "$m" ] || continue
@@ -127,7 +134,22 @@ for c in case_*; do
     rm -f 0/phi 0/Phi
     decomposePar -force > 11.log 2>&1
     mpirun --allow-run-as-root --oversubscribe -np "$NP" foamRun -solver incompressibleFluid -parallel > 12.log 2>&1
-    grep -aq "^End" 12.log || { echo "SOLVE_FAIL $c"; exit 71; }
+    SOLVE_RC=$?
+
+    # RANKS/LATEST are computed BEFORE the gate (not just for the flux check
+    # below) because "did it actually write a result" is itself part of
+    # "done" -- see check_solve_converged.
+    RANKS=$(ls -d processor[0-9]* 2>/dev/null | wc -l)
+    LATEST=$(ls -d processor0/[0-9]* 2>/dev/null | xargs -n1 basename 2>/dev/null | sort -g | tail -1)
+
+    GATE_MSG=$(check_solve_converged "$SOLVE_RC" 12.log processor0 "$LATEST")
+    GATE_RC=$?
+    case "$GATE_RC" in
+      0) : ;;                                      # OK -- fall through
+      2) echo "NOT_CONVERGED $c ($GATE_MSG)"; exit 72 ;;
+      *) echo "$GATE_MSG ($c)"; exit 71 ;;
+    esac
+
     # Direction sanity: phi uses the outward normal, so a correct inlet is NEGATIVE.
     #
     # This MUST run -parallel with the rank count taken from the DISK. The case is
@@ -135,14 +157,13 @@ for c in case_*; do
     # foamPostProcess against that root silently resolves latestTime to 0/ and
     # writes nothing at all -- which reads as "no flux" rather than as an error,
     # so the check would quietly stop checking. Reconstructing first is not an
-    # option either: it costs minutes per direction for four numbers.
-    RANKS=$(ls -d processor[0-9]* 2>/dev/null | wc -l)
-    LATEST=$(ls -d processor0/[0-9]* 2>/dev/null | xargs -n1 basename 2>/dev/null              | sort -g | tail -1)
-    if [ "$RANKS" -gt 0 ] && [ -n "$LATEST" ]; then
-      mpirun --allow-run-as-root --oversubscribe -np "$RANKS"         foamPostProcess -func "patchFlowRate(patch=inlet)" -time "$LATEST" -parallel > fr.log 2>&1
-    else
-      foamPostProcess -func "patchFlowRate(patch=inlet)" -latestTime > fr.log 2>&1
-    fi
+    # option either: it costs minutes per direction for four numbers. The gate
+    # above already REQUIRES RANKS>0 and a non-empty LATEST to reach here (that
+    # is what "no result time directory" fails on), so the old serial fallback
+    # for RANKS==0 -- which silently resolved latestTime to 0/ and reported
+    # "no flux" as if it were a real answer -- is dead code and has been removed.
+    mpirun --allow-run-as-root --oversubscribe -np "$RANKS" \
+        foamPostProcess -func "patchFlowRate(patch=inlet)" -time "$LATEST" -parallel > fr.log 2>&1
     FLUX=$(grep -a 'sum(inlet)' fr.log | tail -1 | awk '{print $NF}')
     echo "INLET_FLUX $c ${FLUX:-NONE}"
   ) || exit $?
@@ -156,6 +177,12 @@ $POD run --rm --user 0:0 -e HOME=/home/openfoam -v "$SCRATCH:/s" "$IMG" \
     | tee "$SCRATCH/run.log" >&2
 grep -q "INNER_OK" "$SCRATCH/run.log" || {
     grep -q "MESH_FAIL" "$SCRATCH/run.log" && fatal_case "meshing failed - see run.log"
+    # NOT_CONVERGED is fatal, not retried: convergence is a property of the
+    # RECIPE (iteration budget, geometry, mesh), never of which machine ran
+    # it, so retrying elsewhere would reproduce the identical outcome -- same
+    # reasoning as the non-negative-inlet-flux check below.
+    grep -q "NOT_CONVERGED" "$SCRATCH/run.log" && \
+        fatal_case "a direction ran to completion without meeting residualControl - see 12.log"
     log "solve failed"; exit 1
 }
 
