@@ -118,6 +118,34 @@ class ReleaseIn(BaseModel):
 
 
 
+def _split_tokens(raw: str) -> list[str]:
+    return [t.strip() for t in raw.split(",") if t.strip()]
+
+
+def _tokens_from_env(canonical: str, legacy: str) -> list[str]:
+    """One token bucket, read from its canonical variable or the old spelling.
+
+    The old names said what a token WAS (``CASEBROKER_TOKENS``) rather than what it
+    GRANTS, so the only way to learn that the plain one is read+write -- and that the
+    "readonly" one is a strictly smaller subset of it rather than an alternative to
+    it -- was to read this file. ``*_WRITE_TOKENS`` / ``*_READ_TOKENS`` name the
+    capability, and the legacy spellings keep working so no deployment breaks.
+
+    Both spellings set to DIFFERENT values is refused rather than resolved by
+    precedence. Two plausible intents exist there and silently honouring one leaves
+    the operator believing a credential is live when it is not -- the failure mode
+    is "a token you think you revoked still works", which must never be quiet.
+    """
+    new = _split_tokens(os.environ.get(canonical, ""))
+    old = _split_tokens(os.environ.get(legacy, ""))
+    if new and old and set(new) != set(old):
+        raise RuntimeError(
+            f"{canonical} and {legacy} are both set, to different values. "
+            f"{legacy} is the deprecated spelling of {canonical}; set only one."
+        )
+    return new or old
+
+
 def create_app(db_path: str | None = None, tokens: list[str] | None = None,
                readonly_tokens: list[str] | None = None) -> FastAPI:
     """Build an app bound to one database and token set(s).
@@ -138,11 +166,10 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
     """
     db_path = db_path or os.environ.get("CASEBROKER_DB", "casebroker.sqlite")
     if tokens is None:
-        tokens = [t.strip() for t in
-                  os.environ.get("CASEBROKER_TOKENS", "").split(",") if t.strip()]
+        tokens = _tokens_from_env("CASEBROKER_WRITE_TOKENS", "CASEBROKER_TOKENS")
     if readonly_tokens is None:
-        readonly_tokens = [t.strip() for t in
-                          os.environ.get("CASEBROKER_READONLY_TOKENS", "").split(",") if t.strip()]
+        readonly_tokens = _tokens_from_env("CASEBROKER_READ_TOKENS",
+                                           "CASEBROKER_READONLY_TOKENS")
 
     app = FastAPI(title="Wind v2 case broker", version=__version__)
     conn = db.connect(db_path)
@@ -190,9 +217,39 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         # was just pushed, instead of trusting a deploy's own status field.
         return {"ok": True, "version": __version__,
                 "auth": "token" if (tokens or readonly_tokens) else "OPEN",
+                # COUNTS, never values: how many credentials of each capability
+                # exist is what an operator needs to answer "did my rotation
+                # actually land?", and it discloses nothing usable.
+                "scopes": {"write": len(tokens), "read": len(readonly_tokens)},
+                # kept for older dashboards that read this field by name
                 "readonly_auth": bool(readonly_tokens),
                 "db": _redact_db_target(db_path)}
 
+
+    @app.get("/v1/whoami")
+    def whoami(request: Request) -> dict[str, Any]:
+        """What can the presented token do? Deliberately unauthenticated.
+
+        Holding a token string, the only previous way to discover its capability was
+        to attempt a mutating call and see whether it 401'd -- which means the way to
+        find out was to try to change production data. This answers it directly, and
+        answers it the same way the real dependencies do (same constant-time compare,
+        same buckets), so it cannot drift from what the gates actually enforce.
+
+        200 in every case, including a bad token (`scope: "none"`): distinguishing
+        "this credential is wrong" from "the broker is unreachable" is the entire
+        point, and a 401 would conflate them. This reveals no more than any guarded
+        endpoint already does -- the token is either in a bucket or it is not.
+        """
+        supplied = _supplied_token(request)
+        if not tokens and not readonly_tokens:
+            return {"scope": "write", "auth": "OPEN",
+                    "detail": "no tokens configured; every caller has full access"}
+        if any(hmac.compare_digest(supplied, t) for t in tokens):
+            return {"scope": "write", "auth": "token"}
+        if any(hmac.compare_digest(supplied, t) for t in readonly_tokens):
+            return {"scope": "read", "auth": "token"}
+        return {"scope": "none", "auth": "token"}
 
     @app.get("/", include_in_schema=False)
     def dashboard() -> FileResponse:

@@ -24,6 +24,13 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=8.3"]
 
+# Removed earlier in this repo's history because it pointed at a casebroker.cli
+# that had never been written, so the installed command failed on every run.
+# Restored now that the module exists and answers the question that turned out to
+# be genuinely confusing: what token do I need, and what can this one do?
+[project.scripts]
+casebroker = "casebroker.cli:main"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

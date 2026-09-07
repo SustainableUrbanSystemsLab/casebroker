@@ -22,6 +22,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 - `.github/workflows/release.yml` — pushing a `v*.*.*` tag publishes a GitHub
   Release, refusing to do so if the tag disagrees with `pyproject.toml`.
 
+- `CASEBROKER_WRITE_TOKENS` / `CASEBROKER_READ_TOKENS` — token variables named
+  for the capability they grant. The old `CASEBROKER_TOKENS` never said anywhere
+  that it was read **and** write, while its partner was explicitly `READONLY`, so
+  the only way to learn the relationship was to read `app.py`. Both old spellings
+  still work; setting a variable and its deprecated twin to *different* values is
+  refused at startup rather than resolved by precedence.
+- `GET /v1/whoami` — reports what the presented token can do (`write` / `read` /
+  `none`). Unauthenticated and always `200`, so "this credential is wrong" stays
+  distinguishable from "the broker is unreachable". Previously the only way to
+  discover a token's scope was to attempt a mutating call against production.
+- `/healthz` now reports `scopes` — the *count* of configured tokens per
+  capability, never values — so "did my rotation actually land?" is answerable.
+- The `casebroker` command is back, and now exists: `casebroker token new`,
+  `casebroker token check --broker … --token …` (non-zero exit on `--expect`
+  mismatch, so it works as a deploy gate) and `casebroker health --broker …`
+  (non-zero exit when auth is OFF). Dependency-free, so it runs on a login node.
+
 ### Fixed
 
 - The dashboard's `color-scheme` is now bound to the selected theme instead of
