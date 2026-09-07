@@ -48,10 +48,20 @@ cp "$BUILDINGS" "$SCRATCH/buildings.stl"
 cp "$TERRAIN"   "$SCRATCH/terrain.stl"
 
 # ── 2. build the study ────────────────────────────────────────────────────────
-printf '%s' "$SPEC" | "$PY" - "$SCRATCH" "$CASE_ID" "$NP" > "$SCRATCH/cfg.json" <<'PY'
+# $SPEC is written to a file rather than piped in: a `<<'PY'` heredoc on the same
+# command ALWAYS wins the redirect race for stdin, so a `printf ... | "$PY" -
+# ... <<'PY'` pipe is silently discarded -- python reads the heredoc as its own
+# script source (that is what "$PY" - means), and by the time the script itself
+# tries `json.load(sys.stdin)`, stdin is the already-exhausted heredoc, not the
+# piped spec. That crashed on every case with "Expecting value: line 1 column 1"
+# followed by eddy3d-cli rejecting the resulting empty cfg.json -- found on the
+# very first real end-to-end validation run (Phoenix job 12910607).
+printf '%s' "$SPEC" > "$SCRATCH/spec.json"
+"$PY" - "$SCRATCH" "$CASE_ID" "$NP" > "$SCRATCH/cfg.json" <<'PY'
 import json, sys
-spec = json.load(sys.stdin)
 scratch, case_id, np_ = sys.argv[1], sys.argv[2], int(sys.argv[3])
+with open(scratch + "/spec.json") as f:
+    spec = json.load(f)
 dom = spec["domain"]           # {"min": [...], "max": [...], "cellSize": n}
 json.dump({
     "caseName": case_id,
