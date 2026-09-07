@@ -38,11 +38,20 @@ jobs:
           CASEBROKER_TEST_PG_DSN: ${{ secrets.DBSTRING }}
 
   deploy-smoke-test:
-    name: confirm the live deploy came up healthy
-    # Render's own webhook (configured once, when the service was created with
-    # autoDeploy: yes and this repo as its source) already redeploys on every
-    # push to main -- this job does not trigger that, it only confirms the
-    # result actually came up rather than assuming a push = a working service.
+    name: deploy this commit to Render and confirm it came up healthy
+    # Render's GitHub App integration turned out NOT to include this repo in its
+    # "selected repositories" list (this repo was born from a git subtree split
+    # into a brand-new repo, never connected through Render's own "Connect a
+    # repo" UI flow) -- autoDeploy showed "yes" in the service config, but no
+    # webhook delivery ever reached GitHub for it (confirmed empty via
+    # `gh api repos/.../hooks`), so pushes silently did not deploy anything
+    # while this job kept reporting green. It was checking `deploys?limit=1`
+    # and accepting whatever status that returned -- true even when the "latest"
+    # deploy was a STALE one from a previous commit, which is exactly what
+    # happened: three real pushes in a row went undetected as un-deployed.
+    # So this job now TRIGGERS its own deploy of the commit that triggered this
+    # workflow run, and polls that specific deploy id -- never trusting "the
+    # latest deploy is live" as a proxy for "MY commit is live".
     needs: [sqlite, postgres]
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -53,21 +62,41 @@ jobs:
       RENDER_SERVICE_ID: srv-dafe8kdg1s2s73e703tg
       RENDER_URL: https://casebroker.onrender.com
     steps:
-      - name: Wait for Render's auto-deploy to reach a terminal state
+      - name: Trigger a deploy and capture its commit + id
+        id: deploy
         run: |
+          resp=$(curl -s -X POST -H "Authorization: Bearer ${{ secrets.RENDERAPIKEY }}" \
+            -H "Content-Type: application/json" \
+            "https://api.render.com/v1/services/$RENDER_SERVICE_ID/deploys" -d '{}')
+          deploy_id=$(echo "$resp" | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
+          deployed_sha=$(echo "$resp" | python3 -c "import json,sys; print(json.load(sys.stdin)['commit']['id'])")
+          echo "deploy_id=$deploy_id" >> "$GITHUB_OUTPUT"
+          echo "triggered deploy $deploy_id for commit $deployed_sha"
+          # Render deploys the branch HEAD, which -- for a push-triggered run on
+          # main -- IS github.sha; if it ever disagrees, something is racing
+          # (another push landed between this one and the trigger call above)
+          # and that is worth knowing rather than silently checking the wrong
+          # commit's health.
+          if [ "$deployed_sha" != "${{ github.sha }}" ]; then
+            echo "::warning::Render deployed $deployed_sha, but this workflow run is for ${{ github.sha }} -- another push likely landed first"
+          fi
+
+      - name: Wait for that specific deploy to reach a terminal state
+        run: |
+          deploy_id="${{ steps.deploy.outputs.deploy_id }}"
           for i in $(seq 1 40); do
             status=$(curl -s -H "Authorization: Bearer ${{ secrets.RENDERAPIKEY }}" \
-              "https://api.render.com/v1/services/$RENDER_SERVICE_ID/deploys?limit=1" \
-              | python3 -c "import json,sys; d=json.load(sys.stdin); print(d[0].get('deploy',d[0]).get('status',''))")
-            echo "[$i] deploy status: $status"
+              "https://api.render.com/v1/services/$RENDER_SERVICE_ID/deploys/$deploy_id" \
+              | python3 -c "import json,sys; print(json.load(sys.stdin).get('status',''))")
+            echo "[$i] deploy $deploy_id status: $status"
             case "$status" in
               live) exit 0 ;;
               build_failed|update_failed|canceled|deactivated)
-                echo "::error::Render deploy ended in status '$status'"; exit 1 ;;
+                echo "::error::Render deploy $deploy_id ended in status '$status'"; exit 1 ;;
             esac
             sleep 15
           done
-          echo "::error::Timed out waiting for the deploy to go live"; exit 1
+          echo "::error::Timed out waiting for deploy $deploy_id to go live"; exit 1
 
       - name: Hit the live /healthz and check it, without ever printing the response
         run: |
