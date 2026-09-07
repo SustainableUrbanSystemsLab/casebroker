@@ -119,8 +119,22 @@ for c in case_*; do
     mpirun --allow-run-as-root --oversubscribe -np "$NP" foamRun -solver incompressibleFluid -parallel > 12.log 2>&1
     grep -aq "^End" 12.log || { echo "SOLVE_FAIL $c"; exit 71; }
     # Direction sanity: phi uses the outward normal, so a correct inlet is NEGATIVE.
-    foamPostProcess -func "patchFlowRate(patch=inlet)" -latestTime > fr.log 2>&1
-    echo "INLET_FLUX $c $(grep -a 'sum(inlet)' fr.log | tail -1 | awk '{print $NF}')"
+    #
+    # This MUST run -parallel with the rank count taken from the DISK. The case is
+    # still decomposed (results live only in processor*/), and a serial
+    # foamPostProcess against that root silently resolves latestTime to 0/ and
+    # writes nothing at all -- which reads as "no flux" rather than as an error,
+    # so the check would quietly stop checking. Reconstructing first is not an
+    # option either: it costs minutes per direction for four numbers.
+    RANKS=$(ls -d processor[0-9]* 2>/dev/null | wc -l)
+    LATEST=$(ls -d processor0/[0-9]* 2>/dev/null | xargs -n1 basename 2>/dev/null              | sort -g | tail -1)
+    if [ "$RANKS" -gt 0 ] && [ -n "$LATEST" ]; then
+      mpirun --allow-run-as-root --oversubscribe -np "$RANKS"         foamPostProcess -func "patchFlowRate(patch=inlet)" -time "$LATEST" -parallel > fr.log 2>&1
+    else
+      foamPostProcess -func "patchFlowRate(patch=inlet)" -latestTime > fr.log 2>&1
+    fi
+    FLUX=$(grep -a 'sum(inlet)' fr.log | tail -1 | awk '{print $NF}')
+    echo "INLET_FLUX $c ${FLUX:-NONE}"
   ) || exit $?
 done
 echo INNER_OK
@@ -138,7 +152,7 @@ grep -q "INNER_OK" "$SCRATCH/run.log" || {
 # Every direction must have admitted the wind. A positive inlet flux means the
 # box was not turned to face it, which is a silent, plausible-looking wrong answer
 # rather than a crash -- so it is checked, not assumed.
-if grep -a "INLET_FLUX" "$SCRATCH/run.log" | awk '{print $3}' | grep -qv '^-'; then
+if grep -a "INLET_FLUX" "$SCRATCH/run.log" | awk '{print $3}' | grep -qvE '^-[0-9]'; then
     log "$(grep -a INLET_FLUX "$SCRATCH/run.log")"
     fatal_case "a direction has non-negative inlet flux: the wind did not enter the domain"
 fi
