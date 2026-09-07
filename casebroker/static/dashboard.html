@@ -159,7 +159,7 @@
     width: 32px;
     height: 32px;
     border-radius: 8px;
-    background: linear-gradient(135deg, var(--accent) 0%, #0284c7 100%);
+    background: linear-gradient(135deg, var(--accent) 0%, var(--primary) 100%);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -415,15 +415,38 @@
     padding: 8px;
     border-radius: 8px;
   }
+  /* accent.fg, not success.fg: in GitHub every link is blue and green is spent
+     only on the primary button and success state. Having links green is what
+     made this read as a green-themed app rather than a GitHub-themed one. */
+  .broker-static {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-height: 38px;
+    padding: 8px 12px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--surface-elevated);
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+    color: var(--text-secondary);
+  }
+  .broker-static #brokerDisplay {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .broker-static .link { margin-left: auto; flex: none; }
+
   a.link {
-    color: var(--accent);
+    color: var(--primary);
     text-decoration: none;
     cursor: pointer;
     font-size: 12.5px;
     font-weight: 500;
     transition: color 0.15s ease;
   }
-  a.link:hover { text-decoration: underline; color: var(--accent-hover); }
+  a.link:hover { text-decoration: underline; color: var(--primary-hover); }
 
   /* KPI Stats Grid */
   .stats-grid {
@@ -441,24 +464,22 @@
     overflow: hidden;
     transition: transform 0.15s ease, box-shadow 0.15s ease;
   }
-  .stat-card:hover {
-    transform: translateY(-2px);
-    box-shadow: var(--shadow-sm);
-  }
-  .stat-card::before {
+  /* The state's colour lives in a 6px dot beside its label -- the size GitHub
+     uses for a language dot -- instead of a 3px bar across the whole tile. Same
+     information, a fraction of the ink. */
+  .stat-card .label::after {
     content: "";
-    position: absolute;
-    top: 0;
-    left: 0;
-    right: 0;
-    height: 3px;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
     background: var(--border);
+    flex: none;
   }
-  .stat-card.total::before { background: var(--text-muted); }
-  .stat-card.done::before { background: var(--accent); }
-  .stat-card.leased::before { background: var(--primary); }
-  .stat-card.pending::before { background: var(--warn); }
-  .stat-card.quarantined::before { background: var(--bad); }
+  .stat-card.total .label::after       { background: var(--text-muted); }
+  .stat-card.done .label::after        { background: var(--accent); }
+  .stat-card.leased .label::after      { background: var(--primary); }
+  .stat-card.pending .label::after     { background: var(--warn); }
+  .stat-card.quarantined .label::after { background: var(--bad); }
 
   .stat-card .label {
     font-size: 11.5px;
@@ -477,10 +498,8 @@
     font-variant-numeric: tabular-nums;
     margin-top: 4px;
   }
-  .stat-card.done .value { color: var(--accent); }
-  .stat-card.leased .value { color: var(--primary); }
-  .stat-card.pending .value { color: var(--warn); }
-  .stat-card.quarantined .value { color: var(--bad); }
+  .stat-card .value { color: var(--text-primary); }
+  .stat-card.quarantined.nonzero .value { color: var(--bad); }
   .stat-card .subtext {
     font-size: 11px;
     color: var(--text-muted);
@@ -859,11 +878,16 @@
     <form id="connectForm" autocomplete="on">
       <div class="row">
         <div class="field" style="flex: 2; min-width: 280px;">
-          <label for="broker">
-            Broker URL
-            <span class="label-hint">(Target casebroker API instance)</span>
+          <label for="token">
+            Broker
+            <span class="label-hint">(this instance)</span>
           </label>
-          <input type="text" id="broker" name="brokerUrl" autocomplete="url" placeholder="https://..." required />
+          <div class="broker-static">
+            <span id="brokerDisplay" title="This dashboard is served by the broker it talks to"></span>
+            <a class="link" id="changeBroker" role="button" tabindex="0">change</a>
+          </div>
+          <input type="text" id="broker" name="brokerUrl" autocomplete="url"
+                 placeholder="https://..." hidden />
         </div>
 
         <div class="field" style="flex: 2; min-width: 280px;">
@@ -904,9 +928,9 @@
     </form>
 
     <!-- Collapsed connection summary shown when connected -->
-    <div id="connectedSummary" style="display:none; align-items:center; gap:12px; margin-top:4px; padding: 10px 14px; border-radius:8px; background: var(--accent-light); border:1px solid var(--accent);">
-      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg>
-      <span style="color:var(--accent); font-weight:600; font-size:0.85rem;">Connected</span>
+    <div id="connectedSummary" style="display:none; align-items:center; gap:10px; margin-top:4px; padding: 10px 14px; border-radius:6px; background: var(--surface-elevated); border:1px solid var(--border);">
+      <span style="width:8px; height:8px; border-radius:50%; background:var(--accent); flex:none;"></span>
+      <span style="color:var(--text-primary); font-weight:600; font-size:0.85rem;">Connected</span>
       <span id="connectedUrl" style="color:var(--text-secondary); font-size:0.82rem; font-family:var(--font-mono);"></span>
       <button id="editConnection" type="button" style="margin-left:auto; font-size:0.8rem; padding:4px 10px;">Edit connection</button>
     </div>
@@ -959,7 +983,7 @@
       <div class="campaign-progress">
         <div class="progress-header">
           <span>Simulation Campaign Progress</span>
-          <span id="progressPct" style="font-family: var(--font-mono); color: var(--accent);">0%</span>
+          <span id="progressPct" style="font-family: var(--font-mono); color: var(--text-secondary);">0%</span>
         </div>
         <div class="progress-bar-wrap" id="campaignProgressBar">
           <div class="progress-segment done" id="progDone" style="width: 0%" title="Done"></div>
@@ -1234,6 +1258,23 @@
 
   // -- State & Inputs ---------------------------------------------------------
   $("broker").value = localStorage.getItem(LS_URL) || window.location.origin;
+
+  // The instance knows its own URL; the input stays in the DOM (every caller
+  // reads $("broker").value) but is revealed only for the rare case of pointing
+  // this page at a DIFFERENT broker, which is a dev affordance, not a setup step.
+  function syncBrokerDisplay() {
+    $("brokerDisplay").textContent = $("broker").value || window.location.origin;
+  }
+  syncBrokerDisplay();
+  function revealBrokerInput() {
+    $("broker").hidden = false;
+    $("broker").focus();
+    $("changeBroker").style.display = "none";
+  }
+  $("changeBroker").addEventListener("click", revealBrokerInput);
+  $("changeBroker").addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); revealBrokerInput(); }
+  });
   $("token").value = localStorage.getItem(LS_TOK) || "";
 
   // A shareable deep link: ?token=...&ro=1 pre-fills the token field and
@@ -1280,7 +1321,7 @@
     }
   }
 
-  $("broker").addEventListener("input", () => { $("connect").style.display = ""; });
+  $("broker").addEventListener("input", () => { $("connect").style.display = ""; syncBrokerDisplay(); });
   $("token").addEventListener("input", () => { $("connect").style.display = ""; });
 
   // Formatters
@@ -1413,7 +1454,7 @@
         <div class="value">${pendingCount.toLocaleString()}</div>
         <div class="subtext">Awaiting claim</div>
       </div>
-      <div class="stat-card quarantined">
+      <div class="stat-card quarantined${quarantinedCount > 0 ? " nonzero" : ""}">
         <div class="label">Quarantined</div>
         <div class="value">${quarantinedCount.toLocaleString()}</div>
         <div class="subtext">Exceeded max attempts</div>
@@ -1470,8 +1511,8 @@
             </td>
             <td class="num">${spPending.toLocaleString()}</td>
             <td class="num">${spLeased.toLocaleString()}</td>
-            <td class="num" style="color:var(--accent); font-weight:600;">${spDone.toLocaleString()}</td>
-            <td class="num" style="color:var(--bad);">${spQuar.toLocaleString()}</td>
+            <td class="num" style="font-weight:600;">${spDone.toLocaleString()}</td>
+            <td class="num"${spQuar > 0 ? ' style="color:var(--bad);"' : ''}>${spQuar.toLocaleString()}</td>
             <td class="num" style="font-weight:600;">${spTotal.toLocaleString()}</td>
           </tr>`;
         }).join("")
@@ -1529,8 +1570,8 @@
             </td>
             <td>${relTime(w.first_seen)}</td>
             <td>${relTime(w.last_seen)}</td>
-            <td class="num" style="font-weight:600; color:var(--accent);">${(w.cases_done || 0).toLocaleString()}</td>
-            <td class="num" style="color:var(--bad);">${(w.cases_failed || 0).toLocaleString()}</td>
+            <td class="num" style="font-weight:600;">${(w.cases_done || 0).toLocaleString()}</td>
+            <td class="num"${(w.cases_failed || 0) > 0 ? ' style="color:var(--bad);"' : ''}>${(w.cases_failed || 0).toLocaleString()}</td>
             <td class="num" style="font-family:var(--font-mono); font-size:12px;">${reliability}</td>
           </tr>`;
       }).join("");

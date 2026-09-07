@@ -91,6 +91,89 @@ could not lease, complete, fail or release a case, or add new ones. Never put
 a write token in a link you hand out; it has none of these
 restrictions.
 
+## How the client and server interact
+
+The broker is an HTTP service in front of a database. It hands out work and
+records results, and it **never initiates anything** — it does not know which
+machines exist until one asks for a case, and it cannot reach into a cluster to
+start a job. Every machine runs the same client, and each one *pulls*:
+
+```
+  PACE Phoenix  ──┐
+  PACE ICE      ──┤   POST /v1/lease        ┌──────────┐      ┌──────────┐
+  workstation   ──┼──  "give me a case"  ──▶│ casebroker│ ───▶ │ Postgres │
+  anyone else   ──┘                         └──────────┘      └──────────┘
+                                             stateless         the campaign
+```
+
+That is the whole reason for a broker rather than splitting the case list up
+front: the machines differ by more than an order of magnitude in throughput and
+Phoenix's availability changes hour to hour, so a fast box simply comes back
+sooner. Adding a machine needs no server-side change — only a URL and a token.
+
+### One case, end to end
+
+A worker loops: lease → run → report → repeat. The wrinkle is that a case takes
+**hours** while a lease lasts **30 minutes**, so the client renews it from a
+background thread while the CFD runs.
+
+```mermaid
+sequenceDiagram
+    participant W as worker.py
+    participant B as broker
+    participant R as run_case.sh
+    W->>B: POST /v1/lease
+    B-->>W: lease_id + case spec (state → leased, 30 min TTL)
+    W->>R: spec as JSON on stdin
+    loop every 5 min, while the solve runs
+        W->>B: POST /v1/heartbeat
+        B-->>W: 200, lease extended
+    end
+    R-->>W: result_uri on the last stdout line
+    W->>B: POST /v1/complete
+    B-->>W: 200, state → done
+```
+
+**The lease is the unit of ownership, not the case.** Every call after the first
+is keyed by `lease_id`, never by `case_id` — that is what lets the broker tell
+the rightful owner from a worker that woke up late still holding a stale claim.
+
+Step by step:
+
+1. **Lease.** Ask for one case. An empty list back means the queue is drained —
+   a normal answer, not an error; after ten idle polls the worker exits so the
+   SLURM allocation is freed.
+2. **Receive.** The broker atomically claims a row and returns a `lease_id` with
+   the full spec. Concurrency is settled here, inside one SQL statement.
+3. **Run.** The spec goes to `run_case.sh` as JSON on stdin. The broker knows
+   nothing about OpenFOAM; this is the only seam.
+4. **Heartbeat.** A background thread renews every 5 min. A **409** means the
+   case was taken away — the worker abandons it rather than finishing work it no
+   longer owns.
+5. **Report.** The runner's last stdout line carries `result_uri`; the worker
+   posts it with metrics, wall time and which machine produced it.
+6. **Repeat.**
+
+Defaults are the client's: `lease_seconds=1800`, `heartbeat_seconds=300`.
+
+### When a worker dies
+
+Phoenix's free `embers` QOS preempts after an hour, so a worker dying mid-solve
+is the *normal* case, not an edge case. All three paths end with the work getting
+done; they differ in how much is wasted.
+
+| | What happens | Cost |
+| --- | --- | --- |
+| **Preempted** (SIGTERM first) | The client catches the signal and calls `POST /v1/release`. State → `pending`, **and the attempt is refunded** — preemption is not the case's fault. | One partial solve. Back in the pool in under a second. |
+| **Killed** (no warning) | Heartbeats simply stop and the lease TTL lapses. Nothing detects this, and nothing needs to. | Up to one lease period of idle before someone re-leases it. |
+| **Zombie returns** | The old worker finishes and calls `complete` with a superseded `lease_id`. Rejected with **409**; the real owner's result stands. | Nothing — but see below. |
+
+The third is the dangerous one, and why every mutating call re-checks the lease
+rather than trusting it — see *Three design decisions worth knowing* below for
+what that prevents. The operational rule it leaves you with: **a 409 means
+stop.** Wherever it appears, heartbeat or complete, the case belongs to someone
+else now, and continuing burns core-hours on a result the broker will refuse.
+
 ## The protocol
 
 | Endpoint | Purpose |
