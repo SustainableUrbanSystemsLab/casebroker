@@ -4,6 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Wind v2 Case Broker</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%2322272e'/%3E%3Cpath d='M8 22 L16 10 L24 22' stroke='%2357ab5a' stroke-width='3' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3Ccircle cx='16' cy='10' r='2.5' fill='%2357ab5a'/%3E%3C/svg%3E" />
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -906,6 +907,14 @@
       </div>
     </form>
 
+    <!-- Collapsed connection summary shown when connected -->
+    <div id="connectedSummary" style="display:none; align-items:center; gap:12px; margin-top:4px; padding: 10px 14px; border-radius:8px; background: var(--accent-light); border:1px solid var(--accent);">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg>
+      <span style="color:var(--accent); font-weight:600; font-size:0.85rem;">Connected</span>
+      <span id="connectedUrl" style="color:var(--text-secondary); font-size:0.82rem; font-family:var(--font-mono);"></span>
+      <button id="editConnection" type="button" style="margin-left:auto; font-size:0.8rem; padding:4px 10px;">Edit connection</button>
+    </div>
+
     <div class="row" style="margin-top:14px; padding-top:14px; border-top:1px solid var(--border); align-items:flex-end">
       <div class="field" style="flex:2; min-width:260px">
         <label for="roToken">
@@ -1269,7 +1278,14 @@
     const dot = $("connDot");
     dot.className = state || "";
     $("connText").textContent = text;
+    const connectBtn = $("connect");
+    if (connectBtn) {
+      connectBtn.style.display = (state === "ok") ? "none" : "";
+    }
   }
+
+  $("broker").addEventListener("input", () => { $("connect").style.display = ""; });
+  $("token").addEventListener("input", () => { $("connect").style.display = ""; });
 
   // Formatters
   function esc(s) {
@@ -1747,10 +1763,17 @@
       const st = await api("/v1/status");
       setConn("ok", "connected");
       showErr(null);
+      // Collapse the connect form and show summary bar
+      $("connectForm").style.display = "none";
+      $("connectedUrl").textContent = $("broker").value.trim() || location.origin;
+      $("connectedSummary").style.display = "flex";
       renderStatus(st);
       await loadCases();
       nextRefreshSeconds = 60;
     } catch (e) {
+      // On error, re-show the connect form so the user can fix credentials
+      $("connectForm").style.display = "";
+      $("connectedSummary").style.display = "none";
       if (e.status === 401) {
         setConn("bad", "unauthorized (401)");
         $("authNotice").style.display = "flex";
@@ -1796,6 +1819,12 @@
     localStorage.setItem(LS_URL, $("broker").value.trim());
     localStorage.setItem(LS_TOK, $("token").value.trim());
     refresh();
+  });
+
+  $("editConnection").addEventListener("click", () => {
+    $("connectedSummary").style.display = "none";
+    $("connectForm").style.display = "";
+    $("token").focus();
   });
 
   $("refresh").addEventListener("click", () => {
