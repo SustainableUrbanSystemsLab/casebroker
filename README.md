@@ -219,22 +219,36 @@ also means an existing case can never change split when the dataset grows —
 unlike v1's `make_splits.py`, whose seed-42 shuffle over a fixed list reshuffles
 everything the moment a case is appended.
 
-## Storage: SQLite for dev, Postgres for production
+## Storage: Supabase in production, SQLite for tests
 
 `CASEBROKER_DB` decides the engine purely by its shape — a file path opens
 SQLite, a `postgres://` or `postgresql://` DSN opens Postgres — and nothing
 above `db.py` needs to know which one it got:
 
 ```bash
-CASEBROKER_DB=campaign.sqlite                                    # local dev/tests
-CASEBROKER_DB=postgresql://user:pass@host:5432/postgres           # production
+CASEBROKER_DB=campaign.sqlite                       # local dev and the test suite
+CASEBROKER_DB=postgresql://postgres.<ref>:<pw>@aws-0-<region>.pooler.supabase.com:6543/postgres
 ```
 
-SQLite needs no network and no credentials, so the tests that exercise lease
-semantics (`test_db.py`) run in milliseconds with zero external dependencies.
-Postgres is what a real campaign deploys against: a managed database survives a
-service restart or redeploy where a container's local disk does not, and it is
-what lets the service itself be **stateless and disk-free** — see Deploying below.
+**The live campaign runs on Supabase Postgres.** SQLite is not a smaller
+production option, it is the *test* engine: it needs no network and no
+credentials, which is why the 97 tests that exercise lease semantics run in
+milliseconds with zero external dependencies. A managed database survives a
+service restart or redeploy where a container's filesystem does not, and with
+state external the service itself is **stateless and disk-free** — the cheapest
+compute tier is enough.
+
+**Supabase gives you two ports, and the difference matters here.** `6543` is the
+*transaction* pooler and is what this deploys against; `5432` is a direct
+connection. Transaction pooling is exactly the mode that breaks server-side
+prepared statements — see the pooler note below, which is already handled.
+
+The image ships **no default `CASEBROKER_DB`** on purpose. It used to default to
+`/data/campaign.sqlite` with a `VOLUME`, which is right on a VM and wrong on
+Render, where there is no persistent disk: the campaign was written to a
+filesystem discarded on every deploy, and nothing said so — the service came
+back up healthy and simply empty. `app.py` now prints a startup warning whenever
+`CASEBROKER_DB` resolves to SQLite.
 
 The two engines share every function name and diverge only where it would be
 actively wrong to pretend they could not: **claiming work under concurrency**.
@@ -342,11 +356,12 @@ Three things are **not** done and must be before this faces the internet:
    stops it. Optionally also set `CASEBROKER_READ_TOKENS` to a *different*
    value if you want a link you can hand out for viewing only — see
    "Sharing a read-only view" above.
-3. **Point `CASEBROKER_DB` at Postgres, not a local SQLite file**, unless the
-   platform gives that file a persistent disk. A container's local filesystem
-   does not survive a redeploy; a managed Postgres database does. With state
-   external, the service itself needs no disk at all — the cheapest compute
-   tier a platform offers is enough.
+3. **Point `CASEBROKER_DB` at the Supabase DSN** (port `6543`, the transaction
+   pooler). A container's local filesystem does not survive a redeploy; a
+   managed database does. With state external, the service needs no disk at all
+   — the cheapest compute tier a platform offers is enough. If this is left
+   unset, or set to a file path, the service starts anyway and logs a warning:
+   it will look healthy right up until a redeploy silently empties it.
 
 **`/healthz` is intentionally unauthenticated** (so infrastructure health checks
 work with no token) **and therefore must never return anything that could be a

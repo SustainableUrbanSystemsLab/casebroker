@@ -39,6 +39,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
   mismatch, so it works as a deploy gate) and `casebroker health --broker …`
   (non-zero exit when auth is OFF). Dependency-free, so it runs on a login node.
 
+### Changed
+
+- The Docker image no longer defaults `CASEBROKER_DB` to `/data/campaign.sqlite`
+  with a `VOLUME`. That is correct on a VM and wrong on Render, which has no
+  persistent disk: the campaign was written to a container filesystem discarded
+  on every deploy, and nothing reported it — the service came back up healthy and
+  empty. Production points at Supabase Postgres; `app.py` now warns on startup
+  whenever `CASEBROKER_DB` resolves to SQLite. Docs name Supabase and the `6543`
+  transaction-pooler port, which is why `prepare_threshold=None` is needed.
+
 ### Fixed
 
 - The dashboard's `color-scheme` is now bound to the selected theme instead of

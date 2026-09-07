@@ -16,6 +16,7 @@ from __future__ import annotations
 import hmac
 import os
 import pathlib
+import sys
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
@@ -118,6 +119,10 @@ class ReleaseIn(BaseModel):
 
 
 
+def _is_postgres_dsn(target: str) -> bool:
+    return target.startswith(("postgres://", "postgresql://"))
+
+
 def _split_tokens(raw: str) -> list[str]:
     return [t.strip() for t in raw.split(",") if t.strip()]
 
@@ -164,7 +169,19 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
     test's connection silently serves the next test's requests. Found exactly
     that way -- a test that passed alone and failed in the suite.
     """
+    from_env = db_path is None
     db_path = db_path or os.environ.get("CASEBROKER_DB", "casebroker.sqlite")
+    # A deployment that resolves to SQLite is almost always a misconfiguration:
+    # the container filesystem it lands on does not survive a redeploy, and the
+    # campaign disappears with no error at any point -- the service comes back
+    # up healthy and simply empty. Only warned when the path came from the
+    # ENVIRONMENT, which is the deployment path; the test suite passes db_path
+    # explicitly and stays quiet.
+    if from_env and not _is_postgres_dsn(db_path):
+        print(f"[warn] CASEBROKER_DB is a SQLite file ({db_path}). This does NOT "
+              "survive a container redeploy. Point it at Postgres for anything "
+              "that is not a laptop.", file=sys.stderr)
+
     if tokens is None:
         tokens = _tokens_from_env("CASEBROKER_WRITE_TOKENS", "CASEBROKER_TOKENS")
     if readonly_tokens is None:
