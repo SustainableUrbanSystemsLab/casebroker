@@ -4,236 +4,1109 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Wind v2 Case Broker</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
   :root {
     color-scheme: light dark;
-    --bg: #f7f7f5;
-    --panel: #ffffff;
-    --border: #e2e0da;
-    --text: #1c1c1a;
-    --muted: #6b6a64;
-    --accent: #2f6f4f;
-    --accent-weak: #e7f2ec;
-    --warn: #9a5b13;
-    --warn-weak: #fbeedd;
-    --bad: #a3352c;
-    --bad-weak: #fbe9e7;
-    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+
+    /* Light theme tokens */
+    --bg: #f8fafc;
+    --surface: #ffffff;
+    --surface-elevated: #f1f5f9;
+    --surface-hover: #f8fafc;
+    --border: #e2e8f0;
+    --border-subtle: #edf2f7;
+    --text-primary: #0f172a;
+    --text-secondary: #475569;
+    --text-muted: #64748b;
+    --accent: #059669;
+    --accent-rgb: 5, 150, 105;
+    --accent-light: #ecfdf5;
+    --accent-hover: #047857;
+    --primary: #2563eb;
+    --primary-light: #eff6ff;
+    --primary-hover: #1d4ed8;
+    --warn: #d97706;
+    --warn-light: #fffbeb;
+    --bad: #e11d48;
+    --bad-light: #fff1f2;
+    --info: #0284c7;
+    --info-light: #f0f9ff;
+    --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+    --shadow: 0 4px 6px -1px rgb(0 0 0 / 0.06), 0 2px 4px -2px rgb(0 0 0 / 0.04);
+    --shadow-md: 0 8px 16px -2px rgb(0 0 0 / 0.06), 0 4px 8px -2px rgb(0 0 0 / 0.03);
+    --ring: rgba(37, 99, 235, 0.2);
   }
+
+  [data-theme="dark"] {
+    --bg: #0b0f17;
+    --surface: #131b26;
+    --surface-elevated: #1a2434;
+    --surface-hover: #1f2b3e;
+    --border: #233044;
+    --border-subtle: #182232;
+    --text-primary: #f8fafc;
+    --text-secondary: #94a3b8;
+    --text-muted: #64748b;
+    --accent: #10b981;
+    --accent-rgb: 16, 185, 129;
+    --accent-light: rgba(16, 185, 129, 0.12);
+    --accent-hover: #34d399;
+    --primary: #3b82f6;
+    --primary-light: rgba(59, 130, 246, 0.12);
+    --primary-hover: #60a5fa;
+    --warn: #f59e0b;
+    --warn-light: rgba(245, 158, 11, 0.14);
+    --bad: #fb7185;
+    --bad-light: rgba(244, 63, 94, 0.14);
+    --info: #38bdf8;
+    --info-light: rgba(56, 189, 248, 0.12);
+    --shadow-sm: 0 1px 3px 0 rgb(0 0 0 / 0.35);
+    --shadow: 0 4px 8px -1px rgb(0 0 0 / 0.45);
+    --shadow-md: 0 10px 20px -2px rgb(0 0 0 / 0.55);
+    --ring: rgba(59, 130, 246, 0.35);
+  }
+
   @media (prefers-color-scheme: dark) {
-    :root {
-      --bg: #16171a;
-      --panel: #1e2023;
-      --border: #33353a;
-      --text: #e7e6e2;
-      --muted: #9a9a95;
-      --accent: #6bc596;
-      --accent-weak: #17301f;
-      --warn: #e0a94f;
-      --warn-weak: #332a15;
-      --bad: #e5776e;
-      --bad-weak: #331e1c;
+    :root:not([data-theme="light"]) {
+      --bg: #0b0f17;
+      --surface: #131b26;
+      --surface-elevated: #1a2434;
+      --surface-hover: #1f2b3e;
+      --border: #233044;
+      --border-subtle: #182232;
+      --text-primary: #f8fafc;
+      --text-secondary: #94a3b8;
+      --text-muted: #64748b;
+      --accent: #10b981;
+      --accent-rgb: 16, 185, 129;
+      --accent-light: rgba(16, 185, 129, 0.12);
+      --accent-hover: #34d399;
+      --primary: #3b82f6;
+      --primary-light: rgba(59, 130, 246, 0.12);
+      --primary-hover: #60a5fa;
+      --warn: #f59e0b;
+      --warn-light: rgba(245, 158, 11, 0.14);
+      --bad: #fb7185;
+      --bad-light: rgba(244, 63, 94, 0.14);
+      --info: #38bdf8;
+      --info-light: rgba(56, 189, 248, 0.12);
+      --shadow-sm: 0 1px 3px 0 rgb(0 0 0 / 0.35);
+      --shadow: 0 4px 8px -1px rgb(0 0 0 / 0.45);
+      --shadow-md: 0 10px 20px -2px rgb(0 0 0 / 0.55);
+      --ring: rgba(59, 130, 246, 0.35);
     }
   }
+
   * { box-sizing: border-box; }
   body {
     margin: 0;
     background: var(--bg);
-    color: var(--text);
-    font: 14px/1.45 -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    color: var(--text-primary);
+    font-family: var(--font-sans);
+    font-size: 13.5px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
   }
+
+  /* Header */
   header {
-    display: flex; align-items: baseline; gap: .6em;
-    padding: 18px 22px 8px;
+    background: var(--surface);
     border-bottom: 1px solid var(--border);
+    position: sticky;
+    top: 0;
+    z-index: 40;
+    box-shadow: var(--shadow-sm);
+  }
+  .header-inner {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 12px 24px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
     flex-wrap: wrap;
   }
-  header h1 { font-size: 17px; margin: 0; font-weight: 650; }
-  header .sub { color: var(--muted); font-size: 12.5px; }
-  #connDot {
-    width: 8px; height: 8px; border-radius: 50%; display: inline-block;
-    background: var(--muted); margin-right: 6px; vertical-align: 1px;
+  .brand-group {
+    display: flex;
+    align-items: center;
+    gap: 12px;
   }
-  #connDot.ok { background: var(--accent); }
-  #connDot.bad { background: var(--bad); }
-  main { max-width: 980px; margin: 0 auto; padding: 18px 22px 60px; }
+  .brand-logo {
+    width: 32px;
+    height: 32px;
+    border-radius: 8px;
+    background: linear-gradient(135deg, var(--accent) 0%, #0284c7 100%);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #ffffff;
+    box-shadow: 0 2px 6px rgba(var(--accent-rgb), 0.3);
+  }
+  .brand-logo svg { width: 18px; height: 18px; }
+  .brand-title {
+    margin: 0;
+    font-size: 16px;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .brand-badge {
+    font-size: 10.5px;
+    padding: 2px 7px;
+    border-radius: 6px;
+    background: var(--surface-elevated);
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+    font-weight: 500;
+  }
+  .header-meta {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 12.5px;
+  }
+  .conn-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px;
+    border-radius: 9999px;
+    background: var(--surface-elevated);
+    border: 1px solid var(--border);
+    font-weight: 500;
+  }
+  #connDot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--text-muted);
+    transition: all 0.2s ease;
+  }
+  #connDot.ok {
+    background: var(--accent);
+    box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.25);
+  }
+  #connDot.bad {
+    background: var(--bad);
+    box-shadow: 0 0 0 3px rgba(225, 29, 72, 0.25);
+  }
+  #connDot.working {
+    background: var(--warn);
+    box-shadow: 0 0 0 3px rgba(217, 119, 6, 0.25);
+    animation: pulse 1.2s infinite ease-in-out;
+  }
+  @keyframes pulse {
+    0%, 100% { transform: scale(1); opacity: 1; }
+    50% { transform: scale(1.3); opacity: 0.7; }
+  }
+  .header-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  /* Main Container */
+  main {
+    max-width: 1200px;
+    width: 100%;
+    margin: 0 auto;
+    padding: 24px 20px 60px;
+    flex: 1;
+  }
+
+  /* Panels / Cards */
   .panel {
-    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
-    padding: 16px 18px; margin-bottom: 16px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px 22px;
+    margin-bottom: 20px;
+    box-shadow: var(--shadow-sm);
+    transition: box-shadow 0.2s ease;
+  }
+  .panel:hover {
+    box-shadow: var(--shadow);
+  }
+  .panel-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 16px;
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+  .panel-title-group {
+    display: flex;
+    align-items: center;
+    gap: 8px;
   }
   .panel h2 {
-    font-size: 12px; text-transform: uppercase; letter-spacing: .05em;
-    color: var(--muted); margin: 0 0 12px;
+    font-size: 13px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-secondary);
+    font-weight: 700;
+    margin: 0;
+    display: flex;
+    align-items: center;
+    gap: 6px;
   }
-  .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
-  label { font-size: 12.5px; color: var(--muted); }
-  input[type=text], input[type=password] {
-    font: inherit; padding: 7px 9px; border-radius: 6px; border: 1px solid var(--border);
-    background: var(--bg); color: var(--text); min-width: 200px;
+  .panel-subtitle {
+    color: var(--text-muted);
+    font-size: 12.5px;
   }
+
+  /* Alerts / Notices */
+  .err {
+    background: var(--bad-light);
+    color: var(--bad);
+    border: 1px solid var(--bad);
+    border-radius: 10px;
+    padding: 12px 16px;
+    margin-bottom: 20px;
+    font-size: 13px;
+    font-weight: 500;
+    display: none;
+    align-items: center;
+    gap: 10px;
+  }
+  .notice-banner {
+    background: var(--info-light);
+    color: var(--info);
+    border: 1px solid var(--info);
+    border-radius: 10px;
+    padding: 12px 16px;
+    margin-bottom: 20px;
+    font-size: 13px;
+    display: none;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  .warn-banner {
+    background: var(--warn-light);
+    color: var(--warn);
+    border: 1px solid var(--warn);
+    border-radius: 10px;
+    padding: 10px 14px;
+    font-size: 12.5px;
+    font-weight: 500;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  /* Form Elements */
+  .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: flex-end; }
+  .field {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    flex: 1;
+    min-width: 220px;
+  }
+  label {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .label-hint {
+    font-size: 11px;
+    font-weight: normal;
+    color: var(--text-muted);
+  }
+  input[type=text], input[type=password], select {
+    font-family: inherit;
+    font-size: 13.5px;
+    padding: 9px 12px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--surface-elevated);
+    color: var(--text-primary);
+    outline: none;
+    transition: border-color 0.15s ease, box-shadow 0.15s ease;
+    width: 100%;
+  }
+  input[type=text]:focus, input[type=password]:focus, select:focus {
+    border-color: var(--primary);
+    box-shadow: 0 0 0 3px var(--ring);
+  }
+  select { cursor: pointer; }
+
+  /* Buttons */
   button {
-    font: inherit; padding: 7px 13px; border-radius: 6px; border: 1px solid var(--border);
-    background: var(--panel); color: var(--text); cursor: pointer;
+    font-family: inherit;
+    font-size: 13px;
+    font-weight: 600;
+    padding: 9px 16px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--text-primary);
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    transition: all 0.15s ease;
+    white-space: nowrap;
   }
-  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-  button:hover { filter: brightness(0.97); }
-  button:disabled { opacity: .5; cursor: default; }
-  a.link { color: var(--accent); cursor: pointer; font-size: 12.5px; }
-  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; }
-  .stat {
-    border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px;
-    background: var(--bg);
+  button:hover {
+    background: var(--surface-hover);
+    border-color: var(--text-muted);
   }
-  .stat .n { font-size: 22px; font-weight: 650; font-variant-numeric: tabular-nums; }
-  .stat .l { font-size: 11.5px; color: var(--muted); margin-top: 2px; }
-  .stat.pending .n { color: var(--warn); }
-  .stat.leased .n { color: var(--accent); }
-  .stat.quarantined .n { color: var(--bad); }
-  table { border-collapse: collapse; width: 100%; font-size: 13px; }
-  th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--border); }
-  th { color: var(--muted); font-weight: 600; font-size: 11.5px; text-transform: uppercase; }
-  tr:last-child td { border-bottom: none; }
-  td.num { text-align: right; font-variant-numeric: tabular-nums; }
-  code, pre {
-    font-family: var(--mono); font-size: 12.5px; background: var(--bg);
-    border: 1px solid var(--border); border-radius: 6px;
+  button:active { transform: translateY(1px); }
+  button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+    transform: none;
   }
-  pre { padding: 10px; overflow: auto; max-height: 340px; margin: 10px 0 0; }
-  code.inline { padding: 1px 5px; }
-  .badge {
-    display: inline-block; padding: 1px 8px; border-radius: 99px; font-size: 11px;
+  button.primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #ffffff;
+    box-shadow: 0 2px 4px rgba(var(--accent-rgb), 0.25);
+  }
+  button.primary:hover {
+    background: var(--accent-hover);
+    border-color: var(--accent-hover);
+  }
+  button.subtle {
+    border-color: transparent;
+    background: transparent;
+    color: var(--text-secondary);
+    padding: 6px 10px;
+  }
+  button.subtle:hover {
+    background: var(--surface-elevated);
+    color: var(--text-primary);
+  }
+  button.icon-btn {
+    padding: 8px;
+    border-radius: 8px;
+  }
+  a.link {
+    color: var(--accent);
+    text-decoration: none;
+    cursor: pointer;
+    font-size: 12.5px;
+    font-weight: 500;
+    transition: color 0.15s ease;
+  }
+  a.link:hover { text-decoration: underline; color: var(--accent-hover); }
+
+  /* KPI Stats Grid */
+  .stats-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 12px;
+    margin-bottom: 20px;
+  }
+  .stat-card {
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px 16px;
+    background: var(--surface-elevated);
+    position: relative;
+    overflow: hidden;
+    transition: transform 0.15s ease, box-shadow 0.15s ease;
+  }
+  .stat-card:hover {
+    transform: translateY(-2px);
+    box-shadow: var(--shadow-sm);
+  }
+  .stat-card::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 3px;
+    background: var(--border);
+  }
+  .stat-card.total::before { background: var(--text-muted); }
+  .stat-card.done::before { background: var(--accent); }
+  .stat-card.leased::before { background: var(--primary); }
+  .stat-card.pending::before { background: var(--warn); }
+  .stat-card.quarantined::before { background: var(--bad); }
+
+  .stat-card .label {
+    font-size: 11.5px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-muted);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .stat-card .value {
+    font-size: 26px;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    font-variant-numeric: tabular-nums;
+    margin-top: 4px;
+  }
+  .stat-card.done .value { color: var(--accent); }
+  .stat-card.leased .value { color: var(--primary); }
+  .stat-card.pending .value { color: var(--warn); }
+  .stat-card.quarantined .value { color: var(--bad); }
+  .stat-card .subtext {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-top: 4px;
+    font-weight: 500;
+  }
+
+  /* Progress Bar */
+  .campaign-progress {
+    background: var(--surface-elevated);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px 16px;
+    margin-bottom: 20px;
+  }
+  .progress-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 8px;
+    font-size: 12.5px;
     font-weight: 600;
   }
-  .badge.done { background: var(--accent-weak); color: var(--accent); }
-  .badge.pending { background: var(--warn-weak); color: var(--warn); }
-  .badge.leased { background: var(--warn-weak); color: var(--warn); }
-  .badge.quarantined { background: var(--bad-weak); color: var(--bad); }
-  .err {
-    background: var(--bad-weak); color: var(--bad); border: 1px solid var(--bad);
-    border-radius: 8px; padding: 10px 14px; margin-bottom: 16px; font-size: 13px;
-    display: none;
+  .progress-bar-wrap {
+    height: 12px;
+    background: var(--border-subtle);
+    border-radius: 999px;
+    overflow: hidden;
+    display: flex;
+    box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.1);
   }
-  .empty { color: var(--muted); font-style: italic; padding: 8px 0; }
-  footer { color: var(--muted); font-size: 11.5px; text-align: center; padding: 20px; }
-  tr.caseRow { cursor: pointer; }
-  tr.caseRow:hover td { background: var(--accent-weak); }
-  tr.caseRow.open td { background: var(--accent-weak); }
-  tr.caseDetailRow td { border-bottom: 1px solid var(--border); padding: 0; }
+  .progress-segment {
+    height: 100%;
+    transition: width 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+  .progress-segment.done { background: var(--accent); }
+  .progress-segment.leased { background: var(--primary); }
+  .progress-segment.pending { background: var(--warn); }
+  .progress-segment.quarantined { background: var(--bad); }
+  .progress-legend {
+    display: flex;
+    gap: 16px;
+    margin-top: 10px;
+    font-size: 11.5px;
+    color: var(--text-secondary);
+    flex-wrap: wrap;
+  }
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .legend-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+  }
+
+  /* Tables */
+  .table-wrap {
+    overflow-x: auto;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--surface);
+  }
+  table {
+    border-collapse: collapse;
+    width: 100%;
+    font-size: 13px;
+    text-align: left;
+  }
+  thead {
+    background: var(--surface-elevated);
+    border-bottom: 1px solid var(--border);
+  }
+  th {
+    padding: 10px 14px;
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-muted);
+    white-space: nowrap;
+  }
+  td {
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border-subtle);
+    color: var(--text-secondary);
+    vertical-align: middle;
+  }
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: var(--surface-hover); }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+
+  /* Badges */
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 8px;
+    border-radius: 6px;
+    font-size: 11px;
+    font-weight: 600;
+    font-family: var(--font-mono);
+    text-transform: lowercase;
+  }
+  .badge.done { background: var(--accent-light); color: var(--accent); }
+  .badge.leased { background: var(--primary-light); color: var(--primary); }
+  .badge.pending { background: var(--warn-light); color: var(--warn); }
+  .badge.quarantined { background: var(--bad-light); color: var(--bad); }
+
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    padding: 2px 8px;
+    border-radius: 6px;
+    font-size: 11.5px;
+    font-weight: 500;
+    background: var(--surface-elevated);
+    border: 1px solid var(--border);
+    color: var(--text-secondary);
+  }
+  .chip.mono { font-family: var(--font-mono); font-size: 11px; }
+
+  /* Code & Mono */
+  code, pre {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    background: var(--surface-elevated);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+  }
+  code.inline {
+    padding: 2px 6px;
+    color: var(--text-primary);
+  }
+  pre {
+    padding: 12px 14px;
+    overflow-x: auto;
+    max-height: 380px;
+    margin: 8px 0 0;
+    line-height: 1.45;
+    color: var(--text-primary);
+  }
+
+  /* Case Browser Specifics */
+  tr.caseRow {
+    cursor: pointer;
+    transition: background 0.15s ease;
+  }
+  tr.caseRow:hover td { background: var(--surface-elevated); }
+  tr.caseRow.open td {
+    background: var(--surface-elevated);
+    border-bottom-color: transparent;
+  }
+  tr.caseDetailRow td {
+    padding: 0;
+    background: var(--surface-elevated);
+    border-bottom: 2px solid var(--border);
+  }
   tr.caseDetailRow.closed { display: none; }
-  .caseDetail { padding: 14px 16px; background: var(--bg); }
-  .kv { display: grid; grid-template-columns: 140px 1fr; gap: 6px 12px; font-size: 12.5px; }
-  .kv dt { color: var(--muted); }
-  .kv dd { margin: 0; word-break: break-all; }
-  .kv dd.mono { font-family: var(--mono); }
-  .pager { display: flex; align-items: center; gap: 10px; margin-top: 10px; font-size: 12.5px; color: var(--muted); }
-  .pager button { padding: 4px 10px; }
-  select {
-    font: inherit; padding: 6px 8px; border-radius: 6px; border: 1px solid var(--border);
-    background: var(--bg); color: var(--text);
+
+  .caseDetail {
+    padding: 16px 20px;
+    background: var(--surface-elevated);
+  }
+  .detail-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 16px;
+    margin-bottom: 14px;
+  }
+  .detail-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 14px;
+  }
+  .detail-card h3 {
+    margin: 0 0 10px;
+    font-size: 11.5px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-muted);
+    font-weight: 700;
+  }
+  .kv-list {
+    display: grid;
+    grid-template-columns: 100px 1fr;
+    gap: 6px 12px;
+    font-size: 12.5px;
+    margin: 0;
+  }
+  .kv-list dt { color: var(--text-muted); font-weight: 500; }
+  .kv-list dd { margin: 0; word-break: break-all; color: var(--text-primary); display: flex; align-items: center; gap: 6px; }
+  .kv-list dd.mono { font-family: var(--font-mono); font-size: 11.5px; }
+
+  .copy-btn {
+    background: transparent;
+    border: none;
+    padding: 2px 4px;
+    color: var(--text-muted);
+    cursor: pointer;
+    border-radius: 4px;
+    display: inline-flex;
+    align-items: center;
+  }
+  .copy-btn:hover { background: var(--surface-elevated); color: var(--text-primary); }
+  .copy-btn svg { width: 13px; height: 13px; }
+
+  /* Pager */
+  .pager {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-top: 14px;
+    font-size: 12.5px;
+    color: var(--text-muted);
+  }
+  .pager-controls {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  /* Empty state */
+  .empty-state {
+    text-align: center;
+    padding: 36px 20px;
+    color: var(--text-muted);
+    font-size: 13.5px;
+  }
+  .empty-icon {
+    width: 40px;
+    height: 40px;
+    margin: 0 auto 10px;
+    opacity: 0.4;
+    color: var(--text-muted);
+  }
+
+  /* Refresh Countdown Ring */
+  .refresh-indicator {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+  }
+  .spin { animation: spin 0.8s linear infinite; }
+  @keyframes spin { 100% { transform: rotate(360deg); } }
+
+  /* Toast */
+  #toast {
+    position: fixed;
+    bottom: 24px;
+    right: 24px;
+    background: var(--text-primary);
+    color: var(--bg);
+    padding: 9px 16px;
+    border-radius: 8px;
+    font-size: 12.5px;
+    font-weight: 500;
+    box-shadow: var(--shadow-md);
+    opacity: 0;
+    transform: translateY(10px);
+    transition: opacity 0.2s ease, transform 0.2s ease;
+    z-index: 100;
+    pointer-events: none;
+  }
+  #toast.show { opacity: 1; transform: translateY(0); }
+
+  /* Footer */
+  footer {
+    border-top: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--text-muted);
+    font-size: 12px;
+    text-align: center;
+    padding: 20px;
+    margin-top: auto;
   }
 </style>
 </head>
 <body>
 
 <header>
-  <h1>Wind v2 Case Broker</h1>
-  <span class="sub"><span id="connDot"></span><span id="connText">not connected</span></span>
+  <div class="header-inner">
+    <div class="brand-group">
+      <div class="brand-logo" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M17.7 7.7a2.5 2.5 0 1 1 1.8 4.3H2"/>
+          <path d="M9.6 4.6A2 2 0 1 1 11 8H2"/>
+          <path d="M12.6 19.4A2 2 0 1 0 14 16H2"/>
+        </svg>
+      </div>
+      <div>
+        <h1 class="brand-title">
+          Wind v2 Case Broker
+          <span class="brand-badge" id="brokerDbBadge">v0.1.0</span>
+        </h1>
+      </div>
+    </div>
+
+    <div class="header-meta">
+      <span class="conn-pill" id="connPill">
+        <span id="connDot"></span>
+        <span id="connText">not connected</span>
+      </span>
+
+      <div class="header-actions">
+        <button id="themeToggle" class="subtle icon-btn" title="Toggle color theme" aria-label="Toggle theme">
+          <svg id="themeIcon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="5"></circle>
+            <line x1="12" y1="1" x2="12" y2="3"></line>
+            <line x1="12" y1="21" x2="12" y2="23"></line>
+            <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+            <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+            <line x1="1" y1="12" x2="3" y2="12"></line>
+            <line x1="21" y1="12" x2="23" y2="12"></line>
+            <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+            <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+          </svg>
+        </button>
+      </div>
+    </div>
+  </div>
 </header>
 
 <main>
-  <div id="err" class="err"></div>
+  <!-- Error and Warning Banners -->
+  <div id="err" class="err" role="alert"></div>
+  <div id="authNotice" class="notice-banner" role="status">
+    <div style="display:flex;align-items:center;gap:8px">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
+        <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
+      </svg>
+      <span><strong>Authentication Required:</strong> This broker requires a bearer token to display live campaign telemetry and cases.</span>
+    </div>
+    <button class="subtle" id="focusTokenBtn" style="color:inherit;text-decoration:underline">Enter Token &rarr;</button>
+  </div>
 
+  <!-- Connection Panel -->
   <section class="panel">
-    <h2>Connection</h2>
+    <div class="panel-header">
+      <div class="panel-title-group">
+        <h2>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+            <path d="M5 12.55a11 11 0 0 1 14.08 0"></path>
+            <path d="M1.42 9a16 16 0 0 1 21.16 0"></path>
+            <path d="M8.53 16.11a6 6 0 0 1 6.95 0"></path>
+            <line x1="12" y1="20" x2="12.01" y2="20"></line>
+          </svg>
+          Connection
+        </h2>
+      </div>
+      <div class="refresh-indicator">
+        <span id="nextRefreshCountdown">auto-refresh active</span>
+      </div>
+    </div>
+
     <form id="connectForm" autocomplete="on">
       <div class="row">
-        <label>Broker URL
-          <br /><input type="text" id="broker" name="brokerUrl" autocomplete="url"
-            placeholder="https://..." />
-        </label>
-        <label>Bearer token (leave blank if the broker has no auth configured)
-          <br /><input type="password" id="token" name="token" autocomplete="current-password"
-            placeholder="paste token" />
-        </label>
+        <div class="field" style="flex: 2; min-width: 280px;">
+          <label for="broker">
+            Broker URL
+            <span class="label-hint">(Target casebroker API instance)</span>
+          </label>
+          <input type="text" id="broker" name="brokerUrl" autocomplete="url" placeholder="https://..." required />
+        </div>
+
+        <div class="field" style="flex: 2; min-width: 280px;">
+          <label for="token">
+            Bearer Token
+            <span class="label-hint">(Leave blank if broker runs without auth)</span>
+          </label>
+          <input type="password" id="token" name="token" autocomplete="current-password" placeholder="Enter bearer token..." />
+        </div>
+
         <div>
-          <br />
-          <button class="primary" id="connect" type="submit">Connect</button>
+          <button class="primary" id="connect" type="submit">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+              <polyline points="20 6 9 17 4 12"></polyline>
+            </svg>
+            Connect
+          </button>
         </div>
       </div>
-      <div class="row" style="margin-top:8px">
-        <a class="link" id="clearToken">forget saved token</a>
-        <label style="margin-left:auto">
-          <input type="checkbox" id="autoRefresh" checked /> auto-refresh every 60s
-        </label>
-        <button id="refresh" type="button">Refresh now</button>
+
+      <div class="row" style="margin-top:14px; align-items: center;">
+        <a class="link" id="clearToken">Forget saved token</a>
+
+        <div style="margin-left:auto; display:flex; align-items: center; gap: 16px;">
+          <label style="margin:0; font-weight: 500; cursor: pointer;">
+            <input type="checkbox" id="autoRefresh" checked style="cursor: pointer; margin-right: 6px;" />
+            auto-refresh every 60s
+          </label>
+
+          <button id="refresh" type="button">
+            <svg id="refreshIcon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+              <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/>
+            </svg>
+            Refresh now
+          </button>
+        </div>
       </div>
     </form>
   </section>
 
+  <!-- Campaign Status Panel -->
   <section class="panel">
-    <h2>Campaign status</h2>
-    <div id="statusEmpty" class="empty">Connect to a broker to see status.</div>
+    <div class="panel-header">
+      <div class="panel-title-group">
+        <h2>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+            <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline>
+          </svg>
+          Campaign Status
+        </h2>
+      </div>
+      <div id="expiredBannerWrap"></div>
+    </div>
+
+    <div id="statusEmpty" class="empty-state">
+      <svg class="empty-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+        <circle cx="12" cy="12" r="10"></circle>
+        <line x1="12" y1="8" x2="12" y2="12"></line>
+        <line x1="12" y1="16" x2="12.01" y2="16"></line>
+      </svg>
+      <div>Connect to a broker to see campaign status.</div>
+    </div>
+
     <div id="statusBody" style="display:none">
-      <div class="stats" id="stateStats"></div>
-      <table style="margin-top:16px">
-        <thead><tr><th>Split</th><th class="num">Pending</th><th class="num">Leased</th>
-          <th class="num">Done</th><th class="num">Quarantined</th></tr></thead>
-        <tbody id="splitBody"></tbody>
-      </table>
-      <div class="row" style="margin-top:12px; color:var(--muted); font-size:12.5px">
-        <span id="etaText"></span>
-        <span id="expiredText" style="margin-left:auto"></span>
+      <!-- High level visual progress bar -->
+      <div class="campaign-progress">
+        <div class="progress-header">
+          <span>Simulation Campaign Progress</span>
+          <span id="progressPct" style="font-family: var(--font-mono); color: var(--accent);">0%</span>
+        </div>
+        <div class="progress-bar-wrap" id="campaignProgressBar">
+          <div class="progress-segment done" id="progDone" style="width: 0%" title="Done"></div>
+          <div class="progress-segment leased" id="progLeased" style="width: 0%" title="Leased"></div>
+          <div class="progress-segment pending" id="progPending" style="width: 0%" title="Pending"></div>
+          <div class="progress-segment quarantined" id="progQuarantined" style="width: 0%" title="Quarantined"></div>
+        </div>
+        <div class="progress-legend">
+          <span class="legend-item"><span class="legend-dot" style="background:var(--accent)"></span> Done</span>
+          <span class="legend-item"><span class="legend-dot" style="background:var(--primary)"></span> Leased (In Flight)</span>
+          <span class="legend-item"><span class="legend-dot" style="background:var(--warn)"></span> Pending</span>
+          <span class="legend-item"><span class="legend-dot" style="background:var(--bad)"></span> Quarantined</span>
+        </div>
+      </div>
+
+      <!-- KPI Stat Cards -->
+      <div class="stats-grid" id="stateStats"></div>
+
+      <!-- Split Matrix -->
+      <div style="margin-top: 20px;">
+        <h3 style="font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); margin: 0 0 10px;">
+          Dataset Split Breakdown
+        </h3>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Split</th>
+                <th style="min-width: 140px;">Progress</th>
+                <th class="num">Pending</th>
+                <th class="num">Leased</th>
+                <th class="num">Done</th>
+                <th class="num">Quarantined</th>
+                <th class="num">Total</th>
+              </tr>
+            </thead>
+            <tbody id="splitBody"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="row" style="margin-top:14px; align-items: center; justify-content: space-between; font-size: 12.5px; color: var(--text-secondary);">
+        <div style="display:flex; align-items: center; gap: 8px;">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="10"></circle>
+            <polyline points="12 6 12 12 16 14"></polyline>
+          </svg>
+          <span id="etaText"></span>
+        </div>
+        <div>
+          <span id="expiredText" style="color: var(--warn); font-weight: 500;"></span>
+        </div>
       </div>
     </div>
   </section>
 
+  <!-- Workers Panel -->
   <section class="panel">
-    <h2>Workers</h2>
-    <div id="workersEmpty" class="empty">—</div>
-    <table id="workersTable" style="display:none">
-      <thead><tr><th>Worker</th><th>Host</th><th>Cluster</th><th>First seen</th><th>Last seen</th>
-        <th class="num">Done</th><th class="num">Failed</th></tr></thead>
-      <tbody id="workersBody"></tbody>
-    </table>
-  </section>
-
-  <section class="panel">
-    <h2>Cases</h2>
-    <div class="row">
-      <label>State
-        <br />
-        <select id="caseState">
-          <option value="">all</option>
-          <option value="pending">pending</option>
-          <option value="leased">leased</option>
-          <option value="done">done</option>
-          <option value="quarantined">quarantined</option>
-        </select>
-      </label>
-      <label style="margin-left:auto">Jump to a case_id
-        <br /><input type="text" id="caseId" placeholder="v2-4894713a345a4429" style="min-width:280px" />
-      </label>
-      <div><br /><button id="lookup">Look up</button></div>
+    <div class="panel-header">
+      <div class="panel-title-group">
+        <h2>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+            <rect x="2" y="2" width="20" height="8" rx="2" ry="2"></rect>
+            <rect x="2" y="14" width="20" height="8" rx="2" ry="2"></rect>
+            <line x1="6" y1="6" x2="6.01" y2="6"></line>
+            <line x1="6" y1="18" x2="6.01" y2="18"></line>
+          </svg>
+          Worker Fleet
+        </h2>
+      </div>
+      <span class="chip" id="workerCountBadge">0 active</span>
     </div>
 
-    <div id="casesEmpty" class="empty">Connect to a broker to browse cases.</div>
-    <table id="casesTable" style="display:none; margin-top:12px">
-      <thead><tr>
-        <th>Case</th><th>State</th><th>Split</th><th>LCZ</th><th>City</th><th>Updated</th>
-      </tr></thead>
-      <tbody id="casesBody"></tbody>
-    </table>
+    <div id="workersEmpty" class="empty-state">—</div>
+    <div class="table-wrap" id="workersTableWrap" style="display:none">
+      <table id="workersTable">
+        <thead>
+          <tr>
+            <th>Worker ID</th>
+            <th>Host</th>
+            <th>Cluster</th>
+            <th>Status</th>
+            <th>First seen</th>
+            <th>Last seen</th>
+            <th class="num">Done</th>
+            <th class="num">Failed</th>
+            <th class="num">Reliability</th>
+          </tr>
+        </thead>
+        <tbody id="workersBody"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- Cases Browser Panel -->
+  <section class="panel">
+    <div class="panel-header">
+      <div class="panel-title-group">
+        <h2>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+            <polyline points="14 2 14 8 20 8"></polyline>
+            <line x1="16" y1="13" x2="8" y2="13"></line>
+            <line x1="16" y1="17" x2="8" y2="17"></line>
+          </svg>
+          Case Browser & Inspector
+        </h2>
+      </div>
+      <span class="label-hint">Click any row to inspect simulation spec & results</span>
+    </div>
+
+    <!-- Filter Bar -->
+    <div class="row" style="margin-bottom: 16px;">
+      <div class="field" style="min-width: 140px; flex: 1;">
+        <label for="caseState">State</label>
+        <select id="caseState">
+          <option value="">All States</option>
+          <option value="pending">Pending</option>
+          <option value="leased">Leased</option>
+          <option value="done">Done</option>
+          <option value="quarantined">Quarantined</option>
+        </select>
+      </div>
+
+      <div class="field" style="min-width: 140px; flex: 1;">
+        <label for="caseSplitFilter">Split</label>
+        <select id="caseSplitFilter">
+          <option value="">All Splits</option>
+        </select>
+      </div>
+
+      <div class="field" style="min-width: 160px; flex: 1;">
+        <label for="caseCityFilter">City Cluster</label>
+        <input type="text" id="caseCityFilter" placeholder="Filter by city..." />
+      </div>
+
+      <div class="field" style="min-width: 240px; flex: 2;">
+        <label for="caseId">Jump to Case ID</label>
+        <input type="text" id="caseId" placeholder="e.g. v2-4894713a345a4429" />
+      </div>
+
+      <div>
+        <button id="lookup" type="button">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+            <circle cx="11" cy="11" r="8"></circle>
+            <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+          </svg>
+          Look up
+        </button>
+      </div>
+
+      <div>
+        <button id="resetFilters" type="button" class="subtle" title="Reset all filters">
+          Reset
+        </button>
+      </div>
+    </div>
+
+    <div id="casesEmpty" class="empty-state">
+      <svg class="empty-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+        <rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect>
+        <line x1="8" y1="21" x2="16" y2="21"></line>
+        <line x1="12" y1="17" x2="12" y2="21"></line>
+      </svg>
+      <div>Connect to a broker to browse cases.</div>
+    </div>
+
+    <div class="table-wrap" id="casesTableWrap" style="display:none">
+      <table id="casesTable">
+        <thead>
+          <tr>
+            <th>Case ID</th>
+            <th>State</th>
+            <th>Split</th>
+            <th>LCZ</th>
+            <th>City Cluster</th>
+            <th>Recipe</th>
+            <th>Attempts</th>
+            <th>Updated</th>
+          </tr>
+        </thead>
+        <tbody id="casesBody"></tbody>
+      </table>
+    </div>
+
     <div class="pager" id="casesPager" style="display:none">
-      <button id="casesPrev">&larr; Prev</button>
-      <span id="casesRange"></span>
-      <button id="casesNext">Next &rarr;</button>
+      <span id="casesRange" style="font-weight: 500;"></span>
+      <div class="pager-controls">
+        <button id="casesPrev">&larr; Previous</button>
+        <button id="casesNext">Next &rarr;</button>
+      </div>
     </div>
   </section>
 </main>
 
+<div id="toast"></div>
+
 <footer>
-  Talks directly to the broker's own JSON API (<code class="inline">/v1/*</code>) from your browser.
-  The token is kept only in this browser's local storage and sent as a bearer header on each request.
+  <div style="max-width: 1200px; margin: 0 auto; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
+    <span>Talks directly to the broker's JSON API (<code class="inline">/v1/*</code>) from your browser.</span>
+    <span>Token stored securely in your browser's local storage.</span>
+  </div>
 </footer>
 
 <script>
@@ -241,24 +1114,126 @@
   const $ = (id) => document.getElementById(id);
   const LS_URL = "casebroker.brokerUrl";
   const LS_TOK = "casebroker.token";
+  const LS_THEME = "casebroker.theme";
+  const LS_AUTO = "casebroker.autoRefresh";
 
+  // -- Theme Management --------------------------------------------------------
+  function initTheme() {
+    const saved = localStorage.getItem(LS_THEME);
+    if (saved) {
+      document.documentElement.setAttribute("data-theme", saved);
+    }
+    updateThemeIcon();
+  }
+
+  function toggleTheme() {
+    const current = document.documentElement.getAttribute("data-theme") ||
+      (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+    const next = current === "dark" ? "light" : "dark";
+    document.documentElement.setAttribute("data-theme", next);
+    localStorage.setItem(LS_THEME, next);
+    updateThemeIcon();
+  }
+
+  function updateThemeIcon() {
+    const isDark = document.documentElement.getAttribute("data-theme") === "dark" ||
+      (!document.documentElement.getAttribute("data-theme") && window.matchMedia("(prefers-color-scheme: dark)").matches);
+    const icon = $("themeIcon");
+    if (icon) {
+      icon.innerHTML = isDark
+        ? `<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>`
+        : `<circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>`;
+    }
+  }
+
+  $("themeToggle").addEventListener("click", toggleTheme);
+  initTheme();
+
+  // -- Clipboard Toast Helper -------------------------------------------------
+  let toastTimer = null;
+  function showToast(msg) {
+    const t = $("toast");
+    t.textContent = msg;
+    t.classList.add("show");
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => t.classList.remove("show"), 2400);
+  }
+
+  window.copyText = (text, label = "Copied to clipboard") => {
+    navigator.clipboard.writeText(text).then(() => showToast(label)).catch(() => {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      document.body.removeChild(ta);
+      showToast(label);
+    });
+  };
+
+  // -- State & Inputs ---------------------------------------------------------
   $("broker").value = localStorage.getItem(LS_URL) || window.location.origin;
   $("token").value = localStorage.getItem(LS_TOK) || "";
 
   let autoTimer = null;
+  let countdownTimer = null;
+  let nextRefreshSeconds = 60;
+  const AUTO_REFRESH_MS = 60000;
 
   function showErr(msg) {
     const e = $("err");
     if (!msg) { e.style.display = "none"; e.textContent = ""; return; }
     e.textContent = msg;
-    e.style.display = "block";
+    e.style.display = "flex";
   }
 
-  function setConn(ok, text) {
-    $("connDot").className = ok === null ? "" : (ok ? "ok" : "bad");
+  function setConn(state, text) {
+    const dot = $("connDot");
+    dot.className = state || "";
     $("connText").textContent = text;
   }
 
+  // Formatters
+  function esc(s) {
+    return String(s).replace(/[&<>"']/g, (c) => ({
+      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+    }[c]));
+  }
+
+  function relTime(unixSeconds) {
+    if (!unixSeconds) return "—";
+    const s = Math.floor(Date.now() / 1000) - unixSeconds;
+    if (s < 0) return "just now";
+    if (s < 60) return s + "s ago";
+    if (s < 3600) return Math.floor(s / 60) + "m ago";
+    if (s < 86400) return Math.floor(s / 3600) + "h ago";
+    return Math.floor(s / 86400) + "d ago";
+  }
+
+  function formatBytes(bytes) {
+    if (bytes == null || isNaN(bytes)) return "—";
+    if (bytes === 0) return "0 B";
+    const k = 1024;
+    const sizes = ["B", "KB", "MB", "GB", "TB"];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
+  }
+
+  function formatDuration(sec) {
+    if (sec == null) return "—";
+    if (sec < 60) return sec + " s";
+    const m = Math.floor(sec / 60);
+    const rem = Math.round(sec % 60);
+    return `${m}m ${rem}s`;
+  }
+
+  function parseMaybeJson(s) {
+    if (s == null) return {};
+    if (typeof s !== "string") return s;
+    try { return JSON.parse(s); } catch (e) { return {}; }
+  }
+
+  // API Client
   async function api(path) {
     const base = $("broker").value.replace(/\/+$/, "");
     const token = $("token").value.trim();
@@ -268,37 +1243,90 @@
     if (!res.ok) {
       let body = "";
       try { body = (await res.text()).slice(0, 200); } catch (e) {}
-      throw new Error(`${res.status} ${res.statusText} — ${body || "(no body)"}`);
+      const err = new Error(`${res.status} ${res.statusText} — ${body || "(no body)"}`);
+      err.status = res.status;
+      throw err;
     }
     return res.json();
+  }
+
+  // Check health without throwing 401
+  async function checkHealth() {
+    const base = $("broker").value.replace(/\/+$/, "");
+    try {
+      const res = await fetch(base + "/healthz");
+      if (res.ok) {
+        const h = await res.json();
+        if (h.db) {
+          const dbLabel = h.db.startsWith("postgres") ? "Postgres" : "SQLite";
+          $("brokerDbBadge").textContent = `${dbLabel} • ${h.auth === "token" ? "auth required" : "open"}`;
+        }
+        return h;
+      }
+    } catch (e) {
+      // Server unreachable
+    }
+    return null;
   }
 
   const STATE_ORDER = ["pending", "leased", "done", "quarantined"];
   const STATE_LABEL = { pending: "Pending", leased: "Leased", done: "Done", quarantined: "Quarantined" };
 
-  function relTime(unixSeconds) {
-    if (!unixSeconds) return "—";
-    const s = Math.floor(Date.now() / 1000) - unixSeconds;
-    if (s < 60) return s + "s ago";
-    if (s < 3600) return Math.floor(s / 60) + "m ago";
-    if (s < 86400) return Math.floor(s / 3600) + "h ago";
-    return Math.floor(s / 86400) + "d ago";
-  }
-
   function renderStatus(st) {
     $("statusEmpty").style.display = "none";
     $("statusBody").style.display = "block";
 
-    const stats = STATE_ORDER.map((s) => {
-      const n = st.by_state?.[s] || 0;
-      return `<div class="stat ${s}"><div class="n">${n.toLocaleString()}</div>
-              <div class="l">${STATE_LABEL[s]}</div></div>`;
-    }).join("") + `
-      <div class="stat"><div class="n">${(st.remaining ?? 0).toLocaleString()}</div>
-        <div class="l">Remaining</div></div>`;
-    $("stateStats").innerHTML = stats;
+    const doneCount = st.by_state?.["done"] || 0;
+    const leasedCount = st.by_state?.["leased"] || 0;
+    const pendingCount = st.by_state?.["pending"] || 0;
+    const quarantinedCount = st.by_state?.["quarantined"] || 0;
+    const totalCases = doneCount + leasedCount + pendingCount + quarantinedCount;
 
-    // by_split is a flat {"train/done": n, ...} map — pivot it into a split x state table.
+    // Update Overall Progress Bar
+    const pct = totalCases > 0 ? ((doneCount / totalCases) * 100).toFixed(1) : 0;
+    $("progressPct").textContent = `${pct}% completed (${doneCount.toLocaleString()} / ${totalCases.toLocaleString()})`;
+    if (totalCases > 0) {
+      $("progDone").style.width = `${(doneCount / totalCases) * 100}%`;
+      $("progLeased").style.width = `${(leasedCount / totalCases) * 100}%`;
+      $("progPending").style.width = `${(pendingCount / totalCases) * 100}%`;
+      $("progQuarantined").style.width = `${(quarantinedCount / totalCases) * 100}%`;
+    }
+
+    // KPI Stat cards
+    $("stateStats").innerHTML = `
+      <div class="stat-card total">
+        <div class="label">Total Cases</div>
+        <div class="value">${totalCases.toLocaleString()}</div>
+        <div class="subtext">Entire campaign pool</div>
+      </div>
+      <div class="stat-card done">
+        <div class="label">Done</div>
+        <div class="value">${doneCount.toLocaleString()}</div>
+        <div class="subtext">${pct}% completion rate</div>
+      </div>
+      <div class="stat-card leased">
+        <div class="label">In Flight (Leased)</div>
+        <div class="value">${leasedCount.toLocaleString()}</div>
+        <div class="subtext">Being simulated now</div>
+      </div>
+      <div class="stat-card pending">
+        <div class="label">Pending</div>
+        <div class="value">${pendingCount.toLocaleString()}</div>
+        <div class="subtext">Awaiting claim</div>
+      </div>
+      <div class="stat-card quarantined">
+        <div class="label">Quarantined</div>
+        <div class="value">${quarantinedCount.toLocaleString()}</div>
+        <div class="subtext">Exceeded max attempts</div>
+      </div>
+      <div class="stat-card total">
+        <div class="label">Remaining</div>
+        <div class="value">${(st.remaining ?? 0).toLocaleString()}</div>
+        <div class="subtext">Pending + in-flight</div>
+      </div>
+    `;
+
+    // Splits breakdown
     const splits = {};
     for (const [key, n] of Object.entries(st.by_split || {})) {
       const [split, state] = key.split("/");
@@ -306,57 +1334,117 @@
       splits[split][state] = n;
     }
     const splitNames = Object.keys(splits).sort();
+
+    // Populate split filter dropdown if needed
+    const splitSelect = $("caseSplitFilter");
+    const currentSplitVal = splitSelect.value;
+    const existingOptions = Array.from(splitSelect.options).map(o => o.value);
+    splitNames.forEach(sp => {
+      if (!existingOptions.includes(sp)) {
+        const opt = document.createElement("option");
+        opt.value = sp;
+        opt.textContent = `Split: ${sp}`;
+        splitSelect.appendChild(opt);
+      }
+    });
+    splitSelect.value = currentSplitVal;
+
     $("splitBody").innerHTML = splitNames.length
       ? splitNames.map((sp) => {
           const row = splits[sp];
-          return `<tr><td>${sp}</td>` +
-            STATE_ORDER.map((s) => `<td class="num">${(row[s] || 0).toLocaleString()}</td>`).join("") +
-            `</tr>`;
+          const spDone = row["done"] || 0;
+          const spLeased = row["leased"] || 0;
+          const spPending = row["pending"] || 0;
+          const spQuar = row["quarantined"] || 0;
+          const spTotal = spDone + spLeased + spPending + spQuar;
+          const spPct = spTotal > 0 ? Math.round((spDone / spTotal) * 100) : 0;
+
+          return `<tr>
+            <td><span class="chip mono">${esc(sp)}</span></td>
+            <td>
+              <div style="display:flex; align-items:center; gap:8px;">
+                <div style="flex:1; height:6px; background:var(--border-subtle); border-radius:999px; overflow:hidden; display:flex;">
+                  <div style="width:${spPct}%; background:var(--accent);"></div>
+                </div>
+                <span style="font-size:11px; font-family:var(--font-mono); color:var(--text-muted); width:32px; text-align:right;">${spPct}%</span>
+              </div>
+            </td>
+            <td class="num">${spPending.toLocaleString()}</td>
+            <td class="num">${spLeased.toLocaleString()}</td>
+            <td class="num" style="color:var(--accent); font-weight:600;">${spDone.toLocaleString()}</td>
+            <td class="num" style="color:var(--bad);">${spQuar.toLocaleString()}</td>
+            <td class="num" style="font-weight:600;">${spTotal.toLocaleString()}</td>
+          </tr>`;
         }).join("")
-      : `<tr><td colspan="5" class="empty">No cases yet.</td></tr>`;
+      : `<tr><td colspan="7" class="empty-state">No split data yet.</td></tr>`;
 
+    // Velocity & ETA text
     $("etaText").textContent = st.eta_days != null
-      ? `~${st.eta_days} day(s) left at the current rate (${st.done_last_24h} done in the last 24h)`
-      : (st.done_last_24h ? `${st.done_last_24h} done in the last 24h` : "no completions yet — ETA unknown");
-    $("expiredText").textContent = st.expired_leases
-      ? `${st.expired_leases} lease(s) expired and awaiting reclaim`
-      : "";
+      ? `Estimated completion: ~${st.eta_days} day(s) at current throughput (${st.done_last_24h.toLocaleString()} completed in last 24h)`
+      : (st.done_last_24h ? `${st.done_last_24h.toLocaleString()} completed in last 24h (insufficient history for ETA)` : "No completions yet — ETA unknown");
 
+    if (st.expired_leases > 0) {
+      $("expiredBannerWrap").innerHTML = `
+        <span class="warn-banner">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path>
+            <line x1="12" y1="9" x2="12" y2="13"></line>
+            <line x1="12" y1="17" x2="12.01" y2="17"></line>
+          </svg>
+          ${st.expired_leases} lease(s) expired — awaiting reclaim
+        </span>`;
+      $("expiredText").textContent = `${st.expired_leases} lease(s) expired and awaiting reclaim`;
+    } else {
+      $("expiredBannerWrap").innerHTML = "";
+      $("expiredText").textContent = "";
+    }
+
+    // Workers Table
     const workers = st.workers || [];
+    $("workerCountBadge").textContent = `${workers.length} known`;
     if (workers.length) {
       $("workersEmpty").style.display = "none";
+      $("workersTableWrap").style.display = "block";
       $("workersTable").style.display = "table";
-      $("workersBody").innerHTML = workers.map((w) => `
-        <tr>
-          <td><code class="inline">${w.worker_id}</code></td>
-          <td>${w.host ? esc(w.host) : "—"}</td>
-          <td>${w.cluster ? esc(w.cluster) : "—"}</td>
-          <td>${relTime(w.first_seen)}</td>
-          <td>${relTime(w.last_seen)}</td>
-          <td class="num">${w.cases_done}</td>
-          <td class="num">${w.cases_failed}</td>
-        </tr>`).join("");
+      $("workersBody").innerHTML = workers.map((w) => {
+        const isRecent = (Math.floor(Date.now() / 1000) - w.last_seen) < 300;
+        const totalW = (w.cases_done || 0) + (w.cases_failed || 0);
+        const reliability = totalW > 0 ? ((w.cases_done / totalW) * 100).toFixed(1) + "%" : "—";
+
+        return `
+          <tr>
+            <td>
+              <div style="display:flex;align-items:center;gap:6px">
+                <code class="inline">${esc(w.worker_id)}</code>
+                <button class="copy-btn" onclick="copyText('${esc(w.worker_id)}', 'Worker ID copied')" title="Copy Worker ID">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                </button>
+              </div>
+            </td>
+            <td>${w.host ? `<span class="chip mono">${esc(w.host)}</span>` : "—"}</td>
+            <td>${w.cluster ? `<span class="chip">${esc(w.cluster)}</span>` : "—"}</td>
+            <td>
+              <span class="badge ${isRecent ? "done" : "quarantined"}">
+                ${isRecent ? "Active" : "Offline"}
+              </span>
+            </td>
+            <td>${relTime(w.first_seen)}</td>
+            <td>${relTime(w.last_seen)}</td>
+            <td class="num" style="font-weight:600; color:var(--accent);">${(w.cases_done || 0).toLocaleString()}</td>
+            <td class="num" style="color:var(--bad);">${(w.cases_failed || 0).toLocaleString()}</td>
+            <td class="num" style="font-family:var(--font-mono); font-size:12px;">${reliability}</td>
+          </tr>`;
+      }).join("");
     } else {
       $("workersEmpty").style.display = "block";
-      $("workersEmpty").textContent = "No worker has leased anything yet.";
+      $("workersEmpty").textContent = "No workers have leased cases yet.";
+      $("workersTableWrap").style.display = "none";
       $("workersTable").style.display = "none";
     }
   }
 
-  function esc(s) {
-    return String(s).replace(/[&<>"']/g, (c) => ({
-      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-  }
-
-  function parseMaybeJson(s) {
-    if (s == null) return {};
-    if (typeof s !== "string") return s;
-    try { return JSON.parse(s); } catch (e) { return {}; }
-  }
-
-  // -- case browser: list + click-to-expand -------------------------------
-
-  const caseList = { state: "", limit: 25, offset: 0, total: 0, singleId: null };
+  // -- Case Browser Logic ------------------------------------------------------
+  const caseList = { state: "", split: "", city: "", limit: 25, offset: 0, total: 0, singleId: null };
   let openDetailId = null;
 
   function badge(state) {
@@ -366,42 +1454,107 @@
   function caseDetailHtml(c) {
     const metrics = parseMaybeJson(c.metrics);
     const spec = parseMaybeJson(c.spec);
-    const rows = [
-      ["Case ID", c.case_id, "mono"],
-      ["State", badge(c.state)],
-      ["Split", c.split || "—"],
-      ["LCZ", c.lcz || "—"],
-      ["City cluster", c.city_cluster || "—"],
-      ["Recipe", c.recipe || "—"],
-      ["Attempts", `${c.attempts} / ${c.max_attempts}`],
-      ["Priority", c.priority],
-      ["Created", c.created_at ? new Date(c.created_at * 1000).toLocaleString() : "—"],
-      ["Updated", c.updated_at ? new Date(c.updated_at * 1000).toLocaleString() : "—"],
-      // Which machine actually produced this result -- from the worker's own
-      // report at completion time (casebroker.worker.Worker.run_forever bakes
-      // this into the case's metrics, not just the transient workers table, so
-      // it stays answerable long after that worker has gone quiet).
-      ["Worker", metrics.worker || c.lease_worker || "—", "mono"],
-      ["Host", metrics.host || "—", "mono"],
-      ["Cluster", metrics.cluster || "—"],
-      ["Wall time", metrics.wall_seconds != null ? metrics.wall_seconds + " s" : "—"],
-      // Where it is finally stored -- the runner's own result_uri, e.g. a
-      // file:// path on shared cluster storage or an s3:// object key.
-      ["Result location", c.result_uri || "—", "mono"],
-      ["Result bytes", c.result_bytes != null ? c.result_bytes.toLocaleString() : "—"],
-      ["Result sha256", c.result_sha256 || "—", "mono"],
-      ["Lease expires", c.lease_expires ? relTime(c.lease_expires) + " (from now)" : "—"],
-    ];
-    if (c.last_error) rows.push(["Last error", esc(c.last_error), "mono"]);
+    const curlSnippet = `curl -H "Authorization: Bearer ${esc($("token").value.trim() || "<TOKEN>")}" "${$("broker").value.replace(/\/+$/, "")}/v1/cases/${esc(c.case_id)}"`;
 
-    const kv = rows.map(([k, v, cls]) =>
-      `<dt>${k}</dt><dd${cls ? ` class="${cls}"` : ""}>${v}</dd>`).join("");
     return `
       <div class="caseDetail">
-        <dl class="kv">${kv}</dl>
-        <details style="margin-top:12px">
-          <summary style="cursor:pointer;color:var(--muted);font-size:12px">raw spec + metrics</summary>
-          <pre style="margin-top:8px">${esc(JSON.stringify({ spec, metrics }, null, 2))}</pre>
+        <div class="detail-grid">
+          <!-- Simulation Spec Card -->
+          <div class="detail-card">
+            <h3>Simulation Parameters</h3>
+            <dl class="kv-list">
+              <dt>Case ID</dt>
+              <dd class="mono">
+                ${esc(c.case_id)}
+                <button class="copy-btn" onclick="copyText('${esc(c.case_id)}', 'Case ID copied')" title="Copy Case ID">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                </button>
+              </dd>
+              <dt>State</dt>
+              <dd>${badge(c.state)}</dd>
+              <dt>Split</dt>
+              <dd><span class="chip mono">${esc(c.split || "—")}</span></dd>
+              <dt>Recipe</dt>
+              <dd>${esc(c.recipe || "—")}</dd>
+              <dt>LCZ</dt>
+              <dd>${esc(c.lcz || "—")}</dd>
+              <dt>City Cluster</dt>
+              <dd>${esc(c.city_cluster || "—")}</dd>
+              <dt>Priority</dt>
+              <dd>${c.priority}</dd>
+              <dt>Attempts</dt>
+              <dd>
+                <span class="${c.attempts > 1 ? "chip" : ""}" style="${c.attempts > 1 ? "color:var(--warn);" : ""}">
+                  ${c.attempts} / ${c.max_attempts}
+                </span>
+              </dd>
+            </dl>
+          </div>
+
+          <!-- Execution & Compute Card -->
+          <div class="detail-card">
+            <h3>Compute & Execution Telemetry</h3>
+            <dl class="kv-list">
+              <dt>Worker</dt>
+              <dd class="mono">${esc(metrics.worker || c.lease_worker || "—")}</dd>
+              <dt>Host</dt>
+              <dd class="mono">${esc(metrics.host || "—")}</dd>
+              <dt>Cluster</dt>
+              <dd>${esc(metrics.cluster || "—")}</dd>
+              <dt>Wall Time</dt>
+              <dd>${formatDuration(metrics.wall_seconds)}</dd>
+              <dt>Created</dt>
+              <dd>${c.created_at ? new Date(c.created_at * 1000).toLocaleString() : "—"}</dd>
+              <dt>Updated</dt>
+              <dd>${c.updated_at ? new Date(c.updated_at * 1000).toLocaleString() : "—"}</dd>
+              <dt>Lease Expiry</dt>
+              <dd>${c.lease_expires ? relTime(c.lease_expires) + " (from now)" : "—"}</dd>
+            </dl>
+          </div>
+
+          <!-- Results & Artifacts Card -->
+          <div class="detail-card">
+            <h3>Storage & Artifacts</h3>
+            <dl class="kv-list">
+              <dt>Result URI</dt>
+              <dd class="mono">
+                <span style="overflow:hidden; text-overflow:ellipsis; max-width:200px;" title="${esc(c.result_uri || "")}">${esc(c.result_uri || "—")}</span>
+                ${c.result_uri ? `<button class="copy-btn" onclick="copyText('${esc(c.result_uri)}', 'Result URI copied')" title="Copy URI"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></button>` : ""}
+              </dd>
+              <dt>File Size</dt>
+              <dd>${formatBytes(c.result_bytes)}</dd>
+              <dt>SHA-256</dt>
+              <dd class="mono">
+                <span style="overflow:hidden; text-overflow:ellipsis; max-width:180px;" title="${esc(c.result_sha256 || "")}">
+                  ${c.result_sha256 ? c.result_sha256.slice(0, 14) + "…" : "—"}
+                </span>
+                ${c.result_sha256 ? `<button class="copy-btn" onclick="copyText('${esc(c.result_sha256)}', 'SHA256 copied')" title="Copy SHA256"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></button>` : ""}
+              </dd>
+            </dl>
+
+            <div style="margin-top:12px; padding-top:10px; border-top:1px solid var(--border);">
+              <button class="subtle" onclick="copyText('${esc(curlSnippet)}', 'cURL command copied')" style="font-size:11.5px; width:100%; justify-content:center;">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"></polyline><line x1="12" y1="19" x2="20" y2="19"></line></svg>
+                Copy API curl command
+              </button>
+            </div>
+          </div>
+        </div>
+
+        ${c.last_error ? `
+          <div style="background:var(--bad-light); border:1px solid var(--bad); border-radius:8px; padding:12px 14px; margin-bottom:14px; color:var(--bad);">
+            <div style="font-weight:600; margin-bottom:4px; font-size:12px; display:flex; align-items:center; gap:6px;">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>
+              Last Failure Error
+            </div>
+            <code style="display:block; padding:8px; background:var(--surface); border:1px solid var(--border); color:inherit; white-space:pre-wrap; font-size:11.5px;">${esc(c.last_error)}</code>
+          </div>` : ""}
+
+        <details>
+          <summary style="cursor:pointer; color:var(--text-muted); font-size:12px; font-weight:600;">
+            View Raw Specification & Metrics JSON
+          </summary>
+          <pre>${esc(JSON.stringify({ spec, metrics }, null, 2))}</pre>
         </details>
       </div>`;
   }
@@ -409,21 +1562,31 @@
   function renderCasesTable(cases) {
     $("casesEmpty").style.display = cases.length ? "none" : "block";
     $("casesEmpty").textContent = "No cases match this filter.";
+    $("casesTableWrap").style.display = cases.length ? "block" : "none";
     $("casesTable").style.display = cases.length ? "table" : "none";
+
     $("casesBody").innerHTML = cases.map((c) => {
       const open = c.case_id === openDetailId;
       return `
         <tr class="caseRow${open ? " open" : ""}" data-id="${esc(c.case_id)}">
-          <td><code class="inline">${esc(c.case_id)}</code></td>
+          <td>
+            <div style="display:flex; align-items:center; gap:6px;">
+              <code class="inline">${esc(c.case_id)}</code>
+            </div>
+          </td>
           <td>${badge(c.state)}</td>
-          <td>${c.split || "—"}</td>
-          <td>${c.lcz || "—"}</td>
-          <td>${c.city_cluster || "—"}</td>
+          <td><span class="chip mono">${esc(c.split || "—")}</span></td>
+          <td>${esc(c.lcz || "—")}</td>
+          <td>${esc(c.city_cluster || "—")}</td>
+          <td>${esc(c.recipe || "—")}</td>
+          <td>${c.attempts} / ${c.max_attempts}</td>
           <td>${relTime(c.updated_at)}</td>
         </tr>
-        <tr class="caseDetailRow${open ? "" : " closed"}"><td colspan="6">
-          ${open ? caseDetailHtml(c) : ""}
-        </td></tr>`;
+        <tr class="caseDetailRow${open ? "" : " closed"}">
+          <td colspan="8">
+            ${open ? caseDetailHtml(c) : ""}
+          </td>
+        </tr>`;
     }).join("");
 
     $("casesBody").querySelectorAll("tr.caseRow").forEach((tr) => {
@@ -438,10 +1601,10 @@
   function renderPager() {
     const { total, limit, offset, singleId } = caseList;
     if (singleId) { $("casesPager").style.display = "none"; return; }
-    $("casesPager").style.display = total > limit ? "flex" : "none";
+    $("casesPager").style.display = total > 0 ? "flex" : "none";
     const from = total ? offset + 1 : 0;
     const to = Math.min(offset + limit, total);
-    $("casesRange").textContent = `${from}–${to} of ${total.toLocaleString()}`;
+    $("casesRange").textContent = `${from}–${to} of ${total.toLocaleString()} cases`;
     $("casesPrev").disabled = offset <= 0;
     $("casesNext").disabled = offset + limit >= total;
   }
@@ -455,58 +1618,129 @@
         caseList.total = 1;
       } catch (e) {
         $("casesEmpty").style.display = "block";
-        $("casesEmpty").textContent = "Not found: " + e.message;
+        $("casesEmpty").textContent = "Case not found: " + e.message;
+        $("casesTableWrap").style.display = "none";
         $("casesTable").style.display = "none";
       }
       renderPager();
       return;
     }
+
     const q = new URLSearchParams({ limit: caseList.limit, offset: caseList.offset });
     if (caseList.state) q.set("state", caseList.state);
-    const page = await api("/v1/cases?" + q.toString());
-    caseList.total = page.total;
-    renderCasesTable(page.cases);
-    renderPager();
-  }
+    if (caseList.split) q.set("split", caseList.split);
+    if (caseList.city) q.set("city_cluster", caseList.city);
 
-  async function refresh() {
     try {
-      const st = await api("/v1/status");
-      setConn(true, "connected");
-      showErr(null);
-      renderStatus(st);
-      await loadCases();
+      const page = await api("/v1/cases?" + q.toString());
+      caseList.total = page.total;
+      renderCasesTable(page.cases);
+      renderPager();
     } catch (e) {
-      setConn(false, "not connected");
-      showErr("Could not load status: " + e.message);
+      $("casesEmpty").style.display = "block";
+      $("casesEmpty").textContent = "Failed to load cases: " + e.message;
+      $("casesTableWrap").style.display = "none";
+      $("casesTable").style.display = "none";
     }
   }
 
+  // -- Main Refresh Loop -------------------------------------------------------
+  async function refresh() {
+    const refreshIcon = $("refreshIcon");
+    if (refreshIcon) refreshIcon.classList.add("spin");
+    setConn("working", "refreshing…");
+
+    try {
+      // First, check unauthenticated healthz to see server state & DB
+      const health = await checkHealth();
+      const token = $("token").value.trim();
+
+      // If server requires token and user has none:
+      if (health && health.auth === "token" && !token) {
+        setConn(null, "auth required");
+        $("authNotice").style.display = "flex";
+        showErr(null);
+        $("statusEmpty").textContent = "Enter your bearer token above to view live campaign data.";
+        $("casesEmpty").textContent = "Enter your bearer token above to browse cases.";
+        return;
+      }
+
+      $("authNotice").style.display = "none";
+      const st = await api("/v1/status");
+      setConn("ok", "connected");
+      showErr(null);
+      renderStatus(st);
+      await loadCases();
+      nextRefreshSeconds = 60;
+    } catch (e) {
+      if (e.status === 401) {
+        setConn("bad", "unauthorized (401)");
+        $("authNotice").style.display = "flex";
+        showErr("Authentication failed: invalid or expired bearer token");
+      } else {
+        setConn("bad", "disconnected");
+        showErr("Could not reach case broker: " + e.message);
+      }
+    } finally {
+      if (refreshIcon) refreshIcon.classList.remove("spin");
+    }
+  }
+
+  // Auto-refresh timer & countdown
+  function updateCountdown() {
+    if (!$("autoRefresh").checked) {
+      $("nextRefreshCountdown").textContent = "auto-refresh paused";
+      return;
+    }
+    nextRefreshSeconds--;
+    if (nextRefreshSeconds <= 0) {
+      nextRefreshSeconds = 60;
+      refresh();
+    }
+    $("nextRefreshCountdown").textContent = `refreshing in ${nextRefreshSeconds}s`;
+  }
+
+  function setAutoRefresh(on) {
+    if (autoTimer) { clearInterval(autoTimer); autoTimer = null; }
+    if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
+    if (on) {
+      nextRefreshSeconds = 60;
+      countdownTimer = setInterval(updateCountdown, 1000);
+      updateCountdown();
+    } else {
+      $("nextRefreshCountdown").textContent = "auto-refresh paused";
+    }
+  }
+
+  // Event Listeners
   $("connectForm").addEventListener("submit", (e) => {
     e.preventDefault();
     localStorage.setItem(LS_URL, $("broker").value.trim());
     localStorage.setItem(LS_TOK, $("token").value.trim());
     refresh();
   });
-  $("refresh").addEventListener("click", refresh);
+
+  $("refresh").addEventListener("click", () => {
+    nextRefreshSeconds = 60;
+    refresh();
+  });
+
   $("clearToken").addEventListener("click", () => {
     $("token").value = "";
     localStorage.removeItem(LS_TOK);
+    showToast("Cleared saved bearer token");
+    refresh();
   });
 
-  const LS_AUTO = "casebroker.autoRefresh";
-  const AUTO_REFRESH_MS = 60000;
-  function setAutoRefresh(on) {
-    if (autoTimer) { clearInterval(autoTimer); autoTimer = null; }
-    if (on) autoTimer = setInterval(refresh, AUTO_REFRESH_MS);
-  }
-  // Defaults ON: a saved "off" from a previous visit is respected, but a
-  // first-ever visit (nothing saved yet) starts refreshing without the user
-  // having to notice and tick a box.
+  $("focusTokenBtn").addEventListener("click", () => {
+    $("token").focus();
+  });
+
   const autoSaved = localStorage.getItem(LS_AUTO);
   const autoOn = autoSaved === null ? true : autoSaved === "1";
   $("autoRefresh").checked = autoOn;
   setAutoRefresh(autoOn);
+
   $("autoRefresh").addEventListener("change", (e) => {
     localStorage.setItem(LS_AUTO, e.target.checked ? "1" : "0");
     setAutoRefresh(e.target.checked);
@@ -519,10 +1753,46 @@
     openDetailId = null;
     loadCases();
   });
+
+  $("caseSplitFilter").addEventListener("change", (e) => {
+    caseList.split = e.target.value;
+    caseList.offset = 0;
+    caseList.singleId = null;
+    openDetailId = null;
+    loadCases();
+  });
+
+  let cityTimer = null;
+  $("caseCityFilter").addEventListener("input", (e) => {
+    if (cityTimer) clearTimeout(cityTimer);
+    cityTimer = setTimeout(() => {
+      caseList.city = e.target.value.trim();
+      caseList.offset = 0;
+      caseList.singleId = null;
+      openDetailId = null;
+      loadCases();
+    }, 300);
+  });
+
+  $("resetFilters").addEventListener("click", () => {
+    $("caseState").value = "";
+    $("caseSplitFilter").value = "";
+    $("caseCityFilter").value = "";
+    $("caseId").value = "";
+    caseList.state = "";
+    caseList.split = "";
+    caseList.city = "";
+    caseList.singleId = null;
+    caseList.offset = 0;
+    openDetailId = null;
+    loadCases();
+  });
+
   $("casesPrev").addEventListener("click", () => {
     caseList.offset = Math.max(0, caseList.offset - caseList.limit);
     loadCases();
   });
+
   $("casesNext").addEventListener("click", () => {
     caseList.offset += caseList.limit;
     loadCases();
@@ -537,8 +1807,26 @@
   $("lookup").addEventListener("click", doLookup);
   $("caseId").addEventListener("keydown", (e) => { if (e.key === "Enter") doLookup(); });
 
-  // Try loading immediately if a URL/token were already saved from a previous visit.
-  if (localStorage.getItem(LS_TOK) !== null || $("broker").value) refresh();
+  // Keyboard shortcuts
+  window.addEventListener("keydown", (e) => {
+    if (e.target.tagName === "INPUT" || e.target.tagName === "SELECT") return;
+    if (e.key === "r" || e.key === "R") {
+      refresh();
+    } else if (e.key === "/") {
+      e.preventDefault();
+      $("caseId").focus();
+    } else if (e.key === "Escape") {
+      if (openDetailId) {
+        openDetailId = null;
+        loadCases();
+      }
+    }
+  });
+
+  // Initial load
+  if (localStorage.getItem(LS_TOK) !== null || $("broker").value) {
+    refresh();
+  }
 })();
 </script>
 
