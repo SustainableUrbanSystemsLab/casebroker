@@ -1372,7 +1372,8 @@
         const h = await res.json();
         if (h.db) {
           const dbLabel = h.db.startsWith("postgres") ? "Postgres" : "SQLite";
-          $("brokerDbBadge").textContent = `${dbLabel} • ${h.auth === "token" ? "auth required" : "open"}`;
+          const versionLabel = h.version ? `v${h.version} • ` : "";
+          $("brokerDbBadge").textContent = `${versionLabel}${dbLabel} • ${h.auth === "token" ? "auth required" : "open"}`;
         }
         return h;
       }
