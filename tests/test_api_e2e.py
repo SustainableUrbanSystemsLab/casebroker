@@ -191,3 +191,71 @@ def test_many_workers_never_duplicate_a_case(tmp_path, monkeypatch):
     # More than one worker actually participated, or the test proved nothing
     # about concurrency.
     assert len({w for _, w in done_by}) > 1
+
+
+def test_dashboard_is_served_with_no_auth_but_data_stays_gated(broker):
+    """The dashboard shell carries no secrets -- it prompts for a token client-side and
+    calls the JSON API with it, exactly like any other API client. So the page itself
+    must load with no Authorization header, while the data it displays stays behind
+    the same check as every other endpoint.
+
+    The ``broker`` fixture pins ``Authorization: Bearer secret-a`` as a default header
+    for every request it sends (that is what makes the OTHER tests in this file
+    convenient to write), so this test overrides it to "" per-call to actually
+    exercise the unauthenticated path rather than accidentally re-proving the
+    authenticated one.
+    """
+    r = broker.get("/", headers={"Authorization": ""})
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/html")
+    assert "<title>Wind v2 Case Broker</title>" in r.text
+    # The page's own fetch() calls carry the token; the page load itself must not.
+    assert "secret-a" not in r.text and "secret-b" not in r.text
+
+    # And the data it calls stays protected -- unchanged behaviour, just confirmed
+    # from the same fixture the dashboard test lives beside.
+    assert broker.get("/v1/status", headers={"Authorization": ""}).status_code == 401
+    assert broker.get("/v1/status").status_code == 200   # the fixture's default token
+
+
+def test_redact_db_target_masks_only_the_password():
+    """/healthz is deliberately unauthenticated so infrastructure health checks
+    work with no token -- which is exactly why nothing it returns may ever carry
+    a credential. Found the hard way: an early version returned CASEBROKER_DB
+    verbatim, so hitting /healthz against a real Postgres deployment printed the
+    live database password in plain text, no auth required to trigger it.
+
+    A fake DSN is used here on purpose -- this test must never construct or
+    reference a real credential."""
+    from casebroker.app import _redact_db_target
+    fake = "postgresql://appuser:hunter2-not-a-real-secret@db.example.com:6543/postgres"
+    out = _redact_db_target(fake)
+    assert "hunter2-not-a-real-secret" not in out
+    assert out == "postgresql://appuser:***@db.example.com:6543/postgres"
+    # The parts that are NOT secret stay visible -- healthz still needs to
+    # answer "which database is this even pointed at".
+    assert "db.example.com" in out and "appuser" in out
+
+
+def test_redact_db_target_passes_a_sqlite_path_through_unchanged(tmp_path):
+    """A local file path is not a secret; redaction must not mangle it."""
+    from casebroker.app import _redact_db_target
+    p = str(tmp_path / "campaign.sqlite")
+    assert _redact_db_target(p) == p
+
+
+def test_healthz_route_actually_calls_the_redaction_helper(tmp_path, monkeypatch):
+    """The bug was never in the redaction function alone -- it was the ROUTE
+    returning db_path directly instead of routing through it. A SQLite path here
+    (no network needed at all) with a monkeypatched spy proves the wiring, not
+    just the helper."""
+    from fastapi.testclient import TestClient
+    from casebroker import app as app_module
+    calls = []
+    monkeypatch.setattr(app_module, "_redact_db_target",
+                        lambda s: calls.append(s) or "REDACTED-FOR-TEST")
+    db_path = str(tmp_path / "x.sqlite")
+    application = app_module.create_app(db_path=db_path, tokens=None)
+    body = TestClient(application).get("/healthz").json()
+    assert body["db"] == "REDACTED-FOR-TEST"
+    assert calls == [db_path]

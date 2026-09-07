@@ -15,14 +15,47 @@ from __future__ import annotations
 
 import hmac
 import os
+import pathlib
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from . import db, ids
 
 MAX_LEASE_SECONDS = 24 * 3600
+
+# The dashboard shell (static/dashboard.html) carries no secrets -- it prompts the
+# viewer for a bearer token client-side and calls the JSON API with it, exactly like
+# any other API client. So it is served with no Auth dependency; the DATA it displays
+# is still gated by the same token check as every other endpoint.
+_STATIC_DIR = pathlib.Path(__file__).parent / "static"
+
+
+def _redact_db_target(db_path: str) -> str:
+    """A safe-to-display summary of what CASEBROKER_DB points at.
+
+    For SQLite this is just a local file path -- not a secret. For a Postgres
+    DSN it is the connection string with the PASSWORD masked (host, port,
+    username and database name stay visible; they are diagnostically useful and
+    none of them is the credential). /healthz is deliberately unauthenticated so
+    infrastructure health checks work with no token, which is exactly why
+    nothing bearing a credential may ever appear in what it returns.
+
+    Found the hard way: an earlier version returned db_path verbatim, so hitting
+    /healthz against a real Postgres deployment printed the live database
+    password in plain text to whoever (or whatever terminal, log, or transcript)
+    made the request -- with no auth required to trigger it.
+    """
+    if not db_path.startswith(("postgres://", "postgresql://")):
+        return db_path
+    parts = urlsplit(db_path)
+    netloc = parts.netloc
+    if parts.password:
+        netloc = netloc.replace(f":{parts.password}@", ":***@")
+    return urlunsplit((parts.scheme, netloc, parts.path, "", ""))
 
 
 # -- payloads -----------------------------------------------------------------
@@ -118,7 +151,15 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None) -> F
 
     @app.get("/healthz")
     def healthz() -> dict[str, Any]:
-        return {"ok": True, "auth": "token" if tokens else "OPEN", "db": db_path}
+        return {"ok": True, "auth": "token" if tokens else "OPEN",
+                "db": _redact_db_target(db_path)}
+
+
+    @app.get("/", include_in_schema=False)
+    def dashboard() -> FileResponse:
+        """A minimal ops UI: campaign status, workers, one-case lookup. Vanilla HTML/JS,
+        no build step, no external requests other than to this broker's own API."""
+        return FileResponse(_STATIC_DIR / "dashboard.html")
 
 
     @app.post("/v1/cases", dependencies=[Auth])
