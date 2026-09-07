@@ -80,16 +80,3 @@ jobs:
           echo "http_status=$code ok=$ok"
           test "$code" = "200" -a "$ok" = "True"
 
-  debug-secret-shape-TEMPORARY:
-    name: TEMPORARY - check DBSTRING's shape (length + first 10 chars only, never the value)
-    runs-on: ubuntu-latest
-    if: github.event_name != 'pull_request'
-    steps:
-      # Single-line on purpose: a multi-line python -c string inside a YAML
-      # block scalar needs every continuation line indented at least as far as
-      # the block itself, and a heredoc-style script with unindented lines
-      # breaks out of the block early -- confirmed the hard way, that is
-      # exactly what made the previous version of this file invalid YAML.
-      - run: python3 -c "import os; v = os.environ.get('DBSTRING', ''); print('length:', len(v)); print('first 10 chars:', repr(v[:10])); print('starts with postgres URL scheme:', v.startswith(('postgres://', 'postgresql://')))"
-        env:
-          DBSTRING: ${{ secrets.DBSTRING }}
