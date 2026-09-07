@@ -241,7 +241,14 @@ def script_runner(script: str) -> Runner:
         env["CASE_ID"] = lease["case_id"]
         env["CASE_SPEC"] = json.dumps(lease["spec"])
         env["LEASE_ID"] = lease["lease_id"]
-        proc = subprocess.run([script], input=json.dumps(lease), text=True,
+        # POSIX: run via `bash <script>` rather than exec'ing the file directly --
+        # the latter depends on the git executable bit surviving checkout, which a
+        # script authored on Windows is not guaranteed to carry (found on Phoenix:
+        # PermissionError on a freshly cloned run_case.sh). Windows has no such bit
+        # (and a bash on PATH there could not run a .cmd launcher anyway), so it
+        # keeps exec'ing the script by path.
+        argv = [script] if os.name == "nt" else ["bash", script]
+        proc = subprocess.run(argv, input=json.dumps(lease), text=True,
                               capture_output=True, env=env, shell=False)
         if proc.returncode != 0:
             tail = (proc.stderr or proc.stdout)[-2000:]
