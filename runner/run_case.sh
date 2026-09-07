@@ -47,6 +47,36 @@ TERRAIN=$(printf '%s' "$SPEC" | "$PY" -c 'import json,sys; print(json.load(sys.s
 cp "$BUILDINGS" "$SCRATCH/buildings.stl"
 cp "$TERRAIN"   "$SCRATCH/terrain.stl"
 
+# Pedestrian-height reference for the flow-field screenshot below: the
+# terrain's own highest point, not the domain floor -- the domain typically
+# extends well BELOW the terrain (so blockMesh's floor seals under it), and
+# slicing at domain_min_z + 1.5 would sample INSIDE solid ground on any case
+# where the two differ, which is the common case, not the exception.
+TERRAIN_ZMAX=$("$PY" - "$SCRATCH/terrain.stl" <<'PY'
+import struct, sys
+data = open(sys.argv[1], "rb").read()
+zmax = None
+is_binary = len(data) >= 84
+if is_binary:
+    n = struct.unpack_from("<I", data, 80)[0]
+    is_binary = len(data) == 84 + 50 * n
+if is_binary:
+    off = 84
+    for _ in range(n):
+        v = struct.unpack_from("<9f", data, off + 12)
+        zmax = max(zmax, v[2], v[5], v[8]) if zmax is not None else max(v[2], v[5], v[8])
+        off += 50
+else:
+    for line in data.decode("utf-8", "ignore").splitlines():
+        line = line.strip()
+        if line.startswith("vertex"):
+            z = float(line.split()[3])
+            zmax = z if zmax is None else max(zmax, z)
+print(zmax if zmax is not None else "")
+PY
+)
+PEDESTRIAN_Z=$("$PY" -c "print(($TERRAIN_ZMAX) + 1.5)" 2>/dev/null || echo "1.5")
+
 # ── 2. build the study ────────────────────────────────────────────────────────
 # $SPEC is written to a file rather than piped in: a `<<'PY'` heredoc on the same
 # command ALWAYS wins the redirect race for stdin, so a `printf ... | "$PY" -
@@ -99,7 +129,7 @@ cp "$SCRIPT_DIR/lib/solve_gate.sh" "$SCRATCH/solve_gate.sh"
 cat > "$SCRATCH/inner.sh" <<'INNER'
 #!/bin/bash
 set -uo pipefail
-STUDY=$1; NP=$2
+STUDY=$1; NP=$2; SLICE_Z=$3
 source /s/solve_gate.sh
 cd "$STUDY" || exit 1
 for m in mesh mesh_*; do
@@ -166,6 +196,38 @@ for c in case_*; do
         foamPostProcess -func "patchFlowRate(patch=inlet)" -time "$LATEST" -parallel > fr.log 2>&1
     FLUX=$(grep -a 'sum(inlet)' fr.log | tail -1 | awk '{print $NF}')
     echo "INLET_FLUX $c ${FLUX:-NONE}"
+
+    # Sample U on a horizontal plane at pedestrian height so run_case.sh can
+    # render a screenshot after the container exits (matplotlib is not on
+    # this image, so the render itself happens host-side -- see step 4).
+    # Best effort: a failed sample must never fail an otherwise-good case.
+    mkdir -p system
+    cat > system/sliceFO <<SLICEDICT
+type            surfaces;
+libs            (sampling);
+writeControl    timeStep;
+writeInterval   1;
+surfaceFormat   raw;
+fields          (U);
+interpolationScheme cellPoint;
+surfaces
+{
+    slice
+    {
+        type            cuttingPlane;
+        planeType       pointAndNormal;
+        pointAndNormalDict
+        {
+            point       (0 0 $SLICE_Z);
+            normal      (0 0 1);
+        }
+        interpolate     true;
+    }
+}
+SLICEDICT
+    mpirun --allow-run-as-root --oversubscribe -np "$RANKS" \
+        foamPostProcess -dict system/sliceFO -time "$LATEST" -parallel > slice.log 2>&1 \
+        || echo "SLICE_SAMPLE_FAILED $c (see slice.log; not fatal)"
   ) || exit $?
 done
 echo INNER_OK
@@ -173,7 +235,7 @@ INNER
 sed -i 's/\r$//' "$SCRATCH/inner.sh"
 
 $POD run --rm --user 0:0 -e HOME=/home/openfoam -v "$SCRATCH:/s" "$IMG" \
-    "bash /s/inner.sh /s/$CASE_ID $NP" 2>&1 | grep -v "job control\|terminal process group" \
+    "bash /s/inner.sh /s/$CASE_ID $NP $PEDESTRIAN_Z" 2>&1 | grep -v "job control\|terminal process group" \
     | tee "$SCRATCH/run.log" >&2
 grep -q "INNER_OK" "$SCRATCH/run.log" || {
     grep -q "MESH_FAIL" "$SCRATCH/run.log" && fatal_case "meshing failed - see run.log"
@@ -194,13 +256,52 @@ if grep -a "INLET_FLUX" "$SCRATCH/run.log" | awk '{print $3}' | grep -qvE '^-[0-
     fatal_case "a direction has non-negative inlet flux: the wind did not enter the domain"
 fi
 
-# ── 4. sample + ship ──────────────────────────────────────────────────────────
+# ── 4. render + sample + ship ─────────────────────────────────────────────────
 # TODO(v2-contract): replace with the terrain-following slice export once the
-# contract is settled. Until then the case's own logs and the flux check are the
-# artefact, so a pilot run is still verifiable end to end.
+# contract is settled. Until then the case's own logs and the flux check are
+# the artefact that actually gates success -- the screenshot below is a
+# convenience for a human looking at the campaign, not something anything
+# downstream depends on, so a failed render must never fail an otherwise
+# good case. It is a PNG on disk, nothing more: never stored in the broker's
+# database, only referenced by the same result_uri directory as everything
+# else in this case.
+#
+# matplotlib/numpy are not on the OpenFOAM image, so this runs HOST-side
+# against the .raw sample foamPostProcess wrote inside the container (visible
+# here unchanged -- $STUDY is the same bind-mounted path on both sides).
+for RAWFILE in "$STUDY"/case_*/postProcessing/surfaces/*/*_U.raw; do
+    [ -f "$RAWFILE" ] || continue
+    CDIR=$(echo "$RAWFILE" | sed -n "s#.*/\(case_[^/]*\)/postProcessing.*#\1#p")
+    PNG="$SCRATCH/preview_${CDIR#case_}.png"
+    uv run --with matplotlib --with numpy python - "$RAWFILE" "$PNG" >>"$SCRATCH/preview.log" 2>&1 <<'PY' \
+        || log "preview render failed for $CDIR (see preview.log; not fatal)"
+import sys
+import numpy as np
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
+raw_path, out_png = sys.argv[1], sys.argv[2]
+data = np.loadtxt(raw_path, comments="#")
+x, y = data[:, 0], data[:, 1]
+ux, uy, uz = data[:, 3], data[:, 4], data[:, 5]
+umag = np.sqrt(ux**2 + uy**2 + uz**2)
+
+fig, ax = plt.subplots(figsize=(6, 6), dpi=120)
+tpc = ax.tricontourf(x, y, umag, levels=30, cmap="turbo")
+fig.colorbar(tpc, ax=ax, label="|U| (m/s)")
+ax.set_aspect("equal")
+ax.set_xlabel("x (m)"); ax.set_ylabel("y (m)")
+ax.set_title("Pedestrian-height wind speed")
+fig.tight_layout()
+fig.savefig(out_png)
+PY
+done
+
 OUT="$WC/results/$CASE_ID"
 mkdir -p "$OUT"
 cp "$SCRATCH"/run.log "$SCRATCH"/build.json "$SCRATCH"/cfg.json "$OUT/" 2>/dev/null
+cp "$SCRATCH"/preview_*.png "$OUT/" 2>/dev/null
 find "$STUDY" -maxdepth 2 -name "*.log" -exec cp {} "$OUT/" \; 2>/dev/null
 BYTES=$(du -sb "$OUT" | cut -f1)
 
