@@ -1,0 +1,81 @@
+#!/bin/bash
+#SBATCH -J windworker
+#SBATCH -N 1 -n 24
+#SBATCH -t 08:00:00
+#SBATCH -p cpu-small
+#SBATCH -q embers
+#SBATCH -A gts-pkastner3
+#SBATCH --array=1-20%20
+#SBATCH --requeue
+#SBATCH --signal=B:TERM@180
+#SBATCH -o worker_%A_%a.out
+#
+# A pool of pull-based workers on Phoenix. Each array task leases cases from the
+# broker, runs them, reports, and repeats until its wall clock runs low or the
+# queue drains.
+#
+# Why this shape rather than a case-per-array-task:
+#
+#   * `embers` is free but PREEMPTIBLE after one hour, and jobs are requeued. A
+#     statically assigned case dies with its task; a leased one returns to the pool
+#     by itself. --signal=B:TERM@180 gives the worker three minutes' warning, and
+#     casebroker's SIGTERM handler releases the lease immediately with its retry
+#     REFUNDED, rather than leaving the case stranded until the lease TTL lapses.
+#   * Cases are wildly unequal (a dense LCZ 1 tile against an exurban LCZ 9 one),
+#     so pull beats push: a fast worker simply takes more.
+#   * %20 caps concurrency so the campaign shares the cluster politely. Raise it to
+#     go faster; nothing else changes.
+#
+# Prerequisites, all verified on Phoenix 2026-09-07:
+#   - /usr/bin/podman 5.4.0, no subuid range (see run_case.sh for the workaround)
+#   - compute nodes have outbound internet, so the broker is reachable directly
+#   - $TMPDIR is 1.4 TB node-local scratch
+#
+# Submit with:
+#   CASEBROKER_URL=https://broker.example.org CASEBROKER_TOKEN=... \
+#     sbatch --export=ALL phoenix_worker.sbatch
+
+set -uo pipefail
+
+: "${CASEBROKER_URL:?set CASEBROKER_URL}"
+: "${CASEBROKER_TOKEN:?set CASEBROKER_TOKEN}"
+
+WC=${WIND_ROOT:-/storage/scratch1/3/pkastner3/windcomfort/v2}
+REPO=${WIND_REPO:-$WC/repo/JP-Wind-ML-Comparison}
+export WIND_ROOT="$WC"
+export EDDY3D_CLI=${EDDY3D_CLI:-$WC/bin/eddy3d-cli}
+export WIND_NP=${SLURM_NTASKS:-24}
+export WIND_IMAGE=${WIND_IMAGE:-docker.io/dicehub/openfoam:12}
+
+# One worker id per array task, stable across a requeue so the broker's worker
+# table shows a task's whole history rather than a new row each preemption.
+export CASEBROKER_WORKER_ID="phoenix-${SLURM_ARRAY_JOB_ID}-${SLURM_ARRAY_TASK_ID}"
+
+echo "worker $CASEBROKER_WORKER_ID on $(hostname), $(nproc) cores, TMPDIR=${TMPDIR:-unset}"
+df -h "${TMPDIR:-/tmp}" | tail -1
+
+# Leave a margin under the 8 h wall clock: a case must be able to finish, and the
+# worker exits cleanly rather than being killed mid-solve.
+MAX_HOURS=${MAX_HOURS:-7.0}
+
+cd "$REPO/benchmark/casebroker" || exit 1
+
+# The lease is short relative to the job but long relative to a heartbeat: a dead
+# node's case returns to the pool in 30 minutes, while a live worker holds a case
+# for as long as it needs by renewing every 5.
+timeout "${MAX_HOURS}h" uv run python -m casebroker.worker \
+    --broker "$CASEBROKER_URL" \
+    --token "$CASEBROKER_TOKEN" \
+    --worker-id "$CASEBROKER_WORKER_ID" \
+    --runner "$REPO/benchmark/casebroker/runner/run_case.sh" \
+    --lease-seconds 1800 \
+    --heartbeat-seconds 300 \
+    --idle-backoff 120
+rc=$?
+
+# 124 is timeout's own code: the worker hit MAX_HOURS, which is the normal end of a
+# shift, not a failure. Anything the worker was holding is released by its SIGTERM
+# handler on the way out.
+if [ $rc -eq 124 ]; then echo "worker reached MAX_HOURS=$MAX_HOURS; exiting cleanly"; rc=0; fi
+echo "worker $CASEBROKER_WORKER_ID exit=$rc"
+exit $rc
