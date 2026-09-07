@@ -35,7 +35,35 @@ fatal_case() { log "FATAL (will not retry): $*"; exit 64; }
 
 SCRATCH="${TMPDIR:-/tmp}/wind-$CASE_ID-$$"
 mkdir -p "$SCRATCH" || exit 1
-cleanup() { rm -rf "$SCRATCH" "$PSTORE" 2>/dev/null; }
+
+# On ANY failure, the diagnostic logs that would explain it are the very
+# thing about to be deleted: $SCRATCH lives on node-local /tmp, and the trap
+# below runs unconditionally at exit. A gate that correctly CATCHES a
+# problem but leaves nothing to diagnose it with is only half "bulletproof"
+# -- found the hard way debugging a real SOLVE_FAIL that had already been
+# cleaned up by the time its cause could be inspected. Preserved to shared
+# storage (never counted as a case result -- a separate top-level directory
+# from $WC/results, so a failed run can never be mistaken for a done one),
+# and best-effort: a failure while preserving failure diagnostics must not
+# mask the original error or itself abort the script.
+cleanup() {
+    local rc=$?
+    if [ "$rc" -ne 0 ]; then
+        local fail_out="$WC/failed_logs/$CASE_ID"
+        mkdir -p "$fail_out" 2>/dev/null && {
+            cp "$SCRATCH"/run.log "$SCRATCH"/build.json "$SCRATCH"/cfg.json "$fail_out/" 2>/dev/null
+            # --parents keeps each direction's own 11.log/12.log/fr.log distinct
+            # (case_000/12.log, case_045/12.log, ...) -- a flat copy would let
+            # every direction after the first silently overwrite the one
+            # before it, which for a multi-direction case throws away every
+            # log but the last.
+            (cd "$SCRATCH" 2>/dev/null && find . -maxdepth 5 -name "*.log" \
+                -exec cp --parents {} "$fail_out/" \; 2>/dev/null)
+            echo "exit $rc" > "$fail_out/exit_code.txt" 2>/dev/null
+        }
+    fi
+    rm -rf "$SCRATCH" "$PSTORE" 2>/dev/null
+}
 trap cleanup EXIT
 
 # ── 1. geometry ───────────────────────────────────────────────────────────────

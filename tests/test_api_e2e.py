@@ -431,6 +431,15 @@ def test_dashboard_serves_a_shareable_readonly_deep_link(broker):
     assert 'id="copyRoLink"' in html
 
 
+def test_dashboard_has_a_favicon(broker):
+    """A bookmarked/shared dashboard tab is otherwise indistinguishable from
+    every other blank-icon browser tab -- pinned so a future edit to <head>
+    cannot silently drop it."""
+    html = broker.get("/", headers={"Authorization": ""}).text
+    head = html[:html.index("</head>")]
+    assert 'rel="icon"' in head
+
+
 def test_redact_db_target_masks_only_the_password():
     """/healthz is deliberately unauthenticated so infrastructure health checks
     work with no token -- which is exactly why nothing it returns may ever carry

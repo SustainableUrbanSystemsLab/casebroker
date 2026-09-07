@@ -36,7 +36,13 @@ check_solve_converged() {
     echo "SOLVE_FAIL no log file ($log)"; return 1
   fi
   if grep -aqE "$fatal_rx" "$log"; then
-    echo "SOLVE_FAIL fatal error string in $(basename "$log")"; return 1
+    local ctx
+    # -A3: the matched line plus a few after it, since the pattern itself
+    # (e.g. "FOAM FATAL ERROR") rarely carries the actual explanation --
+    # that is almost always the line right after it. Squashed onto one line
+    # so it survives being embedded in a broker error message / JSON string.
+    ctx=$(grep -aA3 -E "$fatal_rx" "$log" | head -4 | tr '\n' ' ' | tr -s ' ')
+    echo "SOLVE_FAIL fatal error in $(basename "$log"): $ctx"; return 1
   fi
   grep -aq "^End$" "$log" || {
     echo "SOLVE_FAIL no End line in $(basename "$log") -- did not finish cleanly"; return 1

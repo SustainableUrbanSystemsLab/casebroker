@@ -113,7 +113,11 @@ def test_a_fatal_error_string_fails_even_with_exit_code_zero(tmp_path):
     proc0 = make_fields(tmp_path, latest="40")
     rc, out = run_gate(0, log, proc0, "40")
     assert rc == 1
-    assert "fatal error string" in out
+    assert "fatal error in" in out
+    # The context lines, not just the bare "FOAM FATAL ERROR" marker -- that
+    # marker alone rarely carries the actual explanation, which is almost
+    # always the line right after it.
+    assert "Maximum number of iterations exceeded" in out
 
 
 def test_a_floating_point_exception_is_caught_case_insensitively(tmp_path):

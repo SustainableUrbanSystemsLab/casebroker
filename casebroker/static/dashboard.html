@@ -1,10 +1,10 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Wind v2 Case Broker</title>
-<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%2322272e'/%3E%3Cpath d='M8 22 L16 10 L24 22' stroke='%2357ab5a' stroke-width='3' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3Ccircle cx='16' cy='10' r='2.5' fill='%2357ab5a'/%3E%3C/svg%3E" />
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A//www.w3.org/2000/svg%27%20viewBox%3D%270%200%2024%2024%27%3E%3Crect%20width%3D%2724%27%20height%3D%2724%27%20rx%3D%276%27%20fill%3D%27%2322272e%27/%3E%3Cpath%20d%3D%27M17.7%207.7a2.5%202.5%200%201%201%201.8%204.3H2M9.6%204.6A2%202%200%201%201%2011%208H2M12.6%2019.4A2%202%200%201%200%2014%2016H2%27%20fill%3D%27none%27%20stroke%3D%27%2357ab5a%27%20stroke-width%3D%272.2%27%20stroke-linecap%3D%27round%27%20stroke-linejoin%3D%27round%27/%3E%3C/svg%3E" />
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -103,7 +103,21 @@
     }
   }
 
-  [data-theme="dark"] button.primary,
+  [data-theme="dark"] button.primary {
+    background: #347d39;
+    border-color: #3fb950;
+    color: #f0f6fc;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+  }
+  [data-theme="dark"] button.primary:hover {
+    background: #46954a;
+    border-color: #57ab5a;
+  }
+  [data-theme="dark"] .brand-logo {
+    background: linear-gradient(135deg, #347d39 0%, #316dca 100%);
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3);
+  }
+
   @media (prefers-color-scheme: dark) {
     :root:not([data-theme="light"]) button.primary {
       background: #347d39;
@@ -1179,9 +1193,9 @@
   // -- Theme Management --------------------------------------------------------
   function initTheme() {
     const saved = localStorage.getItem(LS_THEME);
-    if (saved) {
-      document.documentElement.setAttribute("data-theme", saved);
-    }
+    // Default to dark (soft dark / GitHub Dark Dimmed) if no preference saved
+    const theme = saved || "dark";
+    document.documentElement.setAttribute("data-theme", theme);
     updateThemeIcon();
   }
 
