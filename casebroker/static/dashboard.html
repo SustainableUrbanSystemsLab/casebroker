@@ -19,33 +19,41 @@
     --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
     --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 
-    /* Light theme tokens */
-    --bg: #f8fafc;
+    /* GitHub Light (Primer). Every value is a real Primer token -- this block
+       used to be Tailwind (slate #f8fafc/#0f172a, emerald #059669, blue #2563eb,
+       rose #e11d48), which is why the light theme never looked like GitHub even
+       after the dark one was converted.
+       bg=canvas.subtle, surface=canvas.default, surface-elevated=canvas.inset,
+       border=border.default, border-subtle=border.muted, text=fg.default/muted/
+       subtle, accent=success.fg (GitHub's primary BUTTON is green),
+       primary=accent.fg (GitHub's LINK blue), warn=attention.fg,
+       bad=danger.fg. */
+    --bg: #f6f8fa;
     --surface: #ffffff;
-    --surface-elevated: #f1f5f9;
-    --surface-hover: #f8fafc;
-    --border: #e2e8f0;
-    --border-subtle: #edf2f7;
-    --text-primary: #0f172a;
-    --text-secondary: #475569;
-    --text-muted: #64748b;
-    --accent: #059669;
-    --accent-rgb: 5, 150, 105;
-    --accent-light: #ecfdf5;
-    --accent-hover: #047857;
-    --primary: #2563eb;
-    --primary-light: #eff6ff;
-    --primary-hover: #1d4ed8;
-    --warn: #d97706;
-    --warn-light: #fffbeb;
-    --bad: #e11d48;
-    --bad-light: #fff1f2;
-    --info: #0284c7;
-    --info-light: #f0f9ff;
-    --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
-    --shadow: 0 4px 6px -1px rgb(0 0 0 / 0.06), 0 2px 4px -2px rgb(0 0 0 / 0.04);
-    --shadow-md: 0 8px 16px -2px rgb(0 0 0 / 0.06), 0 4px 8px -2px rgb(0 0 0 / 0.03);
-    --ring: rgba(37, 99, 235, 0.2);
+    --surface-elevated: #f6f8fa;
+    --surface-hover: #eaeef2;
+    --border: #d0d7de;
+    --border-subtle: #d8dee4;
+    --text-primary: #1f2328;
+    --text-secondary: #656d76;
+    --text-muted: #6e7781;
+    --accent: #1a7f37;
+    --accent-rgb: 26, 127, 55;
+    --accent-light: #dafbe1;
+    --accent-hover: #1f883d;
+    --primary: #0969da;
+    --primary-light: #ddf4ff;
+    --primary-hover: #0860ca;
+    --warn: #9a6700;
+    --warn-light: #fff8c5;
+    --bad: #d1242f;
+    --bad-light: #ffebe9;
+    --info: #0969da;
+    --info-light: #ddf4ff;
+    --shadow-sm: 0 1px 0 rgba(31, 35, 40, 0.04);
+    --shadow: 0 3px 6px rgba(140, 149, 159, 0.15);
+    --shadow-md: 0 8px 24px rgba(140, 149, 159, 0.2);
+    --ring: rgba(9, 105, 218, 0.3);
   }
 
   /* GitHub "Dark Dimmed" (Primer). Each value below is a real Primer token --
@@ -66,24 +74,24 @@
     --border: #444c56;
     --border-subtle: #373e47;
     --text-primary: #adbac7;
-    --text-secondary: #909dab;
-    --text-muted: #768390;
+    --text-secondary: #768390;
+    --text-muted: #636e7b;
     --accent: #57ab5a;
     --accent-rgb: 87, 171, 90;
-    --accent-light: rgba(87, 171, 90, 0.15);
+    --accent-light: rgba(70, 149, 74, 0.15);
     --accent-hover: #6bc46e;
     --primary: #539bf5;
-    --primary-light: rgba(83, 155, 245, 0.15);
+    --primary-light: rgba(65, 132, 228, 0.15);
     --primary-hover: #6cb6ff;
     --warn: #c69026;
-    --warn-light: rgba(198, 144, 38, 0.15);
+    --warn-light: rgba(174, 124, 20, 0.15);
     --bad: #e5534b;
-    --bad-light: rgba(229, 83, 75, 0.15);
+    --bad-light: rgba(229, 83, 75, 0.1);
     --info: #539bf5;
-    --info-light: rgba(83, 155, 245, 0.15);
-    --shadow-sm: 0 1px 0 rgba(27, 31, 36, 0.04);
-    --shadow: 0 3px 6px rgba(0, 0, 0, 0.2);
-    --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.25);
+    --info-light: rgba(65, 132, 228, 0.15);
+    --shadow-sm: 0 0 transparent;
+    --shadow: 0 3px 6px #010409;
+    --shadow-md: 0 8px 24px #010409;
     --ring: rgba(83, 155, 245, 0.35);
   }
 
@@ -1936,7 +1944,12 @@
     }
   });
 
-  // Initial load
+  // Initial load. checkHealth() is called unconditionally and FIRST: /healthz
+  // needs no token, and it is what fills the header badge (version, engine,
+  // auth mode). Leaving that to refresh() alone meant any path that did not
+  // reach refresh -- or reached it and threw -- left the badge hidden and the
+  // running version invisible, which is exactly what happened.
+  checkHealth();
   if (localStorage.getItem(LS_TOK) !== null || $("broker").value) {
     refresh();
   }
