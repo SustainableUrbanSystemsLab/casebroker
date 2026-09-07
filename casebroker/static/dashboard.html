@@ -128,7 +128,10 @@
 
   /* Header */
   header {
-    background: var(--surface);
+    /* canvas.inset, not canvas.overlay: GitHub's global nav sits DARKER than the
+       page ground it floats over, not lighter. Using --surface made the bar the
+       brightest band on the screen, which is backwards. */
+    background: var(--surface-elevated);
     border-bottom: 1px solid var(--border);
     position: sticky;
     top: 0;
