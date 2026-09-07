@@ -56,6 +56,43 @@ def case_id(lat: float, lon: float, recipe: str) -> str:
     return f"{ID_SCHEME}-{_digest(site_key(lat, lon), recipe)[:16]}"
 
 
+# Salt for site SELECTION, separate from ID_SCHEME. Bump it only to deliberately
+# re-draw the sample -- that produces a different dataset, not a bigger one.
+SAMPLER_SCHEME = "sampler-v1"
+
+
+def selection_rank(lat: float, lon: float, salt: str = SAMPLER_SCHEME) -> float:
+    """A site's stable position in [0, 1) for threshold-based selection.
+
+    Deliberately NOT derived from :func:`case_id`. ``case_id`` includes the recipe,
+    by design, so that re-specifying a site is a new case rather than a silent
+    redefinition of an old one. Ranking by it would mean that changing the CFD recipe
+    -- swapping a box domain for a cylinder, say -- re-draws the entire sample into a
+    different 5,000 sites, and nothing would report it. **Selection is a property of
+    WHERE, not of how the site is solved.**
+
+    Reproducible from the coordinates alone: :func:`site_key` quantises to
+    ``COORD_QUANT`` decimals (~1.1 m), so a float round-trip through a GeoTIFF, a JSON
+    file or a database cannot move a site's rank. It follows that the coordinates
+    themselves must be deterministic too -- derive them from the pinned sampling
+    lattice, never from something that shifts with a map release.
+    """
+    return int(_digest(salt, site_key(lat, lon))[:16], 16) / float(1 << 64)
+
+
+def is_selected(lat: float, lon: float, threshold: float,
+                salt: str = SAMPLER_SCHEME) -> bool:
+    """Whether a site is in a dataset drawn at ``threshold``.
+
+    Growing the dataset raises thresholds, and raising a threshold can only ADD sites.
+    That is the whole append-only guarantee, and it is why selection is expressed as a
+    threshold rather than as "the top N by rank": under top-N, a class running out
+    forces the allocation to be re-cut, which can drop a site that has already been
+    solved. Under a threshold it merely saturates.
+    """
+    return selection_rank(lat, lon, salt) < threshold
+
+
 def split_for(city_cluster: str, holdout_salt: str = "") -> str:
     """train / val / test, assigned by CITY rather than by tile.
 
