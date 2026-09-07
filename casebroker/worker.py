@@ -45,7 +45,7 @@ class LeaseLost(RuntimeError):
 
 class Worker:
     def __init__(self, broker: str, token: str | None, worker_id: str | None = None,
-                 lease_seconds: int = 1800, heartbeat_seconds: int = 300,
+                 lease_seconds: int = 900, heartbeat_seconds: int = 300,
                  timeout: float = 30.0, host: str | None = None,
                  cluster: str | None = None):
         self.broker = broker.rstrip("/")
@@ -291,7 +291,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--runner", help="path to a per-case script; omit for the echo test runner")
     p.add_argument("--splits", nargs="*", default=None)
     p.add_argument("--max-cases", type=int, default=None)
-    p.add_argument("--lease-seconds", type=int, default=1800)
+    p.add_argument("--lease-seconds", type=int, default=900)
     p.add_argument("--heartbeat-seconds", type=int, default=300)
     p.add_argument("--idle-backoff", type=int, default=60)
     a = p.parse_args(argv)

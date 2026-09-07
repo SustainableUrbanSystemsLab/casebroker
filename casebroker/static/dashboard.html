@@ -458,6 +458,15 @@
   }
   a.link:hover { text-decoration: underline; color: var(--primary-hover); }
 
+  .connected-bar {
+    display: flex; align-items: center; gap: 10px; margin-top: 4px;
+    padding: 10px 14px; border-radius: 6px;
+    background: var(--surface-elevated); border: 1px solid var(--border);
+  }
+  .connected-bar .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); flex: none; }
+  .connected-bar .lbl { color: var(--text-primary); font-weight: 600; font-size: 0.85rem; }
+  .num.alert { color: var(--bad); }
+
   /* KPI Stats Grid */
   .stats-grid {
     display: grid;
@@ -938,9 +947,9 @@
     </form>
 
     <!-- Collapsed connection summary shown when connected -->
-    <div id="connectedSummary" style="display:none; align-items:center; gap:10px; margin-top:4px; padding: 10px 14px; border-radius:6px; background: var(--surface-elevated); border:1px solid var(--border);">
-      <span style="width:8px; height:8px; border-radius:50%; background:var(--accent); flex:none;"></span>
-      <span style="color:var(--text-primary); font-weight:600; font-size:0.85rem;">Connected</span>
+    <div id="connectedSummary" class="connected-bar" style="display:none;">
+      <span class="dot"></span>
+      <span class="lbl">Connected</span>
       <span id="connectedUrl" style="color:var(--text-secondary); font-size:0.82rem; font-family:var(--font-mono);"></span>
       <button id="editConnection" type="button" style="margin-left:auto; font-size:0.8rem; padding:4px 10px;">Edit connection</button>
     </div>
@@ -1522,7 +1531,7 @@
             <td class="num">${spPending.toLocaleString()}</td>
             <td class="num">${spLeased.toLocaleString()}</td>
             <td class="num" style="font-weight:600;">${spDone.toLocaleString()}</td>
-            <td class="num"${spQuar > 0 ? ' style="color:var(--bad);"' : ''}>${spQuar.toLocaleString()}</td>
+            <td class="num${spQuar > 0 ? ' alert' : ''}">${spQuar.toLocaleString()}</td>
             <td class="num" style="font-weight:600;">${spTotal.toLocaleString()}</td>
           </tr>`;
         }).join("")
@@ -1581,7 +1590,7 @@
             <td>${relTime(w.first_seen)}</td>
             <td>${relTime(w.last_seen)}</td>
             <td class="num" style="font-weight:600;">${(w.cases_done || 0).toLocaleString()}</td>
-            <td class="num"${(w.cases_failed || 0) > 0 ? ' style="color:var(--bad);"' : ''}>${(w.cases_failed || 0).toLocaleString()}</td>
+            <td class="num${(w.cases_failed || 0) > 0 ? ' alert' : ''}">${(w.cases_failed || 0).toLocaleString()}</td>
             <td class="num" style="font-family:var(--font-mono); font-size:12px;">${reliability}</td>
           </tr>`;
       }).join("");

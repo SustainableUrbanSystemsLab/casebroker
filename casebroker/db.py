@@ -387,6 +387,10 @@ def lease(conn, worker_id: str, count: int = 1,
             "SELECT case_id, spec, attempts, max_attempts FROM cases"
             " WHERE (state = 'pending' OR (state = 'leased' AND lease_expires < ?))"
             + split_sql +
+            # Every worker targets the same "lowest" rows. That is contention by
+            # design, not by accident: under SKIP LOCKED a locked row is simply
+            # skipped, and case_id is a hash so the tiebreak is effectively random
+            # -- deterministic ordering with no hot spot.
             " ORDER BY priority ASC, case_id ASC LIMIT ?" + lock_clause,
             params,
         ).fetchall()
@@ -471,8 +475,18 @@ def complete(conn, lease_id: str, result_uri: str,
     try:
         row = _by_lease(conn, lease_id)
         if row is None:
+            # A complete whose RESPONSE was lost is retried by the worker with the
+            # same lease_id -- which the successful first write already nulled, so
+            # this lookup misses and the retry would be refused with 409. The
+            # worker reads 409 as "another worker took the case" and logs a false
+            # failure for work that landed. If a done case carries this exact
+            # result_uri the write is already there: report success. A DIFFERENT
+            # result for a finished lease still falls through to the refusal.
+            dup = conn.execute(
+                "SELECT 1 FROM cases WHERE state = 'done' AND result_uri = ?",
+                (result_uri,)).fetchone()
             conn.execute("ROLLBACK")
-            return False
+            return dup is not None
         conn.execute(
             "UPDATE cases SET state='done', result_uri=?, result_sha256=?,"
             " result_bytes=?, metrics=?, lease_id=NULL, lease_worker=NULL,"
@@ -570,8 +584,11 @@ def status(conn, now: int | None = None) -> dict[str, Any]:
         "remaining": remaining,
         # None, not a fabricated infinity: with no completions the rate is unknown.
         "eta_days": round(remaining / done_24h, 1) if done_24h else None,
+        # Seen in the last 24h, not "the 50 most recent": a Phoenix pool alone can
+        # exceed 50, and a count cap silently aged live workers off the dashboard.
         "workers": [dict(r) for r in conn.execute(
-            "SELECT * FROM workers ORDER BY last_seen DESC LIMIT 50")],
+            "SELECT * FROM workers WHERE last_seen > ? ORDER BY last_seen DESC LIMIT 500",
+            (_now() - 86400,))],
     }
 
 

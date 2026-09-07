@@ -154,7 +154,7 @@ Step by step:
    posts it with metrics, wall time and which machine produced it.
 6. **Repeat.**
 
-Defaults are the client's: `lease_seconds=1800`, `heartbeat_seconds=300`.
+Defaults are the client's: `lease_seconds=900`, `heartbeat_seconds=300`.
 
 ### When a worker dies
 
