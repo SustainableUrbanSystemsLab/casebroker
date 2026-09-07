@@ -1,0 +1,81 @@
+name: test
+
+# Two tiers, matching the two-engine design in casebroker/db.py: the SQLite suite
+# needs no secret and runs on every push and PR (including from forks, where
+# secrets are never exposed regardless); the real-Postgres suite exercises the
+# actual production database via the DBSTRING secret and only runs on pushes to
+# main, where GitHub secrets are actually available and where "this touched the
+# real database and cleaned up after itself" is worth re-confirming on every
+# change to db.py.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  sqlite:
+    name: sqlite (no external dependency)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+      - run: uv run --with pytest --with httpx python -m pytest tests/ --ignore=tests/test_db_postgres.py -v
+
+  postgres:
+    name: real postgres (main only)
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+      - run: uv run --with pytest python -m pytest tests/test_db_postgres.py -v
+        env:
+          # test_db_postgres.py prefixes every row it creates with a per-run UUID
+          # and deletes them all in a module-scoped teardown -- see that file's
+          # docstring. It is safe to point this at the same database the
+          # deployed service uses.
+          CASEBROKER_TEST_PG_DSN: ${{ secrets.DBSTRING }}
+
+  deploy-smoke-test:
+    name: confirm the live deploy came up healthy
+    # Render's own webhook (configured once, when the service was created with
+    # autoDeploy: yes and this repo as its source) already redeploys on every
+    # push to main -- this job does not trigger that, it only confirms the
+    # result actually came up rather than assuming a push = a working service.
+    needs: [sqlite, postgres]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    env:
+      # From https://dashboard.render.com/web/srv-dafe8kdg1s2s73e703tg -- if the
+      # service is ever recreated, update this to the new srv-... id from the
+      # dashboard URL.
+      RENDER_SERVICE_ID: srv-dafe8kdg1s2s73e703tg
+      RENDER_URL: https://casebroker.onrender.com
+    steps:
+      - name: Wait for Render's auto-deploy to reach a terminal state
+        run: |
+          for i in $(seq 1 40); do
+            status=$(curl -s -H "Authorization: Bearer ${{ secrets.RENDERAPIKEY }}" \
+              "https://api.render.com/v1/services/$RENDER_SERVICE_ID/deploys?limit=1" \
+              | python3 -c "import json,sys; d=json.load(sys.stdin); print(d[0].get('deploy',d[0]).get('status',''))")
+            echo "[$i] deploy status: $status"
+            case "$status" in
+              live) exit 0 ;;
+              build_failed|update_failed|canceled|deactivated)
+                echo "::error::Render deploy ended in status '$status'"; exit 1 ;;
+            esac
+            sleep 15
+          done
+          echo "::error::Timed out waiting for the deploy to go live"; exit 1
+
+      - name: Hit the live /healthz and check it, without ever printing the response
+        run: |
+          # Never echo this response: for a Postgres CASEBROKER_DB it is the
+          # connection string with only the password masked, so host/user/db
+          # name are still real infrastructure details worth keeping out of a
+          # public repo's public Action logs even though they are not secrets.
+          code=$(curl -s -o /tmp/healthz.json -w "%{http_code}" "$RENDER_URL/healthz")
+          ok=$(python3 -c "import json; print(json.load(open('/tmp/healthz.json')).get('ok'))")
+          echo "http_status=$code ok=$ok"
+          test "$code" = "200" -a "$ok" = "True"
