@@ -46,10 +46,19 @@ class LeaseLost(RuntimeError):
 class Worker:
     def __init__(self, broker: str, token: str | None, worker_id: str | None = None,
                  lease_seconds: int = 1800, heartbeat_seconds: int = 300,
-                 timeout: float = 30.0):
+                 timeout: float = 30.0, host: str | None = None,
+                 cluster: str | None = None):
         self.broker = broker.rstrip("/")
         self.worker_id = worker_id or f"{socket.gethostname()}-{os.getpid()}-{uuid.uuid4().hex[:6]}"
         self.lease_seconds = lease_seconds
+        # "What machine produced this case" is otherwise unanswerable once the
+        # SLURM job has ended and its log has rotated out of easy reach.
+        # SLURM_CLUSTER_NAME is set by the scheduler on both ICE and Phoenix, so
+        # a cluster run needs no extra configuration; CASEBROKER_CLUSTER lets a
+        # non-SLURM box (the lab workstation) name itself explicitly.
+        self.host = host or socket.gethostname()
+        self.cluster = cluster or os.environ.get("CASEBROKER_CLUSTER") \
+            or os.environ.get("SLURM_CLUSTER_NAME") or None
         self.heartbeat_seconds = heartbeat_seconds
         headers = {"Authorization": f"Bearer {token}"} if token else {}
         self.http = httpx.Client(base_url=self.broker, headers=headers, timeout=timeout)
@@ -84,7 +93,8 @@ class Worker:
     def lease(self, count: int = 1, splits: list[str] | None = None) -> list[LeaseDict]:
         r = self._post("/v1/lease", {
             "worker_id": self.worker_id, "count": count,
-            "lease_seconds": self.lease_seconds, "splits": splits})
+            "lease_seconds": self.lease_seconds, "splits": splits,
+            "host": self.host, "cluster": self.cluster})
         r.raise_for_status()
         return r.json()
 
@@ -190,6 +200,13 @@ class Worker:
                 metrics = dict(out.get("metrics", {}))
                 metrics["wall_seconds"] = round(time.time() - t0, 1)
                 metrics["worker"] = self.worker_id
+                # Baked into the case's own record, not just the workers table:
+                # a worker row can age out of /v1/status's top-50, but a done
+                # case must stay able to answer "what machine produced this"
+                # forever.
+                metrics["host"] = self.host
+                if self.cluster:
+                    metrics["cluster"] = self.cluster
                 self.complete(out["result_uri"], out.get("sha256"),
                               out.get("bytes"), metrics)
                 done += 1

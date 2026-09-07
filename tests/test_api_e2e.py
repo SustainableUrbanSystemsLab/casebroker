@@ -120,6 +120,84 @@ def test_splits_are_assigned_by_city_not_by_tile(client):
         "a city's tiles were split across train/test -- that leaks geometry"
 
 
+def test_lease_reports_host_and_cluster_through_to_the_workers_table(client):
+    """A dashboard viewer asking "what machine produced this" reads the workers
+    table, which is only useful if /v1/lease actually threads host/cluster down
+    to db.lease() rather than dropping them on the floor at the API boundary."""
+    client.post("/v1/cases", json=_cases(1))
+    client.post("/v1/lease", json={"worker_id": "phx-w1", "host": "atl1-1-02-005",
+                                   "cluster": "phoenix-slurm"})
+    workers = client.get("/v1/status").json()["workers"]
+    w = next(w for w in workers if w["worker_id"] == "phx-w1")
+    assert (w["host"], w["cluster"]) == ("atl1-1-02-005", "phoenix-slurm")
+
+
+def test_lease_without_host_or_cluster_still_works(client):
+    """Older worker builds, or a worker run by hand, must not be rejected just
+    because they do not know their own machine."""
+    client.post("/v1/cases", json=_cases(1))
+    r = client.post("/v1/lease", json={"worker_id": "w1"})
+    assert r.status_code == 200 and len(r.json()) == 1
+
+
+def test_list_cases_endpoint_is_gated_and_paginated(client):
+    client.post("/v1/cases", json=_cases(5))
+
+    assert client.get("/v1/cases", headers={"Authorization": ""}).status_code == 401
+
+    page = client.get("/v1/cases?limit=2").json()
+    assert page["total"] == 5
+    assert len(page["cases"]) == 2
+
+    rest = client.get("/v1/cases?limit=2&offset=2").json()
+    assert len(rest["cases"]) == 2
+    ids_seen = {c["case_id"] for c in page["cases"]} | {c["case_id"] for c in rest["cases"]}
+    assert len(ids_seen) == 4, "two non-overlapping pages should cover four distinct cases"
+
+
+def test_list_cases_endpoint_filters_by_state(client):
+    client.post("/v1/cases", json=_cases(3))
+    got = client.post("/v1/lease", json={"worker_id": "w1"}).json()[0]
+    client.post("/v1/complete", json={"lease_id": got["lease_id"], "result_uri": "x"})
+
+    done = client.get("/v1/cases?state=done").json()
+    assert done["total"] == 1
+    assert done["cases"][0]["case_id"] == got["case_id"]
+    assert done["cases"][0]["state"] == "done"
+
+    pending = client.get("/v1/cases?state=pending").json()
+    assert pending["total"] == 2
+
+
+def test_a_completed_cases_metrics_name_the_worker_host_and_result_location(client):
+    """End-to-end through the real worker, not just the API: run_forever's
+    metrics enrichment is what actually answers "what machine produced this
+    case and where did it end up" on a finished case."""
+    from casebroker.worker import Worker
+
+    client.post("/v1/cases", json=_cases(1))
+    w = Worker("http://testserver", None, worker_id="w1", host="node-7",
+              cluster="ice-slurm", heartbeat_seconds=3600)
+    w.http = client
+    w._post = lambda path, payload, retries=4: client.post(path, json=payload)
+
+    def runner(lease, worker):
+        return {"result_uri": "file:///results/" + lease["case_id"], "bytes": 42,
+                "metrics": {"stage": "solve-only"}}
+
+    w.run_forever(runner, idle_backoff=0, max_idle_polls=1)
+
+    done = client.get("/v1/cases?state=done").json()["cases"]
+    assert len(done) == 1
+    case = done[0]
+    assert case["result_uri"].startswith("file:///results/")
+    import json as _json
+    metrics = _json.loads(case["metrics"])
+    assert metrics["worker"] == "w1"
+    assert metrics["host"] == "node-7"
+    assert metrics["cluster"] == "ice-slurm"
+
+
 # -- real server, real workers, real HTTP -------------------------------------
 
 @pytest.mark.timeout(120) if hasattr(pytest.mark, "timeout") else (lambda f: f)
@@ -216,6 +294,45 @@ def test_dashboard_is_served_with_no_auth_but_data_stays_gated(broker):
     # from the same fixture the dashboard test lives beside.
     assert broker.get("/v1/status", headers={"Authorization": ""}).status_code == 401
     assert broker.get("/v1/status").status_code == 200   # the fixture's default token
+
+
+def test_dashboard_token_field_is_discoverable_as_a_password_field(broker):
+    """A browser's password manager only offers to save a credential when it
+    sees type=password on an input that sits inside a real <form> with a
+    submit control -- a bare input, even one typed "password", is frequently
+    not enough on its own. Pinned so a future edit cannot silently drop the
+    <form> wrapper or the autocomplete hint and lose that behaviour."""
+    html = broker.get("/", headers={"Authorization": ""}).text
+    assert '<form id="connectForm"' in html
+    assert 'id="token"' in html and 'type="password"' in html
+    assert 'autocomplete="current-password"' in html
+    # The token field must actually be INSIDE the form, not merely present
+    # somewhere on the page.
+    form_start = html.index('<form id="connectForm"')
+    form_end = html.index("</form>", form_start)
+    assert 'id="token"' in html[form_start:form_end]
+    assert 'type="submit"' in html[form_start:form_end], \
+        "a submit control is part of what makes a browser recognise this as a login form"
+
+
+def test_dashboard_auto_refresh_defaults_to_checked(broker):
+    """auto-refresh must be ON out of the box, not something a first-time
+    visitor has to notice and enable."""
+    html = broker.get("/", headers={"Authorization": ""}).text
+    i = html.index('id="autoRefresh"')
+    tag = html[html.rindex("<", 0, i):html.index(">", i) + 1]
+    assert "checked" in tag
+    assert "60" in tag or "every 60s" in html
+
+
+def test_dashboard_serves_a_case_browser(broker):
+    """The click-through case list this dashboard exists to provide: a table
+    of cases plus the id-lookup fallback, both wired to real element ids the
+    script binds event listeners to."""
+    html = broker.get("/", headers={"Authorization": ""}).text
+    for needed in ('id="casesTable"', 'id="casesBody"', 'id="caseState"',
+                  'id="casesPrev"', 'id="casesNext"', 'id="caseId"', 'id="lookup"'):
+        assert needed in html, needed
 
 
 def test_redact_db_target_masks_only_the_password():

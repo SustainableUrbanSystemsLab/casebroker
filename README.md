@@ -56,13 +56,21 @@ new deployment without spending CFD time.
 `GET /` serves a small ops UI — no build step, one HTML file, no dependency on
 anything outside the broker's own API:
 
-- campaign status (counts by state and by split, expired leases, 24h throughput, ETA)
-- the worker table
-- a one-case lookup by id
+- campaign status (counts by state and by split, expired leases, 24h throughput, ETA),
+  auto-refreshing every 60s by default
+- the worker table, including which host/cluster each worker actually ran on
+- a browsable, paginated, filterable case list — click a row to expand every
+  field the broker holds on it: state, split, LCZ, attempts, **which machine
+  produced it** (worker/host/cluster, from the runner's own report at
+  completion), **where its result is finally stored** (`result_uri`, bytes,
+  sha256), wall time, and the last error if it has one — plus a jump-to-id box
+  for a direct lookup
 
 Open it in a browser, paste in the broker's URL and your `CASEBROKER_TOKENS` value
 (kept only in that browser's local storage, sent as a bearer header on each API
-call), and it starts pulling `/v1/status`. The page itself carries no secrets and
+call). The token field is a real `<input type="password">` inside a `<form>` with
+a submit control, so a browser's own password manager can recognise and offer to
+save it, exactly like any other login form. The page itself carries no secrets and
 loads with no auth; every request it makes for actual data goes through the same
 token check as any other client.
 
@@ -71,7 +79,9 @@ token check as any other client.
 | Endpoint | Purpose |
 | --- | --- |
 | `POST /v1/cases` | Append cases. **Idempotent** — re-posting an existing id is a no-op, which is how the dataset grows |
-| `POST /v1/lease` | Claim up to N cases. Empty list = drained, not an error |
+| `GET /v1/cases` | Paginated, filterable (`state`, `split`, `city_cluster`) list of cases, most recently touched first — what the dashboard's case browser calls |
+| `GET /v1/cases/{case_id}` | One case's full record by id |
+| `POST /v1/lease` | Claim up to N cases. Empty list = drained, not an error. Workers report their `host`/`cluster` here (optional) so "what machine produced this" stays answerable later |
 | `POST /v1/heartbeat` | Extend the lease. **409 means stop working on that case** |
 | `POST /v1/complete` | Report a result pointer + metrics |
 | `POST /v1/fail` | Report a failure; `retryable=false` quarantines immediately |

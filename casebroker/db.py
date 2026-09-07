@@ -352,7 +352,8 @@ def add_cases(conn, rows: Iterable[dict[str, Any]]) -> dict[str, int]:
 @_locked
 def lease(conn, worker_id: str, count: int = 1,
           lease_seconds: int = 3600, splits: list[str] | None = None,
-          now: int | None = None) -> list[Lease]:
+          now: int | None = None, host: str | None = None,
+          cluster: str | None = None) -> list[Lease]:
     """Atomically claim up to ``count`` cases.
 
     Expired leases are reclaimed by the same statement that hands out fresh work,
@@ -413,10 +414,16 @@ def lease(conn, worker_id: str, count: int = 1,
                              expires_at=expires, spec=json.loads(row["spec"]),
                              attempt=attempt))
 
+        # host/cluster are refreshed on every lease call (not just insert): the
+        # same worker_id can in principle move machines across a restart, and a
+        # stale "where did this run" answer is worse than a slightly redundant
+        # write on every poll.
         conn.execute(
-            "INSERT INTO workers(worker_id, first_seen, last_seen) VALUES (?,?,?)"
-            " ON CONFLICT(worker_id) DO UPDATE SET last_seen=excluded.last_seen",
-            (worker_id, now, now))
+            "INSERT INTO workers(worker_id, host, cluster, first_seen, last_seen)"
+            " VALUES (?,?,?,?,?)"
+            " ON CONFLICT(worker_id) DO UPDATE SET"
+            " last_seen=excluded.last_seen, host=excluded.host, cluster=excluded.cluster",
+            (worker_id, host, cluster, now, now))
         conn.execute("COMMIT")
     except Exception:
         conn.execute("ROLLBACK")
@@ -566,3 +573,31 @@ def status(conn, now: int | None = None) -> dict[str, Any]:
         "workers": [dict(r) for r in conn.execute(
             "SELECT * FROM workers ORDER BY last_seen DESC LIMIT 50")],
     }
+
+
+@_locked
+def list_cases(conn, state: str | None = None, split: str | None = None,
+               city_cluster: str | None = None, limit: int = 50,
+               offset: int = 0) -> dict[str, Any]:
+    """A page of cases for the dashboard's case browser, most-recently-touched
+    first -- that ordering is what makes "what just happened" the default view
+    rather than an arbitrary slice of a 40,000-row table.
+
+    Returns both the page and the total matching count, so a client can render
+    "N of M" and page controls without a second round trip.
+    """
+    limit = max(1, min(int(limit), 200))
+    offset = max(0, int(offset))
+    where, params = [], []
+    if state:
+        where.append("state = ?"); params.append(state)
+    if split:
+        where.append("split = ?"); params.append(split)
+    if city_cluster:
+        where.append("city_cluster = ?"); params.append(city_cluster)
+    clause = (" WHERE " + " AND ".join(where)) if where else ""
+    total = conn.execute("SELECT COUNT(*) n FROM cases" + clause, params).fetchone()["n"]
+    rows = conn.execute(
+        "SELECT * FROM cases" + clause + " ORDER BY updated_at DESC LIMIT ? OFFSET ?",
+        params + [limit, offset]).fetchall()
+    return {"cases": [dict(r) for r in rows], "total": total, "limit": limit, "offset": offset}

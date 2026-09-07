@@ -76,6 +76,12 @@ class LeaseIn(BaseModel):
     count: int = Field(default=1, ge=1, le=64)
     lease_seconds: int = Field(default=3600, ge=60, le=MAX_LEASE_SECONDS)
     splits: list[str] | None = None
+    # Where this worker is actually running -- surfaced on the dashboard and in
+    # the workers table so "what machine produced this case" is answerable
+    # without grepping a SLURM log. Optional: an older worker build, or one run
+    # by hand, simply reports unknown.
+    host: str | None = None
+    cluster: str | None = None
 
 
 class LeaseOut(BaseModel):
@@ -189,7 +195,8 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None) -> F
         drained (or everything left is leased by someone else) -- the worker should
         back off and retry, not treat it as an error."""
         got = db.lease(conn, body.worker_id, count=body.count,
-                       lease_seconds=body.lease_seconds, splits=body.splits)
+                       lease_seconds=body.lease_seconds, splits=body.splits,
+                       host=body.host, cluster=body.cluster)
         return [LeaseOut(case_id=g.case_id, lease_id=g.lease_id, expires_at=g.expires_at,
                          attempt=g.attempt, spec=g.spec) for g in got]
 
@@ -238,6 +245,17 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None) -> F
         if row is None:
             raise HTTPException(404, "no such case")
         return dict(row)
+
+
+    @app.get("/v1/cases", dependencies=[Auth])
+    def list_cases(state: str | None = None, split: str | None = None,
+                   city_cluster: str | None = None, limit: int = 50,
+                   offset: int = 0) -> dict[str, Any]:
+        """A page of cases for the dashboard's case browser -- most recently
+        touched first, optionally filtered by state/split/city. Distinct from
+        ``GET /v1/cases/{case_id}`` (one case by id, used for a direct lookup)."""
+        return db.list_cases(conn, state=state, split=split, city_cluster=city_cluster,
+                             limit=limit, offset=offset)
 
     return app
 

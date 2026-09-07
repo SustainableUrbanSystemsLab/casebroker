@@ -115,6 +115,22 @@
   }
   .empty { color: var(--muted); font-style: italic; padding: 8px 0; }
   footer { color: var(--muted); font-size: 11.5px; text-align: center; padding: 20px; }
+  tr.caseRow { cursor: pointer; }
+  tr.caseRow:hover td { background: var(--accent-weak); }
+  tr.caseRow.open td { background: var(--accent-weak); }
+  tr.caseDetailRow td { border-bottom: 1px solid var(--border); padding: 0; }
+  tr.caseDetailRow.closed { display: none; }
+  .caseDetail { padding: 14px 16px; background: var(--bg); }
+  .kv { display: grid; grid-template-columns: 140px 1fr; gap: 6px 12px; font-size: 12.5px; }
+  .kv dt { color: var(--muted); }
+  .kv dd { margin: 0; word-break: break-all; }
+  .kv dd.mono { font-family: var(--mono); }
+  .pager { display: flex; align-items: center; gap: 10px; margin-top: 10px; font-size: 12.5px; color: var(--muted); }
+  .pager button { padding: 4px 10px; }
+  select {
+    font: inherit; padding: 6px 8px; border-radius: 6px; border: 1px solid var(--border);
+    background: var(--bg); color: var(--text);
+  }
 </style>
 </head>
 <body>
@@ -129,25 +145,29 @@
 
   <section class="panel">
     <h2>Connection</h2>
-    <div class="row">
-      <label>Broker URL
-        <br /><input type="text" id="broker" placeholder="https://..." />
-      </label>
-      <label>Bearer token (leave blank if the broker has no auth configured)
-        <br /><input type="password" id="token" placeholder="paste token" />
-      </label>
-      <div>
-        <br />
-        <button class="primary" id="connect">Connect</button>
+    <form id="connectForm" autocomplete="on">
+      <div class="row">
+        <label>Broker URL
+          <br /><input type="text" id="broker" name="brokerUrl" autocomplete="url"
+            placeholder="https://..." />
+        </label>
+        <label>Bearer token (leave blank if the broker has no auth configured)
+          <br /><input type="password" id="token" name="token" autocomplete="current-password"
+            placeholder="paste token" />
+        </label>
+        <div>
+          <br />
+          <button class="primary" id="connect" type="submit">Connect</button>
+        </div>
       </div>
-    </div>
-    <div class="row" style="margin-top:8px">
-      <a class="link" id="clearToken">forget saved token</a>
-      <label style="margin-left:auto">
-        <input type="checkbox" id="autoRefresh" /> auto-refresh every 10s
-      </label>
-      <button id="refresh">Refresh now</button>
-    </div>
+      <div class="row" style="margin-top:8px">
+        <a class="link" id="clearToken">forget saved token</a>
+        <label style="margin-left:auto">
+          <input type="checkbox" id="autoRefresh" checked /> auto-refresh every 60s
+        </label>
+        <button id="refresh" type="button">Refresh now</button>
+      </div>
+    </form>
   </section>
 
   <section class="panel">
@@ -171,19 +191,43 @@
     <h2>Workers</h2>
     <div id="workersEmpty" class="empty">—</div>
     <table id="workersTable" style="display:none">
-      <thead><tr><th>Worker</th><th>First seen</th><th>Last seen</th>
+      <thead><tr><th>Worker</th><th>Host</th><th>Cluster</th><th>First seen</th><th>Last seen</th>
         <th class="num">Done</th><th class="num">Failed</th></tr></thead>
       <tbody id="workersBody"></tbody>
     </table>
   </section>
 
   <section class="panel">
-    <h2>Look up a case</h2>
+    <h2>Cases</h2>
     <div class="row">
-      <input type="text" id="caseId" placeholder="case_id (e.g. v2-4894713a345a4429)" style="min-width:320px" />
-      <button id="lookup">Look up</button>
+      <label>State
+        <br />
+        <select id="caseState">
+          <option value="">all</option>
+          <option value="pending">pending</option>
+          <option value="leased">leased</option>
+          <option value="done">done</option>
+          <option value="quarantined">quarantined</option>
+        </select>
+      </label>
+      <label style="margin-left:auto">Jump to a case_id
+        <br /><input type="text" id="caseId" placeholder="v2-4894713a345a4429" style="min-width:280px" />
+      </label>
+      <div><br /><button id="lookup">Look up</button></div>
     </div>
-    <pre id="caseResult" style="display:none"></pre>
+
+    <div id="casesEmpty" class="empty">Connect to a broker to browse cases.</div>
+    <table id="casesTable" style="display:none; margin-top:12px">
+      <thead><tr>
+        <th>Case</th><th>State</th><th>Split</th><th>LCZ</th><th>City</th><th>Updated</th>
+      </tr></thead>
+      <tbody id="casesBody"></tbody>
+    </table>
+    <div class="pager" id="casesPager" style="display:none">
+      <button id="casesPrev">&larr; Prev</button>
+      <span id="casesRange"></span>
+      <button id="casesNext">Next &rarr;</button>
+    </div>
   </section>
 </main>
 
@@ -285,6 +329,8 @@
       $("workersBody").innerHTML = workers.map((w) => `
         <tr>
           <td><code class="inline">${w.worker_id}</code></td>
+          <td>${w.host ? esc(w.host) : "—"}</td>
+          <td>${w.cluster ? esc(w.cluster) : "—"}</td>
           <td>${relTime(w.first_seen)}</td>
           <td>${relTime(w.last_seen)}</td>
           <td class="num">${w.cases_done}</td>
@@ -297,19 +343,147 @@
     }
   }
 
+  function esc(s) {
+    return String(s).replace(/[&<>"']/g, (c) => ({
+      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  }
+
+  function parseMaybeJson(s) {
+    if (s == null) return {};
+    if (typeof s !== "string") return s;
+    try { return JSON.parse(s); } catch (e) { return {}; }
+  }
+
+  // -- case browser: list + click-to-expand -------------------------------
+
+  const caseList = { state: "", limit: 25, offset: 0, total: 0, singleId: null };
+  let openDetailId = null;
+
+  function badge(state) {
+    return `<span class="badge ${state}">${state}</span>`;
+  }
+
+  function caseDetailHtml(c) {
+    const metrics = parseMaybeJson(c.metrics);
+    const spec = parseMaybeJson(c.spec);
+    const rows = [
+      ["Case ID", c.case_id, "mono"],
+      ["State", badge(c.state)],
+      ["Split", c.split || "—"],
+      ["LCZ", c.lcz || "—"],
+      ["City cluster", c.city_cluster || "—"],
+      ["Recipe", c.recipe || "—"],
+      ["Attempts", `${c.attempts} / ${c.max_attempts}`],
+      ["Priority", c.priority],
+      ["Created", c.created_at ? new Date(c.created_at * 1000).toLocaleString() : "—"],
+      ["Updated", c.updated_at ? new Date(c.updated_at * 1000).toLocaleString() : "—"],
+      // Which machine actually produced this result -- from the worker's own
+      // report at completion time (casebroker.worker.Worker.run_forever bakes
+      // this into the case's metrics, not just the transient workers table, so
+      // it stays answerable long after that worker has gone quiet).
+      ["Worker", metrics.worker || c.lease_worker || "—", "mono"],
+      ["Host", metrics.host || "—", "mono"],
+      ["Cluster", metrics.cluster || "—"],
+      ["Wall time", metrics.wall_seconds != null ? metrics.wall_seconds + " s" : "—"],
+      // Where it is finally stored -- the runner's own result_uri, e.g. a
+      // file:// path on shared cluster storage or an s3:// object key.
+      ["Result location", c.result_uri || "—", "mono"],
+      ["Result bytes", c.result_bytes != null ? c.result_bytes.toLocaleString() : "—"],
+      ["Result sha256", c.result_sha256 || "—", "mono"],
+      ["Lease expires", c.lease_expires ? relTime(c.lease_expires) + " (from now)" : "—"],
+    ];
+    if (c.last_error) rows.push(["Last error", esc(c.last_error), "mono"]);
+
+    const kv = rows.map(([k, v, cls]) =>
+      `<dt>${k}</dt><dd${cls ? ` class="${cls}"` : ""}>${v}</dd>`).join("");
+    return `
+      <div class="caseDetail">
+        <dl class="kv">${kv}</dl>
+        <details style="margin-top:12px">
+          <summary style="cursor:pointer;color:var(--muted);font-size:12px">raw spec + metrics</summary>
+          <pre style="margin-top:8px">${esc(JSON.stringify({ spec, metrics }, null, 2))}</pre>
+        </details>
+      </div>`;
+  }
+
+  function renderCasesTable(cases) {
+    $("casesEmpty").style.display = cases.length ? "none" : "block";
+    $("casesEmpty").textContent = "No cases match this filter.";
+    $("casesTable").style.display = cases.length ? "table" : "none";
+    $("casesBody").innerHTML = cases.map((c) => {
+      const open = c.case_id === openDetailId;
+      return `
+        <tr class="caseRow${open ? " open" : ""}" data-id="${esc(c.case_id)}">
+          <td><code class="inline">${esc(c.case_id)}</code></td>
+          <td>${badge(c.state)}</td>
+          <td>${c.split || "—"}</td>
+          <td>${c.lcz || "—"}</td>
+          <td>${c.city_cluster || "—"}</td>
+          <td>${relTime(c.updated_at)}</td>
+        </tr>
+        <tr class="caseDetailRow${open ? "" : " closed"}"><td colspan="6">
+          ${open ? caseDetailHtml(c) : ""}
+        </td></tr>`;
+    }).join("");
+
+    $("casesBody").querySelectorAll("tr.caseRow").forEach((tr) => {
+      tr.addEventListener("click", () => {
+        const id = tr.dataset.id;
+        openDetailId = (openDetailId === id) ? null : id;
+        renderCasesTable(cases);
+      });
+    });
+  }
+
+  function renderPager() {
+    const { total, limit, offset, singleId } = caseList;
+    if (singleId) { $("casesPager").style.display = "none"; return; }
+    $("casesPager").style.display = total > limit ? "flex" : "none";
+    const from = total ? offset + 1 : 0;
+    const to = Math.min(offset + limit, total);
+    $("casesRange").textContent = `${from}–${to} of ${total.toLocaleString()}`;
+    $("casesPrev").disabled = offset <= 0;
+    $("casesNext").disabled = offset + limit >= total;
+  }
+
+  async function loadCases() {
+    if (caseList.singleId) {
+      try {
+        const c = await api("/v1/cases/" + encodeURIComponent(caseList.singleId));
+        openDetailId = c.case_id;
+        renderCasesTable([c]);
+        caseList.total = 1;
+      } catch (e) {
+        $("casesEmpty").style.display = "block";
+        $("casesEmpty").textContent = "Not found: " + e.message;
+        $("casesTable").style.display = "none";
+      }
+      renderPager();
+      return;
+    }
+    const q = new URLSearchParams({ limit: caseList.limit, offset: caseList.offset });
+    if (caseList.state) q.set("state", caseList.state);
+    const page = await api("/v1/cases?" + q.toString());
+    caseList.total = page.total;
+    renderCasesTable(page.cases);
+    renderPager();
+  }
+
   async function refresh() {
     try {
       const st = await api("/v1/status");
       setConn(true, "connected");
       showErr(null);
       renderStatus(st);
+      await loadCases();
     } catch (e) {
       setConn(false, "not connected");
       showErr("Could not load status: " + e.message);
     }
   }
 
-  $("connect").addEventListener("click", () => {
+  $("connectForm").addEventListener("submit", (e) => {
+    e.preventDefault();
     localStorage.setItem(LS_URL, $("broker").value.trim());
     localStorage.setItem(LS_TOK, $("token").value.trim());
     refresh();
@@ -319,24 +493,49 @@
     $("token").value = "";
     localStorage.removeItem(LS_TOK);
   });
-  $("autoRefresh").addEventListener("change", (e) => {
+
+  const LS_AUTO = "casebroker.autoRefresh";
+  const AUTO_REFRESH_MS = 60000;
+  function setAutoRefresh(on) {
     if (autoTimer) { clearInterval(autoTimer); autoTimer = null; }
-    if (e.target.checked) autoTimer = setInterval(refresh, 10000);
+    if (on) autoTimer = setInterval(refresh, AUTO_REFRESH_MS);
+  }
+  // Defaults ON: a saved "off" from a previous visit is respected, but a
+  // first-ever visit (nothing saved yet) starts refreshing without the user
+  // having to notice and tick a box.
+  const autoSaved = localStorage.getItem(LS_AUTO);
+  const autoOn = autoSaved === null ? true : autoSaved === "1";
+  $("autoRefresh").checked = autoOn;
+  setAutoRefresh(autoOn);
+  $("autoRefresh").addEventListener("change", (e) => {
+    localStorage.setItem(LS_AUTO, e.target.checked ? "1" : "0");
+    setAutoRefresh(e.target.checked);
   });
-  $("lookup").addEventListener("click", async () => {
+
+  $("caseState").addEventListener("change", (e) => {
+    caseList.state = e.target.value;
+    caseList.offset = 0;
+    caseList.singleId = null;
+    openDetailId = null;
+    loadCases();
+  });
+  $("casesPrev").addEventListener("click", () => {
+    caseList.offset = Math.max(0, caseList.offset - caseList.limit);
+    loadCases();
+  });
+  $("casesNext").addEventListener("click", () => {
+    caseList.offset += caseList.limit;
+    loadCases();
+  });
+
+  function doLookup() {
     const id = $("caseId").value.trim();
-    if (!id) return;
-    const box = $("caseResult");
-    box.style.display = "block";
-    box.textContent = "loading…";
-    try {
-      const c = await api("/v1/cases/" + encodeURIComponent(id));
-      box.textContent = JSON.stringify(c, null, 2);
-    } catch (e) {
-      box.textContent = "Error: " + e.message;
-    }
-  });
-  $("caseId").addEventListener("keydown", (e) => { if (e.key === "Enter") $("lookup").click(); });
+    caseList.singleId = id || null;
+    caseList.offset = 0;
+    loadCases();
+  }
+  $("lookup").addEventListener("click", doLookup);
+  $("caseId").addEventListener("keydown", (e) => { if (e.key === "Enter") doLookup(); });
 
   // Try loading immediately if a URL/token were already saved from a previous visit.
   if (localStorage.getItem(LS_TOK) !== null || $("broker").value) refresh();

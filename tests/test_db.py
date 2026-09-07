@@ -191,3 +191,79 @@ def test_events_record_every_transition(tmp_path):
     db.complete(conn, lease2.lease_id, "file:///r")
     events = [r["event"] for r in conn.execute("SELECT event FROM events ORDER BY id")]
     assert events == ["created", "leased", "failed", "leased", "done"]
+
+
+def test_lease_records_which_machine_is_working_the_case(tmp_path):
+    """"What machine produced this" has to be answerable from the workers table,
+    not just guessed from a worker_id string."""
+    conn = make_db(tmp_path, 1)
+    db.lease(conn, "phoenix-w1", host="atl1-1-02-005-11-1", cluster="phoenix-slurm")
+    row = conn.execute("SELECT host, cluster FROM workers WHERE worker_id=?",
+                       ("phoenix-w1",)).fetchone()
+    assert (row["host"], row["cluster"]) == ("atl1-1-02-005-11-1", "phoenix-slurm")
+
+
+def test_lease_refreshes_host_and_cluster_on_a_later_call(tmp_path):
+    """A worker_id that resumes on a different machine (a restarted SLURM job,
+    say) must not leave the ops UI pointing at where it USED to run."""
+    conn = make_db(tmp_path, 2)
+    db.lease(conn, "w1", host="node-a", cluster="ice")
+    db.lease(conn, "w1", host="node-b", cluster="ice")
+    row = conn.execute("SELECT host FROM workers WHERE worker_id=?", ("w1",)).fetchone()
+    assert row["host"] == "node-b"
+
+
+def test_list_cases_pages_most_recently_touched_first(tmp_path):
+    conn = make_db(tmp_path, 5, cities=5)
+    all_ids = [r["case_id"] for r in
+              conn.execute("SELECT case_id FROM cases ORDER BY case_id")]
+    # add_cases stamps created_at/updated_at from the real wall clock, which a
+    # synthetic t0 in the past would sort BEHIND -- rebase every row to a known
+    # baseline first so the lease/complete calls below control the ordering.
+    t0 = 1_000_000
+    conn.execute("UPDATE cases SET created_at=?, updated_at=?", (t0, t0))
+    # Touch two cases out of creation order, with explicit timestamps a second
+    # apart, so "most recently touched" and "most recently created" disagree
+    # in a way that would catch the wrong ORDER BY column.
+    db.lease(conn, "w", count=1, now=t0 + 1)
+    later = db.lease(conn, "w2", count=1, now=t0 + 2)[0]
+    db.complete(conn, later.lease_id, "file:///x", now=t0 + 3)
+
+    page = db.list_cases(conn, limit=2)
+    assert page["total"] == 5
+    assert len(page["cases"]) == 2
+    assert page["cases"][0]["case_id"] == later.case_id, \
+        "the just-completed case should sort first"
+
+    rest = db.list_cases(conn, limit=2, offset=2)
+    assert len(rest["cases"]) == 2
+    seen = {c["case_id"] for c in page["cases"]} | {c["case_id"] for c in rest["cases"]}
+    assert seen <= set(all_ids)
+
+
+def test_list_cases_filters_by_state_and_split(tmp_path):
+    conn = make_db(tmp_path, 6, cities=6)
+    lease = db.lease(conn, "w")[0]
+    db.complete(conn, lease.lease_id, "file:///done-one")
+
+    done_only = db.list_cases(conn, state="done")
+    assert done_only["total"] == 1
+    assert done_only["cases"][0]["state"] == "done"
+
+    pending_only = db.list_cases(conn, state="pending")
+    assert pending_only["total"] == 5
+
+    by_split = db.list_cases(conn, split="train")
+    assert all(c["split"] == "train" for c in by_split["cases"])
+    assert by_split["total"] == len(
+        [r for r in conn.execute("SELECT 1 FROM cases WHERE split='train'")])
+
+
+def test_list_cases_limit_is_clamped_not_trusted(tmp_path):
+    """A dashboard bug (or a hostile client) asking for limit=100000 must not
+    turn one page load into "SELECT * FROM 40,000 rows"."""
+    conn = make_db(tmp_path, 3)
+    page = db.list_cases(conn, limit=100000)
+    assert page["limit"] <= 200
+    page0 = db.list_cases(conn, limit=0)
+    assert page0["limit"] >= 1
