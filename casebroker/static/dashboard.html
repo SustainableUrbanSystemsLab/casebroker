@@ -141,6 +141,12 @@
 </header>
 
 <main>
+  <div id="roBanner" class="row" style="display:none; background:var(--warn-weak);
+      color:var(--warn); border:1px solid var(--warn); border-radius:8px;
+      padding:10px 14px; margin-bottom:16px; font-size:13px;">
+    Read-only view — this link can only view campaign status. It cannot lease,
+    complete, fail or release cases, or add new ones, even by calling the API directly.
+  </div>
   <div id="err" class="err"></div>
 
   <section class="panel">
@@ -168,6 +174,16 @@
         <button id="refresh" type="button">Refresh now</button>
       </div>
     </form>
+
+    <div class="row" style="margin-top:14px; padding-top:12px; border-top:1px solid var(--border)">
+      <label>Share a read-only link (paste a <code class="inline">CASEBROKER_READONLY_TOKENS</code> value)
+        <br /><input type="password" id="roToken" autocomplete="off"
+          placeholder="read-only token" style="min-width:220px" />
+      </label>
+      <div><br /><button id="copyRoLink" type="button">Copy read-only link</button></div>
+      <span id="roLinkStatus" style="margin-left:8px; color:var(--muted);
+          font-size:12.5px; align-self:center"></span>
+    </div>
   </section>
 
   <section class="panel">
@@ -244,6 +260,28 @@
 
   $("broker").value = localStorage.getItem(LS_URL) || window.location.origin;
   $("token").value = localStorage.getItem(LS_TOK) || "";
+
+  // A shareable deep link: ?token=...&ro=1 pre-fills the token field and
+  // connects with no typing -- "send this to a friend" for a viewer who
+  // should never see the actual credential sitting in their address bar
+  // longer than the one moment it takes to read it off the URL here.
+  // Read-only enforcement itself is server-side (casebroker.app's
+  // CASEBROKER_READONLY_TOKENS bucket, checked on every request) -- this
+  // banner is purely informational, not a client-side restriction, because a
+  // restriction that lived only in this page would not stop anyone from
+  // calling the API directly with the same token.
+  const urlParams = new URLSearchParams(location.search);
+  const urlToken = urlParams.get("token");
+  if (urlToken) {
+    $("token").value = urlToken;
+    localStorage.setItem(LS_TOK, urlToken);
+    const clean = new URL(location.href);
+    clean.searchParams.delete("token");
+    history.replaceState({}, "", clean.toString());
+  }
+  if (urlParams.get("ro") === "1") {
+    $("roBanner").style.display = "block";
+  }
 
   let autoTimer = null;
 
@@ -492,6 +530,22 @@
   $("clearToken").addEventListener("click", () => {
     $("token").value = "";
     localStorage.removeItem(LS_TOK);
+  });
+
+  $("copyRoLink").addEventListener("click", async () => {
+    const tok = $("roToken").value.trim();
+    const status = $("roLinkStatus");
+    if (!tok) { status.textContent = "paste a read-only token first"; return; }
+    const url = new URL($("broker").value.trim() || location.origin);
+    url.searchParams.set("token", tok);
+    url.searchParams.set("ro", "1");
+    try {
+      await navigator.clipboard.writeText(url.toString());
+      status.textContent = "copied to clipboard";
+    } catch (e) {
+      status.textContent = "couldn't copy automatically — select and copy: " + url.toString();
+    }
+    setTimeout(() => { if (status.textContent.startsWith("copied")) status.textContent = ""; }, 4000);
   });
 
   const LS_AUTO = "casebroker.autoRefresh";

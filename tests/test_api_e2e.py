@@ -335,6 +335,102 @@ def test_dashboard_serves_a_case_browser(broker):
         assert needed in html, needed
 
 
+# -- read-only tokens: a link you can safely send to a friend ----------------
+
+@pytest.fixture()
+def scoped_broker(tmp_path):
+    """A broker with BOTH a full worker token and a separate read-only one --
+    the shape a real deployment uses once a share link exists."""
+    from fastapi.testclient import TestClient
+    from casebroker.app import create_app
+    application = create_app(db_path=str(tmp_path / "ro.sqlite"),
+                             tokens=["worker-secret"], readonly_tokens=["friend-link-token"])
+    return TestClient(application)
+
+
+def test_readonly_token_can_read_but_not_write(scoped_broker):
+    ro = {"Authorization": "Bearer friend-link-token"}
+    full = {"Authorization": "Bearer worker-secret"}
+    scoped_broker.post("/v1/cases", json=_cases(2), headers=full)
+
+    # Every read endpoint the dashboard actually calls: accessible.
+    assert scoped_broker.get("/v1/status", headers=ro).status_code == 200
+    assert scoped_broker.get("/v1/cases", headers=ro).status_code == 200
+    cid = scoped_broker.get("/v1/cases", headers=full).json()["cases"][0]["case_id"]
+    assert scoped_broker.get(f"/v1/cases/{cid}", headers=ro).status_code == 200
+
+    # Every mutating endpoint: rejected outright -- not merely hidden by the
+    # dashboard UI, actually refused by the API a curl could hit directly.
+    for method, path, payload in (
+        ("post", "/v1/cases", _cases(1)),
+        ("post", "/v1/lease", {"worker_id": "sneaky"}),
+        ("post", "/v1/heartbeat", {"lease_id": "x"}),
+        ("post", "/v1/complete", {"lease_id": "x", "result_uri": "y"}),
+        ("post", "/v1/fail", {"lease_id": "x", "error": "y"}),
+        ("post", "/v1/release", {"lease_id": "x"}),
+    ):
+        r = getattr(scoped_broker, method)(path, json=payload, headers=ro)
+        assert r.status_code == 401, f"{path} should reject a read-only token, got {r.status_code}"
+
+
+def test_full_token_still_does_everything_a_readonly_token_cannot(scoped_broker):
+    """Adding read-only tokens must not narrow what the worker token can do."""
+    full = {"Authorization": "Bearer worker-secret"}
+    assert scoped_broker.post("/v1/cases", json=_cases(1), headers=full).status_code == 200
+    assert scoped_broker.post("/v1/lease", json={"worker_id": "w1"}, headers=full).status_code == 200
+    assert scoped_broker.get("/v1/status", headers=full).status_code == 200
+
+
+def test_readonly_only_deployment_locks_out_writes_rather_than_opening_them(tmp_path):
+    """A deployment that configures ONLY readonly_tokens (no worker tokens at
+    all -- an unusual but real config someone could reach for) must not fall
+    back to "no tokens configured means auth is off" for writes. Writes stay
+    locked no matter what is presented, because nothing is in `tokens`."""
+    from fastapi.testclient import TestClient
+    from casebroker.app import create_app
+    application = create_app(db_path=str(tmp_path / "rounly.sqlite"),
+                             tokens=[], readonly_tokens=["only-a-viewer"])
+    c = TestClient(application)
+    ro = {"Authorization": "Bearer only-a-viewer"}
+    assert c.get("/v1/status", headers=ro).status_code == 200
+    assert c.post("/v1/lease", json={"worker_id": "w"}, headers=ro).status_code == 401
+    # And the read-only token itself cannot be used as if it were a write
+    # token even by accident -- there is no code path where it validates
+    # against `tokens`.
+    assert c.post("/v1/lease", json={"worker_id": "w"},
+                  headers={"Authorization": "Bearer only-a-viewer"}).status_code == 401
+
+
+def test_healthz_discloses_whether_a_readonly_tier_exists(scoped_broker, tmp_path):
+    body = scoped_broker.get("/healthz").json()
+    assert body["auth"] == "token"
+    assert body["readonly_auth"] is True
+
+    from fastapi.testclient import TestClient
+    from casebroker.app import create_app
+    plain = TestClient(create_app(db_path=str(tmp_path / "plain.sqlite"), tokens=["only-one"]))
+    assert plain.get("/healthz").json()["readonly_auth"] is False
+
+
+def test_dashboard_serves_a_shareable_readonly_deep_link(broker):
+    """"send this to a friend" means a URL of the form ?token=...&ro=1 that
+    pre-fills the token field, connects with no typing, and shows a banner --
+    pinned as markup/script behaviour here since there is no browser in this
+    test process to actually load the page and click through it. The actual
+    read-only ENFORCEMENT is server-side (see test_readonly_token_can_read_but_not_write);
+    this only checks that the page can consume the link that feature exists for."""
+    html = broker.get("/", headers={"Authorization": ""}).text
+    assert 'id="roBanner"' in html
+    assert "URLSearchParams(location.search)" in html
+    assert 'urlParams.get("token")' in html
+    assert 'urlParams.get("ro")' in html
+    assert "history.replaceState" in html, \
+        "the token must not be left sitting in the visible address bar"
+    # And the operator-side half: a way to actually GENERATE such a link.
+    assert 'id="roToken"' in html
+    assert 'id="copyRoLink"' in html
+
+
 def test_redact_db_target_masks_only_the_password():
     """/healthz is deliberately unauthenticated so infrastructure health checks
     work with no token -- which is exactly why nothing it returns may ever carry

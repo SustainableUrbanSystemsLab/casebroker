@@ -118,8 +118,16 @@ class ReleaseIn(BaseModel):
 
 
 
-def create_app(db_path: str | None = None, tokens: list[str] | None = None) -> FastAPI:
-    """Build an app bound to one database and token set.
+def create_app(db_path: str | None = None, tokens: list[str] | None = None,
+               readonly_tokens: list[str] | None = None) -> FastAPI:
+    """Build an app bound to one database and token set(s).
+
+    Two independent buckets, not one list with a flag on each entry: ``tokens``
+    can do everything (what a worker carries), ``readonly_tokens`` can only see
+    (what a shared dashboard link carries -- "send this to a friend" needs a
+    credential that literally cannot lease/complete/fail/release a case or add
+    new ones, not a UI that merely hides the buttons for it, since anyone can
+    still curl the API directly with whatever token the link handed them).
 
     A factory rather than module globals, because module-global config makes the
     tests lie: each test would have to reload the module to rebind the database,
@@ -132,32 +140,52 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None) -> F
     if tokens is None:
         tokens = [t.strip() for t in
                   os.environ.get("CASEBROKER_TOKENS", "").split(",") if t.strip()]
+    if readonly_tokens is None:
+        readonly_tokens = [t.strip() for t in
+                          os.environ.get("CASEBROKER_READONLY_TOKENS", "").split(",") if t.strip()]
 
     app = FastAPI(title="Wind v2 case broker", version="0.1.0")
     conn = db.connect(db_path)
     app.state.db_path = db_path
 
-    def require_token(request: Request) -> None:
-        # No tokens configured means auth is OFF. Fine for a laptop smoke test,
-        # never how this should face a network -- /healthz reports which mode it
-        # is in so a misconfigured deployment is visible rather than silent.
-        if not tokens:
-            return
+    def _supplied_token(request: Request) -> str:
         header = request.headers.get("authorization", "")
         prefix = "Bearer "
-        supplied = header[len(prefix):] if header.startswith(prefix) else ""
+        return header[len(prefix):] if header.startswith(prefix) else ""
+
+    def require_write_token(request: Request) -> None:
+        # Neither bucket configured means auth is OFF entirely -- fine for a
+        # laptop smoke test, never how this should face a network -- /healthz
+        # reports which mode it is in so a misconfigured deployment is visible
+        # rather than silent. Configuring ONLY readonly_tokens (no worker
+        # tokens at all) is a valid, if unusual, deployment -- it must lock
+        # writes out entirely rather than silently falling back to open,
+        # which is why this checks `tokens` alone and never falls through to
+        # readonly_tokens.
+        if not tokens and not readonly_tokens:
+            return
+        supplied = _supplied_token(request)
         # compare_digest against each configured token: constant-time, and it
         # does not reveal which token matched.
         if not any(hmac.compare_digest(supplied, t) for t in tokens):
             raise HTTPException(status_code=401, detail="bad or missing bearer token")
 
-    Auth = Depends(require_token)
+    def require_read_token(request: Request) -> None:
+        if not tokens and not readonly_tokens:
+            return
+        supplied = _supplied_token(request)
+        if not any(hmac.compare_digest(supplied, t) for t in (*tokens, *readonly_tokens)):
+            raise HTTPException(status_code=401, detail="bad or missing bearer token")
+
+    WriteAuth = Depends(require_write_token)
+    ReadAuth = Depends(require_read_token)
 
     # -- routes -------------------------------------------------------------------
 
     @app.get("/healthz")
     def healthz() -> dict[str, Any]:
-        return {"ok": True, "auth": "token" if tokens else "OPEN",
+        return {"ok": True, "auth": "token" if (tokens or readonly_tokens) else "OPEN",
+                "readonly_auth": bool(readonly_tokens),
                 "db": _redact_db_target(db_path)}
 
 
@@ -168,7 +196,7 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None) -> F
         return FileResponse(_STATIC_DIR / "dashboard.html")
 
 
-    @app.post("/v1/cases", dependencies=[Auth])
+    @app.post("/v1/cases", dependencies=[WriteAuth])
     def add_cases(cases: list[CaseIn]) -> dict[str, int]:
         """Append cases to the campaign. Safe to re-run: existing ids are skipped,
         so growing 5k -> 15k is 'post the new list' and nothing else."""
@@ -189,7 +217,7 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None) -> F
         return db.add_cases(conn, rows)
 
 
-    @app.post("/v1/lease", response_model=list[LeaseOut], dependencies=[Auth])
+    @app.post("/v1/lease", response_model=list[LeaseOut], dependencies=[WriteAuth])
     def lease(body: LeaseIn) -> list[LeaseOut]:
         """Claim the next case(s) to simulate. An empty list means the campaign is
         drained (or everything left is leased by someone else) -- the worker should
@@ -201,7 +229,7 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None) -> F
                          attempt=g.attempt, spec=g.spec) for g in got]
 
 
-    @app.post("/v1/heartbeat", dependencies=[Auth])
+    @app.post("/v1/heartbeat", dependencies=[WriteAuth])
     def heartbeat(body: HeartbeatIn) -> dict[str, bool]:
         ok = db.heartbeat(conn, body.lease_id, body.lease_seconds, body.detail)
         # 409, not 404: the lease existed, it is just no longer the worker's. The
@@ -211,7 +239,7 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None) -> F
         return {"ok": True}
 
 
-    @app.post("/v1/complete", dependencies=[Auth])
+    @app.post("/v1/complete", dependencies=[WriteAuth])
     def complete(body: CompleteIn) -> dict[str, bool]:
         if not db.complete(conn, body.lease_id, body.result_uri, body.sha256,
                            body.bytes, body.metrics):
@@ -219,14 +247,14 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None) -> F
         return {"ok": True}
 
 
-    @app.post("/v1/fail", dependencies=[Auth])
+    @app.post("/v1/fail", dependencies=[WriteAuth])
     def fail(body: FailIn) -> dict[str, bool]:
         if not db.fail(conn, body.lease_id, body.error, body.retryable):
             raise HTTPException(409, "lease expired or superseded")
         return {"ok": True}
 
 
-    @app.post("/v1/release", dependencies=[Auth])
+    @app.post("/v1/release", dependencies=[WriteAuth])
     def release(body: ReleaseIn) -> dict[str, bool]:
         """Graceful preemption. Refunds the attempt, unlike fail()."""
         if not db.release(conn, body.lease_id, body.reason):
@@ -234,12 +262,12 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None) -> F
         return {"ok": True}
 
 
-    @app.get("/v1/status", dependencies=[Auth])
+    @app.get("/v1/status", dependencies=[ReadAuth])
     def status() -> dict[str, Any]:
         return db.status(conn)
 
 
-    @app.get("/v1/cases/{case_id}", dependencies=[Auth])
+    @app.get("/v1/cases/{case_id}", dependencies=[ReadAuth])
     def get_case(case_id: str) -> dict[str, Any]:
         row = conn.execute("SELECT * FROM cases WHERE case_id=?", (case_id,)).fetchone()
         if row is None:
@@ -247,7 +275,7 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None) -> F
         return dict(row)
 
 
-    @app.get("/v1/cases", dependencies=[Auth])
+    @app.get("/v1/cases", dependencies=[ReadAuth])
     def list_cases(state: str | None = None, split: str | None = None,
                    city_cluster: str | None = None, limit: int = 50,
                    offset: int = 0) -> dict[str, Any]:

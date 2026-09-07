@@ -74,6 +74,20 @@ save it, exactly like any other login form. The page itself carries no secrets a
 loads with no auth; every request it makes for actual data goes through the same
 token check as any other client.
 
+**Sharing a read-only view.** Set `CASEBROKER_READONLY_TOKENS` (same
+comma-separated shape as `CASEBROKER_TOKENS`) to a *separate* value from your
+worker token, paste it into the "Share a read-only link" box in the Connection
+panel, and click **Copy read-only link** — it builds a
+`https://.../?token=...&ro=1` URL that pre-fills the token, connects
+automatically, and shows a banner. This is a real second credential, not a
+client-side restriction: a read-only token is rejected with 401 by every
+mutating endpoint (`POST /v1/cases`, `/v1/lease`, `/v1/heartbeat`,
+`/v1/complete`, `/v1/fail`, `/v1/release`) regardless of how it is presented —
+someone you send the link to could `curl` the API directly with it and still
+could not lease, complete, fail or release a case, or add new ones. Never put
+your `CASEBROKER_TOKENS` value in a link you hand out; it has none of these
+restrictions.
+
 ## The protocol
 
 | Endpoint | Purpose |
@@ -165,7 +179,9 @@ Three things are **not** done and must be before this faces the internet:
    nginx, or use a platform that terminates it for you (Render, Fly).
 2. **Set `CASEBROKER_TOKENS`.** With none set, auth is *off* — `GET /healthz`
    reports `"auth": "OPEN"` so this is visible rather than silent, but nothing
-   stops it.
+   stops it. Optionally also set `CASEBROKER_READONLY_TOKENS` to a *different*
+   value if you want a link you can hand out for viewing only — see
+   "Sharing a read-only view" above.
 3. **Point `CASEBROKER_DB` at Postgres, not a local SQLite file**, unless the
    platform gives that file a persistent disk. A container's local filesystem
    does not survive a redeploy; a managed Postgres database does. With state
