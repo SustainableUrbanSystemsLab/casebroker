@@ -1433,21 +1433,29 @@
         // constant baked into this page -- that is the whole point of the
         // single source of truth in pyproject.toml. Older brokers predate the
         // field, so it is shown only when present rather than as "undefined".
-        const badge = $("brokerDbBadge");
-        const parts = [];
-        if (h.version) parts.push(`v${h.version}`);
-        if (h.db) parts.push(h.db.startsWith("postgres") ? "Postgres" : "SQLite");
-        if (h.auth) parts.push(h.auth === "token" ? "auth required" : "open");
-        if (parts.length) {
-          badge.textContent = parts.join(" • ");
-          badge.hidden = false;
-        }
+        setBadge(h);
         return h;
       }
     } catch (e) {
       // Server unreachable
     }
     return null;
+  }
+
+  // Fed by whichever payload arrived -- /healthz or the authenticated
+  // /v1/status, which now carries the same version and db fields. Either can
+  // fill the header badge, so one failing path no longer blanks it.
+  function setBadge(h) {
+    if (!h) return;
+    const badge = $("brokerDbBadge");
+    const parts = [];
+    if (h.version) parts.push(`v${h.version}`);
+    if (h.db) parts.push(h.db.startsWith("postgres") ? "Postgres" : "SQLite");
+    if (h.auth) parts.push(h.auth === "token" ? "auth required" : "open");
+    if (parts.length) {
+      badge.textContent = parts.join(" • ");
+      badge.hidden = false;
+    }
   }
 
   const STATE_ORDER = ["pending", "leased", "done", "quarantined"];
@@ -1856,9 +1864,13 @@
       // (a proxy or extension blocking one path, a stale broker URL). Saying
       // "database unknown" there dressed a failed request up as a fact about the
       // database; naming the failed check is true and points at the cause.
-      const target = dbTarget(health);
-      $("connectedDb").textContent =
-        target || (health ? "database not reported" : "health check unavailable");
+      // Prefer the authenticated /v1/status payload, which this code path has
+      // just successfully fetched, over /healthz -- which is a second request
+      // that can fail independently and leave the panel unable to name the
+      // database it is demonstrably connected to.
+      setBadge(st);
+      const target = dbTarget(st) || dbTarget(health);
+      $("connectedDb").textContent = target || "database not reported";
       // Full redacted DSN on hover: the panel stays short, the detail stays
       // reachable when someone is actually debugging which instance they hit.
       $("connectedDb").title = (health && health.db) || "";

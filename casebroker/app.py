@@ -367,7 +367,19 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
 
     @app.get("/v1/status", dependencies=[ReadAuth])
     def status() -> dict[str, Any]:
-        return db.status(conn)
+        # `version` and `db` are carried here as well as on /healthz so a client
+        # that can read status never needs a SECOND request to identify what it
+        # is talking to. The dashboard previously took them from /healthz, which
+        # meant that if that one path failed -- and it did, reproducibly, for a
+        # browser behind a filter that objected to a response containing what
+        # looks like a connection string -- the page connected successfully and
+        # then could not say which broker or database it had connected TO.
+        #
+        # Costs nothing: both values are already in this process's memory, and
+        # this endpoint is read-authenticated, so it discloses strictly less
+        # widely than /healthz already does unauthenticated.
+        return {**db.status(conn), "version": __version__,
+                "db": _redact_db_target(db_path)}
 
 
     @app.get("/v1/cases/{case_id}", dependencies=[ReadAuth])

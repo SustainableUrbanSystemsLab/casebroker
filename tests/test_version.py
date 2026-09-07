@@ -126,3 +126,25 @@ def test_no_hardcoded_version():
         "the version is hardcoded here; read casebroker.__version__ instead:\n"
         + "\n".join(offenders)
     )
+
+
+def test_status_identifies_the_broker_without_needing_healthz(client):
+    """The dashboard must not need a second request to name what it connected to.
+
+    It took `version` and `db` from /healthz, so a browser that could reach
+    /v1/status but not /healthz -- a filter objecting to a response containing
+    something shaped like a connection string, say -- connected successfully and
+    then could not report which broker or database it had connected TO.
+    """
+    from casebroker import __version__
+    st = client.get("/v1/status", headers={"Authorization": "Bearer t"}).json()
+    assert st["version"] == __version__
+    assert st["db"], "status must name its database"
+    # and it must still be a status response, not just an identity one
+    assert "by_state" in st and "done_last_24h" in st
+
+
+def test_status_redacts_the_database_password_like_healthz_does(client):
+    """A second endpoint exposing the DSN is a second place to leak it."""
+    body = client.get("/v1/status", headers={"Authorization": "Bearer t"}).text
+    assert "password" not in body.lower()
