@@ -25,6 +25,11 @@ WC="${WIND_ROOT:?WIND_ROOT (shared storage root) not set}"
 IMG="${WIND_IMAGE:-docker.io/dicehub/openfoam:12}"
 CLI="${EDDY3D_CLI:?EDDY3D_CLI (path to eddy3d-cli) not set}"
 
+# python3 on the clusters, python on the Windows workstation. Resolving it once
+# here rather than hardcoding python3 keeps the runner usable for a local dry run,
+# which is the only way to exercise it without a scheduler.
+PY=$(command -v python3 || command -v python) || { echo "no python on PATH" >&2; exit 1; }
+
 log() { echo "[$CASE_ID] $*" >&2; }
 fatal_case() { log "FATAL (will not retry): $*"; exit 64; }
 
@@ -35,15 +40,15 @@ trap cleanup EXIT
 
 # ── 1. geometry ───────────────────────────────────────────────────────────────
 # The spec names STLs already staged on shared storage by the tile pipeline.
-BUILDINGS=$(printf '%s' "$SPEC" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("buildings_stl",""))')
-TERRAIN=$(printf '%s' "$SPEC" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("terrain_stl",""))')
+BUILDINGS=$(printf '%s' "$SPEC" | "$PY" -c 'import json,sys; print(json.load(sys.stdin).get("buildings_stl",""))')
+TERRAIN=$(printf '%s' "$SPEC" | "$PY" -c 'import json,sys; print(json.load(sys.stdin).get("terrain_stl",""))')
 [ -f "$BUILDINGS" ] || fatal_case "buildings STL missing: $BUILDINGS"
 [ -f "$TERRAIN" ]   || fatal_case "terrain STL missing: $TERRAIN"
 cp "$BUILDINGS" "$SCRATCH/buildings.stl"
 cp "$TERRAIN"   "$SCRATCH/terrain.stl"
 
 # ── 2. build the study ────────────────────────────────────────────────────────
-printf '%s' "$SPEC" | python3 - "$SCRATCH" "$CASE_ID" "$NP" > "$SCRATCH/cfg.json" <<'PY'
+printf '%s' "$SPEC" | "$PY" - "$SCRATCH" "$CASE_ID" "$NP" > "$SCRATCH/cfg.json" <<'PY'
 import json, sys
 spec = json.load(sys.stdin)
 scratch, case_id, np_ = sys.argv[1], sys.argv[2], int(sys.argv[3])
@@ -148,7 +153,7 @@ cp "$SCRATCH"/run.log "$SCRATCH"/build.json "$SCRATCH"/cfg.json "$OUT/" 2>/dev/n
 find "$STUDY" -maxdepth 2 -name "*.log" -exec cp {} "$OUT/" \; 2>/dev/null
 BYTES=$(du -sb "$OUT" | cut -f1)
 
-python3 - "$OUT" "$BYTES" <<'PY'
+"$PY" - "$OUT" "$BYTES" <<'PY'
 import hashlib, json, os, sys
 out, nbytes = sys.argv[1], int(sys.argv[2])
 h = hashlib.sha256()
