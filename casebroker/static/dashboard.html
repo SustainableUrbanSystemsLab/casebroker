@@ -49,8 +49,8 @@
     --surface-hover: #373e47;
     --border: #444c56;
     --border-subtle: #373e47;
-    --text-primary: #cdd9e5;
-    --text-secondary: #adbac7;
+    --text-primary: #adbac7;
+    --text-secondary: #909dab;
     --text-muted: #768390;
     --accent: #57ab5a;
     --accent-rgb: 87, 171, 90;
@@ -65,9 +65,9 @@
     --bad-light: rgba(229, 83, 75, 0.15);
     --info: #539bf5;
     --info-light: rgba(83, 155, 245, 0.15);
-    --shadow-sm: 0 1px 3px 0 rgb(0 0 0 / 0.3);
-    --shadow: 0 4px 8px -1px rgb(0 0 0 / 0.4);
-    --shadow-md: 0 10px 20px -2px rgb(0 0 0 / 0.5);
+    --shadow-sm: 0 1px 0 rgba(27, 31, 36, 0.04);
+    --shadow: 0 3px 6px rgba(0, 0, 0, 0.2);
+    --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.25);
     --ring: rgba(83, 155, 245, 0.35);
   }
 
@@ -79,8 +79,8 @@
       --surface-hover: #373e47;
       --border: #444c56;
       --border-subtle: #373e47;
-      --text-primary: #cdd9e5;
-      --text-secondary: #adbac7;
+      --text-primary: #adbac7;
+      --text-secondary: #909dab;
       --text-muted: #768390;
       --accent: #57ab5a;
       --accent-rgb: 87, 171, 90;
@@ -95,10 +95,28 @@
       --bad-light: rgba(229, 83, 75, 0.15);
       --info: #539bf5;
       --info-light: rgba(83, 155, 245, 0.15);
-      --shadow-sm: 0 1px 3px 0 rgb(0 0 0 / 0.3);
-      --shadow: 0 4px 8px -1px rgb(0 0 0 / 0.4);
-      --shadow-md: 0 10px 20px -2px rgb(0 0 0 / 0.5);
+      --shadow-sm: 0 1px 0 rgba(27, 31, 36, 0.04);
+      --shadow: 0 3px 6px rgba(0, 0, 0, 0.2);
+      --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.25);
       --ring: rgba(83, 155, 245, 0.35);
+    }
+  }
+
+  [data-theme="dark"] button.primary,
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) button.primary {
+      background: #347d39;
+      border-color: #3fb950;
+      color: #f0f6fc;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+    }
+    :root:not([data-theme="light"]) button.primary:hover {
+      background: #46954a;
+      border-color: #57ab5a;
+    }
+    :root:not([data-theme="light"]) .brand-logo {
+      background: linear-gradient(135deg, #347d39 0%, #316dca 100%);
+      box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3);
     }
   }
 
@@ -1170,7 +1188,13 @@
   function updateThemeIcon() {
     const isDark = document.documentElement.getAttribute("data-theme") === "dark" ||
       (!document.documentElement.getAttribute("data-theme") && window.matchMedia("(prefers-color-scheme: dark)").matches);
+    const btn = $("themeToggle");
     const icon = $("themeIcon");
+    if (btn) {
+      btn.title = isDark
+        ? "Soft dark: A dark theme with reduced contrast for comfortable viewing in low-light environments."
+        : "Switch to Soft dark theme";
+    }
     if (icon) {
       icon.innerHTML = isDark
         ? `<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>`
