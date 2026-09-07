@@ -465,6 +465,14 @@
   }
   .connected-bar .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); flex: none; }
   .connected-bar .lbl { color: var(--text-primary); font-weight: 600; font-size: 0.85rem; }
+  .conn-db {
+    color: var(--text-secondary);
+    font-size: 0.82rem;
+    font-family: var(--font-mono);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
   .num.alert { color: var(--bad); }
 
   /* KPI Stats Grid */
@@ -950,7 +958,7 @@
     <div id="connectedSummary" class="connected-bar" style="display:none;">
       <span class="dot"></span>
       <span class="lbl">Connected</span>
-      <span id="connectedUrl" style="color:var(--text-secondary); font-size:0.82rem; font-family:var(--font-mono);"></span>
+      <span id="connectedDb" class="conn-db"></span>
       <button id="editConnection" type="button" style="margin-left:auto; font-size:0.8rem; padding:4px 10px;">Edit connection</button>
     </div>
 
@@ -1400,6 +1408,31 @@
     return res.json();
   }
 
+  // Which DATABASE is behind this broker -- the question the connection panel
+  // exists to answer. It used to repeat the broker URL, which the Broker field
+  // directly above already states and which the page's own origin implies.
+  // Knowing you are pointed at the production Supabase rather than a staging one
+  // matters most in the seconds before publishing 5,000 cases into it.
+  //
+  // Built from /healthz's already-redacted DSN, and trimmed further: the user
+  // component is dropped because on Supabase that carries the project ref, and
+  // the panel only needs to identify the target, not spell out the account.
+  function dbTarget(h) {
+    const raw = (h && h.db) || "";
+    if (!raw) return "";
+    if (!/^postgres/i.test(raw)) {
+      return `SQLite · ${raw.split(/[\\/]/).pop()}`;   // a path; show the file
+    }
+    try {
+      const u = new URL(raw);
+      const name = u.pathname.replace(/^\//, "") || "postgres";
+      const vendor = /supabase/i.test(u.hostname) ? "Supabase" : "Postgres";
+      return `${vendor} · ${u.hostname}${u.port ? ":" + u.port : ""}/${name}`;
+    } catch (e) {
+      return "Postgres";
+    }
+  }
+
   // Check health without throwing 401
   async function checkHealth() {
     const base = $("broker").value.replace(/\/+$/, "");
@@ -1830,7 +1863,11 @@
       showErr(null);
       // Collapse the connect form and show summary bar
       $("connectForm").style.display = "none";
-      $("connectedUrl").textContent = $("broker").value.trim() || location.origin;
+      const target = dbTarget(health);
+      $("connectedDb").textContent = target || "database unknown";
+      // Full redacted DSN on hover: the panel stays short, the detail stays
+      // reachable when someone is actually debugging which instance they hit.
+      $("connectedDb").title = (health && health.db) || "";
       $("connectedSummary").style.display = "flex";
       renderStatus(st);
       await loadCases();
