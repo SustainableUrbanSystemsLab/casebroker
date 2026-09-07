@@ -1,9 +1,31 @@
-"""SQLite storage for the case broker.
+"""Storage for the case broker: SQLite for local dev/tests, Postgres for production.
 
-SQLite rather than Postgres for the prototype, but every statement lives in this
-one module so the swap is a single file. WAL mode plus ``BEGIN IMMEDIATE`` around
-the claim buys the one property that actually matters with many workers: **two
-workers can never be handed the same case**.
+Every statement lives in this one module, so the storage engine is a property of
+what string you hand :func:`connect` — a file path opens SQLite, a
+``postgres(ql)://`` DSN opens Postgres — and nothing above this module (the API
+layer, the worker, the tests that talk through the public functions) needs to
+know which one it got. That is the promise this module makes and the reason the
+two engines share one set of function names and one :class:`Lease` shape.
+
+Why two engines rather than migrating outright: SQLite needs no network and no
+credentials, so the 24-plus tests that exercise lease semantics run in
+milliseconds with zero external dependencies — exactly what you want for the
+property that matters most (**two workers can never be handed the same case**)
+to be cheap to re-verify on every change. Postgres is what a real campaign
+deploys against, because a managed database survives a service restart or
+redeploy where a container's local disk does not, and because the whole point of
+centralising state is that MANY processes on MANY machines hit it at once, which
+a single SQLite file (correctly) serialises down to one writer at a time.
+
+The two engines therefore do not share identical SQL for the one place it would
+be actively wrong to pretend they could: **claiming work under concurrency**.
+SQLite's ``BEGIN IMMEDIATE`` takes a whole-database write lock immediately, so
+concurrent callers simply queue up one at a time. Postgres instead uses
+``SELECT ... FOR UPDATE SKIP LOCKED`` — a per-ROW lock that lets two callers claim
+two different rows without blocking each other, which is the entire reason to
+move off one file in the first place. See :func:`lease` for the two branches,
+and :func:`_by_lease` for the matching row lock the read side needs so a
+heartbeat in flight cannot be quietly outraced by a reclaim.
 
 State machine
 -------------
@@ -86,6 +108,61 @@ CREATE INDEX IF NOT EXISTS idx_events_case ON events(case_id, id);
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events(event, ts);
 """
 
+# Same schema, Postgres-flavoured: no PRAGMAs (meaningless there), and the
+# events table's autoincrement id is a SERIAL rather than SQLite's
+# INTEGER PRIMARY KEY AUTOINCREMENT. Everything else -- types, IF NOT EXISTS,
+# indexes, the ON CONFLICT syntax used elsewhere -- is valid, identical DDL/DML
+# on both engines.
+PG_SCHEMA = """
+CREATE TABLE IF NOT EXISTS cases (
+    case_id        TEXT PRIMARY KEY,
+    spec           TEXT NOT NULL,
+    recipe         TEXT NOT NULL,
+    city_cluster   TEXT NOT NULL,
+    lcz            TEXT,
+    split          TEXT NOT NULL,
+    state          TEXT NOT NULL DEFAULT 'pending',
+    priority       INTEGER NOT NULL DEFAULT 100,
+    attempts       INTEGER NOT NULL DEFAULT 0,
+    max_attempts   INTEGER NOT NULL DEFAULT 3,
+    lease_id       TEXT,
+    lease_worker   TEXT,
+    lease_expires  INTEGER,
+    last_error     TEXT,
+    result_uri     TEXT,
+    result_sha256  TEXT,
+    result_bytes   INTEGER,
+    metrics        TEXT,
+    created_at     INTEGER NOT NULL,
+    updated_at     INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_cases_claim ON cases(state, priority, case_id);
+CREATE INDEX IF NOT EXISTS idx_cases_lease ON cases(lease_id);
+CREATE INDEX IF NOT EXISTS idx_cases_split ON cases(split, state);
+
+CREATE TABLE IF NOT EXISTS workers (
+    worker_id    TEXT PRIMARY KEY,
+    host         TEXT,
+    cluster      TEXT,
+    first_seen   INTEGER NOT NULL,
+    last_seen    INTEGER NOT NULL,
+    cases_done   INTEGER NOT NULL DEFAULT 0,
+    cases_failed INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS events (
+    id        SERIAL PRIMARY KEY,
+    ts        INTEGER NOT NULL,
+    case_id   TEXT,
+    worker_id TEXT,
+    event     TEXT NOT NULL,
+    detail    TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_events_case ON events(case_id, id);
+CREATE INDEX IF NOT EXISTS idx_events_ts ON events(event, ts);
+"""
+
 
 @dataclass(frozen=True)
 class Lease:
@@ -97,22 +174,118 @@ class Lease:
 
 
 # One process-wide lock around every statement. FastAPI runs sync endpoints in a
-# threadpool, so the shared connection is touched from many threads; SQLite
-# serialises writers regardless, and holding the lock here means a concurrent
-# reader can never observe a half-applied claim. The critical sections are
-# microseconds, so this is not a throughput ceiling at 30,000 cases.
+# threadpool, so the shared connection is touched from many threads. For SQLite
+# this is what makes a shared, check_same_thread=False connection safe at all;
+# for Postgres it is pure belt-and-suspenders (correctness across PROCESSES/
+# machines comes from FOR UPDATE SKIP LOCKED in the database itself, not from
+# this in-process lock) but costs nothing to keep uniform across both engines.
 _LOCK = threading.RLock()
 
 
-def connect(path: str) -> sqlite3.Connection:
+class PgConnection:
+    """Thin shim so call sites written for SQLite keep working against Postgres.
+
+    Two things this repo's other modules and its own tests do against the raw
+    connection, unchanged, that this class exists to keep true: pass ``?``
+    positional placeholders (SQLite's style; psycopg wants ``%s``), and iterate a
+    cursor's result directly or call ``.fetchone()``/``.fetchall()`` on it and
+    index a row by column name (``row["state"]``) the way ``sqlite3.Row`` allows.
+    ``?`` never appears inside a string LITERAL anywhere in this module's SQL --
+    only ever as a placeholder -- so a blind text substitution is safe here
+    without a real SQL parser.
+
+    ``BEGIN IMMEDIATE`` is SQLite-only syntax (Postgres has no ``IMMEDIATE``
+    transaction mode and would raise a syntax error on it), so that one literal
+    is translated to plain ``BEGIN``; the row-level locking SQLite gets for free
+    from the whole-database lock, Postgres gets instead from ``FOR UPDATE`` /
+    ``FOR UPDATE SKIP LOCKED`` in the specific queries that need it (see
+    :func:`lease` and :func:`_by_lease`).
+    """
+
+    def __init__(self, raw):
+        self._raw = raw
+
+    def execute(self, sql: str, params: Iterable[Any] = ()) -> "_PgCursor":
+        if sql.strip().upper() == "BEGIN IMMEDIATE":
+            sql = "BEGIN"
+        cur = self._raw.cursor()
+        cur.execute(sql.replace("?", "%s"), tuple(params) if params else None)
+        return _PgCursor(cur)
+
+    def executescript(self, sql: str) -> None:
+        with self._raw.cursor() as cur:
+            cur.execute(sql)
+
+
+class _PgCursor:
+    """Wraps a psycopg cursor (dict-row factory) with the bit of sqlite3.Cursor's
+    surface this module actually uses: fetchone/fetchall/rowcount/iteration."""
+
+    def __init__(self, cur):
+        self._cur = cur
+
+    def fetchone(self):
+        return self._cur.fetchone()
+
+    def fetchall(self):
+        return self._cur.fetchall()
+
+    def __iter__(self):
+        return iter(self._cur)
+
+    @property
+    def rowcount(self):
+        return self._cur.rowcount
+
+
+def connect(path_or_dsn: str):
+    """SQLite for a file path, Postgres for a ``postgres(ql)://`` DSN.
+
+    The caller (``CASEBROKER_DB`` in practice) decides the engine purely by what
+    string it passes; nothing else in this module, or above it, branches on
+    which one it got except the handful of statements in this file that
+    genuinely differ between the two.
+    """
+    if path_or_dsn.startswith(("postgres://", "postgresql://")):
+        return _connect_postgres(path_or_dsn)
+
     # check_same_thread=False because the connection is shared across the
     # threadpool; _LOCK is what makes that safe.
-    conn = sqlite3.connect(path, timeout=30, isolation_level=None,
+    conn = sqlite3.connect(path_or_dsn, timeout=30, isolation_level=None,
                            check_same_thread=False)
     conn.row_factory = sqlite3.Row
     with _LOCK:
         conn.executescript(SCHEMA)
     return conn
+
+
+def _connect_postgres(dsn: str) -> PgConnection:
+    import psycopg
+    from psycopg.rows import dict_row
+
+    # autocommit=True mirrors SQLite's isolation_level=None: every statement runs
+    # standalone until an explicit BEGIN starts a transaction that a later
+    # COMMIT/ROLLBACK closes, which is exactly the pattern every function below
+    # already uses. dict_row makes a fetched row support row["col"], matching
+    # sqlite3.Row.
+    #
+    # prepare_threshold=None turns off psycopg's automatic server-side prepared
+    # statements. Measured against Supabase's pooler (port 6543, PgBouncer in
+    # TRANSACTION mode): after ~5 uses of the same query text psycopg names and
+    # prepares it server-side, but a transactional pooler can route the NEXT
+    # transaction to a different backend connection than the one that prepared
+    # it -- and to one where a DIFFERENT client's session already used that same
+    # generated name for something else, which raised
+    # "prepared statement \"_pg3_0\" already exists" here on exactly the sixth
+    # call. Every statement in this module is either a one-off or cheap enough
+    # that losing server-side preparation costs nothing worth trading for a
+    # connection that is correct on a transactional pooler.
+    raw = psycopg.connect(dsn, autocommit=True, row_factory=dict_row,
+                          prepare_threshold=None)
+    wrapped = PgConnection(raw)
+    with _LOCK:
+        wrapped.executescript(PG_SCHEMA)
+    return wrapped
 
 
 def _now() -> int:
@@ -138,20 +311,26 @@ def _locked(fn):
 
 
 @_locked
-def add_cases(conn: sqlite3.Connection, rows: Iterable[dict[str, Any]]) -> dict[str, int]:
+def add_cases(conn, rows: Iterable[dict[str, Any]]) -> dict[str, int]:
     """Append cases. Idempotent by case_id, so re-adding an existing case is a
     no-op -- which is what makes "extend the dataset by 10,000" a safe, repeatable
     command rather than a one-shot migration you must not run twice."""
     now = _now()
     added = skipped = 0
+    columns = (" (case_id, spec, recipe, city_cluster, lcz, split, priority,"
+              "  max_attempts, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)")
+    # Same idempotent-insert intent, two dialects: SQLite's OR IGNORE clause sits
+    # on INSERT itself, Postgres's sits after the VALUES list as ON CONFLICT.
+    insert_sql = (
+        "INSERT INTO cases" + columns + " ON CONFLICT (case_id) DO NOTHING"
+        if isinstance(conn, PgConnection)
+        else "INSERT OR IGNORE INTO cases" + columns
+    )
     conn.execute("BEGIN IMMEDIATE")
     try:
         for r in rows:
             cur = conn.execute(
-                "INSERT OR IGNORE INTO cases"
-                " (case_id, spec, recipe, city_cluster, lcz, split, priority,"
-                "  max_attempts, created_at, updated_at)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?)",
+                insert_sql,
                 (r["case_id"], json.dumps(r["spec"], sort_keys=True), r["recipe"],
                  r["city_cluster"], r.get("lcz"), r["split"], r.get("priority", 100),
                  r.get("max_attempts", 3), now, now),
@@ -171,7 +350,7 @@ def add_cases(conn: sqlite3.Connection, rows: Iterable[dict[str, Any]]) -> dict[
 # -- lease / report -----------------------------------------------------------
 
 @_locked
-def lease(conn: sqlite3.Connection, worker_id: str, count: int = 1,
+def lease(conn, worker_id: str, count: int = 1,
           lease_seconds: int = 3600, splits: list[str] | None = None,
           now: int | None = None) -> list[Lease]:
     """Atomically claim up to ``count`` cases.
@@ -183,6 +362,7 @@ def lease(conn: sqlite3.Connection, worker_id: str, count: int = 1,
     now = now or _now()
     expires = now + lease_seconds
     out: list[Lease] = []
+    is_pg = isinstance(conn, PgConnection)
 
     conn.execute("BEGIN IMMEDIATE")
     try:
@@ -193,11 +373,20 @@ def lease(conn: sqlite3.Connection, worker_id: str, count: int = 1,
             split_sql = " AND split IN (" + placeholders + ")"
             params.extend(splits)
         params.append(count)
+
+        # SQLite already has the whole database exclusively locked by BEGIN
+        # IMMEDIATE above, so no per-row locking clause is needed or valid there.
+        # Postgres instead locks only the rows this call is about to claim, and
+        # SKIPS any row a concurrent lease() or an in-flight heartbeat/complete/
+        # fail/release already holds (see _by_lease) rather than blocking on it --
+        # which is the entire point of moving off one file that serialises
+        # everything to begin with.
+        lock_clause = " FOR UPDATE SKIP LOCKED" if is_pg else ""
         rows = conn.execute(
             "SELECT case_id, spec, attempts, max_attempts FROM cases"
             " WHERE (state = 'pending' OR (state = 'leased' AND lease_expires < ?))"
             + split_sql +
-            " ORDER BY priority ASC, case_id ASC LIMIT ?",
+            " ORDER BY priority ASC, case_id ASC LIMIT ?" + lock_clause,
             params,
         ).fetchall()
 
@@ -235,13 +424,23 @@ def lease(conn: sqlite3.Connection, worker_id: str, count: int = 1,
     return out
 
 
-def _by_lease(conn: sqlite3.Connection, lease_id: str):
-    return conn.execute(
-        "SELECT * FROM cases WHERE lease_id=? AND state='leased'", (lease_id,)).fetchone()
+def _by_lease(conn, lease_id: str):
+    """The row a lease_id currently owns, row-locked under Postgres.
+
+    The lock is what stops a concurrent lease() from reclaiming this exact row
+    (via its own FOR UPDATE SKIP LOCKED, which will skip a row this transaction
+    holds) for the whole duration of a heartbeat/complete/fail/release call --
+    the same guarantee SQLite gets for free from BEGIN IMMEDIATE's whole-database
+    lock, here narrowed to the one row that is actually contended.
+    """
+    sql = "SELECT * FROM cases WHERE lease_id=? AND state='leased'"
+    if isinstance(conn, PgConnection):
+        sql += " FOR UPDATE"
+    return conn.execute(sql, (lease_id,)).fetchone()
 
 
 @_locked
-def heartbeat(conn: sqlite3.Connection, lease_id: str, lease_seconds: int = 3600,
+def heartbeat(conn, lease_id: str, lease_seconds: int = 3600,
               detail: str | None = None, now: int | None = None) -> bool:
     """Extend a lease. Returns False when the lease is gone -- the worker must
     then STOP working that case, because someone else may already own it."""
@@ -257,7 +456,7 @@ def heartbeat(conn: sqlite3.Connection, lease_id: str, lease_seconds: int = 3600
 
 
 @_locked
-def complete(conn: sqlite3.Connection, lease_id: str, result_uri: str,
+def complete(conn, lease_id: str, result_uri: str,
              sha256: str | None = None, nbytes: int | None = None,
              metrics: dict[str, Any] | None = None, now: int | None = None) -> bool:
     now = now or _now()
@@ -285,7 +484,7 @@ def complete(conn: sqlite3.Connection, lease_id: str, result_uri: str,
 
 
 @_locked
-def fail(conn: sqlite3.Connection, lease_id: str, error: str, retryable: bool = True,
+def fail(conn, lease_id: str, error: str, retryable: bool = True,
          now: int | None = None) -> bool:
     now = now or _now()
     conn.execute("BEGIN IMMEDIATE")
@@ -313,7 +512,7 @@ def fail(conn: sqlite3.Connection, lease_id: str, error: str, retryable: bool = 
 
 
 @_locked
-def release(conn: sqlite3.Connection, lease_id: str, reason: str = "released",
+def release(conn, lease_id: str, reason: str = "released",
             now: int | None = None) -> bool:
     """Hand a case back untouched, without burning a retry.
 
@@ -343,7 +542,7 @@ def release(conn: sqlite3.Connection, lease_id: str, reason: str = "released",
 # -- observability ------------------------------------------------------------
 
 @_locked
-def status(conn: sqlite3.Connection, now: int | None = None) -> dict[str, Any]:
+def status(conn, now: int | None = None) -> dict[str, Any]:
     now = now or _now()
     by_state = {r["state"]: r["n"] for r in
                 conn.execute("SELECT state, COUNT(*) n FROM cases GROUP BY state")}

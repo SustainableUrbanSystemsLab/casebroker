@@ -1,0 +1,347 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Wind v2 Case Broker</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f7f7f5;
+    --panel: #ffffff;
+    --border: #e2e0da;
+    --text: #1c1c1a;
+    --muted: #6b6a64;
+    --accent: #2f6f4f;
+    --accent-weak: #e7f2ec;
+    --warn: #9a5b13;
+    --warn-weak: #fbeedd;
+    --bad: #a3352c;
+    --bad-weak: #fbe9e7;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16171a;
+      --panel: #1e2023;
+      --border: #33353a;
+      --text: #e7e6e2;
+      --muted: #9a9a95;
+      --accent: #6bc596;
+      --accent-weak: #17301f;
+      --warn: #e0a94f;
+      --warn-weak: #332a15;
+      --bad: #e5776e;
+      --bad-weak: #331e1c;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.45 -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  header {
+    display: flex; align-items: baseline; gap: .6em;
+    padding: 18px 22px 8px;
+    border-bottom: 1px solid var(--border);
+    flex-wrap: wrap;
+  }
+  header h1 { font-size: 17px; margin: 0; font-weight: 650; }
+  header .sub { color: var(--muted); font-size: 12.5px; }
+  #connDot {
+    width: 8px; height: 8px; border-radius: 50%; display: inline-block;
+    background: var(--muted); margin-right: 6px; vertical-align: 1px;
+  }
+  #connDot.ok { background: var(--accent); }
+  #connDot.bad { background: var(--bad); }
+  main { max-width: 980px; margin: 0 auto; padding: 18px 22px 60px; }
+  .panel {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    padding: 16px 18px; margin-bottom: 16px;
+  }
+  .panel h2 {
+    font-size: 12px; text-transform: uppercase; letter-spacing: .05em;
+    color: var(--muted); margin: 0 0 12px;
+  }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  label { font-size: 12.5px; color: var(--muted); }
+  input[type=text], input[type=password] {
+    font: inherit; padding: 7px 9px; border-radius: 6px; border: 1px solid var(--border);
+    background: var(--bg); color: var(--text); min-width: 200px;
+  }
+  button {
+    font: inherit; padding: 7px 13px; border-radius: 6px; border: 1px solid var(--border);
+    background: var(--panel); color: var(--text); cursor: pointer;
+  }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button:hover { filter: brightness(0.97); }
+  button:disabled { opacity: .5; cursor: default; }
+  a.link { color: var(--accent); cursor: pointer; font-size: 12.5px; }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; }
+  .stat {
+    border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px;
+    background: var(--bg);
+  }
+  .stat .n { font-size: 22px; font-weight: 650; font-variant-numeric: tabular-nums; }
+  .stat .l { font-size: 11.5px; color: var(--muted); margin-top: 2px; }
+  .stat.pending .n { color: var(--warn); }
+  .stat.leased .n { color: var(--accent); }
+  .stat.quarantined .n { color: var(--bad); }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 600; font-size: 11.5px; text-transform: uppercase; }
+  tr:last-child td { border-bottom: none; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  code, pre {
+    font-family: var(--mono); font-size: 12.5px; background: var(--bg);
+    border: 1px solid var(--border); border-radius: 6px;
+  }
+  pre { padding: 10px; overflow: auto; max-height: 340px; margin: 10px 0 0; }
+  code.inline { padding: 1px 5px; }
+  .badge {
+    display: inline-block; padding: 1px 8px; border-radius: 99px; font-size: 11px;
+    font-weight: 600;
+  }
+  .badge.done { background: var(--accent-weak); color: var(--accent); }
+  .badge.pending { background: var(--warn-weak); color: var(--warn); }
+  .badge.leased { background: var(--warn-weak); color: var(--warn); }
+  .badge.quarantined { background: var(--bad-weak); color: var(--bad); }
+  .err {
+    background: var(--bad-weak); color: var(--bad); border: 1px solid var(--bad);
+    border-radius: 8px; padding: 10px 14px; margin-bottom: 16px; font-size: 13px;
+    display: none;
+  }
+  .empty { color: var(--muted); font-style: italic; padding: 8px 0; }
+  footer { color: var(--muted); font-size: 11.5px; text-align: center; padding: 20px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Wind v2 Case Broker</h1>
+  <span class="sub"><span id="connDot"></span><span id="connText">not connected</span></span>
+</header>
+
+<main>
+  <div id="err" class="err"></div>
+
+  <section class="panel">
+    <h2>Connection</h2>
+    <div class="row">
+      <label>Broker URL
+        <br /><input type="text" id="broker" placeholder="https://..." />
+      </label>
+      <label>Bearer token (leave blank if the broker has no auth configured)
+        <br /><input type="password" id="token" placeholder="paste token" />
+      </label>
+      <div>
+        <br />
+        <button class="primary" id="connect">Connect</button>
+      </div>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <a class="link" id="clearToken">forget saved token</a>
+      <label style="margin-left:auto">
+        <input type="checkbox" id="autoRefresh" /> auto-refresh every 10s
+      </label>
+      <button id="refresh">Refresh now</button>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>Campaign status</h2>
+    <div id="statusEmpty" class="empty">Connect to a broker to see status.</div>
+    <div id="statusBody" style="display:none">
+      <div class="stats" id="stateStats"></div>
+      <table style="margin-top:16px">
+        <thead><tr><th>Split</th><th class="num">Pending</th><th class="num">Leased</th>
+          <th class="num">Done</th><th class="num">Quarantined</th></tr></thead>
+        <tbody id="splitBody"></tbody>
+      </table>
+      <div class="row" style="margin-top:12px; color:var(--muted); font-size:12.5px">
+        <span id="etaText"></span>
+        <span id="expiredText" style="margin-left:auto"></span>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>Workers</h2>
+    <div id="workersEmpty" class="empty">—</div>
+    <table id="workersTable" style="display:none">
+      <thead><tr><th>Worker</th><th>First seen</th><th>Last seen</th>
+        <th class="num">Done</th><th class="num">Failed</th></tr></thead>
+      <tbody id="workersBody"></tbody>
+    </table>
+  </section>
+
+  <section class="panel">
+    <h2>Look up a case</h2>
+    <div class="row">
+      <input type="text" id="caseId" placeholder="case_id (e.g. v2-4894713a345a4429)" style="min-width:320px" />
+      <button id="lookup">Look up</button>
+    </div>
+    <pre id="caseResult" style="display:none"></pre>
+  </section>
+</main>
+
+<footer>
+  Talks directly to the broker's own JSON API (<code class="inline">/v1/*</code>) from your browser.
+  The token is kept only in this browser's local storage and sent as a bearer header on each request.
+</footer>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const LS_URL = "casebroker.brokerUrl";
+  const LS_TOK = "casebroker.token";
+
+  $("broker").value = localStorage.getItem(LS_URL) || window.location.origin;
+  $("token").value = localStorage.getItem(LS_TOK) || "";
+
+  let autoTimer = null;
+
+  function showErr(msg) {
+    const e = $("err");
+    if (!msg) { e.style.display = "none"; e.textContent = ""; return; }
+    e.textContent = msg;
+    e.style.display = "block";
+  }
+
+  function setConn(ok, text) {
+    $("connDot").className = ok === null ? "" : (ok ? "ok" : "bad");
+    $("connText").textContent = text;
+  }
+
+  async function api(path) {
+    const base = $("broker").value.replace(/\/+$/, "");
+    const token = $("token").value.trim();
+    const headers = {};
+    if (token) headers["Authorization"] = "Bearer " + token;
+    const res = await fetch(base + path, { headers });
+    if (!res.ok) {
+      let body = "";
+      try { body = (await res.text()).slice(0, 200); } catch (e) {}
+      throw new Error(`${res.status} ${res.statusText} — ${body || "(no body)"}`);
+    }
+    return res.json();
+  }
+
+  const STATE_ORDER = ["pending", "leased", "done", "quarantined"];
+  const STATE_LABEL = { pending: "Pending", leased: "Leased", done: "Done", quarantined: "Quarantined" };
+
+  function relTime(unixSeconds) {
+    if (!unixSeconds) return "—";
+    const s = Math.floor(Date.now() / 1000) - unixSeconds;
+    if (s < 60) return s + "s ago";
+    if (s < 3600) return Math.floor(s / 60) + "m ago";
+    if (s < 86400) return Math.floor(s / 3600) + "h ago";
+    return Math.floor(s / 86400) + "d ago";
+  }
+
+  function renderStatus(st) {
+    $("statusEmpty").style.display = "none";
+    $("statusBody").style.display = "block";
+
+    const stats = STATE_ORDER.map((s) => {
+      const n = st.by_state?.[s] || 0;
+      return `<div class="stat ${s}"><div class="n">${n.toLocaleString()}</div>
+              <div class="l">${STATE_LABEL[s]}</div></div>`;
+    }).join("") + `
+      <div class="stat"><div class="n">${(st.remaining ?? 0).toLocaleString()}</div>
+        <div class="l">Remaining</div></div>`;
+    $("stateStats").innerHTML = stats;
+
+    // by_split is a flat {"train/done": n, ...} map — pivot it into a split x state table.
+    const splits = {};
+    for (const [key, n] of Object.entries(st.by_split || {})) {
+      const [split, state] = key.split("/");
+      splits[split] = splits[split] || {};
+      splits[split][state] = n;
+    }
+    const splitNames = Object.keys(splits).sort();
+    $("splitBody").innerHTML = splitNames.length
+      ? splitNames.map((sp) => {
+          const row = splits[sp];
+          return `<tr><td>${sp}</td>` +
+            STATE_ORDER.map((s) => `<td class="num">${(row[s] || 0).toLocaleString()}</td>`).join("") +
+            `</tr>`;
+        }).join("")
+      : `<tr><td colspan="5" class="empty">No cases yet.</td></tr>`;
+
+    $("etaText").textContent = st.eta_days != null
+      ? `~${st.eta_days} day(s) left at the current rate (${st.done_last_24h} done in the last 24h)`
+      : (st.done_last_24h ? `${st.done_last_24h} done in the last 24h` : "no completions yet — ETA unknown");
+    $("expiredText").textContent = st.expired_leases
+      ? `${st.expired_leases} lease(s) expired and awaiting reclaim`
+      : "";
+
+    const workers = st.workers || [];
+    if (workers.length) {
+      $("workersEmpty").style.display = "none";
+      $("workersTable").style.display = "table";
+      $("workersBody").innerHTML = workers.map((w) => `
+        <tr>
+          <td><code class="inline">${w.worker_id}</code></td>
+          <td>${relTime(w.first_seen)}</td>
+          <td>${relTime(w.last_seen)}</td>
+          <td class="num">${w.cases_done}</td>
+          <td class="num">${w.cases_failed}</td>
+        </tr>`).join("");
+    } else {
+      $("workersEmpty").style.display = "block";
+      $("workersEmpty").textContent = "No worker has leased anything yet.";
+      $("workersTable").style.display = "none";
+    }
+  }
+
+  async function refresh() {
+    try {
+      const st = await api("/v1/status");
+      setConn(true, "connected");
+      showErr(null);
+      renderStatus(st);
+    } catch (e) {
+      setConn(false, "not connected");
+      showErr("Could not load status: " + e.message);
+    }
+  }
+
+  $("connect").addEventListener("click", () => {
+    localStorage.setItem(LS_URL, $("broker").value.trim());
+    localStorage.setItem(LS_TOK, $("token").value.trim());
+    refresh();
+  });
+  $("refresh").addEventListener("click", refresh);
+  $("clearToken").addEventListener("click", () => {
+    $("token").value = "";
+    localStorage.removeItem(LS_TOK);
+  });
+  $("autoRefresh").addEventListener("change", (e) => {
+    if (autoTimer) { clearInterval(autoTimer); autoTimer = null; }
+    if (e.target.checked) autoTimer = setInterval(refresh, 10000);
+  });
+  $("lookup").addEventListener("click", async () => {
+    const id = $("caseId").value.trim();
+    if (!id) return;
+    const box = $("caseResult");
+    box.style.display = "block";
+    box.textContent = "loading…";
+    try {
+      const c = await api("/v1/cases/" + encodeURIComponent(id));
+      box.textContent = JSON.stringify(c, null, 2);
+    } catch (e) {
+      box.textContent = "Error: " + e.message;
+    }
+  });
+  $("caseId").addEventListener("keydown", (e) => { if (e.key === "Enter") $("lookup").click(); });
+
+  // Try loading immediately if a URL/token were already saved from a previous visit.
+  if (localStorage.getItem(LS_TOK) !== null || $("broker").value) refresh();
+})();
+</script>
+
+</body>
+</html>

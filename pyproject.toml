@@ -8,6 +8,10 @@ dependencies = [
     "uvicorn[standard]>=0.32",
     "pydantic>=2.9",
     "httpx>=0.27",
+    # Only imported inside db.py's Postgres branch (connect() with a postgres://
+    # DSN); SQLite-only local dev never touches it. Kept as a base dependency
+    # rather than an extra so `uv run` needs no special install step either way.
+    "psycopg[binary]>=3.2",
 ]
 
 [project.optional-dependencies]
