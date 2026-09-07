@@ -1,0 +1,9 @@
+# Shell scripts here are sourced/executed directly on Linux (inside the
+# OpenFOAM container, on Phoenix/ICE compute nodes) -- a CRLF baked into the
+# committed blob by a Windows checkout breaks them at runtime (e.g. "bad
+# interpreter: /bin/bash^M", or a subtler corruption of a comparison/heredoc
+# mid-script) with no signal until it actually runs there. Force LF in the
+# repository regardless of what any individual clone's core.autocrlf says,
+# so this class of bug can't be reintroduced by a future commit made on
+# Windows with autocrlf=true.
+*.sh text eol=lf
