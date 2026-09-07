@@ -104,3 +104,54 @@ def test_healthz_reports_scope_counts_but_never_values(tmp_path):
     assert body.json()["scopes"] == {"write": 2, "read": 1}
     for secret in ("w1", "w2", "r1"):
         assert secret not in body.text
+
+
+# Every mutating endpoint, with a WELL-FORMED body. The body shape matters: FastAPI
+# validates it before the auth dependency runs, so a malformed request answers 422
+# without auth ever being consulted. Probing with a bad body therefore proves
+# nothing about whether the endpoint is guarded -- an easy way to convince yourself
+# a hole exists, or worse, that one does not.
+MUTATING = [
+    ("/v1/lease", {"worker_id": "probe", "count": 1}),
+    ("/v1/cases", []),
+    ("/v1/heartbeat", {"case_id": "x", "worker_id": "probe"}),
+    ("/v1/complete", {"case_id": "x", "worker_id": "probe", "result_uri": "s3://x"}),
+    ("/v1/fail", {"case_id": "x", "worker_id": "probe", "error": "e"}),
+    ("/v1/release", {"case_id": "x", "worker_id": "probe"}),
+]
+
+
+@pytest.mark.parametrize("path,body", MUTATING)
+def test_anonymous_cannot_mutate(tmp_path, path, body):
+    c = client(tmp_path, CASEBROKER_WRITE_TOKENS="w", CASEBROKER_READ_TOKENS="r")
+    assert c.post(path, json=body).status_code == 401
+
+
+@pytest.mark.parametrize("path,body", MUTATING)
+def test_a_read_token_cannot_mutate(tmp_path, path, body):
+    """The read token is a real credential boundary, not a UI that hides buttons."""
+    c = client(tmp_path, CASEBROKER_WRITE_TOKENS="w", CASEBROKER_READ_TOKENS="r")
+    r = c.post(path, json=body, headers={"Authorization": "Bearer r"})
+    assert r.status_code == 401, f"{path} accepted a read-only token ({r.status_code})"
+
+
+def test_whoami_adds_no_oracle_that_the_guarded_endpoints_lack(tmp_path):
+    """whoami is unauthenticated by design; it must not be a NEW disclosure.
+
+    Anything it reveals about a candidate token -- valid or not -- was already
+    readable off /v1/status's 200-vs-401. It labels that answer rather than making
+    a caller infer it; the underlying disclosure is identical.
+    """
+    c = client(tmp_path, CASEBROKER_WRITE_TOKENS="w", CASEBROKER_READ_TOKENS="r")
+    for token, valid in (("w", True), ("r", True), ("bogus", False)):
+        h = {"Authorization": f"Bearer {token}"}
+        via_status = c.get("/v1/status", headers=h).status_code == 200
+        via_whoami = c.get("/v1/whoami", headers=h).json()["scope"] != "none"
+        assert via_status == via_whoami == valid
+
+
+def test_whoami_never_returns_a_token_value(tmp_path):
+    c = client(tmp_path, CASEBROKER_WRITE_TOKENS="supersecret", CASEBROKER_READ_TOKENS="alsosecret")
+    for h in ({}, {"Authorization": "Bearer supersecret"}, {"Authorization": "Bearer nope"}):
+        body = c.get("/v1/whoami", headers=h).text
+        assert "supersecret" not in body and "alsosecret" not in body
