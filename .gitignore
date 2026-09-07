@@ -5,3 +5,11 @@ caddy_data/
 *.sqlite-shm
 .venv/
 __pycache__/
+
+# .env.example says "Copy to .env", and that copy holds a live write token --
+# which grants lease/complete/fail and adding cases. This repo is public, so an
+# un-ignored .env is one `git add -A` away from publishing the campaign's
+# credentials. .env.example itself stays tracked; it contains only placeholders.
+.env
+.env.*
+!.env.example
