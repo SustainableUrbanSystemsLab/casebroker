@@ -182,6 +182,21 @@ class Lease:
 _LOCK = threading.RLock()
 
 
+def _is_connection_error(exc: BaseException) -> bool:
+    """Is this the connection dying, rather than the query being wrong?
+
+    A bad query must not trigger a reconnect -- that would paper over real bugs
+    and churn connections under a syntax error. psycopg raises OperationalError
+    (and InterfaceError for an already-closed connection) for transport-level
+    failures specifically, which is the distinction being drawn here.
+    """
+    try:
+        import psycopg
+    except Exception:
+        return False
+    return isinstance(exc, (psycopg.OperationalError, psycopg.InterfaceError))
+
+
 class PgConnection:
     """Thin shim so call sites written for SQLite keep working against Postgres.
 
@@ -202,17 +217,68 @@ class PgConnection:
     :func:`lease` and :func:`_by_lease`).
     """
 
-    def __init__(self, raw):
+    def __init__(self, raw, dsn: str | None = None):
         self._raw = raw
+        # Kept so a dead connection can be replaced in place. The identity of
+        # THIS object never changes, which is what makes the repair invisible:
+        # create_app() opens one connection at startup and every route closes
+        # over it, so without a stable wrapper there is no way to hand the
+        # running process a new one short of restarting it.
+        self._dsn = dsn
+
+    def _reconnect(self) -> bool:
+        """Replace a dead underlying connection. True if a new one was opened.
+
+        Postgres connections do not last forever and nothing here pretended
+        otherwise on purpose -- they are dropped by a pooler timing out, a
+        Supabase maintenance restart, or (the case that prompted this) enabling
+        SSL enforcement, which terminates connections established before it. The
+        process then held one permanently broken connection and answered 500 to
+        every query for the rest of its life, while /healthz -- which touches no
+        database -- kept reporting ok. Only a manual redeploy cleared it.
+        """
+        if not self._dsn:
+            return False
+        import psycopg
+        from psycopg.rows import dict_row
+        try:
+            self._raw.close()
+        except Exception:
+            pass                      # already dead; nothing to salvage
+        self._raw = psycopg.connect(self._dsn, autocommit=True,
+                                    row_factory=dict_row, prepare_threshold=None)
+        return True
 
     def execute(self, sql: str, params: Iterable[Any] = ()) -> "_PgCursor":
         if sql.strip().upper() == "BEGIN IMMEDIATE":
             sql = "BEGIN"
-        cur = self._raw.cursor()
-        cur.execute(sql.replace("?", "%s"), tuple(params) if params else None)
+        sql = sql.replace("?", "%s")
+        params = tuple(params) if params else None
+        # Known-dead up front: reconnect before running anything. Safe because
+        # nothing has been sent yet, so there is no half-applied work to repeat.
+        if getattr(self._raw, "closed", False):
+            self._reconnect()
+        try:
+            cur = self._raw.cursor()
+            cur.execute(sql, params)
+        except Exception as exc:
+            # Deliberately NOT a retry. This statement may be one inside an
+            # explicit BEGIN..COMMIT (see lease/complete/fail), and re-running it
+            # on a new connection would execute it outside the transaction its
+            # caller believes it is in -- a far worse failure than the 500 the
+            # caller is already getting. So: repair the connection for whoever
+            # comes next, and let THIS request fail honestly.
+            if _is_connection_error(exc):
+                try:
+                    self._reconnect()
+                except Exception:
+                    pass              # next request tries again
+            raise
         return _PgCursor(cur)
 
     def executescript(self, sql: str) -> None:
+        if getattr(self._raw, "closed", False):
+            self._reconnect()
         with self._raw.cursor() as cur:
             cur.execute(sql)
 
@@ -282,7 +348,7 @@ def _connect_postgres(dsn: str) -> PgConnection:
     # connection that is correct on a transactional pooler.
     raw = psycopg.connect(dsn, autocommit=True, row_factory=dict_row,
                           prepare_threshold=None)
-    wrapped = PgConnection(raw)
+    wrapped = PgConnection(raw, dsn)
     with _LOCK:
         wrapped.executescript(PG_SCHEMA)
     return wrapped

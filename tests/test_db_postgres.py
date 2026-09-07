@@ -241,3 +241,34 @@ def test_for_update_skip_locked_lets_a_second_transaction_see_a_different_row():
         b.rollback()
         a.close()
         b.close()
+
+
+def test_a_dead_connection_is_replaced_rather_than_poisoning_the_process():
+    """A dropped Postgres connection must not 500 every request until a redeploy.
+
+    create_app() opens ONE connection at startup and every route closes over it.
+    When SSL enforcement was switched on at Supabase it terminated the
+    connections established before it -- and the running service then answered
+    500 to every query for the rest of its life, while /healthz, which touches no
+    database, kept reporting ok. Only a manual redeploy cleared it.
+    """
+    conn = fresh_conn()
+    assert conn.execute("SELECT 1 AS n").fetchone()["n"] == 1
+
+    conn._raw.close()                      # exactly what the server side did
+    assert conn._raw.closed
+
+    # The SAME wrapper object -- every route's closure still points at it -- but
+    # the connection underneath has been replaced.
+    assert conn.execute("SELECT 1 AS n").fetchone()["n"] == 1
+    assert not conn._raw.closed
+
+
+def test_a_bad_query_does_not_trigger_a_reconnect():
+    """Only transport failures reconnect; a broken query must still just fail."""
+    import psycopg
+    conn = fresh_conn()
+    before = conn._raw
+    with pytest.raises(psycopg.Error):
+        conn.execute("SELECT * FROM a_table_that_does_not_exist")
+    assert conn._raw is before, "a SQL error must not churn the connection"
