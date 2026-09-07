@@ -27,6 +27,7 @@ Why a broker rather than splitting the case list across machines up front:
 | `runner/run_case.sh` | The per-case seam to the CFD: build → mesh → solve → sample, on node-local scratch |
 | `slurm/phoenix_worker.sbatch` | A pool of pull-based workers on Phoenix's free, preemptible `embers` QOS |
 | `CHANGELOG.md` | What changed in each release, and the semantic-versioning contract |
+| `.github/workflows/release.yml` | Tag-triggered GitHub Release; validates the tag against `pyproject.toml` first |
 | `tests/` | 73 tests against SQLite (no external dependency), plus 7 more in `test_db_postgres.py` that run only when `CASEBROKER_TEST_PG_DSN` points at a real Postgres instance |
 
 ## Run it
@@ -196,6 +197,11 @@ Cutting a release is therefore: bump `version` in `pyproject.toml`, move the
 ```bash
 git tag -a v0.2.0 -m "v0.2.0" && git push origin v0.2.0
 ```
+
+Pushing that tag is what publishes the release: `.github/workflows/release.yml`
+fires on any `v*.*.*` tag, **refuses to publish if the tag disagrees with
+`pyproject.toml`**, and creates the GitHub Release. So the tag cannot drift from
+the declared version any more than the code can.
 
 `/healthz` reporting `version` is what makes a deploy checkable from outside:
 

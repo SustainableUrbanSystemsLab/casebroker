@@ -1,0 +1,105 @@
+name: release
+
+# Triggered by pushing a semver tag, e.g.:
+#   git tag v1.2.3 && git push origin v1.2.3
+#
+# Validates that the tag version matches pyproject.toml before creating the
+# GitHub Release, so the two sources can never drift.
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"        # v1.2.3
+      - "v[0-9]+.[0-9]+.[0-9]+-*"       # v1.2.3-rc.1, v1.2.3-beta.2, …
+
+jobs:
+  release:
+    name: Validate & publish GitHub Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # needed to create the release
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history so we can diff commits since last tag
+
+      - uses: astral-sh/setup-uv@v3
+
+      # ── 1. Extract the version declared in pyproject.toml ──────────────────
+      - name: Read version from pyproject.toml
+        id: pkg
+        run: |
+          pkg_version=$(python3 - <<'EOF'
+          import tomllib, pathlib
+          data = tomllib.loads(pathlib.Path("pyproject.toml").read_text())
+          print(data["project"]["version"])
+          EOF
+          )
+          echo "version=$pkg_version" >> "$GITHUB_OUTPUT"
+          echo "pyproject.toml version: $pkg_version"
+
+      # ── 2. Strip the leading 'v' from the git tag ──────────────────────────
+      - name: Parse git tag
+        id: tag
+        run: |
+          tag="${GITHUB_REF_NAME}"             # e.g. v1.2.3
+          semver="${tag#v}"                     # e.g. 1.2.3
+          echo "tag=$tag"   >> "$GITHUB_OUTPUT"
+          echo "semver=$semver" >> "$GITHUB_OUTPUT"
+          echo "git tag: $tag  →  semver: $semver"
+
+      # ── 3. Guard: tag must match pyproject.toml ────────────────────────────
+      - name: Verify tag matches pyproject.toml
+        run: |
+          tag_ver="${{ steps.tag.outputs.semver }}"
+          pkg_ver="${{ steps.pkg.outputs.version }}"
+          if [ "$tag_ver" != "$pkg_ver" ]; then
+            echo "::error::Tag version ($tag_ver) does not match pyproject.toml version ($pkg_ver)."
+            echo "::error::Update [project].version in pyproject.toml before tagging."
+            exit 1
+          fi
+          echo "✓ tag $tag_ver matches pyproject.toml $pkg_ver"
+
+      # ── 4. Run the full test suite before releasing ────────────────────────
+      - name: Run tests
+        run: uv run --extra dev pytest tests/ --ignore=tests/test_db_postgres.py -q
+
+      # ── 5. Build changelog since the previous tag ──────────────────────────
+      - name: Generate changelog
+        id: changelog
+        run: |
+          prev_tag=$(git tag --sort=-version:refname | grep -v "^${{ steps.tag.outputs.tag }}$" | head -1)
+          if [ -z "$prev_tag" ]; then
+            range="HEAD"
+            header="Initial release"
+          else
+            range="${prev_tag}..${{ steps.tag.outputs.tag }}"
+            header="Changes since ${prev_tag}"
+          fi
+
+          changelog=$(git log "$range" --pretty=format:"- %s (%h)" --no-merges)
+
+          # Write to file so the multiline content survives GITHUB_OUTPUT quoting
+          {
+            echo "## $header"
+            echo ""
+            echo "$changelog"
+          } > /tmp/changelog.md
+
+          cat /tmp/changelog.md
+
+      # ── 6. Create the GitHub Release ───────────────────────────────────────
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          is_prerelease=false
+          if echo "${{ steps.tag.outputs.tag }}" | grep -qE '-(alpha|beta|rc)'; then
+            is_prerelease=true
+          fi
+
+          gh release create "${{ steps.tag.outputs.tag }}" \
+            --title "casebroker ${{ steps.tag.outputs.tag }}" \
+            --notes-file /tmp/changelog.md \
+            $([ "$is_prerelease" = "true" ] && echo "--prerelease")

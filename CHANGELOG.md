@@ -19,6 +19,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 - `tests/test_version.py` — asserts every surface agrees, and fails if a version
   literal is ever pasted back into a source file.
 - `CHANGELOG.md` (this file).
+- `.github/workflows/release.yml` — pushing a `v*.*.*` tag publishes a GitHub
+  Release, refusing to do so if the tag disagrees with `pyproject.toml`.
 
 ### Fixed
 

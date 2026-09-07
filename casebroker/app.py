@@ -23,9 +23,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
-from casebroker import __version__
-
-from . import db, ids
+from . import __version__, db, ids
 
 MAX_LEASE_SECONDS = 24 * 3600
 
