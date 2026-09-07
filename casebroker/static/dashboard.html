@@ -54,6 +54,8 @@
     --shadow: 0 3px 6px rgba(140, 149, 159, 0.15);
     --shadow-md: 0 8px 24px rgba(140, 149, 159, 0.2);
     --ring: rgba(9, 105, 218, 0.3);
+    --btn-bg: #f6f8fa;
+    --btn-border: rgba(31, 35, 40, 0.15);
   }
 
   /* GitHub "Dark Dimmed" (Primer). Each value below is a real Primer token --
@@ -81,7 +83,7 @@
     --accent-light: rgba(70, 149, 74, 0.15);
     --accent-hover: #6bc46e;
     --primary: #539bf5;
-    --primary-light: rgba(65, 132, 228, 0.15);
+    --primary-light: rgba(65, 132, 228, 0.1);
     --primary-hover: #6cb6ff;
     --warn: #c69026;
     --warn-light: rgba(174, 124, 20, 0.15);
@@ -93,18 +95,23 @@
     --shadow: 0 3px 6px #010409;
     --shadow-md: 0 8px 24px #010409;
     --ring: rgba(83, 155, 245, 0.35);
+    --btn-bg: #373e47;                        /* btn.bg */
+    --btn-border: rgba(205, 217, 229, 0.1);   /* btn.border */
   }
 
 
   [data-theme="dark"] button.primary {
-    background: #347d39;
-    border-color: #3fb950;
-    color: #f0f6fc;
+    background: #347d39;                      /* btn.primary.bg */
+    /* btn.primary.border is a translucent light edge, not a colour. The old
+       #3fb950 is GitHub DARK's green, not Dimmed's, and ringing a green button
+       in a brighter green is most of why this control shouted. */
+    border-color: rgba(205, 217, 229, 0.1);
+    color: #ffffff;                           /* btn.primary.text */
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
   }
   [data-theme="dark"] button.primary:hover {
-    background: #46954a;
-    border-color: #57ab5a;
+    background: #46954a;                      /* btn.primary.hoverBg */
+    border-color: rgba(205, 217, 229, 0.1);
   }
   [data-theme="dark"] .brand-logo {
     background: linear-gradient(135deg, #347d39 0%, #316dca 100%);
@@ -373,8 +380,8 @@
     font-weight: 600;
     padding: 9px 16px;
     border-radius: 8px;
-    border: 1px solid var(--border);
-    background: var(--surface);
+    border: 1px solid var(--btn-border);
+    background: var(--btn-bg);
     color: var(--text-primary);
     cursor: pointer;
     display: inline-flex;
