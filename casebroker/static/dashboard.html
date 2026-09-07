@@ -10,7 +10,12 @@
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
   :root {
-    color-scheme: light dark;
+    /* Follows data-theme, never the OS: dark is this dashboard's default and is
+       set explicitly on <html>, so leaving this as `light dark` painted native
+       scrollbars, <select>/<input> internals and the token field's autofill
+       highlight in LIGHT for anyone whose OS was in light mode -- on a dark
+       page. The [data-theme="dark"] block below flips it back. */
+    color-scheme: light;
     --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
     --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 
@@ -43,7 +48,17 @@
     --ring: rgba(37, 99, 235, 0.2);
   }
 
+  /* GitHub "Dark Dimmed" (Primer). Each value below is a real Primer token --
+     keep it that way; picking an arbitrary nearby hex is what makes a dimmed
+     theme look muddy. Mapping: bg=canvas.default, surface=canvas.overlay,
+     surface-elevated=canvas.inset (a RECESSED well -- inputs, table headers,
+     hover fills -- despite the name), surface-hover/border-subtle=border.muted,
+     border=border.default, text-primary=fg.default, text-muted=fg.muted,
+     accent=success.fg, primary=accent.fg, warn=attention.fg, bad=danger.fg.
+     --text-secondary is the one deliberate interpolation, sitting between
+     fg.default and fg.muted for the reduced-contrast look. */
   [data-theme="dark"] {
+    color-scheme: dark;
     --bg: #22272e;
     --surface: #2d333b;
     --surface-elevated: #1c2128;
@@ -72,36 +87,6 @@
     --ring: rgba(83, 155, 245, 0.35);
   }
 
-  @media (prefers-color-scheme: dark) {
-    :root:not([data-theme="light"]) {
-      --bg: #22272e;
-      --surface: #2d333b;
-      --surface-elevated: #1c2128;
-      --surface-hover: #373e47;
-      --border: #444c56;
-      --border-subtle: #373e47;
-      --text-primary: #adbac7;
-      --text-secondary: #909dab;
-      --text-muted: #768390;
-      --accent: #57ab5a;
-      --accent-rgb: 87, 171, 90;
-      --accent-light: rgba(87, 171, 90, 0.15);
-      --accent-hover: #6bc46e;
-      --primary: #539bf5;
-      --primary-light: rgba(83, 155, 245, 0.15);
-      --primary-hover: #6cb6ff;
-      --warn: #c69026;
-      --warn-light: rgba(198, 144, 38, 0.15);
-      --bad: #e5534b;
-      --bad-light: rgba(229, 83, 75, 0.15);
-      --info: #539bf5;
-      --info-light: rgba(83, 155, 245, 0.15);
-      --shadow-sm: 0 1px 0 rgba(27, 31, 36, 0.04);
-      --shadow: 0 3px 6px rgba(0, 0, 0, 0.2);
-      --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.25);
-      --ring: rgba(83, 155, 245, 0.35);
-    }
-  }
 
   [data-theme="dark"] button.primary {
     background: #347d39;
@@ -118,22 +103,6 @@
     box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3);
   }
 
-  @media (prefers-color-scheme: dark) {
-    :root:not([data-theme="light"]) button.primary {
-      background: #347d39;
-      border-color: #3fb950;
-      color: #f0f6fc;
-      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
-    }
-    :root:not([data-theme="light"]) button.primary:hover {
-      background: #46954a;
-      border-color: #57ab5a;
-    }
-    :root:not([data-theme="light"]) .brand-logo {
-      background: linear-gradient(135deg, #347d39 0%, #316dca 100%);
-      box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3);
-    }
-  }
 
   * { box-sizing: border-box; }
   body {
@@ -792,7 +761,7 @@
 
 <header>
   <div class="header-inner">
-    <a class="brand-group" href="https://casebroker.onrender.com/" target="_blank" rel="noopener noreferrer" title="Open live dashboard">
+    <a class="brand-group" href="/" title="Dashboard home">
       <div class="brand-logo" aria-hidden="true">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M17.7 7.7a2.5 2.5 0 1 1 1.8 4.3H2"/>
@@ -803,7 +772,7 @@
       <div>
         <h1 class="brand-title">
           Wind v2 Case Broker
-          <span class="brand-badge" id="brokerDbBadge">v0.1.0</span>
+          <span class="brand-badge" id="brokerDbBadge" hidden></span>
         </h1>
       </div>
     </a>
@@ -1220,8 +1189,8 @@
     const icon = $("themeIcon");
     if (btn) {
       btn.title = isDark
-        ? "Soft dark: A dark theme with reduced contrast for comfortable viewing in low-light environments."
-        : "Switch to Soft dark theme";
+        ? "Switch to light theme"
+        : "Switch to soft dark theme (reduced contrast for low-light environments)";
     }
     if (icon) {
       icon.innerHTML = isDark
@@ -1370,9 +1339,18 @@
       const res = await fetch(base + "/healthz");
       if (res.ok) {
         const h = await res.json();
-        if (h.db) {
-          const dbLabel = h.db.startsWith("postgres") ? "Postgres" : "SQLite";
-          $("brokerDbBadge").textContent = `${dbLabel} • ${h.auth === "token" ? "auth required" : "open"}`;
+        // The version is whatever the RUNNING service reports, never a
+        // constant baked into this page -- that is the whole point of the
+        // single source of truth in pyproject.toml. Older brokers predate the
+        // field, so it is shown only when present rather than as "undefined".
+        const badge = $("brokerDbBadge");
+        const parts = [];
+        if (h.version) parts.push(`v${h.version}`);
+        if (h.db) parts.push(h.db.startsWith("postgres") ? "Postgres" : "SQLite");
+        if (h.auth) parts.push(h.auth === "token" ? "auth required" : "open");
+        if (parts.length) {
+          badge.textContent = parts.join(" • ");
+          badge.hidden = false;
         }
         return h;
       }

@@ -23,6 +23,8 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
+from casebroker import __version__
+
 from . import db, ids
 
 MAX_LEASE_SECONDS = 24 * 3600
@@ -144,7 +146,7 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         readonly_tokens = [t.strip() for t in
                           os.environ.get("CASEBROKER_READONLY_TOKENS", "").split(",") if t.strip()]
 
-    app = FastAPI(title="Wind v2 case broker", version="0.1.0")
+    app = FastAPI(title="Wind v2 case broker", version=__version__)
     conn = db.connect(db_path)
     app.state.db_path = db_path
 
@@ -184,7 +186,12 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
 
     @app.get("/healthz")
     def healthz() -> dict[str, Any]:
-        return {"ok": True, "auth": "token" if (tokens or readonly_tokens) else "OPEN",
+        # `version` is safe to expose unauthenticated -- it is already in the
+        # public OpenAPI document and in the repo -- and it is what lets the
+        # deploy smoke test assert that the RUNNING service is the commit that
+        # was just pushed, instead of trusting a deploy's own status field.
+        return {"ok": True, "version": __version__,
+                "auth": "token" if (tokens or readonly_tokens) else "OPEN",
                 "readonly_auth": bool(readonly_tokens),
                 "db": _redact_db_target(db_path)}
 

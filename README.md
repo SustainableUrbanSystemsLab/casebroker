@@ -26,7 +26,8 @@ Why a broker rather than splitting the case list across machines up front:
 | `casebroker/worker.py` | The client: lease → run → report, with heartbeat and SIGTERM release |
 | `runner/run_case.sh` | The per-case seam to the CFD: build → mesh → solve → sample, on node-local scratch |
 | `slurm/phoenix_worker.sbatch` | A pool of pull-based workers on Phoenix's free, preemptible `embers` QOS |
-| `tests/` | 34 tests against SQLite (no external dependency), plus 7 more in `test_db_postgres.py` that run only when `CASEBROKER_TEST_PG_DSN` points at a real Postgres instance |
+| `CHANGELOG.md` | What changed in each release, and the semantic-versioning contract |
+| `tests/` | 73 tests against SQLite (no external dependency), plus 7 more in `test_db_postgres.py` that run only when `CASEBROKER_TEST_PG_DSN` points at a real Postgres instance |
 
 ## Run it
 
@@ -101,6 +102,7 @@ restrictions.
 | `POST /v1/fail` | Report a failure; `retryable=false` quarantines immediately |
 | `POST /v1/release` | Graceful preemption — requeues and **refunds the attempt** |
 | `GET /v1/status` | Counts by state and split, expired leases, 24 h throughput, ETA |
+| `GET /healthz` | Liveness, plus the running `version`, auth mode and redacted DB target. **Unauthenticated** — see Deploying |
 
 State machine:
 
@@ -167,6 +169,39 @@ statements. Without it, a transactional pooler can route consecutive
 transactions to different backend connections, and a prepared-statement name
 collides across sessions — measured as `DuplicatePreparedStatement` errors
 starting on roughly the sixth call to the same query text.
+
+## Versioning
+
+[Semantic versioning](https://semver.org), declared **once** in
+`pyproject.toml`. What the components mean for this service specifically:
+
+- **MAJOR** — a breaking change to the worker-facing protocol in the table
+  above. Workers are long-lived and deployed across machines nobody is going to
+  restart in a hurry (a Phoenix `embers` pool can be mid-lease for an hour), so
+  a broker that stops speaking the old protocol strands them.
+- **MINOR** — a backwards-compatible addition: a new endpoint, a new optional
+  field, a new dashboard feature.
+- **PATCH** — a fix that changes no shape anybody can observe.
+
+Nothing else in the tree hardcodes the number. `casebroker/__init__.py` reads it
+back out of the installed distribution's metadata, and everything that reports a
+version — the OpenAPI document, `/healthz`, the dashboard's header badge — goes
+through `casebroker.__version__`. `tests/test_version.py` asserts they all agree
+and **fails if a version literal is ever pasted into a source file again**, which
+is how the three copies that used to exist got out of step in the first place.
+
+Cutting a release is therefore: bump `version` in `pyproject.toml`, move the
+`Unreleased` entries in `CHANGELOG.md` under the new number, commit, and tag it:
+
+```bash
+git tag -a v0.2.0 -m "v0.2.0" && git push origin v0.2.0
+```
+
+`/healthz` reporting `version` is what makes a deploy checkable from outside:
+
+```bash
+curl -s https://casebroker.example.org/healthz | python3 -c "import json,sys; print(json.load(sys.stdin)['version'])"
+```
 
 ## Deploying
 

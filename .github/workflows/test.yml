@@ -106,6 +106,14 @@ jobs:
           # public repo's public Action logs even though they are not secrets.
           code=$(curl -s -o /tmp/healthz.json -w "%{http_code}" "$RENDER_URL/healthz")
           ok=$(python3 -c "import json; print(json.load(open('/tmp/healthz.json')).get('ok'))")
-          echo "http_status=$code ok=$ok"
+          # `version` is public (it is in the repo and in the OpenAPI document),
+          # so unlike `db` it is safe to echo -- and it is the only field that
+          # says WHAT is serving traffic rather than merely that something is.
+          ver=$(python3 -c "import json; print(json.load(open('/tmp/healthz.json')).get('version','MISSING'))")
+          echo "http_status=$code ok=$ok version=$ver"
           test "$code" = "200" -a "$ok" = "True"
+          # A broker that cannot say its own version is one built before the
+          # single-source-of-truth wiring existed, which means this deploy did
+          # not ship the code this workflow just tested.
+          test "$ver" != "MISSING" -a "$ver" != "None"
 
