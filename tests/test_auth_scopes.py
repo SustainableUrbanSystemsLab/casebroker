@@ -155,3 +155,21 @@ def test_whoami_never_returns_a_token_value(tmp_path):
     for h in ({}, {"Authorization": "Bearer supersecret"}, {"Authorization": "Bearer nope"}):
         body = c.get("/v1/whoami", headers=h).text
         assert "supersecret" not in body and "alsosecret" not in body
+
+
+def test_share_token_requires_write_and_returns_the_read_token(tmp_path):
+    """Not an escalation: a write token already passes every read gate, so the
+    caller can already do strictly more than the credential handed back."""
+    c = client(tmp_path, CASEBROKER_WRITE_TOKENS="w", CASEBROKER_READ_TOKENS="r")
+    assert c.get("/v1/share-token").status_code == 401                      # anonymous
+    assert c.get("/v1/share-token",
+                 headers={"Authorization": "Bearer r"}).status_code == 401  # read cannot
+    got = c.get("/v1/share-token", headers={"Authorization": "Bearer w"})
+    assert got.status_code == 200 and got.json()["token"] == "r"
+
+
+def test_share_token_is_404_when_no_read_token_is_configured(tmp_path):
+    """404, not an empty string: the UI must say so rather than offer a dead link."""
+    c = client(tmp_path, CASEBROKER_WRITE_TOKENS="w")
+    assert c.get("/v1/share-token",
+                 headers={"Authorization": "Bearer w"}).status_code == 404

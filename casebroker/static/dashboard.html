@@ -959,27 +959,16 @@
       <span class="dot"></span>
       <span class="lbl">Connected</span>
       <span id="connectedDb" class="conn-db"></span>
-      <button id="editConnection" type="button" style="margin-left:auto; font-size:0.8rem; padding:4px 10px;">Edit connection</button>
+      <button id="copyRoLink" type="button" style="margin-left:auto; font-size:0.8rem; padding:4px 10px;">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+          <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+        </svg>
+        Copy read-only link
+      </button>
+      <button id="editConnection" type="button" style="font-size:0.8rem; padding:4px 10px;">Edit connection</button>
     </div>
 
-    <div class="row" style="margin-top:14px; padding-top:14px; border-top:1px solid var(--border); align-items:flex-end">
-      <div class="field" style="flex:2; min-width:260px">
-        <label for="roToken">
-          Share a read-only link
-          <span class="label-hint">(paste a CASEBROKER_READONLY_TOKENS value)</span>
-        </label>
-        <input type="password" id="roToken" autocomplete="off" placeholder="read-only token" />
-      </div>
-      <div>
-        <button id="copyRoLink" type="button">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-          </svg>
-          Copy read-only link
-        </button>
-      </div>
-    </div>
   </section>
 
   <!-- Campaign Status Panel -->
@@ -1863,8 +1852,13 @@
       showErr(null);
       // Collapse the connect form and show summary bar
       $("connectForm").style.display = "none";
+      // /v1/status answering while /healthz did not is a real, reachable state
+      // (a proxy or extension blocking one path, a stale broker URL). Saying
+      // "database unknown" there dressed a failed request up as a fact about the
+      // database; naming the failed check is true and points at the cause.
       const target = dbTarget(health);
-      $("connectedDb").textContent = target || "database unknown";
+      $("connectedDb").textContent =
+        target || (health ? "database not reported" : "health check unavailable");
       // Full redacted DSN on hover: the panel stays short, the detail stays
       // reachable when someone is actually debugging which instance they hit.
       $("connectedDb").title = (health && health.db) || "";
@@ -1941,13 +1935,22 @@
     refresh();
   });
 
-  $("copyRoLink").addEventListener("click", () => {
-    const tok = $("roToken").value.trim();
-    if (!tok) { showToast("Paste a read-only token first"); return; }
-    const url = new URL($("broker").value.trim() || location.origin);
-    url.searchParams.set("token", tok);
-    url.searchParams.set("ro", "1");
-    window.copyText(url.toString(), "Read-only link copied to clipboard");
+  // The broker mints the link. Nobody has to fetch CASEBROKER_READ_TOKENS out of
+  // a hosting dashboard and paste it into a form -- a procedure that reliably
+  // ends with production credentials in clipboards and chat logs. The value is
+  // never rendered: it goes from the response straight into the copied URL.
+  $("copyRoLink").addEventListener("click", async () => {
+    try {
+      const r = await api("/v1/share-token");
+      const url = new URL($("broker").value.trim() || location.origin);
+      url.searchParams.set("token", r.token);
+      url.searchParams.set("ro", "1");
+      window.copyText(url.toString(), "Read-only link copied to clipboard");
+    } catch (e) {
+      showToast(e.status === 404
+        ? "No read-only token is set on this broker (CASEBROKER_READ_TOKENS)"
+        : "Could not create a read-only link — a write token is required");
+    }
   });
 
   $("focusTokenBtn").addEventListener("click", () => {

@@ -427,7 +427,10 @@ def test_dashboard_serves_a_shareable_readonly_deep_link(broker):
     assert "history.replaceState" in html, \
         "the token must not be left sitting in the visible address bar"
     # And the operator-side half: a way to actually GENERATE such a link.
-    assert 'id="roToken"' in html
+    # The read-only token is no longer pasted into the page: the dashboard asks
+    # the broker for it (GET /v1/share-token, write-auth) and builds the link.
+    assert 'id="copyRoLink"' in html
+    assert "/v1/share-token" in html
     assert 'id="copyRoLink"' in html
 
 

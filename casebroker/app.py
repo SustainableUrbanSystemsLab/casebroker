@@ -243,6 +243,30 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
                 "db": _redact_db_target(db_path)}
 
 
+    @app.get("/v1/share-token", dependencies=[WriteAuth])
+    def share_token() -> dict[str, Any]:
+        """The read-only token, for building a shareable link. WRITE auth required.
+
+        This is not an escalation, which is the only reason it can exist: a write
+        token already passes every read gate, so a caller who can call this can
+        already do strictly more than the credential it returns. Handing them the
+        lesser one discloses nothing they could not otherwise reach.
+
+        It exists because the alternative was worse in practice -- the dashboard
+        asked an operator to go and fetch CASEBROKER_READ_TOKENS out of the
+        hosting provider's environment tab and paste it into a form, which is a
+        procedure that ends with production credentials in clipboards and chat
+        messages. One click that never shows the value is safer than a workflow
+        that requires copying a secret by hand.
+
+        404 rather than an empty string when no read token is configured: the
+        dashboard must say "no read-only token is set on this broker" instead of
+        silently offering a link that cannot authenticate.
+        """
+        if not readonly_tokens:
+            raise HTTPException(404, "no read-only token is configured on this broker")
+        return {"token": readonly_tokens[0]}
+
     @app.get("/v1/whoami")
     def whoami(request: Request) -> dict[str, Any]:
         """What can the presented token do? Deliberately unauthenticated.
