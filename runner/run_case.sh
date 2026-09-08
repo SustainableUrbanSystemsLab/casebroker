@@ -24,6 +24,8 @@ NP="${WIND_NP:-24}"
 WC="${WIND_ROOT:?WIND_ROOT (shared storage root) not set}"
 IMG="${WIND_IMAGE:-docker.io/dicehub/openfoam:12}"
 CLI="${EDDY3D_CLI:?EDDY3D_CLI (path to eddy3d-cli) not set}"
+# The geometry builder lives in the parent repo beside this submodule.
+REAL_CITIES="${REAL_CITIES:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../real_cities" 2>/dev/null && pwd)}"
 
 # python3 on the clusters, python on the Windows workstation. Resolving it once
 # here rather than hardcoding python3 keeps the runner usable for a local dry run,
@@ -83,10 +85,32 @@ trap cleanup EXIT
 # The spec names STLs already staged on shared storage by the tile pipeline.
 BUILDINGS=$(printf '%s' "$SPEC" | "$PY" -c 'import json,sys; print(json.load(sys.stdin).get("buildings_stl",""))')
 TERRAIN=$(printf '%s' "$SPEC" | "$PY" -c 'import json,sys; print(json.load(sys.stdin).get("terrain_stl",""))')
-# Retryable, not fatal: an absent STL means the tile pipeline has not staged this
-# site yet, which is a statement about the pipeline and not about the site.
-[ -n "$BUILDINGS" ] || retry_case "spec carries no buildings_stl (geometry not staged for this site)"
-[ -n "$TERRAIN" ]   || retry_case "spec carries no terrain_stl (geometry not staged for this site)"
+# No STL in the spec means nobody has built this site's geometry yet, which for
+# the v2 campaign is every case: the sampler publishes coordinates, not meshes.
+# Build it here rather than pre-staging 5,000 tiles, because a worker already
+# knows the one site it needs, compute nodes have outbound internet, and the two
+# sources involved (Overture over S3, GEDTM30 as a COG) are windowed reads with
+# no shared rate limit -- so this parallelises with the fleet instead of
+# serialising behind a staging job. Cached under $WC/geometry, so a case that is
+# preempted and re-leased does not re-download.
+if [ -z "$BUILDINGS" ] || [ -z "$TERRAIN" ]; then
+    LAT=$(printf '%s' "$SPEC" | "$PY" -c 'import json,sys; print(json.load(sys.stdin)["lat"])')
+    LON=$(printf '%s' "$SPEC" | "$PY" -c 'import json,sys; print(json.load(sys.stdin)["lon"])')
+    GEO="$WC/geometry/$CASE_ID"
+    BUILDINGS="$GEO/${CASE_ID}_buildings.stl"
+    TERRAIN="$GEO/${CASE_ID}_terrain.stl"
+    if [ ! -f "$BUILDINGS" ] || [ ! -f "$TERRAIN" ]; then
+        log "building geometry for $LAT,$LON"
+        mkdir -p "$GEO"
+        # Exit 3 is site_geometry's "no usable building here" -- a real property
+        # of the site, not a transient fault, so that one IS fatal. Anything else
+        # (a DTM host down, an Overture timeout) is retryable.
+        "$PY" "$REAL_CITIES/site_geometry.py" --site "$CASE_ID"               --lat "$LAT" --lon "$LON" --out "$GEO" >"$GEO/geometry.log" 2>&1
+        grc=$?
+        [ $grc -eq 3 ] && fatal_case "site has no usable buildings (see geometry.log)"
+        [ $grc -ne 0 ] && retry_case "geometry build failed rc=$grc (see $GEO/geometry.log)"
+    fi
+fi
 [ -f "$BUILDINGS" ] || retry_case "buildings STL not found: $BUILDINGS"
 [ -f "$TERRAIN" ]   || retry_case "terrain STL not found: $TERRAIN"
 cp "$BUILDINGS" "$SCRATCH/buildings.stl"
