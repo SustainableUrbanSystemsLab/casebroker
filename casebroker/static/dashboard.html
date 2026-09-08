@@ -475,6 +475,28 @@
   }
   .num.alert { color: var(--bad); }
 
+  .fleet-queue {
+    display: flex; flex-wrap: wrap; gap: 10px;
+    margin-bottom: 14px; padding-bottom: 12px;
+    border-bottom: 1px solid var(--border);
+  }
+  .fleet-card {
+    flex: 1 1 190px; min-width: 175px;
+    border: 1px solid var(--border); border-radius: 6px;
+    padding: 9px 12px; background: var(--surface-elevated);
+  }
+  .fleet-card .fc-name {
+    font-size: 11.5px; font-weight: 600; letter-spacing: 0.04em;
+    text-transform: uppercase; color: var(--text-muted);
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  .fleet-card .fc-nums { display: flex; gap: 16px; margin-top: 5px; align-items: baseline; }
+  .fleet-card .fc-n { font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .fleet-card .fc-lbl { font-size: 11px; color: var(--text-muted); margin-left: 4px; }
+  .fleet-card .fc-age { font-size: 10.5px; font-family: var(--font-mono); }
+  .fleet-card.stale { border-style: dashed; }
+  .fleet-card.stale .fc-n, .fleet-card.stale .fc-name { color: var(--text-muted); }
+
   .geo-wrap { min-height: 40px; }
   .geo-fig { display: flex; gap: 14px; align-items: flex-start; flex-wrap: wrap; }
   .geo-fig svg { background: var(--surface-elevated); border: 1px solid var(--border); border-radius: 6px; }
@@ -1080,6 +1102,8 @@
       <span class="chip" id="workerCountBadge">0 active</span>
     </div>
 
+    <div id="fleetQueue" class="fleet-queue" style="display:none"></div>
+
     <div id="workersEmpty" class="empty-state">—</div>
     <div class="table-wrap" id="workersTableWrap" style="display:none">
       <table id="workersTable">
@@ -1658,6 +1682,38 @@
       $("expiredText").textContent = "";
     }
 
+    // Scheduler queue, per cluster. This is REPORTED, not observed: the broker
+    // cannot see SLURM -- a queued worker has never called it and does not exist
+    // here until its first lease -- so without this "5,000 pending, 0 leased" is
+    // true and cannot distinguish "twenty workers are third in the queue" from
+    // "nothing is coming". Every card carries its age, because a snapshot nobody
+    // has refreshed describes a queue that has moved on, and showing that as
+    // current is the one way this panel could mislead.
+    const fleet = st.fleet || [];
+    const fq = $("fleetQueue");
+    if (fleet.length) {
+      fq.style.display = "flex";
+      fq.innerHTML = fleet.map((f) => {
+        const stale = f.age_seconds > 900;          // 15 min: longer than any poll
+        const age = f.age_seconds < 90 ? `${f.age_seconds}s ago`
+                  : f.age_seconds < 5400 ? `${Math.round(f.age_seconds / 60)}m ago`
+                  : `${Math.round(f.age_seconds / 3600)}h ago`;
+        return `<div class="fleet-card${stale ? " stale" : ""}">
+          <div class="fc-name"><span>${esc(f.cluster)}</span>
+            <span class="fc-age" style="color:${stale ? "var(--warn)" : "var(--text-muted)"}"
+                  title="${stale ? "stale — nobody has reported this queue recently" : "last reported"}">${age}</span></div>
+          <div class="fc-nums">
+            <span><span class="fc-n" style="color:var(--primary)">${f.running}</span><span class="fc-lbl">running</span></span>
+            <span><span class="fc-n">${f.queued}</span><span class="fc-lbl">queued</span></span>
+          </div>
+          ${f.detail ? `<div class="fc-age" style="color:var(--text-muted);margin-top:3px">${esc(f.detail)}</div>` : ""}
+        </div>`;
+      }).join("");
+    } else {
+      fq.style.display = "none";
+      fq.innerHTML = "";
+    }
+
     // Workers Table
     const workers = st.workers || [];
     $("workerCountBadge").textContent = `${workers.length} known`;
@@ -1696,7 +1752,9 @@
       }).join("");
     } else {
       $("workersEmpty").style.display = "block";
-      $("workersEmpty").textContent = "No workers have leased cases yet.";
+      $("workersEmpty").textContent = fleet.some((f) => f.queued > 0)
+        ? "No worker has leased a case yet — the queue above is still waiting for the scheduler."
+        : "No workers have leased cases yet.";
       $("workersTableWrap").style.display = "none";
       $("workersTable").style.display = "none";
     }

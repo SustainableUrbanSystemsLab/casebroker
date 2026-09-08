@@ -17,6 +17,7 @@ import argparse
 import json
 import os
 import secrets
+import subprocess
 import sys
 import urllib.error
 import urllib.request
@@ -116,6 +117,64 @@ def cmd_health(args) -> int:
     return 0
 
 
+def cmd_fleet(args) -> int:
+    """Report what a scheduler is holding, from squeue, to the broker.
+
+    Run on a login node -- that is the only place squeue exists. The broker
+    cannot see SLURM itself: a queued worker has never contacted it, so until its
+    first lease it does not exist there at all. Without this the dashboard can
+    say "5,000 pending, 0 leased" while twenty workers sit third in the queue,
+    and cannot tell that apart from nothing being scheduled.
+
+    Intended for cron, e.g. every 5 minutes:
+        */5 * * * * casebroker fleet --broker https://... --cluster Phoenix
+    """
+    import shutil
+    if not shutil.which("squeue"):
+        print("squeue not found — run this on a cluster login node", file=sys.stderr)
+        return 2
+    user = args.user or os.environ.get("USER") or ""
+    cmd = ["squeue", "-h", "-u", user, "-o", "%T"]
+    if args.name:
+        cmd += ["-n", args.name]
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    except Exception as e:                       # noqa: BLE001
+        print(f"squeue failed: {e}", file=sys.stderr)
+        return 2
+    if out.returncode != 0:
+        print(f"squeue failed: {out.stderr.strip()[:300]}", file=sys.stderr)
+        return 2
+
+    states = [ln.strip().upper() for ln in out.stdout.splitlines() if ln.strip()]
+    running = sum(1 for st in states if st == "RUNNING")
+    # Everything not running and not finishing is waiting on the scheduler.
+    # COMPLETING is counted as neither: it is on its way out, and counting it as
+    # queued would show capacity that is actually leaving.
+    queued = sum(1 for st in states if st in ("PENDING", "CONFIGURING", "REQUEUED",
+                                              "RESIZING", "SUSPENDED"))
+    token = _resolve_token(args.token, "write")
+    body = json.dumps({"cluster": args.cluster, "queued": queued, "running": running,
+                       "detail": args.detail}).encode("utf-8")
+    req = urllib.request.Request(args.broker.rstrip("/") + "/v1/fleet", data=body,
+                                 headers={"Content-Type": "application/json"},
+                                 method="POST")
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            r.read()
+    except urllib.error.HTTPError as e:
+        print(f"broker rejected the report: {e.code} "
+              f"{e.read()[:200].decode('utf-8', 'replace')}", file=sys.stderr)
+        return 1
+    except urllib.error.URLError as e:
+        print(f"could not reach {args.broker}: {e}", file=sys.stderr)
+        return 2
+    print(f"{args.cluster}: {running} running, {queued} queued")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="casebroker", description=__doc__.splitlines()[0])
     ap.add_argument("--version", action="version", version=f"casebroker {__version__}")
@@ -138,6 +197,15 @@ def main(argv: list[str] | None = None) -> int:
     c.add_argument("--expect", choices=("write", "read", "none"), default=None,
                    help="exit non-zero unless the scope is this (for CI)")
     c.set_defaults(func=cmd_check)
+
+    fl = sub.add_parser("fleet", help="report squeue counts to the broker (run on a login node)")
+    fl.add_argument("--broker", required=True)
+    fl.add_argument("--cluster", required=True, help="name shown on the dashboard, e.g. Phoenix")
+    fl.add_argument("--token", default=None, help="write token; '-' reads stdin; omitted reads the environment")
+    fl.add_argument("--user", default=None, help="squeue -u (default: $USER)")
+    fl.add_argument("--name", default=None, help="only count jobs with this --job-name")
+    fl.add_argument("--detail", default=None, help="free text shown under the counts, e.g. the QOS")
+    fl.set_defaults(func=cmd_fleet)
 
     h = sub.add_parser("health", help="a broker's version and auth posture")
     h.add_argument("--broker", required=True)
