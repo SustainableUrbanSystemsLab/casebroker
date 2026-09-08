@@ -1297,7 +1297,13 @@
       wrap.innerHTML = `<span style="font-size:12px;color:var(--bad)">could not load footprints: ${esc(e.message || e.status || e)}</span>`;
       return;
     }
-    const R = 520, S = 300, k = S / (2 * R);          // metres -> px, centred
+    // The drawing extends to the DOMAIN, not the footprint query. The query
+    // covers 520 m; the mesh box is 1304 m a side (504 m core + 800 m buffer),
+    // and the buffer is most of the domain -- so a picture scaled to the
+    // buildings alone hides the majority of what is actually meshed and makes
+    // the core look like the whole case.
+    const CORE_M = 504, BUFFER_M = 800, DOM_M = CORE_M + BUFFER_M;   // 1304
+    const S = 300, k = S / (2 * DOM_M);               // metres -> px, centred
     const [lat0, lon0] = d.centre;
     const mPerDegLat = 110540, mPerDegLon = 111320 * Math.cos(lat0 * Math.PI / 180);
     const toXY = ([lon, lat]) => [
@@ -1316,24 +1322,80 @@
       }
       if (h) modelled++; else flat++;
     }
-    const core = 504 * k;                              // the 1008 m sampled core
+    const core = CORE_M * k, dom = DOM_M * k;
+
+    // -- 45 degree isometric ------------------------------------------------
+    // Same footprints, same heights, seen from a corner. A plan view cannot show
+    // height at all, and height is what the inference above invents: a tile of
+    // uniform median blocks and a tile of real towers look identical from
+    // directly overhead and completely different from here.
+    const ISO = 300, HSCALE = 0.9;                    // px per metre of height
+    const isoPt = (x, y, z) => [
+      ISO / 2 + (x - y) * 0.7071,
+      ISO * 0.66 - (x + y) * 0.7071 * 0.5 - z,
+    ];
+    // Painter's algorithm: far corner first, so nearer blocks overdraw.
+    const solids = [];
+    for (const f of d.features) {
+      const h = (f.properties && f.properties.h) || 0;
+      for (const ring of rings(f.geometry)) {
+        const pts = ring.map(([lon, lat]) => [
+          (lon - lon0) * mPerDegLon * k, (lat - lat0) * mPerDegLat * k,
+        ]);
+        let cx = 0, cy = 0;
+        for (const [x, y] of pts) { cx += x; cy += y; }
+        cx /= pts.length; cy /= pts.length;
+        solids.push({ pts, h, depth: cx + cy, inferred: !(f.properties && f.properties.h) });
+      }
+    }
+    solids.sort((a, b) => a.depth - b.depth);
+    let iso = "";
+    for (const sd of solids) {
+      const hz = Math.min(sd.h, 120) * HSCALE * k * 8;   // clamp: one spire must not own the frame
+      const top = sd.pts.map(([x, y]) => isoPt(x, y, hz));
+      const base = sd.pts.map(([x, y]) => isoPt(x, y, 0));
+      const fill = sd.inferred ? "var(--text-muted)" : "var(--primary)";
+      // walls, then roof, so the roof reads on top
+      for (let i = 0; i < sd.pts.length - 1; i++) {
+        const q = [base[i], base[i + 1], top[i + 1], top[i]]
+          .map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(" ");
+        iso += `<polygon points="${q}" fill="${fill}" fill-opacity="0.35" stroke="${fill}" stroke-width="0.3" stroke-opacity="0.5"/>`;
+      }
+      iso += `<polygon points="${top.map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(" ")}" fill="${fill}" fill-opacity="0.95" stroke="none"/>`;
+    }
+    // ground plane: the domain square and the core, in the same projection
+    const gp = (c) => c.map(([x, y]) => isoPt(x, y, 0))
+      .map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(" ");
+    const sq = (r) => [[-r, -r], [r, -r], [r, r], [-r, r], [-r, -r]];
+    const isoGround =
+      `<polygon points="${gp(sq(dom))}" fill="var(--surface)" fill-opacity="0.35" stroke="var(--border)" stroke-width="1"/>` +
+      `<polygon points="${gp(sq(core))}" fill="none" stroke="var(--bad)" stroke-width="1.1" stroke-dasharray="4 3"/>`;
+
     wrap.innerHTML = `
       <div class="geo-fig">
         <svg viewBox="0 0 ${S} ${S}" width="${S}" height="${S}" role="img"
-             aria-label="Building footprints for this case; filled shapes carry a height and are meshed.">
+             aria-label="Plan view: building footprints, the sampled core and the full mesh domain.">
+          <rect x="${S/2-dom}" y="${S/2-dom}" width="${2*dom}" height="${2*dom}"
+                fill="none" stroke="var(--warn)" stroke-width="1.2"/>
           ${paths}
           <rect x="${S/2-core}" y="${S/2-core}" width="${2*core}" height="${2*core}"
                 fill="none" stroke="var(--bad)" stroke-width="1.2" stroke-dasharray="5 4"/>
           <circle cx="${S/2}" cy="${S/2}" r="2.5" fill="var(--bad)"/>
         </svg>
+        <svg viewBox="0 0 ${ISO} ${ISO}" width="${ISO}" height="${ISO}" role="img"
+             aria-label="Isometric view at 45 degrees; blue blocks have measured heights, grey blocks were inferred.">
+          ${isoGround}${iso}
+        </svg>
         <div class="geo-legend">
-          <div><span class="geo-swatch" style="background:var(--primary)"></span><b>${modelled}</b> extruded (has height)</div>
-          <div><span class="geo-swatch" style="border:1px solid var(--text-muted)"></span><b>${flat}</b> no height — not meshed</div>
-          <div><span class="geo-swatch" style="border:1px dashed var(--bad)"></span>1008 m sampled core</div>
+          <div><span class="geo-swatch" style="background:var(--primary)"></span><b>${modelled}</b> measured height</div>
+          <div><span class="geo-swatch" style="border:1px solid var(--text-muted)"></span><b>${flat}</b> height inferred</div>
+          <div><span class="geo-swatch" style="border:1px dashed var(--bad)"></span>${2*CORE_M} m sampled core</div>
+          <div><span class="geo-swatch" style="border:1px solid var(--warn)"></span>${2*DOM_M} m mesh domain</div>
           <div style="margin-top:6px;color:var(--text-muted)">release ${esc(d.release)}${d.cached ? " · cached" : ""}</div>
+          <div class="geo-note" style="margin-top:4px">Right: 45° isometric, heights to scale (clamped at 120 m).</div>
           <div class="geo-note">${modelled === 0
-            ? "No building carries a height here, so this site meshes as bare ground. That is the condition that fails a case."
-            : "Only the filled shapes become CFD geometry; outlines are footprints Overture knows but cannot extrude."}</div>
+            ? "Overture heights NONE of these. Every height is inferred from the LCZ class, so this tile's massing is entirely synthetic."
+            : `All ${modelled + flat} are extruded. Only ${modelled} carry a measured height (${Math.round(100 * modelled / (modelled + flat))}%); the rest are filled from this tile's median, and that ratio is what to judge the case on.`}</div>
         </div>
       </div>`;
   }
