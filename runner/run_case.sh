@@ -105,7 +105,12 @@ if [ -z "$BUILDINGS" ] || [ -z "$TERRAIN" ]; then
         # Exit 3 is site_geometry's "no usable building here" -- a real property
         # of the site, not a transient fault, so that one IS fatal. Anything else
         # (a DTM host down, an Overture timeout) is retryable.
-        "$PY" "$REAL_CITIES/site_geometry.py" --site "$CASE_ID"               --lat "$LAT" --lon "$LON" --out "$GEO" >"$GEO/geometry.log" 2>&1
+        # uv run --project, not $PY: site_geometry needs numpy, rasterio,
+        # trimesh and manifold3d, which live in the real_cities project venv.
+        # $PY is a bare interpreter resolved for parsing the spec -- it has none
+        # of them, and the failure surfaces as ModuleNotFoundError on the first
+        # import, identically for every case.
+        (cd "$REAL_CITIES" && uv run --project . python site_geometry.py               --site "$CASE_ID" --lat "$LAT" --lon "$LON" --out "$GEO")               >"$GEO/geometry.log" 2>&1
         grc=$?
         [ $grc -eq 3 ] && fatal_case "site has no usable buildings (see geometry.log)"
         [ $grc -ne 0 ] && retry_case "geometry build failed rc=$grc (see $GEO/geometry.log)"
