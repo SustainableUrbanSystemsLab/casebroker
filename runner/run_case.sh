@@ -232,17 +232,22 @@ json.dump({
     "wind": spec.get("wind", {"directions": [0, 45, 90, 135, 180, 225, 270, 315],
                               "speed": 5, "refHeight": 10, "roughness": 0.5,
                               "groundZ": float(os.environ.get("GROUND_Z", "0"))}),
-    # build-case defaults to buildingLevel 2 / groundLevel 1 -- 4 m cells on
-    # facades and 8 m on the ground against a 16 m background. One level finer
-    # on both: 2 m facades and 4 m ground. Measured on the Nanjing tile, that
-    # takes the mesh from 1.92 M to 5.6 M cells, so it is roughly a 3x cost per
-    # direction and the reason it is written here rather than left to a default
-    # -- it is a deliberate accuracy-for-compute trade, not a tweak.
-    # Spread AFTER the defaults, so a per-case spec can still override either.
+    # Refinement is left at build-case's defaults (buildingLevel 2 / groundLevel
+    # 1): 4 m cells on facades, 8 m on the ground, against a 16 m background.
+    #
+    # A previous commit set these one level finer here. Reverted, because a
+    # hand-written snappyHexMeshDict at those levels is NOT what Eddy3D builds at
+    # those levels, and the difference is a factor of five. Eddy3D's template
+    # also refines feature EDGES to a hard-coded level 4 and uses
+    # nCellsBetweenLevels 4, which compound with the surface levels: measured on
+    # this tile, a bare dict gave 5.6 M cells where build-case passed 26 M and
+    # was killed by the OOM killer mid-castellation, on a 128 GB machine.
+    #
+    # Raising these is still worth doing, but it has to come with the feature
+    # level and the transition width, and be measured through build-case rather
+    # than through a dict that merely shares its numbers.
     "geometry": {"buildingsStl": scratch + "/buildings.stl",
                  "terrainStl": scratch + "/terrain.stl",
-                 "buildingLevel": 3,
-                 "groundLevel": 2,
                  **spec.get("geometry", {})},
     "simulation": {**{"iterations": 1868, "writeInterval": 1868,
                       "turbulenceModel": "kEpsilon", "numericsLevel": 4},
