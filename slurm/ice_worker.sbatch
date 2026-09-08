@@ -61,6 +61,24 @@ command -v uv >/dev/null 2>&1 || {
 
 cd "$REPO/benchmark/casebroker" || exit 1
 
+# Keep the dashboard's queue card fresh. PACE forbids crontab ("You (pkastner3)
+# are not allowed to use this program"), so the reporting rides along with the
+# job that is already running: every five minutes for as long as this worker
+# lives. A worker is exactly the right reporter -- if none is running there is
+# nothing to report, and the card correctly goes stale.
+#
+# The token goes through the environment, not --token, so it stays out of the
+# process table. Failures are swallowed: a queue report must never be able to
+# take down the worker it is reporting on.
+export CASEBROKER_WRITE_TOKENS="$CASEBROKER_TOKEN"
+( while true; do
+      uv run casebroker fleet --broker "$CASEBROKER_URL"           --cluster "$CASEBROKER_CLUSTER" >/dev/null 2>&1 || true
+      sleep 300
+  done ) &
+FLEET_REPORTER=$!
+trap 'kill "$FLEET_REPORTER" 2>/dev/null' EXIT
+
+
 # MAX_CASES caps a validation run at a handful of cases. Leave it unset for a
 # real shift, where the worker keeps going until the queue drains or the wall
 # clock runs low.

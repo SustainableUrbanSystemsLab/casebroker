@@ -146,7 +146,7 @@
     box-shadow: var(--shadow-sm);
   }
   .header-inner {
-    max-width: 1200px;
+    max-width: 1560px;
     margin: 0 auto;
     padding: 12px 24px;
     display: flex;
@@ -244,7 +244,7 @@
 
   /* Main Container */
   main {
-    max-width: 1200px;
+    max-width: 1560px;
     width: 100%;
     margin: 0 auto;
     padding: 24px 20px 60px;
@@ -507,9 +507,16 @@
   /* KPI Stats Grid */
   .stats-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    /* Eight across on a wide screen, wrapping only when the viewport genuinely
+       cannot hold them. auto-fit with a 160px minimum let the seventh card wrap
+       to a second row on a 1200px page, which breaks the one thing this row is
+       for: reading the campaign's state as a single set. */
+    grid-template-columns: repeat(auto-fit, minmax(min(170px, 100%), 1fr));
     gap: 12px;
     margin-bottom: 20px;
+  }
+  @media (min-width: 1480px) {
+    .stats-grid { grid-template-columns: repeat(8, 1fr); }
   }
   .stat-card {
     border: 1px solid var(--border);
@@ -1232,7 +1239,7 @@
 <div id="toast"></div>
 
 <footer>
-  <div style="max-width: 1200px; margin: 0 auto; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
+  <div style="max-width: 1560px; margin: 0 auto; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
     <span>Talks directly to the broker's JSON API (<code class="inline">/v1/*</code>) from your browser.</span>
     <span>Token stored securely in your browser's local storage.</span>
   </div>

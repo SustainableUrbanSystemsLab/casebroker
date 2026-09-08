@@ -49,6 +49,10 @@ export WIND_IMAGE=${WIND_IMAGE:-docker.io/dicehub/openfoam:12}
 
 # One worker id per array task, stable across a requeue so the broker's worker
 # table shows a task's whole history rather than a new row each preemption.
+# Names this cluster on the dashboard and in every case's metrics. SLURM sets
+# SLURM_CLUSTER_NAME on PACE, but the fleet reporter below runs whether or not it
+# does, and an unnamed cluster would report as an empty string.
+export CASEBROKER_CLUSTER=${CASEBROKER_CLUSTER:-${SLURM_CLUSTER_NAME:-Phoenix}}
 export CASEBROKER_WORKER_ID="phoenix-${SLURM_ARRAY_JOB_ID}-${SLURM_ARRAY_TASK_ID}"
 
 echo "worker $CASEBROKER_WORKER_ID on $(hostname), $(nproc) cores, TMPDIR=${TMPDIR:-unset}"
@@ -72,6 +76,24 @@ command -v uv >/dev/null 2>&1 || {
 }
 
 cd "$REPO/benchmark/casebroker" || exit 1
+
+# Keep the dashboard's queue card fresh. PACE forbids crontab ("You (pkastner3)
+# are not allowed to use this program"), so the reporting rides along with the
+# job that is already running: every five minutes for as long as this worker
+# lives. A worker is exactly the right reporter -- if none is running there is
+# nothing to report, and the card correctly goes stale.
+#
+# The token goes through the environment, not --token, so it stays out of the
+# process table. Failures are swallowed: a queue report must never be able to
+# take down the worker it is reporting on.
+export CASEBROKER_WRITE_TOKENS="$CASEBROKER_TOKEN"
+( while true; do
+      uv run casebroker fleet --broker "$CASEBROKER_URL"           --cluster "$CASEBROKER_CLUSTER" >/dev/null 2>&1 || true
+      sleep 300
+  done ) &
+FLEET_REPORTER=$!
+trap 'kill "$FLEET_REPORTER" 2>/dev/null' EXIT
+
 
 # The lease is short relative to the job but long relative to a heartbeat: a dead
 # node's case returns to the pool in 30 minutes, while a live worker holds a case
