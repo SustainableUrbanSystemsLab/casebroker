@@ -176,7 +176,7 @@ export DOMAIN_ZMIN   # read by the config generator below, which is a separate p
 # very first real end-to-end validation run (Phoenix job 12910607).
 printf '%s' "$SPEC" > "$SCRATCH/spec.json"
 "$PY" - "$SCRATCH" "$CASE_ID" "$NP" > "$SCRATCH/cfg.json" <<'PY'
-import json, sys
+import json, os, sys
 scratch, case_id, np_ = sys.argv[1], sys.argv[2], int(sys.argv[3])
 with open(scratch + "/spec.json") as f:
     spec = json.load(f)
