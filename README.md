@@ -1,5 +1,15 @@
 # casebroker — one queue for the v2 CFD campaign
 
+[![broker](https://img.shields.io/website?url=https%3A%2F%2Fcasebroker.onrender.com%2Fhealthz&label=broker&up_message=live&down_message=down&style=flat-square)](https://casebroker.onrender.com/healthz)
+[![tests](https://img.shields.io/github/actions/workflow/status/SustainableUrbanSystemsLab/casebroker/test.yml?branch=main&label=tests&style=flat-square)](https://github.com/SustainableUrbanSystemsLab/casebroker/actions/workflows/test.yml)
+[![version](https://img.shields.io/github/v/tag/SustainableUrbanSystemsLab/casebroker?label=version&style=flat-square)](https://github.com/SustainableUrbanSystemsLab/casebroker/releases)
+[![license](https://img.shields.io/github/license/SustainableUrbanSystemsLab/casebroker?style=flat-square)](LICENSE)
+
+The broker badge pings `/healthz`, which is unauthenticated precisely so
+infrastructure checks work without a token. It reports whether the service is up,
+not whether the campaign is progressing — the dashboard answers that.
+
+
 A central database of cases plus an HTTP work queue, so that many machines —
 PACE ICE, PACE Phoenix, the lab workstation, anyone else's box — can each ask
 *"what should I simulate next?"* and never collide.
@@ -29,7 +39,9 @@ Why a broker rather than splitting the case list across machines up front:
 | `slurm/phoenix_worker.sbatch` | A pool of pull-based workers on Phoenix's free, preemptible `embers` QOS |
 | `CHANGELOG.md` | What changed in each release, and the semantic-versioning contract |
 | `.github/workflows/release.yml` | Tag-triggered GitHub Release; validates the tag against `pyproject.toml` first |
-| `tests/` | 73 tests against SQLite (no external dependency), plus 7 more in `test_db_postgres.py` that run only when `CASEBROKER_TEST_PG_DSN` points at a real Postgres instance |
+| [`DOMAIN.md`](DOMAIN.md) | The nouns: case, lease, worker, fleet, geometry — and the invariants that must hold |
+| [`AGENTS.md`](AGENTS.md) | How to change this without breaking the campaign, and the failures that motivated each rule |
+| `tests/` | 103 tests against SQLite (no external dependency), plus 9 more in `test_db_postgres.py` that run only when `CASEBROKER_TEST_PG_DSN` points at a real Postgres instance |
 
 ## Run it
 
@@ -189,6 +201,9 @@ else now, and continuing burns core-hours on a result the broker will refuse.
 | `GET /v1/status` | Counts by state and split, expired leases, 24 h throughput, ETA |
 | `GET /healthz` | Liveness, plus the running `version`, auth mode, per-scope token counts and redacted DB target. **Unauthenticated** — see Deploying |
 | `GET /v1/whoami` | What the presented token can do (`write` / `read` / `none`). **Unauthenticated** — it answers *about* a credential rather than gating on one |
+| `GET /v1/share-token` | The read-only token, so the dashboard can mint a shareable link. **Write auth** — not an escalation, since a write token already passes every read gate |
+| `POST /v1/fleet` | Report what a scheduler holds (`cluster`, `queued`, `running`). The broker cannot see SLURM; `casebroker fleet` pushes this from a login node |
+| `GET /v1/cases/{case_id}/footprints` | Overture building footprints for a case, as GeoJSON, cached. Same release and bbox the runner meshes, so the picture is the geometry |
 
 State machine:
 
