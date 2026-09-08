@@ -484,3 +484,91 @@ def test_healthz_route_actually_calls_the_redaction_helper(tmp_path, monkeypatch
     body = TestClient(application).get("/healthz").json()
     assert body["db"] == "REDACTED-FOR-TEST"
     assert calls == [db_path]
+
+
+def test_healthz_reports_database_reachability_separately_from_liveness(tmp_path):
+    """A broker that started but cannot reach its database must not read healthy.
+
+    /healthz is what the uptime badge polls, and it answered only "did the
+    process start?" -- which it does perfectly well against a database it cannot
+    authenticate to. The badge then reads "live" for a broker that could not have
+    served a single case, and nothing outside the service can tell the two apart.
+
+    `ok` deliberately stays True in the broken case: the PROCESS is up, and
+    collapsing the two fields would leave a reader unable to distinguish
+    "service down" from "database down", which is the whole point of db_ok.
+    """
+    import casebroker.db as dbmod
+    from fastapi.testclient import TestClient
+
+    from casebroker.app import create_app
+
+    real_connect = dbmod.connect
+
+    class LosesTheDatabase:
+        """Real connection for setup, dead for the health probe."""
+
+        def __init__(self, inner):
+            self._inner = inner
+
+        def execute(self, sql, params=()):
+            if sql.strip() == "select 1":
+                raise RuntimeError("server closed the connection unexpectedly")
+            return self._inner.execute(sql, params)
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+    healthy = create_app(str(tmp_path / "ok.sqlite"), ["w"], ["r"])
+    with TestClient(healthy) as c:
+        assert c.get("/healthz").json()["db_ok"] is True
+
+    dbmod.connect = lambda target: LosesTheDatabase(real_connect(target))
+    try:
+        broken = create_app(str(tmp_path / "dead.sqlite"), ["w"], ["r"])
+    finally:
+        dbmod.connect = real_connect
+
+    with TestClient(broken) as c:
+        body = c.get("/healthz").json()
+        # The failure is reported, not raised: a probe that 500s tells an
+        # operator less than one that answers False, and tells a badge nothing.
+        assert body["db_ok"] is False
+        assert body["ok"] is True
+
+
+def test_healthz_never_discloses_why_the_database_is_unreachable(tmp_path):
+    """The probe is unauthenticated, so the failure REASON must not leak.
+
+    A connection error carries the host, the role and the TLS posture. None of
+    that is ours to publish to anyone who can reach the service.
+    """
+    import casebroker.db as dbmod
+    from fastapi.testclient import TestClient
+
+    from casebroker.app import create_app
+
+    real_connect = dbmod.connect
+    secret = "password authentication failed for user postgres.tenantref"
+
+    class Leaky:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def execute(self, sql, params=()):
+            if sql.strip() == "select 1":
+                raise RuntimeError(secret)
+            return self._inner.execute(sql, params)
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+    dbmod.connect = lambda target: Leaky(real_connect(target))
+    try:
+        app = create_app(str(tmp_path / "leaky.sqlite"), ["w"], ["r"])
+    finally:
+        dbmod.connect = real_connect
+
+    with TestClient(app) as c:
+        raw = c.get("/healthz").text
+    assert "tenantref" not in raw and "authentication" not in raw

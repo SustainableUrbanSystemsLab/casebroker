@@ -16,6 +16,7 @@ from __future__ import annotations
 import hmac
 import json
 import os
+import time
 import pathlib
 import sys
 from typing import Any
@@ -234,6 +235,36 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
 
     # -- routes -------------------------------------------------------------------
 
+    # /healthz is what the uptime badge and the deploy smoke test poll, and it
+    # answered only "did FastAPI start?". That is a weaker claim than it looks:
+    # the process starts fine against a database it cannot reach, so the badge
+    # read "live" for a broker that could not have served a single case. When
+    # this repo's own .env stopped authenticating against Supabase there was no
+    # way to tell from outside whether production was in the same state.
+    #
+    # Cached, because anyone who can reach the service can poll this: an uncached
+    # probe is a free way to make the broker open a connection per request, and
+    # Supabase's pooler answers a flood of those by tripping its breaker --
+    # turning the health check into the outage it exists to detect.
+    _db_probe: dict[str, Any] = {"at": 0.0, "ok": None}
+
+    def _db_ok() -> bool | None:
+        now = time.monotonic()
+        if _db_probe["ok"] is not None and now - _db_probe["at"] < 30.0:
+            return _db_probe["ok"]
+        try:
+            conn.execute("select 1")
+            ok: bool | None = True
+        except Exception:                                    # noqa: BLE001
+            # Deliberately not re-raised, and deliberately undetailed: this
+            # endpoint is unauthenticated, so WHY a connection failed -- host,
+            # role, TLS posture -- is not ours to publish. False is the whole
+            # signal; the logs carry the rest.
+            ok = False
+        _db_probe["at"] = now
+        _db_probe["ok"] = ok
+        return ok
+
     @app.get("/healthz")
     def healthz() -> dict[str, Any]:
         # `version` is safe to expose unauthenticated -- it is already in the
@@ -248,6 +279,11 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
                 "scopes": {"write": len(tokens), "read": len(readonly_tokens)},
                 # kept for older dashboards that read this field by name
                 "readonly_auth": bool(readonly_tokens),
+                # Whether the broker can actually REACH its database, as opposed
+                # to merely having started. `ok` stays True either way: the
+                # process is up, and collapsing the two would leave the badge
+                # unable to tell "service down" from "database down".
+                "db_ok": _db_ok(),
                 "db": _redact_db_target(db_path)}
 
 
