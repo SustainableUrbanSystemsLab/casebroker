@@ -235,8 +235,17 @@ json.dump({
     "wind": spec.get("wind", {"directions": [0, 45, 90, 135, 180, 225, 270, 315],
                               "speed": 5, "refHeight": 10, "roughness": 0.5,
                               "groundZ": float(os.environ.get("GROUND_Z", "0"))}),
+    # build-case defaults to buildingLevel 2 / groundLevel 1 -- 4 m cells on
+    # facades and 8 m on the ground against a 16 m background. One level finer
+    # on both: 2 m facades and 4 m ground. Measured on the Nanjing tile, that
+    # takes the mesh from 1.92 M to 5.6 M cells, so it is roughly a 3x cost per
+    # direction and the reason it is written here rather than left to a default
+    # -- it is a deliberate accuracy-for-compute trade, not a tweak.
+    # Spread AFTER the defaults, so a per-case spec can still override either.
     "geometry": {"buildingsStl": scratch + "/buildings.stl",
                  "terrainStl": scratch + "/terrain.stl",
+                 "buildingLevel": 3,
+                 "groundLevel": 2,
                  **spec.get("geometry", {})},
     "simulation": {**{"iterations": 1868, "writeInterval": 1868,
                       "turbulenceModel": "kEpsilon", "numericsLevel": 4},
