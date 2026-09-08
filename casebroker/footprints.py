@@ -89,3 +89,52 @@ def fetch(lat: float, lon: float, timeout: int = 120) -> dict[str, Any]:
     return {"type": "FeatureCollection", "release": RELEASE,
             "centre": [lat, lon], "half_m": HALF_M,
             "n": len(feats), "features": feats}
+
+# Same COG the geometry builder reads (benchmark/real_cities/terrain.py). Global
+# 30 m bare-earth DTM, CC BY 4.0, Cloud-Optimized, so a windowed read is about a
+# second and downloads none of the global file.
+GEDTM30 = ("/vsicurl/https://s3.opengeohub.org/global/dtm/v1.2/"
+           "gedtm_rf_m_30m_s_20060101_20151231_go_epsg.4326.3855_v1.2.tif")
+
+
+def terrain(lat: float, lon: float, half_m: float = 1304.0, n: int = 48) -> dict:
+    """Whether this site has real bare-earth terrain, and how much relief.
+
+    Answers before the case runs what the runner would otherwise only discover
+    while building geometry: GEDTM30 has gaps, and where it does the builder
+    falls back to a flat plane. A flat tile is a legitimate case -- it is what
+    dense cores get anyway -- but it is a different case, and finding out after
+    66 core-hours is worse than finding out now.
+
+    Coarse on purpose: 48x48 over the whole domain is enough to say "there is
+    relief here and roughly this much" without pulling a full-resolution window
+    for a one-line answer.
+
+    Never raises. A dead DTM host is a fact about today, not about the site, and
+    a preview panel must not fail because a third party is down.
+    """
+    try:
+        import math as _math
+
+        import rasterio
+        from rasterio.enums import Resampling
+        from rasterio.windows import from_bounds
+    except Exception:                                    # noqa: BLE001
+        return {"source": "unknown", "detail": "rasterio not installed on the broker"}
+
+    dlat = half_m / 110_540.0
+    dlon = half_m / (111_320.0 * _math.cos(_math.radians(lat)))
+    try:
+        with rasterio.open(GEDTM30) as ds:
+            w = from_bounds(lon - dlon, lat - dlat, lon + dlon, lat + dlat, ds.transform)
+            a = ds.read(1, window=w, out_shape=(n, n), resampling=Resampling.bilinear)
+    except Exception as e:                               # noqa: BLE001
+        return {"source": "unavailable", "detail": str(e)[:160]}
+
+    vals = [float(v) for row in a for v in row if v is not None and float(v) < 1e30]
+    if not vals:
+        # Genuine nodata, not an outage: the builder will use a flat plane here.
+        return {"source": "flat", "detail": "GEDTM30 has no data at this site"}
+    lo, hi = min(vals), max(vals)
+    return {"source": "gedtm30", "relief_m": round(hi - lo, 1),
+            "min_m": round(lo, 1), "max_m": round(hi, 1)}

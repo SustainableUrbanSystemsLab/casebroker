@@ -24,6 +24,11 @@ dependencies = [
     # -- there is no REST API and no published tile endpoint -- so the broker
     # runs the same client, pinned to the same release, that the CFD runner uses.
     "overturemaps>=1.0.2",
+    # Reads a 48x48 window of the GEDTM30 COG to say whether a site has real
+    # terrain before it is simulated. Optional at runtime -- footprints.terrain()
+    # degrades to "unknown" if the import fails -- but shipped so the answer is
+    # actually available.
+    "rasterio>=1.4",
 ]
 
 [project.optional-dependencies]

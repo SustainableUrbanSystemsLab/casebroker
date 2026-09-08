@@ -1391,6 +1391,13 @@
           <div><span class="geo-swatch" style="border:1px solid var(--text-muted)"></span><b>${flat}</b> height inferred</div>
           <div><span class="geo-swatch" style="border:1px dashed var(--bad)"></span>${2*CORE_M} m sampled core</div>
           <div><span class="geo-swatch" style="border:1px solid var(--warn)"></span>${2*DOM_M} m mesh domain</div>
+          ${(() => {
+            const t = d.terrain || {};
+            if (t.source === "gedtm30") return `<div style="margin-top:6px"><span class="geo-swatch" style="background:var(--accent)"></span>terrain found — <b>${t.relief_m} m</b> relief</div>`;
+            if (t.source === "flat") return `<div style="margin-top:6px"><span class="geo-swatch" style="background:var(--warn)"></span><b>no terrain</b> — meshed flat<div class="geo-note" style="margin-top:2px">GEDTM30 is a land DTM, so no data here usually means this site is not on land.</div></div>`;
+            if (t.source === "unavailable") return `<div style="margin-top:6px;color:var(--text-muted)">terrain unknown — DTM host unreachable</div>`;
+            return "";
+          })()}
           <div style="margin-top:6px;color:var(--text-muted)">release ${esc(d.release)}${d.cached ? " · cached" : ""}</div>
           <div class="geo-note" style="margin-top:4px">Right: 45° isometric, heights to scale (clamped at 120 m).</div>
           <div class="geo-note">${modelled === 0

@@ -440,6 +440,11 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
             raise HTTPException(422, "case spec carries no lat/lon")
         try:
             fc = footprints.fetch(float(lat), float(lon))
+            # Whether this site has real bare-earth terrain or will be meshed
+            # flat. Cached with the footprints because it is the same question --
+            # "what will this case actually be made of" -- and because finding
+            # out after 66 core-hours is worse than finding out now.
+            fc["terrain"] = footprints.terrain(float(lat), float(lon))
         except Exception as e:                       # noqa: BLE001
             # 502, not 500: the failure is upstream at Overture, and saying so
             # keeps it out of the broker's own error budget.
