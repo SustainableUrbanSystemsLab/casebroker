@@ -60,8 +60,84 @@ def _height(props: dict[str, Any]) -> float | None:
     return None
 
 
+# GlobalBuildingAtlas LoD1, via the Source Cooperative mirror. The geometry
+# builder switched to this as its default height source, and this endpoint has
+# to follow: a case inspector that draws a DIFFERENT set of buildings than the
+# mesh contains is worse than no inspector, because it looks like a check.
+#
+# Not TUM's own WFS (tubvsig-so2sat-vm1.srv.mwn.de, layer global3D:lod1_global,
+# which the MetaMAP Grasshopper plugin queries): that proxy now answers
+# GetFeature with PARAMETER_NOT_ALLOWED, serving only GetCapabilities and
+# DescribeFeatureType, and wants a browser User-Agent and Referer besides. The
+# mirror is anonymous GeoParquet with a bbox column, so a bounding-box predicate
+# prunes row groups and one site costs a few MB of range reads.
+GBA_BASE = "https://data.source.coop/tge-labs/globalbuildingatlas-lod1"
+
+
+def gba_tile_for(lat: float, lon: float) -> str:
+    """The 5x5 degree tile key covering this point.
+
+    Mirrors benchmark/real_cities/gba.py exactly; validated against all 922
+    published keys. Duplicated rather than imported because that module lives in
+    the parent repo, which the broker does not vendor.
+    """
+    west = int(math.floor(lon / 5.0) * 5)
+    south = int(math.floor(lat / 5.0) * 5)
+    east, north = west + 5, south + 5
+    lonf = lambda v: ("e" if v >= 0 else "w") + f"{abs(v):03d}"   # noqa: E731
+    latf = lambda v: ("n" if v >= 0 else "s") + f"{abs(v):02d}"   # noqa: E731
+    return f"{lonf(west)}_{latf(north)}_{lonf(east)}_{latf(south)}"
+
+
+def fetch_gba(lat: float, lon: float, half_m: float = HALF_M,
+              timeout: int = 300) -> dict[str, Any]:
+    """GBA footprints and predicted heights, as a compact FeatureCollection.
+
+    ``h`` is the predicted height and ``v`` its variance. The variance is kept
+    because it is the honest part: GBA gives a height for every building, but a
+    prediction with variance 3 and one with variance 175 are not the same claim,
+    and the inspector should be able to say so.
+    """
+    import duckdb
+
+    dlat = half_m / 110_540.0
+    dlon = half_m / (111_320.0 * math.cos(math.radians(lat)))
+    xmin, ymin, xmax, ymax = lon - dlon, lat - dlat, lon + dlon, lat + dlat
+    url = f"{GBA_BASE}/{gba_tile_for(lat, lon)}.parquet"
+
+    con = duckdb.connect()
+    con.execute("INSTALL httpfs; LOAD httpfs; INSTALL spatial; LOAD spatial;")
+    con.execute(f"SET http_timeout={int(timeout) * 1000};")
+    rows = con.execute(
+        f"""
+        SELECT ST_AsGeoJSON(geometry) AS gj, height, var
+        FROM read_parquet('{url}')
+        WHERE bbox.xmin < {xmax} AND bbox.xmax > {xmin}
+          AND bbox.ymin < {ymax} AND bbox.ymax > {ymin}
+        """
+    ).fetchall()
+
+    feats = []
+    for gj, height, var in rows:
+        geom = json.loads(gj)
+        if geom.get("type") not in ("Polygon", "MultiPolygon"):
+            continue
+        feats.append({"type": "Feature",
+                      "properties": {"h": None if height is None else float(height),
+                                     "v": None if var is None else round(float(var), 1)},
+                      "geometry": _round_geom(geom)})
+    return {"type": "FeatureCollection", "release": "GBA.LoD1",
+            "source": "globalbuildingatlas", "height_kind": "predicted",
+            "centre": [lat, lon], "half_m": half_m,
+            "n": len(feats), "features": feats}
+
+
 def fetch(lat: float, lon: float, timeout: int = 120) -> dict[str, Any]:
-    """Footprints as a compact GeoJSON FeatureCollection.
+    """Overture footprints as a compact GeoJSON FeatureCollection.
+
+    Superseded by :func:`fetch_gba` for the campaign; kept because a case built
+    before the switch was meshed from THIS source, and redrawing it from GBA
+    would misrepresent what was actually solved.
 
     Only the polygon rings and a height survive: the full Overture record carries
     sources, ids and classifications that would multiply the payload for a

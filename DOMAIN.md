@@ -107,11 +107,25 @@ mislead.
 
 ## Footprints
 
-Overture building geometry for a case, cached per case. Pinned to the **same
-release and bbox derivation the runner uses**, so the picture is the geometry
-that gets meshed. Rendering anything merely similar — OSM, a map tile — would
-look like a check while disagreeing with the mesh, and would disagree most
-exactly where checking matters.
+Building geometry for a case, cached per case, from the **same source the runner
+meshes** — GlobalBuildingAtlas by default, Overture if GBA is unreachable (the
+response says which, via `source`). Rendering anything merely similar — OSM, a
+map tile, or the other building source — would look like a check while
+disagreeing with the mesh, and would disagree most exactly where checking
+matters.
+
+Read from the Source Cooperative GeoParquet mirror, not TUM's own WFS: that
+endpoint now answers `GetFeature` with `PARAMETER_NOT_ALLOWED`, serving only
+`GetCapabilities` and `DescribeFeatureType`. The mirror carries a `bbox` struct
+column, so a bounding-box predicate prunes row groups and one site costs a few MB
+of range reads against a tile that can be 1.7 GB.
+
+**The tile key fails silently when wrong.** Keys are `{west}_{north}_{east}_{south}`
+with hemisphere letters carrying ABSOLUTE values, and the pairs run (west, north)
+then (east, south) — so latitude descends while longitude ascends. A wrong key is
+usually a 404, but it can also be a real tile for the wrong part of the world,
+which returns buildings and produces a case that meshes, solves, and is somewhere
+else. `tests/test_gba_tiles.py` pins it.
 
 ---
 
@@ -132,9 +146,36 @@ Two Z data that are easy to confuse and mean different things:
 Using one where the other belongs displaces the inlet profile by tens of metres,
 and the case still meshes, still converges, and is wrong.
 
-**Height provenance is first-class.** Overture heights only some buildings;
-untagged ones are filled from the tile's median, or the LCZ class typical height
-where a tile has too little to learn from. The report keeps them apart:
+**Heights come from GlobalBuildingAtlas, and they are PREDICTIONS.**
+
+GBA (TUM, ESSD 2025) gives a modelled height for every building — >97% global
+completeness, RMSE 1.5–8.9 m by continent — from spaceborne lidar plus optical
+and radar imagery. It replaced Overture as the default height source because
+Overture is a footprint source that happens to tag a few heights: on the Nanjing
+tile `v2-02c16d2609798e9c` it tagged **17 of 1,099**, and those 17 are landmark
+towers, so their median is 75 m. The LCZ4 class prior is 40 m. GBA's median over
+1,321 buildings is **9.3 m** — the tile is low-rise, and both of the other
+answers built it as high-rises.
+
+**A prediction is never labelled measured.** On the GBA path the report sets
+`frac_prisms_measured` to **0.0** and `frac_prisms_predicted` to 1.0, with
+`height_kind: predicted`. The field counting "prisms whose tag does not say
+inferred" would otherwise report 100% measured for a tile where every height is
+model output, which is the exact mislabelling these fields exist to prevent.
+
+GBA also gives a per-building **variance**, carried into the report as
+`height_var_median` / `_p90` / `_max` and `n_high_variance` (variance > 25). On
+that Nanjing tile: median 3.65, p90 15.25, max 175, 54 buildings above 25. A
+height predicted with variance 3 and one predicted with variance 175 are not the
+same claim.
+
+**Licence: GBA is CC BY-NC 4.0** — non-commercial, and stricter than everything
+else here (Overture ODbL/CDLA, GEDTM30 CC BY 4.0). It constrains how a dataset
+built on it may be released.
+
+The Overture path remains, selectable with `--heights overture`, because a case
+meshed before the switch was built from it and redrawing it from GBA would
+misrepresent what was solved. On that path the older fields still apply:
 
 - `height_provenance` / `frac_measured_height` — what **Overture tagged**
 - `prism_provenance` / `frac_prisms_measured` — what was **actually extruded**

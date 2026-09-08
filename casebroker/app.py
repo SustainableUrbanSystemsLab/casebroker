@@ -475,16 +475,26 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         if lat is None or lon is None:
             raise HTTPException(422, "case spec carries no lat/lon")
         try:
-            fc = footprints.fetch(float(lat), float(lon))
+            # GBA is what the geometry builder now defaults to, so it is what
+            # gets meshed, so it is what this must draw. Overture stays as the
+            # fallback rather than being deleted: it is one HTTP dependency
+            # against another, and an inspector that 502s is useless exactly
+            # when someone is trying to find out why a case looks wrong.
+            try:
+                fc = footprints.fetch_gba(float(lat), float(lon))
+            except Exception as gba_err:             # noqa: BLE001
+                fc = footprints.fetch(float(lat), float(lon))
+                fc["source"] = "overture"
+                fc["fallback_from"] = f"gba unavailable: {str(gba_err)[:120]}"
             # Whether this site has real bare-earth terrain or will be meshed
             # flat. Cached with the footprints because it is the same question --
             # "what will this case actually be made of" -- and because finding
             # out after 66 core-hours is worse than finding out now.
             fc["terrain"] = footprints.terrain(float(lat), float(lon))
         except Exception as e:                       # noqa: BLE001
-            # 502, not 500: the failure is upstream at Overture, and saying so
-            # keeps it out of the broker's own error budget.
-            raise HTTPException(502, f"overture query failed: {e}") from e
+            # 502, not 500: the failure is upstream at the building-data source,
+            # and saying so keeps it out of the broker's own error budget.
+            raise HTTPException(502, f"building query failed: {e}") from e
         db.put_footprints(conn, case_id, json.dumps(fc), fc["n"])
         return {**fc, "cached": False}
 

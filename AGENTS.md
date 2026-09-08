@@ -55,6 +55,18 @@ check out `v2-dataset-extension` in the parent and `main` in this submodule.
 could reach one but not the other connected fine and then couldn't name what it
 had connected to. Both carry `version` and `db` now; prefer `status`.
 
+**A predicted height is not a measured one, and the report must say so.**
+`frac_prisms_measured` counts prisms whose tag does not contain "inferred". GBA
+tags say neither, so the field read 100% MEASURED for a tile where every height
+came out of a model. The GBA branch now overrides it to 0.0 and sets
+`frac_prisms_predicted` instead. Any new height source has to answer this
+question explicitly rather than inherit an answer from a tag spelling.
+
+**Do not put a float in a provenance tag.** The first GBA cut appended the
+per-building variance to the tag, whose last `:` segment becomes the
+`prism_provenance` key — turning one bucket into 200 single-member ones. A tag is
+a CATEGORY; per-building numbers belong in `stats`.
+
 **Watch for silently overwritten dict keys.** `tile_lod()` returns
 `height_provenance` and `frac_measured_height` and is spread *after* the caller's
 own keys, so identically named ones vanished and the report showed pre-inference
@@ -97,7 +109,15 @@ so a broker that stops speaking the old protocol strands them.
 
 ## Open problems
 
-- **Overture coverage.** Only ~45% of sampled sites return buildings at all, and
+- **GBA is CC BY-NC 4.0.** The default height source is non-commercial, stricter
+  than Overture (ODbL/CDLA) or GEDTM30 (CC BY 4.0), and it constrains how a
+  dataset built on it may be released. Unresolved.
+- **Sites drawn before the switch were meshed from Overture** with heights
+  filled from a tile median or class constant, so the dataset now mixes two
+  height regimes. `height_source` in each geometry report says which; nothing
+  reconciles them yet.
+- **Overture coverage** (still relevant to the fallback path, and to footprints
+  where GBA is thin). Only ~45% of sampled sites return buildings at all, and
   LCZ 1 — the scarcest and most valuable class — is ~25%. Coverage is thin across
   China and much of Africa. Sites that *do* pass may still have most heights
   inferred rather than measured.
