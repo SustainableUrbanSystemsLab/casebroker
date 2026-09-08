@@ -157,14 +157,25 @@ PY
 TERRAIN_ZMAX=$(printf '%s' "$TERRAIN_Z" | cut -d" " -f1)
 TERRAIN_ZMIN=$(printf '%s' "$TERRAIN_Z" | cut -d" " -f2)
 PEDESTRIAN_Z=$("$PY" -c "print(($TERRAIN_ZMAX) + 1.5)" 2>/dev/null || echo "1.5")
-# The domain floor has to SEAL against the terrain slab. A fixed -60 m floor was
-# below the slab's underside on this site by 25 m, and build-case rejected it
+# The domain floor has to sit BELOW every piece of geometry. A fixed -60 m floor
+# was above the lowest geometry on this site by 25 m, and build-case rejected it
 # outright: snappyHexMesh would have meshed that gap as fluid and the inlet would
-# have blown air UNDER the terrain. The slab's own base depends on the site's
-# relief and on watertight.py's depth, so it has to be read from the geometry
-# rather than assumed. Half a metre of overlap absorbs float error in the STL
-# round-trip without reintroducing a gap.
-DOMAIN_ZMIN=$("$PY" -c "print(($TERRAIN_ZMIN) + 0.5)" 2>/dev/null || echo "-60")
+# have blown air UNDER the terrain. The right datum depends on the site relief
+# and on watertight.py extrusion depth, so it is read rather than assumed.
+#
+# READ FROM THE REPORT, not measured off terrain.stl. That measurement worked
+# only while terrain was a closed slab whose minimum WAS its underside. The
+# terrain is now an open surface, so its minimum is the real ground -- about 30 m
+# ABOVE the buildings 20 m skirts -- and a floor placed there would slice through
+# the bottom of every building. slab_base_z is the value that still means "below
+# all geometry". The fallback keeps an older geometry report working.
+DOMAIN_ZMIN=$("$PY" -c "
+import json,sys
+try:
+    print(json.load(open(sys.argv[1]))['slab_base_z'] + 0.5)
+except Exception:
+    print(float(sys.argv[2]) - 30.0)
+" "$GEO_REPORT" "$TERRAIN_ZMIN" 2>/dev/null || echo "-60")
 export DOMAIN_ZMIN   # read by the config generator below, which is a separate process
 # The ABL datum, from the geometry report the builder wrote beside the STLs.
 GROUND_Z=$("$PY" -c "
@@ -199,7 +210,15 @@ with open(scratch + "/spec.json") as f:
 # box, -60..600 m tall at 16 m cells, that the validated Braselton case used.
 dom = spec.get("domain")
 if dom is None:
-    half = 504.0 + 800.0
+    # 4 m inside the terrain sheet, which spans 504+800 exactly. While terrain
+    # was a closed slab with vertical sides, a domain of identical extent was
+    # fine -- the slab's walls were coincident with the domain's and snappy had a
+    # closed volume to cut against. An open sheet has no walls, so a domain of
+    # exactly the same footprint leaves the sheet's edge lying IN the side patch,
+    # where castellation cannot reliably decide which side is fluid. Insetting
+    # the domain makes the sheet overhang it on all four sides, which is what
+    # gives snappy an unambiguous cut.
+    half = 504.0 + 800.0 - 4.0
     zmin = float(os.environ.get("DOMAIN_ZMIN", "-60"))
     dom = {"min": [-half, -half, zmin], "max": [half, half, 600], "cellSize": 16}
 json.dump({
