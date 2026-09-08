@@ -396,8 +396,24 @@ def _connect_postgres(dsn: str) -> PgConnection:
     # call. Every statement in this module is either a one-off or cheap enough
     # that losing server-side preparation costs nothing worth trading for a
     # connection that is correct on a transactional pooler.
-    raw = psycopg.connect(dsn, autocommit=True, row_factory=dict_row,
-                          prepare_threshold=None)
+    # sslmode=require unless the DSN already says otherwise. libpq defaults to
+    # "prefer", which tries TLS and silently FALLS BACK to plaintext -- and once
+    # Supabase had SSL enforcement switched on, that fallback was rejected with
+    #
+    #     FATAL: (ESSLREQUIRED) SSL connection is required for user: postgres
+    #
+    # then the repeated rejections tripped the pooler's own defence:
+    #
+    #     FATAL: (ECIRCUITBREAKER) too many authentication failures
+    #
+    # which looked like a rate limit and was really a misconfiguration. Requiring
+    # TLS is also simply correct here: the credential and every case spec cross a
+    # public network, and "prefer" means an attacker who can break the TLS
+    # handshake gets a plaintext session instead of a failure.
+    kwargs = {"autocommit": True, "row_factory": dict_row, "prepare_threshold": None}
+    if "sslmode=" not in dsn:
+        kwargs["sslmode"] = "require"
+    raw = psycopg.connect(dsn, **kwargs)
     wrapped = PgConnection(raw, dsn)
     with _LOCK:
         wrapped.executescript(PG_SCHEMA)
