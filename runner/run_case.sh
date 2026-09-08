@@ -157,25 +157,22 @@ PY
 TERRAIN_ZMAX=$(printf '%s' "$TERRAIN_Z" | cut -d" " -f1)
 TERRAIN_ZMIN=$(printf '%s' "$TERRAIN_Z" | cut -d" " -f2)
 PEDESTRIAN_Z=$("$PY" -c "print(($TERRAIN_ZMAX) + 1.5)" 2>/dev/null || echo "1.5")
-# The domain floor has to sit BELOW every piece of geometry. A fixed -60 m floor
-# was above the lowest geometry on this site by 25 m, and build-case rejected it
-# outright: snappyHexMesh would have meshed that gap as fluid and the inlet would
-# have blown air UNDER the terrain. The right datum depends on the site relief
-# and on watertight.py extrusion depth, so it is read rather than assumed.
+# The domain floor is placed just ABOVE the terrain's lowest point, so the
+# terrain itself seals it. Measuring terrain.stl is the right way to find that
+# point and it survived the slab->sheet change, because both spell the same
+# thing: the closed slab's minimum was its artificial underside and the domain
+# sealed against that; the open sheet's minimum is the real ground and the
+# domain seals against the sheet.
 #
-# READ FROM THE REPORT, not measured off terrain.stl. That measurement worked
-# only while terrain was a closed slab whose minimum WAS its underside. The
-# terrain is now an open surface, so its minimum is the real ground -- about 30 m
-# ABOVE the buildings 20 m skirts -- and a floor placed there would slice through
-# the bottom of every building. slab_base_z is the value that still means "below
-# all geometry". The fallback keeps an older geometry report working.
-DOMAIN_ZMIN=$("$PY" -c "
-import json,sys
-try:
-    print(json.load(open(sys.argv[1]))['slab_base_z'] + 0.5)
-except Exception:
-    print(float(sys.argv[2]) - 30.0)
-" "$GEO_REPORT" "$TERRAIN_ZMIN" 2>/dev/null || echo "-60")
+# It must not go BELOW the terrain. A fixed -60 m floor did, on a site whose
+# ground sat 25 m higher, and snappyHexMesh meshed the gap as fluid so the inlet
+# blew air UNDER the terrain; eddy3d-cli now refuses such a domain outright.
+# Going below is also tempting for a different wrong reason: buildings are
+# extruded ~20 m down into the ground, and that skirt does dip below this floor.
+# It is meant to -- the skirt exists to guarantee the buildings INTERSECT the
+# terrain, and that intersection happens at the surface. Lowering the floor to
+# contain it only buys a void that snappy then has to carve away.
+DOMAIN_ZMIN=$("$PY" -c "print(($TERRAIN_ZMIN) + 0.5)" 2>/dev/null || echo "-60")
 export DOMAIN_ZMIN   # read by the config generator below, which is a separate process
 # The ABL datum, from the geometry report the builder wrote beside the STLs.
 GROUND_Z=$("$PY" -c "
