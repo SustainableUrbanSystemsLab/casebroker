@@ -39,6 +39,16 @@ def bbox_for(lat: float, lon: float, half_m: float = HALF_M) -> str:
     return f"{lon - dlon:.6f},{lat - dlat:.6f},{lon + dlon:.6f},{lat + dlat:.6f}"
 
 
+def _round_geom(geom, nd=6):
+    def ring(r):
+        return [[round(float(x), nd), round(float(y), nd)] for x, y, *_ in r]
+    t = geom.get("type")
+    if t == "Polygon":
+        return {"type": t, "coordinates": [ring(r) for r in geom["coordinates"]]}
+    return {"type": t,
+            "coordinates": [[ring(r) for r in poly] for poly in geom["coordinates"]]}
+
+
 def _height(props: dict[str, Any]) -> float | None:
     """Best available height, mirroring overture_3d._height."""
     h = props.get("height")
@@ -83,9 +93,13 @@ def fetch(lat: float, lon: float, timeout: int = 120) -> dict[str, Any]:
         geom = f.get("geometry") or {}
         if geom.get("type") not in ("Polygon", "MultiPolygon"):
             continue
+        # Coordinates rounded to 6 decimals, about 0.1 m. Overture ships far more
+        # precision than a building footprint means, and the raw payload for one
+        # dense tile is ~360 KB of digits nobody can see -- this roughly halves
+        # what crosses the wire for a drawing whose finest feature is one pixel.
         feats.append({"type": "Feature",
                       "properties": {"h": _height(f.get("properties") or {})},
-                      "geometry": geom})
+                      "geometry": _round_geom(geom)})
     return {"type": "FeatureCollection", "release": RELEASE,
             "centre": [lat, lon], "half_m": HALF_M,
             "n": len(feats), "features": feats}

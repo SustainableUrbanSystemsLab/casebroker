@@ -536,6 +536,9 @@
   .stat-card.leased .label::after      { background: var(--primary); }
   .stat-card.pending .label::after     { background: var(--warn); }
   .stat-card.quarantined .label::after { background: var(--bad); }
+  .stat-card.queued .label::after        { background: var(--primary); }
+  /* A stale snapshot is drawn as provisional, not as a number to act on. */
+  .stat-card.queued.nonzero-stale { border-style: dashed; }
 
   .stat-card .label {
     font-size: 11.5px;
@@ -1289,14 +1292,26 @@
   // become geometry. A site can look busy here and still mesh almost empty --
   // which is exactly the failure that quarantined sites earlier.
   async function loadFootprints(caseId, wrap) {
-    wrap.innerHTML = '<span style="font-size:12px;color:var(--text-muted)">querying Overture…</span>';
+    const t0 = Date.now();
+    wrap.innerHTML = '<span id="geoTick" style="font-size:12px;color:var(--text-muted)">'
+      + 'querying Overture… <span style="font-family:var(--font-mono)">0.0s</span>'
+      + '<span style="display:block;margin-top:3px;font-size:11px">first look at a case queries S3 and is cached after; later opens are instant</span></span>';
+    // Silence for five seconds reads as a hang, and this is a genuine remote
+    // query -- so it counts up, and says why it is slow only the first time.
+    const tick = setInterval(() => {
+      const el = document.querySelector("#geoTick span");
+      if (el) el.textContent = ((Date.now() - t0) / 1000).toFixed(1) + "s";
+      else clearInterval(tick);
+    }, 100);
     let d;
     try {
       d = await api(`/v1/cases/${encodeURIComponent(caseId)}/footprints`);
     } catch (e) {
+      clearInterval(tick);
       wrap.innerHTML = `<span style="font-size:12px;color:var(--bad)">could not load footprints: ${esc(e.message || e.status || e)}</span>`;
       return;
     }
+    clearInterval(tick);
     // The drawing extends to the DOMAIN, not the footprint query. The query
     // covers 520 m; the mesh box is 1304 m a side (504 m core + 800 m buffer),
     // and the buffer is most of the domain -- so a picture scaled to the
@@ -1329,10 +1344,19 @@
     // height at all, and height is what the inference above invents: a tile of
     // uniform median blocks and a tile of real towers look identical from
     // directly overhead and completely different from here.
-    const ISO = 300, HSCALE = 0.9;                    // px per metre of height
+    // The isometric frames the CORE, not the whole domain. At domain scale a
+    // 300 px box spans 2608 m, so 0.115 px per metre -- a 40 m building is four
+    // pixels and the buffer is empty sky. Framing the 1008 m core gives roughly
+    // three times the detail where the buildings actually are.
+    const ISO = 300, ISO_K = ISO / (2 * CORE_M * 1.15);
+    // Heights are exaggerated, and the caption says so. An earlier version
+    // multiplied by 8 while claiming "to scale", which drew a single tagged
+    // tower as a spike over a flat field and made the tile look like a
+    // measurement error rather than a mostly-untagged tile.
+    const HEX = 3;
     const isoPt = (x, y, z) => [
       ISO / 2 + (x - y) * 0.7071,
-      ISO * 0.66 - (x + y) * 0.7071 * 0.5 - z,
+      ISO * 0.62 - (x + y) * 0.7071 * 0.5 - z,
     ];
     // Painter's algorithm: far corner first, so nearer blocks overdraw.
     const solids = [];
@@ -1340,7 +1364,7 @@
       const h = (f.properties && f.properties.h) || 0;
       for (const ring of rings(f.geometry)) {
         const pts = ring.map(([lon, lat]) => [
-          (lon - lon0) * mPerDegLon * k, (lat - lat0) * mPerDegLat * k,
+          (lon - lon0) * mPerDegLon * ISO_K, (lat - lat0) * mPerDegLat * ISO_K,
         ]);
         let cx = 0, cy = 0;
         for (const [x, y] of pts) { cx += x; cy += y; }
@@ -1351,7 +1375,7 @@
     solids.sort((a, b) => a.depth - b.depth);
     let iso = "";
     for (const sd of solids) {
-      const hz = Math.min(sd.h, 120) * HSCALE * k * 8;   // clamp: one spire must not own the frame
+      const hz = Math.min(sd.h, 150) * ISO_K * HEX;     // clamped so one spire cannot own the frame
       const top = sd.pts.map(([x, y]) => isoPt(x, y, hz));
       const base = sd.pts.map(([x, y]) => isoPt(x, y, 0));
       const fill = sd.inferred ? "var(--text-muted)" : "var(--primary)";
@@ -1368,8 +1392,7 @@
       .map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(" ");
     const sq = (r) => [[-r, -r], [r, -r], [r, r], [-r, r], [-r, -r]];
     const isoGround =
-      `<polygon points="${gp(sq(dom))}" fill="var(--surface)" fill-opacity="0.35" stroke="var(--border)" stroke-width="1"/>` +
-      `<polygon points="${gp(sq(core))}" fill="none" stroke="var(--bad)" stroke-width="1.1" stroke-dasharray="4 3"/>`;
+      `<polygon points="${gp(sq(CORE_M * ISO_K))}" fill="var(--surface)" fill-opacity="0.3" stroke="var(--bad)" stroke-width="1.1" stroke-dasharray="4 3"/>`;
 
     wrap.innerHTML = `
       <div class="geo-fig">
@@ -1399,7 +1422,7 @@
             return "";
           })()}
           <div style="margin-top:6px;color:var(--text-muted)">release ${esc(d.release)}${d.cached ? " · cached" : ""}</div>
-          <div class="geo-note" style="margin-top:4px">Right: 45° isometric, heights to scale (clamped at 120 m).</div>
+          <div class="geo-note" style="margin-top:4px">Right: 45° isometric over the sampled core. Heights are exaggerated ${HEX}× against plan distance and clamped at 150 m — at true scale a 40 m building is four pixels.</div>
           <div class="geo-note">${modelled === 0
             ? "Overture heights NONE of these. Every height is inferred from the LCZ class, so this tile's massing is entirely synthetic."
             : `All ${modelled + flat} are extruded. Only ${modelled} carry a measured height (${Math.round(100 * modelled / (modelled + flat))}%); the rest are filled from this tile's median, and that ratio is what to judge the case on.`}</div>
@@ -1412,6 +1435,15 @@
     if (!btn) return;
     loadFootprints(btn.dataset.case, btn.parentElement);
   });
+
+  // Expanding a case starts the fetch. It was behind a button because the query
+  // is slow, but that made every inspection two clicks and a wait instead of
+  // one, and the answer is cached after the first look anyway.
+  function autoLoadGeometry() {
+    document.querySelectorAll(".geo-load").forEach((b) => {
+      if (!b.dataset.auto) { b.dataset.auto = "1"; loadFootprints(b.dataset.case, b.parentElement); }
+    });
+  }
 
   // -- Clipboard Toast Helper -------------------------------------------------
   let toastTimer = null;
@@ -1676,6 +1708,30 @@
         <div class="value">${(st.remaining ?? 0).toLocaleString()}</div>
         <div class="subtext">Pending + in-flight</div>
       </div>
+      ${(() => {
+        // Workers waiting in SLURM. This belongs beside the case counts and not
+        // only in the fleet table, because it answers the question those six
+        // cards raise and cannot settle: 5,000 pending and 0 in flight reads as
+        // a stalled campaign whether twenty workers are third in a queue or
+        // nothing is scheduled at all.
+        //
+        // Reported, not observed -- the broker cannot see a scheduler -- so the
+        // card states its own age and goes muted once stale rather than
+        // presenting an old snapshot as current.
+        const fl = st.fleet || [];
+        const q = fl.reduce((a, f) => a + (f.queued || 0), 0);
+        const r = fl.reduce((a, f) => a + (f.running || 0), 0);
+        const oldest = fl.length ? Math.max(...fl.map((f) => f.age_seconds || 0)) : null;
+        const stale = oldest === null || oldest > 900;
+        const sub = !fl.length ? "no cluster is reporting"
+                  : stale ? `last reported ${Math.round(oldest / 60)} min ago`
+                  : `${r} worker(s) running on ${fl.map((f) => f.cluster).join(", ")}`;
+        return `<div class="stat-card queued${stale ? " nonzero-stale" : ""}">
+          <div class="label">Queued (SLURM)</div>
+          <div class="value"${stale ? ' style="color:var(--text-muted)"' : ""}>${fl.length ? q.toLocaleString() : "—"}</div>
+          <div class="subtext">${sub}</div>
+        </div>`;
+      })()}
     `;
 
     // Splits breakdown
@@ -1991,6 +2047,7 @@
       tr.addEventListener("click", () => {
         const id = tr.dataset.id;
         openDetailId = (openDetailId === id) ? null : id;
+        if (openDetailId) setTimeout(autoLoadGeometry, 0);
         renderCasesTable(cases);
       });
     });

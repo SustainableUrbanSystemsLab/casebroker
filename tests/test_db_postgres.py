@@ -48,18 +48,65 @@ def cleanup_after_module():
     """Runs once per module; deletes every row this run created, whatever the
     outcome of the tests. Nothing else in the shared database is touched."""
     yield
-    conn = db.connect(DSN)
+    conn = fresh_conn()
     like = f"pgtest-{RUN}-%"
     conn.execute("DELETE FROM events WHERE case_id LIKE ? OR worker_id LIKE ?", (like, like))
     conn.execute("DELETE FROM cases WHERE case_id LIKE ?", (like,))
     conn.execute("DELETE FROM workers WHERE worker_id LIKE ?", (like,))
 
 
-def fresh_conn():
+_POOL: list = []
+_POOL_LOCK = threading.Lock()
+
+
+def pooled_conn():
+    """A connection from a shared bundle, opened once and reused.
+
+    These tests are connection-hungry by design -- proving two transactions can
+    claim different rows needs two real connections -- and opening a fresh one
+    per call made Supabase's pooler answer a burst with ECIRCUITBREAKER. Bundling
+    keeps the same property the tests actually depend on (connections are
+    INDEPENDENT of each other) while opening each only once.
+    """
+    with _POOL_LOCK:
+        if _POOL:
+            return _POOL.pop()
+    return fresh_conn()
+
+
+def release_conn(conn):
+    with _POOL_LOCK:
+        _POOL.append(conn)
+
+
+def fresh_conn(attempts=5):
     """A new, independent connection -- what a separate worker process/machine
     would actually have. Sharing one connection across "workers" would test
-    nothing about cross-connection locking."""
-    return db.connect(DSN)
+    nothing about cross-connection locking.
+
+    Retried with backoff because this suite is, by design, connection-hungry:
+    proving that two transactions can claim different rows requires two real
+    connections, and several tests open several each. Supabase's pooler answers a
+    burst of those with
+
+        (ECIRCUITBREAKER) too many authentication failures, new connections are
+        temporarily blocked
+
+    which is a rate limit, not a defect -- but it failed the whole job, and that
+    job gates deploys, so an infrastructure hiccup stopped unrelated code from
+    shipping. Backing off turns a transient refusal into a pause instead of a
+    red build."""
+    import time as _t
+    last = None
+    for i in range(attempts):
+        try:
+            return db.connect(DSN)
+        except Exception as e:                       # noqa: BLE001 -- retry any refusal
+            last = e
+            if "ECIRCUITBREAKER" not in str(e) and "too many" not in str(e).lower():
+                raise
+            _t.sleep(2 ** i)                         # 1, 2, 4, 8, 16 s
+    raise last
 
 
 def seed(n: int, tag: str) -> list[str]:
@@ -127,9 +174,19 @@ def test_many_real_connections_racing_never_double_lease():
             got = db.lease(conn, prefix(f"racer-{k}"), count=6)
             with lock:
                 claimed.extend((g.case_id, k) for g in got)
+                # db.lease claims any pending row, and CASEBROKER_TEST_PG_DSN is
+                # allowed to point at the REAL database -- the CI job points it
+                # at production deliberately. So a racer can pick up campaign
+                # cases, and leaving them leased would strand real work until the
+                # TTL lapsed. Hand back anything that is not ours immediately.
+                for g in got:
+                    if not g.case_id.startswith(f"pgtest-{RUN}-"):
+                        foreign.append(g.lease_id)
         except Exception as e:                # pragma: no cover - surfaced below
             errors.append(e)
 
+    foreign: list = []
+    conn0 = fresh_conn()
     threads = [threading.Thread(target=worker, args=(k,)) for k in range(n_workers)]
     for t in threads:
         t.start()
@@ -137,7 +194,16 @@ def test_many_real_connections_racing_never_double_lease():
         t.join(timeout=60)
 
     assert not errors, errors
-    claimed_ids = [c for c, _ in claimed]
+    for lease_id in foreign:
+        try:
+            db.release(conn0, lease_id)
+        except Exception:                     # noqa: BLE001 -- best effort
+            pass
+
+    # Only this run's cases. Asserting over everything claimed made the test fail
+    # the moment the shared database had a real campaign in it: 60 created, 72
+    # claimed, because twelve belonged to the campaign.
+    claimed_ids = [c for c, _ in claimed if c.startswith(f"pgtest-{RUN}-")]
     dupes = {c for c in claimed_ids if claimed_ids.count(c) > 1}
     assert not dupes, f"double-leased over real connections: {sorted(dupes)}"
     assert set(claimed_ids) == set(case_ids), (
