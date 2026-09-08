@@ -166,7 +166,15 @@ import json, sys
 scratch, case_id, np_ = sys.argv[1], sys.argv[2], int(sys.argv[3])
 with open(scratch + "/spec.json") as f:
     spec = json.load(f)
-dom = spec["domain"]           # {"min": [...], "max": [...], "cellSize": n}
+# The v2 sampler publishes a SITE, not a mesh box: coordinates, recipe and LCZ,
+# with no domain. The domain is a property of the recipe, so it is derived here
+# rather than carried 5,000 times through the database. fixed-box-1008 means a
+# 1008 m sampled core (half 504) inside an 800 m buffer -- the same +/-1304 m
+# box, -60..600 m tall at 16 m cells, that the validated Braselton case used.
+dom = spec.get("domain")
+if dom is None:
+    half = 504.0 + 800.0
+    dom = {"min": [-half, -half, -60], "max": [half, half, 600], "cellSize": 16}
 json.dump({
     "caseName": case_id,
     "workDir": scratch,
