@@ -475,6 +475,13 @@
   }
   .num.alert { color: var(--bad); }
 
+  .geo-wrap { min-height: 40px; }
+  .geo-fig { display: flex; gap: 14px; align-items: flex-start; flex-wrap: wrap; }
+  .geo-fig svg { background: var(--surface-elevated); border: 1px solid var(--border); border-radius: 6px; }
+  .geo-legend { font-size: 12px; color: var(--text-secondary); line-height: 1.9; }
+  .geo-swatch { display: inline-block; width: 11px; height: 11px; border-radius: 2px; vertical-align: -1px; margin-right: 6px; }
+  .geo-note { font-size: 11.5px; color: var(--text-muted); margin-top: 8px; max-width: 46ch; }
+
   /* KPI Stats Grid */
   .stats-grid {
     display: grid;
@@ -1250,6 +1257,69 @@
   $("themeToggle").addEventListener("click", toggleTheme);
   initTheme();
 
+  // -- Site geometry ----------------------------------------------------------
+  // Drawn from the broker's /footprints endpoint, which runs the SAME Overture
+  // query, pinned to the same release, that the CFD runner does. The split
+  // below is the point of the whole panel: Overture returns every footprint it
+  // knows, but only those carrying a height can be extruded, so only those
+  // become geometry. A site can look busy here and still mesh almost empty --
+  // which is exactly the failure that quarantined sites earlier.
+  async function loadFootprints(caseId, wrap) {
+    wrap.innerHTML = '<span style="font-size:12px;color:var(--text-muted)">querying Overture…</span>';
+    let d;
+    try {
+      d = await api(`/v1/cases/${encodeURIComponent(caseId)}/footprints`);
+    } catch (e) {
+      wrap.innerHTML = `<span style="font-size:12px;color:var(--bad)">could not load footprints: ${esc(e.message || e.status || e)}</span>`;
+      return;
+    }
+    const R = 520, S = 300, k = S / (2 * R);          // metres -> px, centred
+    const [lat0, lon0] = d.centre;
+    const mPerDegLat = 110540, mPerDegLon = 111320 * Math.cos(lat0 * Math.PI / 180);
+    const toXY = ([lon, lat]) => [
+      S / 2 + (lon - lon0) * mPerDegLon * k,
+      S / 2 - (lat - lat0) * mPerDegLat * k,
+    ];
+    const rings = (g) => g.type === "Polygon" ? [g.coordinates[0]]
+                       : g.coordinates.map((poly) => poly[0]);
+    let modelled = 0, flat = 0, paths = "";
+    for (const f of d.features) {
+      const h = f.properties && f.properties.h;
+      for (const ring of rings(f.geometry)) {
+        const pts = ring.map(toXY).map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(" ");
+        if (h) paths += `<polygon points="${pts}" fill="var(--primary)" fill-opacity="0.85" stroke="none"/>`;
+        else   paths += `<polygon points="${pts}" fill="none" stroke="var(--text-muted)" stroke-width="0.7"/>`;
+      }
+      if (h) modelled++; else flat++;
+    }
+    const core = 504 * k;                              // the 1008 m sampled core
+    wrap.innerHTML = `
+      <div class="geo-fig">
+        <svg viewBox="0 0 ${S} ${S}" width="${S}" height="${S}" role="img"
+             aria-label="Building footprints for this case; filled shapes carry a height and are meshed.">
+          ${paths}
+          <rect x="${S/2-core}" y="${S/2-core}" width="${2*core}" height="${2*core}"
+                fill="none" stroke="var(--bad)" stroke-width="1.2" stroke-dasharray="5 4"/>
+          <circle cx="${S/2}" cy="${S/2}" r="2.5" fill="var(--bad)"/>
+        </svg>
+        <div class="geo-legend">
+          <div><span class="geo-swatch" style="background:var(--primary)"></span><b>${modelled}</b> extruded (has height)</div>
+          <div><span class="geo-swatch" style="border:1px solid var(--text-muted)"></span><b>${flat}</b> no height — not meshed</div>
+          <div><span class="geo-swatch" style="border:1px dashed var(--bad)"></span>1008 m sampled core</div>
+          <div style="margin-top:6px;color:var(--text-muted)">release ${esc(d.release)}${d.cached ? " · cached" : ""}</div>
+          <div class="geo-note">${modelled === 0
+            ? "No building carries a height here, so this site meshes as bare ground. That is the condition that fails a case."
+            : "Only the filled shapes become CFD geometry; outlines are footprints Overture knows but cannot extrude."}</div>
+        </div>
+      </div>`;
+  }
+
+  document.addEventListener("click", (e) => {
+    const btn = e.target.closest(".geo-load");
+    if (!btn) return;
+    loadFootprints(btn.dataset.case, btn.parentElement);
+  });
+
   // -- Clipboard Toast Helper -------------------------------------------------
   let toastTimer = null;
   function showToast(msg) {
@@ -1727,6 +1797,18 @@
                 Copy API curl command
               </button>
             </div>
+          </div>
+        </div>
+
+        <div class="detail-card" style="margin-bottom:14px;">
+          <h3>Site Geometry
+            <span class="label-hint" style="font-weight:400;">(Overture, same release the runner meshes)</span>
+          </h3>
+          <div id="geoWrap-${esc(c.case_id)}" class="geo-wrap">
+            <button class="subtle geo-load" data-case="${esc(c.case_id)}"
+                    data-lat="${spec.lat ?? ""}" data-lon="${spec.lon ?? ""}">
+              Show building footprints
+            </button>
           </div>
         </div>
 

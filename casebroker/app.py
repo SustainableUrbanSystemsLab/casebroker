@@ -14,6 +14,7 @@ changing ``CASEBROKER_TOKENS`` and restarting.
 from __future__ import annotations
 
 import hmac
+import json
 import os
 import pathlib
 import sys
@@ -24,7 +25,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
-from . import __version__, db, ids
+from . import __version__, db, footprints, ids
 
 MAX_LEASE_SECONDS = 24 * 3600
 
@@ -404,6 +405,47 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         return {**db.status(conn), "version": __version__,
                 "db": _redact_db_target(db_path)}
 
+
+    @app.get("/v1/cases/{case_id}/footprints", dependencies=[ReadAuth])
+    def case_footprints(case_id: str, refresh: bool = False) -> dict[str, Any]:
+        """Overture building footprints for this case, as GeoJSON.
+
+        The dashboard cannot fetch these itself: Overture publishes GeoParquet on
+        S3 and a Python client, with no REST API and no published tile endpoint,
+        so a browser has nothing to call. The broker runs the query.
+
+        It is deliberately the SAME release and the same bbox derivation the
+        runner uses, so the picture is the geometry that gets meshed. Drawing
+        OSM footprints or a map tile instead would be worse than drawing
+        nothing: it would look like a check while disagreeing with the mesh, and
+        it would disagree most exactly where checking matters -- the sites where
+        Overture is empty but OSM is not.
+
+        Cached after the first fetch; `refresh=true` forces a re-query.
+        """
+        row = conn.execute("SELECT * FROM cases WHERE case_id=?", (case_id,)).fetchone()
+        if row is None:
+            raise HTTPException(404, "no such case")
+        row = dict(row)
+        if not refresh:
+            hit = db.get_footprints(conn, case_id)
+            if hit:
+                return {**json.loads(hit["geojson"]), "cached": True,
+                        "fetched_at": hit["fetched_at"]}
+        spec = row.get("spec") or {}
+        if isinstance(spec, str):
+            spec = json.loads(spec)
+        lat, lon = spec.get("lat"), spec.get("lon")
+        if lat is None or lon is None:
+            raise HTTPException(422, "case spec carries no lat/lon")
+        try:
+            fc = footprints.fetch(float(lat), float(lon))
+        except Exception as e:                       # noqa: BLE001
+            # 502, not 500: the failure is upstream at Overture, and saying so
+            # keeps it out of the broker's own error budget.
+            raise HTTPException(502, f"overture query failed: {e}") from e
+        db.put_footprints(conn, case_id, json.dumps(fc), fc["n"])
+        return {**fc, "cached": False}
 
     @app.get("/v1/cases/{case_id}", dependencies=[ReadAuth])
     def get_case(case_id: str) -> dict[str, Any]:

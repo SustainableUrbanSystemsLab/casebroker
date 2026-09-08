@@ -108,6 +108,16 @@ CREATE TABLE IF NOT EXISTS fleet (
     reported_at  INTEGER NOT NULL
 );
 
+-- Overture footprints for a case, cached. The query costs seconds against S3 and
+-- cannot change for a pinned release, so it is paid once per case rather than on
+-- every dashboard open.
+CREATE TABLE IF NOT EXISTS footprints (
+    case_id     TEXT PRIMARY KEY,
+    geojson     TEXT NOT NULL,
+    n           INTEGER NOT NULL DEFAULT 0,
+    fetched_at  INTEGER NOT NULL
+);
+
 
 -- Append-only audit trail. Every transition lands here, so "why is this case
 -- still pending after three days" stays answerable after the fact.
@@ -178,6 +188,16 @@ CREATE TABLE IF NOT EXISTS fleet (
     running      INTEGER NOT NULL DEFAULT 0,
     detail       TEXT,
     reported_at  INTEGER NOT NULL
+);
+
+-- Overture footprints for a case, cached. The query costs seconds against S3 and
+-- cannot change for a pinned release, so it is paid once per case rather than on
+-- every dashboard open.
+CREATE TABLE IF NOT EXISTS footprints (
+    case_id     TEXT PRIMARY KEY,
+    geojson     TEXT NOT NULL,
+    n           INTEGER NOT NULL DEFAULT 0,
+    fetched_at  INTEGER NOT NULL
 );
 
 
@@ -659,6 +679,27 @@ def release(conn, lease_id: str, reason: str = "released",
 # -- observability ------------------------------------------------------------
 
 @_locked
+def put_footprints(conn, case_id: str, geojson: str, n: int, now: int | None = None) -> None:
+    now = now or _now()
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        if not conn.execute(
+                "UPDATE footprints SET geojson=?, n=?, fetched_at=? WHERE case_id=?",
+                (geojson, n, now, case_id)).rowcount:
+            conn.execute("INSERT INTO footprints (case_id, geojson, n, fetched_at)"
+                         " VALUES (?, ?, ?, ?)", (case_id, geojson, n, now))
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+
+
+def get_footprints(conn, case_id: str):
+    r = conn.execute("SELECT geojson, n, fetched_at FROM footprints WHERE case_id=?",
+                     (case_id,)).fetchone()
+    return dict(r) if r else None
+
+
 @_locked
 def report_fleet(conn, cluster: str, queued: int, running: int,
                  detail: str | None = None, now: int | None = None) -> None:
