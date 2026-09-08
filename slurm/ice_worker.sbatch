@@ -61,7 +61,11 @@ command -v uv >/dev/null 2>&1 || {
 
 cd "$REPO/benchmark/casebroker" || exit 1
 
+# MAX_CASES caps a validation run at a handful of cases. Leave it unset for a
+# real shift, where the worker keeps going until the queue drains or the wall
+# clock runs low.
 timeout "${MAX_HOURS}h" uv run python -m casebroker.worker \
+    ${MAX_CASES:+--max-cases "$MAX_CASES"} \
     --broker "$CASEBROKER_URL" \
     --token "$CASEBROKER_TOKEN" \
     --worker-id "$CASEBROKER_WORKER_ID" \

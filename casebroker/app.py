@@ -85,6 +85,13 @@ class LeaseIn(BaseModel):
     cluster: str | None = None
 
 
+class FleetIn(BaseModel):
+    cluster: str
+    queued: int = Field(default=0, ge=0)
+    running: int = Field(default=0, ge=0)
+    detail: str | None = None
+
+
 class LeaseOut(BaseModel):
     case_id: str
     lease_id: str
@@ -364,6 +371,22 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
             raise HTTPException(409, "lease expired or superseded")
         return {"ok": True}
 
+
+    @app.post("/v1/fleet", dependencies=[WriteAuth])
+    def report_fleet(body: FleetIn) -> dict[str, str]:
+        """Tell the broker what a scheduler is holding that has not arrived yet.
+
+        The broker cannot see SLURM: a queued worker has never called it, so it
+        does not exist here until its first lease. That makes "5,000 pending, 0
+        leased" true and unhelpful -- it cannot distinguish "nothing is coming"
+        from "twenty workers are third in the queue". Whoever can run squeue
+        pushes that in here.
+
+        Write-scoped because it is an assertion about the campaign that the
+        dashboard will show as fact, not a read.
+        """
+        db.report_fleet(conn, body.cluster, body.queued, body.running, body.detail)
+        return {"cluster": body.cluster}
 
     @app.get("/v1/status", dependencies=[ReadAuth])
     def status() -> dict[str, Any]:

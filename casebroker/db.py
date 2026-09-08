@@ -93,6 +93,21 @@ CREATE TABLE IF NOT EXISTS workers (
     cases_done   INTEGER NOT NULL DEFAULT 0,
     cases_failed INTEGER NOT NULL DEFAULT 0
 );
+-- What a SCHEDULER holds that has not reached the broker yet. A worker queued in
+-- SLURM has never contacted this service -- it does not exist here until its
+-- first lease -- so "5,000 pending, 0 leased" is accurate and still tells an
+-- operator nothing about whether anything is coming. This table is the missing
+-- half: a snapshot somebody with squeue access pushes in. It is deliberately
+-- REPORTED rather than inferred, and always read back with its age, because a
+-- stale snapshot presented as live is worse than no snapshot at all.
+CREATE TABLE IF NOT EXISTS fleet (
+    cluster      TEXT PRIMARY KEY,
+    queued       INTEGER NOT NULL DEFAULT 0,
+    running      INTEGER NOT NULL DEFAULT 0,
+    detail       TEXT,
+    reported_at  INTEGER NOT NULL
+);
+
 
 -- Append-only audit trail. Every transition lands here, so "why is this case
 -- still pending after three days" stays answerable after the fact.
@@ -150,6 +165,21 @@ CREATE TABLE IF NOT EXISTS workers (
     cases_done   INTEGER NOT NULL DEFAULT 0,
     cases_failed INTEGER NOT NULL DEFAULT 0
 );
+-- What a SCHEDULER holds that has not reached the broker yet. A worker queued in
+-- SLURM has never contacted this service -- it does not exist here until its
+-- first lease -- so "5,000 pending, 0 leased" is accurate and still tells an
+-- operator nothing about whether anything is coming. This table is the missing
+-- half: a snapshot somebody with squeue access pushes in. It is deliberately
+-- REPORTED rather than inferred, and always read back with its age, because a
+-- stale snapshot presented as live is worse than no snapshot at all.
+CREATE TABLE IF NOT EXISTS fleet (
+    cluster      TEXT PRIMARY KEY,
+    queued       INTEGER NOT NULL DEFAULT 0,
+    running      INTEGER NOT NULL DEFAULT 0,
+    detail       TEXT,
+    reported_at  INTEGER NOT NULL
+);
+
 
 CREATE TABLE IF NOT EXISTS events (
     id        SERIAL PRIMARY KEY,
@@ -629,6 +659,44 @@ def release(conn, lease_id: str, reason: str = "released",
 # -- observability ------------------------------------------------------------
 
 @_locked
+@_locked
+def report_fleet(conn, cluster: str, queued: int, running: int,
+                 detail: str | None = None, now: int | None = None) -> None:
+    """Record what a scheduler currently holds for one cluster.
+
+    Upsert on cluster, so a reporter can run on a timer and simply overwrite its
+    own last snapshot rather than accumulating history nobody reads.
+    """
+    now = now or _now()
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        updated = conn.execute(
+            "UPDATE fleet SET queued=?, running=?, detail=?, reported_at=? WHERE cluster=?",
+            (queued, running, detail, now, cluster)).rowcount
+        if not updated:
+            conn.execute(
+                "INSERT INTO fleet (cluster, queued, running, detail, reported_at)"
+                " VALUES (?, ?, ?, ?, ?)", (cluster, queued, running, detail, now))
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+
+
+def fleet(conn, now: int | None = None) -> list[dict[str, Any]]:
+    """Reported scheduler state, each row carrying how old it is.
+
+    ``age_seconds`` is returned rather than left for the caller to compute
+    because every consumer needs it: a snapshot nobody has refreshed for an hour
+    describes a queue that has almost certainly moved on, and presenting that as
+    current is the specific way this feature could mislead.
+    """
+    now = now or _now()
+    return [{**dict(r), "age_seconds": now - r["reported_at"]}
+            for r in conn.execute(
+                "SELECT * FROM fleet ORDER BY cluster")]
+
+
 def status(conn, now: int | None = None) -> dict[str, Any]:
     now = now or _now()
     by_state = {r["state"]: r["n"] for r in
@@ -643,6 +711,7 @@ def status(conn, now: int | None = None) -> dict[str, Any]:
         (now - 86400,)).fetchone()["n"]
     remaining = by_state.get("pending", 0) + by_state.get("leased", 0)
     return {
+        "fleet": fleet(conn, now),
         "by_state": by_state,
         "by_split": by_split,
         "expired_leases": stale,
