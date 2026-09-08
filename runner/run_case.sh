@@ -62,7 +62,11 @@ cleanup() {
             echo "exit $rc" > "$fail_out/exit_code.txt" 2>/dev/null
         }
     fi
-    rm -rf "$SCRATCH" "$PSTORE" 2>/dev/null
+    # ${PSTORE:-} because PSTORE is not assigned until the podman section far
+    # below: any failure BEFORE that -- a missing STL, a bad spec -- runs this
+    # trap with it still unset, and under `set -u` the cleanup handler then dies
+    # itself, on the way out of the error it was written to report.
+    rm -rf "$SCRATCH" "${PSTORE:-}" 2>/dev/null
 }
 trap cleanup EXIT
 
