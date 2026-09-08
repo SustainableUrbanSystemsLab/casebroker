@@ -26,6 +26,7 @@ IMG="${WIND_IMAGE:-docker.io/dicehub/openfoam:12}"
 CLI="${EDDY3D_CLI:?EDDY3D_CLI (path to eddy3d-cli) not set}"
 # The geometry builder lives in the parent repo beside this submodule.
 REAL_CITIES="${REAL_CITIES:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../real_cities" 2>/dev/null && pwd)}"
+GEO_REPORT=""   # set when this run builds its own geometry; empty means zGround falls back to 0
 
 # python3 on the clusters, python on the Windows workstation. Resolving it once
 # here rather than hardcoding python3 keeps the runner usable for a local dry run,
@@ -97,6 +98,7 @@ if [ -z "$BUILDINGS" ] || [ -z "$TERRAIN" ]; then
     LAT=$(printf '%s' "$SPEC" | "$PY" -c 'import json,sys; print(json.load(sys.stdin)["lat"])')
     LON=$(printf '%s' "$SPEC" | "$PY" -c 'import json,sys; print(json.load(sys.stdin)["lon"])')
     GEO="$WC/geometry/$CASE_ID"
+    GEO_REPORT="$GEO/$CASE_ID.json"
     BUILDINGS="$GEO/${CASE_ID}_buildings.stl"
     TERRAIN="$GEO/${CASE_ID}_terrain.stl"
     if [ ! -f "$BUILDINGS" ] || [ ! -f "$TERRAIN" ]; then
@@ -164,6 +166,16 @@ PEDESTRIAN_Z=$("$PY" -c "print(($TERRAIN_ZMAX) + 1.5)" 2>/dev/null || echo "1.5"
 # round-trip without reintroducing a gap.
 DOMAIN_ZMIN=$("$PY" -c "print(($TERRAIN_ZMIN) + 0.5)" 2>/dev/null || echo "-60")
 export DOMAIN_ZMIN   # read by the config generator below, which is a separate process
+# The ABL datum, from the geometry report the builder wrote beside the STLs.
+GROUND_Z=$("$PY" -c "
+import json,sys
+try:
+    print(json.load(open(sys.argv[1]))['terrain_z_min'])
+except Exception:
+    print(0)
+" "$GEO_REPORT" 2>/dev/null || echo 0)
+export GROUND_Z
+log "domain floor ${DOMAIN_ZMIN}, ABL zGround ${GROUND_Z}"
 
 # ── 2. build the study ────────────────────────────────────────────────────────
 # $SPEC is written to a file rather than piped in: a `<<'PY'` heredoc on the same
@@ -194,8 +206,16 @@ json.dump({
     "caseName": case_id,
     "workDir": scratch,
     "domain": dom,
+    # groundZ is OpenFOAM's zGround: the datum the ABL log profile is measured
+    # from, U = (U*/kappa) ln((z - zGround + z0)/z0). It was pinned at 0, which is
+    # only correct where the ground happens to sit at zero. On real terrain the
+    # profile is then displaced by the site's elevation, and at the actual ground
+    # surface the log argument can go negative. Taken from the geometry report's
+    # ground-surface minimum -- NOT the terrain STL's minimum, which is the slab's
+    # artificial base some 20 m lower.
     "wind": spec.get("wind", {"directions": [0, 45, 90, 135, 180, 225, 270, 315],
-                              "speed": 5, "refHeight": 10, "roughness": 0.5, "groundZ": 0}),
+                              "speed": 5, "refHeight": 10, "roughness": 0.5,
+                              "groundZ": float(os.environ.get("GROUND_Z", "0"))}),
     "geometry": {"buildingsStl": scratch + "/buildings.stl",
                  "terrainStl": scratch + "/terrain.stl",
                  **spec.get("geometry", {})},
