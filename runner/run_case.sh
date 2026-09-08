@@ -126,10 +126,10 @@ cp "$TERRAIN"   "$SCRATCH/terrain.stl"
 # extends well BELOW the terrain (so blockMesh's floor seals under it), and
 # slicing at domain_min_z + 1.5 would sample INSIDE solid ground on any case
 # where the two differ, which is the common case, not the exception.
-TERRAIN_ZMAX=$("$PY" - "$SCRATCH/terrain.stl" <<'PY'
+TERRAIN_Z=$("$PY" - "$SCRATCH/terrain.stl" <<'PY'
 import struct, sys
 data = open(sys.argv[1], "rb").read()
-zmax = None
+zmax = zmin = None
 is_binary = len(data) >= 84
 if is_binary:
     n = struct.unpack_from("<I", data, 80)[0]
@@ -138,7 +138,9 @@ if is_binary:
     off = 84
     for _ in range(n):
         v = struct.unpack_from("<9f", data, off + 12)
-        zmax = max(zmax, v[2], v[5], v[8]) if zmax is not None else max(v[2], v[5], v[8])
+        hi, lo = max(v[2], v[5], v[8]), min(v[2], v[5], v[8])
+        zmax = hi if zmax is None else max(zmax, hi)
+        zmin = lo if zmin is None else min(zmin, lo)
         off += 50
 else:
     for line in data.decode("utf-8", "ignore").splitlines():
@@ -146,10 +148,22 @@ else:
         if line.startswith("vertex"):
             z = float(line.split()[3])
             zmax = z if zmax is None else max(zmax, z)
-print(zmax if zmax is not None else "")
+            zmin = z if zmin is None else min(zmin, z)
+print(f"{zmax} {zmin}" if zmax is not None else "")
 PY
 )
+TERRAIN_ZMAX=$(printf '%s' "$TERRAIN_Z" | cut -d" " -f1)
+TERRAIN_ZMIN=$(printf '%s' "$TERRAIN_Z" | cut -d" " -f2)
 PEDESTRIAN_Z=$("$PY" -c "print(($TERRAIN_ZMAX) + 1.5)" 2>/dev/null || echo "1.5")
+# The domain floor has to SEAL against the terrain slab. A fixed -60 m floor was
+# below the slab's underside on this site by 25 m, and build-case rejected it
+# outright: snappyHexMesh would have meshed that gap as fluid and the inlet would
+# have blown air UNDER the terrain. The slab's own base depends on the site's
+# relief and on watertight.py's depth, so it has to be read from the geometry
+# rather than assumed. Half a metre of overlap absorbs float error in the STL
+# round-trip without reintroducing a gap.
+DOMAIN_ZMIN=$("$PY" -c "print(($TERRAIN_ZMIN) + 0.5)" 2>/dev/null || echo "-60")
+export DOMAIN_ZMIN   # read by the config generator below, which is a separate process
 
 # ── 2. build the study ────────────────────────────────────────────────────────
 # $SPEC is written to a file rather than piped in: a `<<'PY'` heredoc on the same
@@ -174,7 +188,8 @@ with open(scratch + "/spec.json") as f:
 dom = spec.get("domain")
 if dom is None:
     half = 504.0 + 800.0
-    dom = {"min": [-half, -half, -60], "max": [half, half, 600], "cellSize": 16}
+    zmin = float(os.environ.get("DOMAIN_ZMIN", "-60"))
+    dom = {"min": [-half, -half, zmin], "max": [half, half, 600], "cellSize": 16}
 json.dump({
     "caseName": case_id,
     "workDir": scratch,
