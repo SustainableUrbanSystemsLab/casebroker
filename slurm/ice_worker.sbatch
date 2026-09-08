@@ -46,6 +46,19 @@ df -h "${TMPDIR:-/tmp}" | tail -1
 
 MAX_HOURS=${MAX_HOURS:-7.0}
 
+# uv lives in ~/.local/bin, which a NON-LOGIN shell does not put on PATH -- and a
+# SLURM batch script is exactly that. The first ICE submission died in one second
+# with "timeout: failed to run command 'uv': No such file or directory" (exit
+# 127) while uv sat installed and working on the very same filesystem. Resolved
+# here rather than relying on the node's profile, and checked explicitly so a
+# missing uv fails with a sentence instead of a bare 127.
+export PATH="$HOME/.local/bin:$PATH"
+command -v uv >/dev/null 2>&1 || {
+    echo "FATAL: uv not found on PATH. Install with:" >&2
+    echo "  curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=\"$HOME/.local/bin\" sh" >&2
+    exit 127
+}
+
 cd "$REPO/benchmark/casebroker" || exit 1
 
 timeout "${MAX_HOURS}h" uv run python -m casebroker.worker \
