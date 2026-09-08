@@ -32,6 +32,15 @@ PY=$(command -v python3 || command -v python) || { echo "no python on PATH" >&2;
 
 log() { echo "[$CASE_ID] $*" >&2; }
 fatal_case() { log "FATAL (will not retry): $*"; exit 64; }
+# Exit 64 is reserved for "this SITE is broken" -- degenerate geometry that will
+# fail identically on every machine forever. A missing input file is not that: it
+# says the tooling or the staging is not ready, and the site itself is fine. The
+# distinction is expensive to get wrong in one direction only. A retryable error
+# costs at most three attempts; a wrongly fatal one silently removes a site from
+# the campaign with no way back short of editing the database -- which is exactly
+# what happened on the first ICE run, where a missing STL quarantined 173 perfectly
+# good sites in under a minute before anyone could stop it.
+retry_case() { log "RETRYABLE: $*"; exit 1; }
 
 SCRATCH="${TMPDIR:-/tmp}/wind-$CASE_ID-$$"
 mkdir -p "$SCRATCH" || exit 1
@@ -74,8 +83,12 @@ trap cleanup EXIT
 # The spec names STLs already staged on shared storage by the tile pipeline.
 BUILDINGS=$(printf '%s' "$SPEC" | "$PY" -c 'import json,sys; print(json.load(sys.stdin).get("buildings_stl",""))')
 TERRAIN=$(printf '%s' "$SPEC" | "$PY" -c 'import json,sys; print(json.load(sys.stdin).get("terrain_stl",""))')
-[ -f "$BUILDINGS" ] || fatal_case "buildings STL missing: $BUILDINGS"
-[ -f "$TERRAIN" ]   || fatal_case "terrain STL missing: $TERRAIN"
+# Retryable, not fatal: an absent STL means the tile pipeline has not staged this
+# site yet, which is a statement about the pipeline and not about the site.
+[ -n "$BUILDINGS" ] || retry_case "spec carries no buildings_stl (geometry not staged for this site)"
+[ -n "$TERRAIN" ]   || retry_case "spec carries no terrain_stl (geometry not staged for this site)"
+[ -f "$BUILDINGS" ] || retry_case "buildings STL not found: $BUILDINGS"
+[ -f "$TERRAIN" ]   || retry_case "terrain STL not found: $TERRAIN"
 cp "$BUILDINGS" "$SCRATCH/buildings.stl"
 cp "$TERRAIN"   "$SCRATCH/terrain.stl"
 
