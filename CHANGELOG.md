@@ -8,6 +8,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-08
+
+First tagged release. 0.1.0 was never cut, so everything below shipped under a
+version that never moved: sixty commits, a dozen new endpoints, and `/healthz`
+reporting `0.1.0` throughout. MINOR rather than MAJOR because every addition is
+backwards compatible -- no endpoint changed shape, no field was removed, and the
+deprecated `CASEBROKER_TOKENS` spelling still works.
+
+New endpoints in this release: `GET /v1/whoami`, `GET /v1/share-token`,
+`POST /v1/fleet`, `GET /v1/cases/{id}/footprints`. `/v1/status` gained
+`version`, `db` and `fleet`; `/healthz` gained `version` and `scopes`.
+
 ### Added
 
 - `/healthz` now reports `version`, so "is the commit I just pushed actually the

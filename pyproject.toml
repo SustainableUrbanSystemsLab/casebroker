@@ -7,7 +7,7 @@ name = "casebroker"
 # back from the installed distribution metadata and everything that reports a
 # version (the OpenAPI document, /healthz, the dashboard badge) goes through
 # there. Bumping it here and tagging v<version> is the whole release.
-version = "0.1.0"
+version = "0.2.0"
 description = "Central case broker for the v2 real-city CFD campaign: one database of cases, many workers leasing the next one to simulate."
 requires-python = ">=3.11"
 dependencies = [
