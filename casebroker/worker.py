@@ -22,12 +22,14 @@ Three things here are not optional at campaign scale:
 from __future__ import annotations
 
 import argparse
+import glob
 import json
 import os
 import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -47,10 +49,20 @@ class Worker:
     def __init__(self, broker: str, token: str | None, worker_id: str | None = None,
                  lease_seconds: int = 900, heartbeat_seconds: int = 300,
                  timeout: float = 30.0, host: str | None = None,
-                 cluster: str | None = None):
+                 cluster: str | None = None, progress_file: str | None = None,
+                 cases_dir: str | None = None):
         self.broker = broker.rstrip("/")
         self.worker_id = worker_id or f"{socket.gethostname()}-{os.getpid()}-{uuid.uuid4().hex[:6]}"
         self.lease_seconds = lease_seconds
+        # Where the runner drops its one-line "iter 412 p=3.2e-05 ..." summary
+        # (runner/lib/progress.py). The heartbeat ships whatever is there in
+        # place of "alive", so the dashboard shows where a solve actually is.
+        self.progress_file = progress_file
+        # Per-case checkpoints this machine keeps on its own disk (the runner's
+        # $WIND_CASES). A `resume.json` in there names a case this worker was
+        # mid-way through when it last stopped; it is asked for first on the
+        # next lease so the solve continues instead of restarting.
+        self.cases_dir = cases_dir
         # "What machine produced this case" is otherwise unanswerable once the
         # SLURM job has ended and its log has rotated out of easy reach.
         # SLURM_CLUSTER_NAME is set by the scheduler on both ICE and Phoenix, so
@@ -90,13 +102,47 @@ class Worker:
 
     # -- lease lifecycle ------------------------------------------------------
 
+    def resume_case_ids(self) -> list[str]:
+        """Cases with a checkpoint on THIS machine that this worker id left
+        behind. Read from disk on every call: the runner deletes the marker when
+        a case completes, so nothing here needs to track state."""
+        if not self.cases_dir:
+            return []
+        ids: list[str] = []
+        for marker in sorted(glob.glob(os.path.join(self.cases_dir, "*", "resume.json"))):
+            try:
+                with open(marker, encoding="utf-8") as f:
+                    m = json.load(f)
+            except (OSError, ValueError):
+                continue
+            # A checkpoint another worker id on this same box left is not ours to
+            # continue -- its ranks, runtime and lease history are that worker's.
+            if m.get("worker_id") == self.worker_id and m.get("case_id"):
+                ids.append(m["case_id"])
+        return ids[:64]
+
     def lease(self, count: int = 1, splits: list[str] | None = None) -> list[LeaseDict]:
         r = self._post("/v1/lease", {
             "worker_id": self.worker_id, "count": count,
             "lease_seconds": self.lease_seconds, "splits": splits,
-            "host": self.host, "cluster": self.cluster})
+            "host": self.host, "cluster": self.cluster,
+            "resume_case_ids": self.resume_case_ids() or None})
         r.raise_for_status()
         return r.json()
+
+    def progress_detail(self) -> str:
+        """The runner's latest progress line, or "alive" when there is none yet.
+        Best effort: a progress line is decoration on a heartbeat and must never
+        be able to break one."""
+        if self.progress_file:
+            try:
+                with open(self.progress_file, encoding="utf-8", errors="ignore") as f:
+                    line = f.read().strip().splitlines()
+                if line and line[-1].strip():
+                    return line[-1].strip()[:400]
+            except OSError:
+                pass
+        return "alive"
 
     def heartbeat(self, detail: str | None = None) -> None:
         if not self._current_lease:
@@ -140,7 +186,7 @@ class Worker:
             if not self._current_lease:
                 continue
             try:
-                self.heartbeat("alive")
+                self.heartbeat(self.progress_detail())
             except LeaseLost:
                 print("[warn] lease lost; abandoning current case", file=sys.stderr)
                 return
@@ -192,6 +238,13 @@ class Worker:
             self._current_lease = lease["lease_id"]
             self._lease_lost.clear()
             t0 = time.time()
+            # A stale line from the previous case must not be reported as this
+            # one's progress on the first heartbeat.
+            if self.progress_file:
+                try:
+                    os.remove(self.progress_file)
+                except OSError:
+                    pass
             print(f"[info] leased {lease['case_id']} (attempt {lease['attempt']})")
             try:
                 out = runner(lease, self)
@@ -258,6 +311,15 @@ def script_runner(script: str) -> Runner:
         env["CASE_ID"] = lease["case_id"]
         env["CASE_SPEC"] = json.dumps(lease["spec"])
         env["LEASE_ID"] = lease["lease_id"]
+        # What the runner needs to talk BACK: where to write progress for the
+        # heartbeat, where to keep a checkpoint, and which worker it belongs to
+        # (so a resume marker is only honoured by the worker that wrote it).
+        if worker is not None:
+            if worker.progress_file:
+                env["CASEBROKER_PROGRESS_FILE"] = worker.progress_file
+            if worker.cases_dir:
+                env["WIND_CASES"] = worker.cases_dir
+            env["CASEBROKER_WORKER_ID"] = worker.worker_id
         # POSIX: run via `bash <script>` rather than exec'ing the file directly --
         # the latter depends on the git executable bit surviving checkout, which a
         # script authored on Windows is not guaranteed to carry (found on Phoenix:
@@ -294,9 +356,18 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--lease-seconds", type=int, default=900)
     p.add_argument("--heartbeat-seconds", type=int, default=300)
     p.add_argument("--idle-backoff", type=int, default=60)
+    p.add_argument("--progress-file", default=os.environ.get("CASEBROKER_PROGRESS_FILE"),
+                   help="where the runner writes its progress line for the heartbeat "
+                        "(default: a per-worker file in the temp dir)")
+    p.add_argument("--cases-dir", default=os.environ.get("WIND_CASES"),
+                   help="local checkpoint directory; cases with a resume.json here are "
+                        "asked for first so they continue instead of restarting")
     a = p.parse_args(argv)
 
-    w = Worker(a.broker, a.token, a.worker_id, a.lease_seconds, a.heartbeat_seconds)
+    w = Worker(a.broker, a.token, a.worker_id, a.lease_seconds, a.heartbeat_seconds,
+               cases_dir=a.cases_dir)
+    w.progress_file = a.progress_file or os.path.join(
+        tempfile.gettempdir(), f"casebroker-progress-{w.worker_id}.txt")
     runner = script_runner(a.runner) if a.runner else echo_runner
     n = w.run_forever(runner, splits=a.splits, max_cases=a.max_cases,
                       idle_backoff=a.idle_backoff)

@@ -75,6 +75,26 @@ numbers for post-inference geometry.
 **Delete `__pycache__` after editing modules in `real_cities/`.** A stale
 bytecode cache made a fixed function look broken for several rounds.
 
+**Hooking any machine into the campaign as a worker -- Windows or Linux,
+Docker, Podman or native blueCFD -- is [`docs/fleet.md`](docs/fleet.md):**
+`machine.env` + `start_worker.sh`/`.ps1`, progress in the heartbeat,
+same-machine checkpoint/resume, one archive per finished case, Syncthing for
+workstations and `scripts/pull_done.sh` for PACE. Two invariants people will
+be tempted to "simplify": a case never moves between machines mid-solve
+(the checkpoint is local disk), and `CASEBROKER_WORKER_ID` is stable per
+machine (it is how a restarted worker gets its own case back).
+
+**Running a case on PACE ICE/Phoenix: see [`docs/pace-hpc.md`](docs/pace-hpc.md)
+before improvising.** Covers Podman (not Docker — check for it before
+porting a case to an older cluster OpenFOAM module), the Windows-SSH-client
+requirement, scratch storage vs the tiny `$HOME` quotas, the rootless-podman
+setup, the OpenFOAM image's `ENTRYPOINT`-quoting trap, the 24-core/node
+ceiling, and a working template at
+[`slurm/standalone_solve_template.sbatch`](slurm/standalone_solve_template.sbatch).
+Every gotcha in that doc cost real debugging time (including one 120-job
+runaway retry loop) — it exists so the next attempt doesn't re-pay that
+cost.
+
 ## Conventions
 
 - **Commits explain *why*, and name the failure that motivated the change.** The

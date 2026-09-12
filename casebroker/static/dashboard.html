@@ -1958,6 +1958,11 @@
               <dd>${c.updated_at ? new Date(c.updated_at * 1000).toLocaleString() : "—"}</dd>
               <dt>Lease Expiry</dt>
               <dd>${c.lease_expires ? relTime(c.lease_expires) + " (from now)" : "—"}</dd>
+              <dt>Progress</dt>
+              <dd class="mono" title="${esc(c.last_progress || "")}">
+                ${esc(c.last_progress || "—")}
+                ${c.last_progress_at ? `<span style="color:var(--text-muted);font-family:var(--font);"> · ${esc(relTime(c.last_progress_at))}</span>` : ""}
+              </dd>
             </dl>
           </div>
 

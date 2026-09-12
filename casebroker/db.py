@@ -485,50 +485,41 @@ def add_cases(conn, rows: Iterable[dict[str, Any]]) -> dict[str, int]:
 def lease(conn, worker_id: str, count: int = 1,
           lease_seconds: int = 3600, splits: list[str] | None = None,
           now: int | None = None, host: str | None = None,
-          cluster: str | None = None) -> list[Lease]:
+          cluster: str | None = None,
+          resume_case_ids: list[str] | None = None) -> list[Lease]:
     """Atomically claim up to ``count`` cases.
 
     Expired leases are reclaimed by the same statement that hands out fresh work,
     so a crashed or preempted worker's cases re-enter the pool with no reaper
     process and no operator action.
+
+    ``resume_case_ids`` are cases this worker holds a local checkpoint for. They
+    are claimed FIRST, ahead of the priority order, and one still leased to this
+    same ``worker_id`` is handed straight back without spending an attempt: a
+    worker that restarted (walltime, preemption, Ctrl-C) is continuing its own
+    work, not retrying a failure. The old lease_id is superseded, so a zombie of
+    the previous process gets 409 on its next heartbeat exactly as before. A case
+    is never resumed by a DIFFERENT worker -- the checkpoint is on that machine's
+    local disk -- so a foreign id in the list simply does not match and the case
+    stays where it is.
     """
     now = now or _now()
     expires = now + lease_seconds
     out: list[Lease] = []
     is_pg = isinstance(conn, PgConnection)
+    # SQLite already has the whole database exclusively locked by BEGIN
+    # IMMEDIATE below, so no per-row locking clause is needed or valid there.
+    # Postgres instead locks only the rows this call is about to claim, and
+    # SKIPS any row a concurrent lease() or an in-flight heartbeat/complete/
+    # fail/release already holds (see _by_lease) rather than blocking on it --
+    # which is the entire point of moving off one file that serialises
+    # everything to begin with.
+    lock_clause = " FOR UPDATE SKIP LOCKED" if is_pg else ""
 
-    conn.execute("BEGIN IMMEDIATE")
-    try:
-        params: list[Any] = [now]
-        split_sql = ""
-        if splits:
-            placeholders = ",".join("?" for _ in splits)
-            split_sql = " AND split IN (" + placeholders + ")"
-            params.extend(splits)
-        params.append(count)
-
-        # SQLite already has the whole database exclusively locked by BEGIN
-        # IMMEDIATE above, so no per-row locking clause is needed or valid there.
-        # Postgres instead locks only the rows this call is about to claim, and
-        # SKIPS any row a concurrent lease() or an in-flight heartbeat/complete/
-        # fail/release already holds (see _by_lease) rather than blocking on it --
-        # which is the entire point of moving off one file that serialises
-        # everything to begin with.
-        lock_clause = " FOR UPDATE SKIP LOCKED" if is_pg else ""
-        rows = conn.execute(
-            "SELECT case_id, spec, attempts, max_attempts FROM cases"
-            " WHERE (state = 'pending' OR (state = 'leased' AND lease_expires < ?))"
-            + split_sql +
-            # Every worker targets the same "lowest" rows. That is contention by
-            # design, not by accident: under SKIP LOCKED a locked row is simply
-            # skipped, and case_id is a hash so the tiebreak is effectively random
-            # -- deterministic ordering with no hot spot.
-            " ORDER BY priority ASC, case_id ASC LIMIT ?" + lock_clause,
-            params,
-        ).fetchall()
-
+    def claim(rows, resumed: bool) -> None:
         for row in rows:
-            attempt = row["attempts"] + 1
+            own = resumed and row["state"] == "leased" and row["lease_worker"] == worker_id
+            attempt = row["attempts"] if own else row["attempts"] + 1
             if attempt > row["max_attempts"]:
                 # Poison case: its retries are spent. Park it rather than let it
                 # cycle forever through every worker in the fleet.
@@ -545,10 +536,48 @@ def lease(conn, worker_id: str, count: int = 1,
                 "UPDATE cases SET state='leased', lease_id=?, lease_worker=?,"
                 " lease_expires=?, attempts=?, updated_at=? WHERE case_id=?",
                 (lease_id, worker_id, expires, attempt, now, row["case_id"]))
-            _event(conn, row["case_id"], worker_id, "leased", "attempt %d" % attempt, now)
+            _event(conn, row["case_id"], worker_id, "resumed" if resumed else "leased",
+                   "attempt %d" % attempt, now)
             out.append(Lease(case_id=row["case_id"], lease_id=lease_id,
                              expires_at=expires, spec=json.loads(row["spec"]),
                              attempt=attempt))
+
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        if resume_case_ids:
+            ids = list(dict.fromkeys(resume_case_ids))[:count]
+            placeholders = ",".join("?" for _ in ids)
+            rows = conn.execute(
+                "SELECT case_id, spec, attempts, max_attempts, state, lease_worker"
+                " FROM cases WHERE case_id IN (" + placeholders + ")"
+                " AND (state = 'pending'"
+                "      OR (state = 'leased' AND (lease_expires < ? OR lease_worker = ?)))"
+                " ORDER BY case_id ASC" + lock_clause,
+                [*ids, now, worker_id],
+            ).fetchall()
+            claim(rows, resumed=True)
+
+        remaining = count - len(out)
+        if remaining > 0:
+            params: list[Any] = [now]
+            split_sql = ""
+            if splits:
+                placeholders = ",".join("?" for _ in splits)
+                split_sql = " AND split IN (" + placeholders + ")"
+                params.extend(splits)
+            params.append(remaining)
+            rows = conn.execute(
+                "SELECT case_id, spec, attempts, max_attempts, state, lease_worker FROM cases"
+                " WHERE (state = 'pending' OR (state = 'leased' AND lease_expires < ?))"
+                + split_sql +
+                # Every worker targets the same "lowest" rows. That is contention by
+                # design, not by accident: under SKIP LOCKED a locked row is simply
+                # skipped, and case_id is a hash so the tiebreak is effectively random
+                # -- deterministic ordering with no hot spot.
+                " ORDER BY priority ASC, case_id ASC LIMIT ?" + lock_clause,
+                params,
+            ).fetchall()
+            claim(rows, resumed=False)
 
         # host/cluster are refreshed on every lease call (not just insert): the
         # same worker_id can in principle move machines across a restart, and a
@@ -807,6 +836,28 @@ def list_cases(conn, state: str | None = None, split: str | None = None,
     clause = (" WHERE " + " AND ".join(where)) if where else ""
     total = conn.execute("SELECT COUNT(*) n FROM cases" + clause, params).fetchone()["n"]
     rows = conn.execute(
-        "SELECT * FROM cases" + clause + " ORDER BY updated_at DESC LIMIT ? OFFSET ?",
+        "SELECT " + _CASE_COLS + " FROM cases" + clause +
+        " ORDER BY updated_at DESC LIMIT ? OFFSET ?",
         params + [limit, offset]).fetchall()
     return {"cases": [dict(r) for r in rows], "total": total, "limit": limit, "offset": offset}
+
+
+# A case row plus the newest thing its worker said about it. Workers ship a
+# one-line progress summary ("case_270 iter 412 p=3.2e-05 ...") as the
+# heartbeat's `detail`, which lands in `events` -- a correlated subquery folds
+# the latest one back onto the case so the dashboard can show where a solve is
+# without a second endpoint or an events API. Two columns: what was said, and
+# when, so a stale line reads as stale.
+_CASE_COLS = (
+    "cases.*,"
+    " (SELECT e.detail FROM events e WHERE e.case_id = cases.case_id"
+    "   AND e.event = 'progress' ORDER BY e.id DESC LIMIT 1) AS last_progress,"
+    " (SELECT e.ts FROM events e WHERE e.case_id = cases.case_id"
+    "   AND e.event = 'progress' ORDER BY e.id DESC LIMIT 1) AS last_progress_at"
+)
+
+
+def get_case(conn, case_id: str) -> dict[str, Any] | None:
+    row = conn.execute("SELECT " + _CASE_COLS + " FROM cases WHERE case_id=?",
+                       (case_id,)).fetchone()
+    return dict(row) if row is not None else None

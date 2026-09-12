@@ -85,6 +85,11 @@ class LeaseIn(BaseModel):
     # by hand, simply reports unknown.
     host: str | None = None
     cluster: str | None = None
+    # Cases this worker holds a local checkpoint for (see db.lease): claimed
+    # first, and handed back without spending an attempt when still leased to
+    # this same worker_id. Never honoured for a different worker -- the
+    # checkpoint is on that machine's own disk.
+    resume_case_ids: list[str] | None = Field(default=None, max_length=64)
 
 
 class FleetIn(BaseModel):
@@ -371,7 +376,8 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         back off and retry, not treat it as an error."""
         got = db.lease(conn, body.worker_id, count=body.count,
                        lease_seconds=body.lease_seconds, splits=body.splits,
-                       host=body.host, cluster=body.cluster)
+                       host=body.host, cluster=body.cluster,
+                       resume_case_ids=body.resume_case_ids)
         return [LeaseOut(case_id=g.case_id, lease_id=g.lease_id, expires_at=g.expires_at,
                          attempt=g.attempt, spec=g.spec) for g in got]
 
@@ -500,10 +506,10 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
 
     @app.get("/v1/cases/{case_id}", dependencies=[ReadAuth])
     def get_case(case_id: str) -> dict[str, Any]:
-        row = conn.execute("SELECT * FROM cases WHERE case_id=?", (case_id,)).fetchone()
+        row = db.get_case(conn, case_id)
         if row is None:
             raise HTTPException(404, "no such case")
-        return dict(row)
+        return row
 
 
     @app.get("/v1/cases", dependencies=[ReadAuth])

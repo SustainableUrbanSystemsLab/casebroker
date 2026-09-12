@@ -43,9 +43,11 @@ set -uo pipefail
 WC=${WIND_ROOT:-/storage/scratch1/3/pkastner3/windcomfort/v2}
 REPO=${WIND_REPO:-$WC/repo/JP-Wind-ML-Comparison}
 export WIND_ROOT="$WC"
-export EDDY3D_CLI=${EDDY3D_CLI:-$WC/bin/eddy3d-cli}
+export EDDY3D_CLI=${EDDY3D_CLI:-$WC/bin/e3d}
 export WIND_NP=${SLURM_NTASKS:-24}
 export WIND_IMAGE=${WIND_IMAGE:-docker.io/dicehub/openfoam:12}
+export WIND_CASES=${WIND_CASES:-$WC/cases}
+export WIND_DONE=${WIND_DONE:-$WC/done}
 
 # One worker id per array task, stable across a requeue so the broker's worker
 # table shows a task's whole history rather than a new row each preemption.
@@ -103,6 +105,7 @@ timeout "${MAX_HOURS}h" uv run python -m casebroker.worker \
     --token "$CASEBROKER_TOKEN" \
     --worker-id "$CASEBROKER_WORKER_ID" \
     --runner "$REPO/benchmark/casebroker/runner/run_case.sh" \
+    --cases-dir "$WIND_CASES" \
     --lease-seconds 1800 \
     --heartbeat-seconds 300 \
     --idle-backoff 120

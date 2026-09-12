@@ -47,7 +47,7 @@ def make_fields(tmp_path, latest="250", turbulence="epsilon", extra_text=""):
     t = proc0 / latest
     t.mkdir(parents=True)
     for f in ("U", "p", "phi", "k", turbulence):
-        (t / f).write_text(f"FoamFile {{ class volVectorField; }}\n(0 0 0)\n{extra_text}\n")
+        (t / f).write_text(f"FoamFile {{ class volVectorField; format ascii; }}\n(0 0 0)\n{extra_text}\n")
     return proc0
 
 
@@ -182,7 +182,7 @@ def test_nan_in_the_velocity_field_fails_even_with_a_converged_log(tmp_path):
     diverged to nan on the very last iteration."""
     log = converged_log(tmp_path)
     proc0 = make_fields(tmp_path)
-    (proc0 / "250" / "U").write_text("FoamFile {}\n(nan nan nan)\n")
+    (proc0 / "250" / "U").write_text("FoamFile { format ascii; }\n(nan nan nan)\n")
     rc, out = run_gate(0, log, proc0, "250")
     assert rc == 1
     assert "nan/inf" in out
@@ -191,7 +191,7 @@ def test_nan_in_the_velocity_field_fails_even_with_a_converged_log(tmp_path):
 def test_inf_in_the_pressure_field_fails(tmp_path):
     log = converged_log(tmp_path)
     proc0 = make_fields(tmp_path)
-    (proc0 / "250" / "p").write_text("FoamFile {}\n-inf\n")
+    (proc0 / "250" / "p").write_text("FoamFile { format ascii; }\n-inf\n")
     rc, out = run_gate(0, log, proc0, "250")
     assert rc == 1
     assert "nan/inf" in out
@@ -204,3 +204,57 @@ def test_a_word_that_merely_contains_nan_as_a_substring_does_not_false_positive(
     proc0 = make_fields(tmp_path, extra_text="nonuniform List<scalar> canopy_inflow")
     rc, out = run_gate(0, log, proc0, "250")
     assert (rc, out) == (0, "OK")
+
+
+
+def test_the_sigfpe_trapping_announcement_is_not_a_floating_point_exception(tmp_path):
+    """Every real OpenFOAM log opens with
+    "sigFpe : Enabling floating point exception trapping (FOAM_SIGFPE)." --
+    the announcement that FPEs will be fatal, not one occurring. The fatal
+    pattern matched it, and the gate failed every real converged solve on
+    it (first end-to-end run of the fleet runner, 2026-09-11). A real FPE,
+    in the same log, must still be caught."""
+    log = tmp_path / "12.log"
+    log.write_text(
+        "sigFpe : Enabling floating point exception trapping (FOAM_SIGFPE).\n"
+        "fileModificationChecking : Monitoring run-time modified files using timeStampMaster\n"
+        "Time = 250s\n\n"
+        "SIMPLE solution converged in 250 iterations\n\n"
+        "End\n\n"
+    )
+    proc0 = make_fields(tmp_path)
+    assert run_gate(0, log, proc0, "250") == (0, "OK")
+
+    log.write_text(
+        "sigFpe : Enabling floating point exception trapping (FOAM_SIGFPE).\n"
+        "Time = 12s\n\n"
+        "Floating point exception (core dumped)\n"
+    )
+    rc, out = run_gate(0, log, make_fields(tmp_path / "b", latest="12"), "12")
+    assert rc == 1 and "fatal error in" in out
+
+
+def test_binary_field_bytes_that_happen_to_spell_inf_are_not_a_failure(tmp_path):
+    """The campaign writes `format binary`: the payload is raw doubles, and
+    "iNf"/"nan" occur in it by chance (fifth smoke run, 2026-09-11: a clean
+    30-iteration solve failed on byte-noise at U:1636). A binary field is
+    not text-scanned; the log's residuals carry the divergence instead."""
+    log = converged_log(tmp_path)
+    proc0 = make_fields(tmp_path)
+    noise = bytes([0x48, 0xFF]) + b" iNf&@G" + bytes([0x8F]) + b" nan " + bytes([0])
+    (proc0 / "250" / "U").write_bytes(
+        b"FoamFile { class volVectorField; format binary; }\n" + noise * 10)
+    assert run_gate(0, log, proc0, "250") == (0, "OK")
+
+
+def test_nan_in_the_solver_residuals_fails_a_binary_case(tmp_path):
+    log = tmp_path / "12.log"
+    log.write_text(
+        "Time = 250s\n\n"
+        "DILUPBiCGStab:  Solving for Ux, Initial residual = nan, Final residual = nan\n"
+        "SIMPLE solution converged in 250 iterations\n\nEnd\n"
+    )
+    proc0 = make_fields(tmp_path)
+    (proc0 / "250" / "U").write_bytes(b"FoamFile { format binary; }\n" + bytes([0, 1]))
+    rc, out = run_gate(0, log, proc0, "250")
+    assert rc == 1 and "solver residuals" in out

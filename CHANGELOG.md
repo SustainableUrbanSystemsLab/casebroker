@@ -8,6 +8,60 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+Hooking heterogeneous machines into the campaign: Windows workstations (Docker
+or native blueCFD-Core) alongside the PACE clusters, with progress visible on
+the dashboard, stopped solves resuming on the same machine, and one archive per
+finished case for Syncthing / a master-side pull to collect. See
+`docs/fleet.md`. MINOR: every protocol change is an optional addition.
+
+### Added
+- `POST /v1/lease` accepts `resume_case_ids`: cases this worker holds a local
+  checkpoint for are claimed first, and one still leased to the same
+  `worker_id` is handed back without spending an attempt. Never honoured for a
+  different worker.
+- Case rows (`GET /v1/cases`, `GET /v1/cases/{id}`) carry `last_progress` and
+  `last_progress_at`, the newest heartbeat `detail`; the dashboard's case
+  detail shows it as a Progress row.
+- Worker: `--progress-file` (the heartbeat ships the runner's one-line
+  progress summary instead of `"alive"`) and `--cases-dir` (where
+  `resume.json` markers are looked for). Both are passed to the runner as
+  `CASEBROKER_PROGRESS_FILE` / `WIND_CASES`, with `CASEBROKER_WORKER_ID`.
+- Runner: `WIND_RUNTIME` = `podman` | `docker` | `native` (blueCFD-Core 2024,
+  OpenFOAM-12 + MS-MPI) | `auto`; checkpoint on SIGTERM/SIGINT and resume with
+  `startFrom latestTime`; per-outer-iteration progress line
+  (`runner/lib/progress.py`); one `<case_id>.tar.gz` per case in `WIND_DONE`
+  holding the reconstructed last time step, mesh, dictionaries, logs and
+  samples, written atomically.
+- `start_worker.sh`, `start_worker.ps1`, `machine.env.example`,
+  `runner/run_case.cmd` (Windows launcher), `scripts/pull_done.sh` (master
+  pulls archives from PACE over SSH), `docs/fleet.md`.
+
+### Changed
+- `result_uri` now points at the case archive rather than a `results/`
+  directory; `result_bytes`/`result_sha256` describe the archive.
+- The runner's default solver `writeInterval` is 200, not the whole iteration
+  budget -- the old value wrote once at the very end, so a walltime-cut solve
+  had nothing to resume from.
+- `slurm/*_worker.sbatch` default `EDDY3D_CLI` to `$WC/bin/e3d` (the CLI's new
+  name; a fresh `linux-x64` build was deployed to both clusters) and pass
+  `--cases-dir`; ICE keeps checkpoints and archives on ice1 scratch, not the
+  30 GB home.
+
+### Fixed
+- Solve gate: the nan/inf scan matched the `sigFpe : Enabling floating point
+  exception trapping` banner every OpenFOAM log opens with, and then matched
+  `iNf` in the raw bytes of `format binary` field files -- both failed clean,
+  converged solves. Only ascii fields are text-scanned now; binary fields are
+  judged by `nan` in the solver's residual lines. The gate names the file and
+  line it matched.
+- Runner: the pedestrian-plane slice sample (and the preview PNG built from it)
+  had never run. The `sliceFO` dictionary was written in an older syntax:
+  no `FoamFile` header, a bare `libs (sampling)`, `surfaces` as a dictionary
+  rather than a list, and no named function-object wrapper (OpenFOAM 12's
+  `foamPostProcess -dict` reads a `functions` list). Now the exact form of the
+  image's own `movingCone/system/cutPlane` tutorial, and the renderer reads
+  the raw writer's `postProcessing/<fo>/<time>/<surface>.xy` layout.
+
 ## [0.2.0] - 2026-09-08
 
 First tagged release. 0.1.0 was never cut, so everything below shipped under a

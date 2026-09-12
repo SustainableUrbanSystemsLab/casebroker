@@ -34,9 +34,15 @@ set -uo pipefail
 WC=${WIND_ROOT:-$HOME/windcomfort}
 REPO=${WIND_REPO:-$WC/repos/JP-Wind-ML-Comparison}
 export WIND_ROOT="$WC"
-export EDDY3D_CLI=${EDDY3D_CLI:-$WC/bin/eddy3d-cli}
+export EDDY3D_CLI=${EDDY3D_CLI:-$WC/bin/e3d}
 export WIND_NP=${SLURM_NTASKS:-24}
 export WIND_IMAGE=${WIND_IMAGE:-docker.io/dicehub/openfoam:12}
+# $HOME on ICE is 30 GB and lives near full. A checkpoint of a case in flight
+# is 1-3 GB and an archive ~300 MB, so both go to the 300 GB ice1 scratch --
+# which itself has to have room: a scratch at 100% silently dropped one rank's
+# fields during a copy-back on 2026-09-11 (see docs/pace-hpc.md).
+export WIND_CASES=${WIND_CASES:-/storage/ice1/0/3/pkastner3/windcomfort/cases}
+export WIND_DONE=${WIND_DONE:-/storage/ice1/0/3/pkastner3/windcomfort/done}
 export CASEBROKER_CLUSTER=${CASEBROKER_CLUSTER:-ICE}
 
 export CASEBROKER_WORKER_ID="ice-${SLURM_ARRAY_JOB_ID}-${SLURM_ARRAY_TASK_ID}"
@@ -88,6 +94,7 @@ timeout "${MAX_HOURS}h" uv run python -m casebroker.worker \
     --token "$CASEBROKER_TOKEN" \
     --worker-id "$CASEBROKER_WORKER_ID" \
     --runner "$REPO/benchmark/casebroker/runner/run_case.sh" \
+    --cases-dir "$WIND_CASES" \
     --lease-seconds 1800 \
     --heartbeat-seconds 300 \
     --idle-backoff 120
