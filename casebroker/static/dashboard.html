@@ -983,6 +983,12 @@
             auto-refresh every 60s
           </label>
 
+          <label id="notifyLabel" style="margin:0; font-weight: 500; cursor: pointer;"
+                 title="Desktop notification when a case finishes. Works while this tab stays open.">
+            <input type="checkbox" id="notifyDone" style="cursor: pointer; margin-right: 6px;" />
+            notify on finished cases
+          </label>
+
           <button id="refresh" type="button">
             <svg id="refreshIcon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
               <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/>
@@ -1252,6 +1258,7 @@
   const LS_TOK = "casebroker.token";
   const LS_THEME = "casebroker.theme";
   const LS_AUTO = "casebroker.autoRefresh";
+  const LS_NOTIFY = "casebroker.notifyDone";
 
   // -- Theme Management --------------------------------------------------------
   function initTheme() {
@@ -2111,6 +2118,102 @@
     }
   }
 
+  // -- Finished-case notifications ---------------------------------------------
+  // A campaign case takes hours, so the useful signal is "one finished while you
+  // were doing something else". The browser can deliver that with no backend
+  // change: each refresh already knows which cases are done, so a diff of the
+  // most-recently-finished ids against the previous poll is the event.
+  //
+  // Scope, stated in the UI rather than discovered: this fires while THIS TAB is
+  // open (backgrounded is fine, closed is not). Notifications that survive a
+  // closed tab need a service worker, the Push API, VAPID keys and a broker that
+  // can push -- a different feature, not a bigger version of this one.
+  //
+  // The Notifications API also requires a SECURE CONTEXT: https, or localhost.
+  // On a plain-http broker on the LAN `Notification` is simply not defined, so
+  // the toggle says why instead of failing silently when clicked.
+  let notifySeen = null;        // ids of done cases at the last poll; null = no baseline yet
+  let notifyPrevDone = null;    // done COUNT at the last poll -- the accurate total
+
+  function notifySupported() {
+    return typeof Notification !== "undefined" && (window.isSecureContext !== false);
+  }
+
+  function setNotifyEnabled(on) {
+    localStorage.setItem(LS_NOTIFY, on ? "1" : "0");
+    $("notifyDone").checked = on;
+    // A fresh enable must not announce the whole backlog: the next poll
+    // establishes the baseline and only what happens AFTER it is news.
+    if (on) { notifySeen = null; notifyPrevDone = null; }
+  }
+
+  async function requestNotifyPermission() {
+    if (!notifySupported()) {
+      showToast(typeof Notification === "undefined"
+        ? "This browser has no notification support"
+        : "Notifications need https (or localhost)");
+      return false;
+    }
+    if (Notification.permission === "granted") return true;
+    if (Notification.permission === "denied") {
+      showToast("Notifications are blocked for this site in your browser settings");
+      return false;
+    }
+    // Must be called from the click that toggled the checkbox, or the browser
+    // ignores it.
+    const res = await Notification.requestPermission();
+    if (res !== "granted") { showToast("Notification permission was not granted"); return false; }
+    return true;
+  }
+
+  function fireNotification(newIds, doneCount) {
+    const n = newIds.length;
+    const title = n === 1 ? "Case finished" : `${n} cases finished`;
+    const listed = newIds.slice(0, 3).join(", ");
+    const body = (n <= 3 ? listed : `${listed} and ${n - 3} more`)
+      + (doneCount != null ? ` - ${doneCount.toLocaleString()} done in total` : "");
+    try {
+      // One tag: a second notification REPLACES the first rather than stacking
+      // a wall of them after a quiet night.
+      const note = new Notification(title, { body, tag: "casebroker-done", renotify: true });
+      note.onclick = () => {
+        window.focus();
+        if (n === 1) { caseList.singleId = newIds[0]; openDetailId = newIds[0]; loadCases(); }
+        note.close();
+      };
+    } catch (e) {
+      // Some browsers refuse `new Notification` on mobile/PWA contexts; the
+      // in-page toast still reports it.
+      showToast(title + ": " + listed);
+    }
+  }
+
+  async function checkFinished(doneCount) {
+    if (!$("notifyDone").checked || !notifySupported() || Notification.permission !== "granted") return;
+    let page;
+    try {
+      // Most-recently-touched first, so a page of 25 covers far more than one
+      // 60 s refresh ever finishes.
+      page = await api("/v1/cases?state=done&limit=25");
+    } catch (e) {
+      return;   // a failed poll is not an event; the next one re-checks
+    }
+    const ids = (page.cases || []).map((c) => c.case_id);
+    if (notifySeen === null) {           // first poll after enabling: baseline only
+      notifySeen = new Set(ids);
+      notifyPrevDone = doneCount;
+      return;
+    }
+    const fresh = ids.filter((id) => !notifySeen.has(id));
+    notifySeen = new Set(ids);
+    // The COUNT comes from /v1/status, which sees every case, not just this
+    // page -- so a burst larger than the page is still reported truthfully.
+    const grew = (doneCount != null && notifyPrevDone != null) ? doneCount - notifyPrevDone : fresh.length;
+    notifyPrevDone = doneCount;
+    if (fresh.length > 0) fireNotification(fresh, doneCount);
+    else if (grew > 0) fireNotification([`${grew} case(s)`], doneCount);
+  }
+
   // -- Main Refresh Loop -------------------------------------------------------
   async function refresh() {
     const refreshIcon = $("refreshIcon");
@@ -2155,6 +2258,7 @@
       $("connectedSummary").style.display = "flex";
       renderStatus(st);
       await loadCases();
+      await checkFinished(st.by_state?.["done"] ?? null);
       nextRefreshSeconds = 60;
     } catch (e) {
       // On error, re-show the connect form so the user can fix credentials
@@ -2255,6 +2359,29 @@
   $("autoRefresh").addEventListener("change", (e) => {
     localStorage.setItem(LS_AUTO, e.target.checked ? "1" : "0");
     setAutoRefresh(e.target.checked);
+  });
+
+  // Notifications: the toggle is disabled outright where the API cannot work
+  // (no https, no support), with the reason in the tooltip, rather than
+  // accepting a click that can only fail. A saved "on" is honoured only while
+  // permission still stands -- the user may have revoked it since.
+  if (!notifySupported()) {
+    $("notifyDone").disabled = true;
+    $("notifyLabel").style.opacity = "0.5";
+    $("notifyLabel").title = (typeof Notification === "undefined")
+      ? "This browser has no notification support"
+      : "Notifications need https (or localhost)";
+  } else {
+    const notifySaved = localStorage.getItem(LS_NOTIFY) === "1";
+    setNotifyEnabled(notifySaved && Notification.permission === "granted");
+  }
+
+  $("notifyDone").addEventListener("change", async (e) => {
+    if (!e.target.checked) { setNotifyEnabled(false); return; }
+    // requestPermission() must run inside this user gesture.
+    const ok = await requestNotifyPermission();
+    setNotifyEnabled(ok);
+    if (ok) showToast("You will be notified as cases finish (while this tab is open)");
   });
 
   $("caseState").addEventListener("change", (e) => {

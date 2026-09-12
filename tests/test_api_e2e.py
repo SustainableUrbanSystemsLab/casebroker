@@ -335,6 +335,32 @@ def test_dashboard_serves_a_case_browser(broker):
         assert needed in html, needed
 
 
+def test_dashboard_notification_toggle_is_present_and_off_by_default(broker):
+    """Desktop notifications are opt-IN: the browser only grants permission from
+    a user gesture, and a dashboard that asked on load would be denied by default
+    in every modern browser AND be obnoxious. So the checkbox must exist, must be
+    unchecked, and the request must hang off its change event."""
+    html = broker.get("/", headers={"Authorization": ""}).text
+    i = html.index('id="notifyDone"')
+    tag = html[html.rindex("<", 0, i):html.index(">", i) + 1]
+    assert "checked" not in tag, "notifications must be opt-in, not on by default"
+    assert 'id="notifyLabel"' in html
+    # requestPermission has to be reachable from the toggle's own handler.
+    assert "requestNotifyPermission" in html
+    assert "Notification.requestPermission()" in html
+
+
+def test_dashboard_notifier_baselines_before_it_announces_anything(broker):
+    """The failure this guards against: enabling notifications on a campaign with
+    5,000 finished cases and being told about all of them. The first poll after
+    enabling only records what is already done; only what finishes AFTER that is
+    news -- so the enable path must reset the baseline to null, and the poll must
+    return early when it is."""
+    html = broker.get("/", headers={"Authorization": ""}).text
+    assert "notifySeen = null" in html
+    assert "if (notifySeen === null)" in html
+
+
 # -- read-only tokens: a link you can safely send to a friend ----------------
 
 @pytest.fixture()

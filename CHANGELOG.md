@@ -15,6 +15,15 @@ finished case for Syncthing / a master-side pull to collect. See
 `docs/fleet.md`. MINOR: every protocol change is an optional addition.
 
 ### Added
+- Dashboard: optional desktop notifications when cases finish. A "notify on
+  finished cases" toggle asks for permission from its own click (the only
+  moment a browser will grant it), then each 60 s refresh diffs the most
+  recently finished cases and raises one notification naming them, with the
+  true total taken from `/v1/status`. Opt-in, remembered, baselined on enable
+  so a finished backlog is never announced, and disabled with the reason shown
+  where the API cannot work (no https, no support). No broker change: it rides
+  the refresh that already happens, and it works while the tab is open --
+  surviving a closed tab would need a service worker and the Push API.
 - `POST /v1/lease` accepts `resume_case_ids`: cases this worker holds a local
   checkpoint for are claimed first, and one still leased to the same
   `worker_id` is handed back without spending an attempt. Never honoured for a
