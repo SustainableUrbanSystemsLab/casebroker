@@ -328,7 +328,7 @@ try:
 except Exception:
     print(0)
 " "$GEO_REPORT" 2>/dev/null || echo 0)
-export GROUND_Z
+export GROUND_Z GEO_REPORT
 log "domain floor ${DOMAIN_ZMIN}, ABL zGround ${GROUND_Z}"
 
 # ── 2. build the study ────────────────────────────────────────────────────────
@@ -355,6 +355,12 @@ with open(scratch + "/spec.json") as f:
 # rather than carried 5,000 times through the database. fixed-box-1008 means a
 # 1008 m sampled core (half 504) inside an 800 m buffer -- the same +/-1304 m
 # box, -60..600 m tall at 16 m cells, that the validated Braselton case used.
+z0_by_direction = None
+try:
+    with open(os.environ["GEO_REPORT"]) as f:
+        z0_by_direction = json.load(f).get("z0_by_direction") or None
+except Exception:
+    pass
 dom = spec.get("domain")
 if dom is None:
     # 4 m inside the terrain sheet, which spans 504+800 exactly. While terrain
@@ -382,8 +388,13 @@ json.dump({
     # surface the log argument can go negative. Taken from the geometry report's
     # ground-surface minimum -- NOT the terrain STL's minimum, which is the slab's
     # artificial base some 20 m lower.
+    # roughnessByDirection: the upstream z0 per direction from the geometry
+    # report (real_cities/upstream_z0.py -- WorldCover, log-mean over a 3 km
+    # upwind sector). "roughness" stays the fallback for directions without one
+    # and for a site whose WorldCover tile is missing (report says None).
     "wind": spec.get("wind", {"directions": [0, 45, 90, 135, 180, 225, 270, 315],
                               "speed": 5, "refHeight": 10, "roughness": 0.5,
+                              "roughnessByDirection": z0_by_direction,
                               "groundZ": float(os.environ.get("GROUND_Z", "0"))}),
     # From a 55-configuration mesh study on this campaign's own geometry (one
     # GlobalBuildingAtlas tile, 1263 buildings, median height 9.3 m). Against

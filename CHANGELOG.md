@@ -37,6 +37,12 @@ finished case for Syncthing / a master-side pull to collect. See
   pulls archives from PACE over SSH), `docs/fleet.md`.
 
 ### Changed
+- Runner: the inlet roughness is per wind direction. `build-case` gets
+  `wind.roughnessByDirection` from the geometry report's `z0_by_direction`
+  (real_cities `upstream_z0.py`: ESA WorldCover, log-mean z0 over a 3 km
+  upwind sector beyond the domain edge, per direction); `roughness` 0.5 stays
+  the fallback for a site without a WorldCover tile. Needs an `e3d` build
+  with `WindConfig.RoughnessByDirection`; older builds ignore the key.
 - `result_uri` now points at the case archive rather than a `results/`
   directory; `result_bytes`/`result_sha256` describe the archive.
 - The runner's default solver `writeInterval` is 200, not the whole iteration
