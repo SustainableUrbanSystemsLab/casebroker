@@ -150,6 +150,32 @@ Unset, the runner does nothing and Syncthing behaves as configured. On a
 machine that should be silent between cases you can also pause the folder
 and have a cron unpause/pause it; the scan call is simpler and enough.
 
+**Measured, 2026-09-12** (two Syncthing v2.1.5 instances, one standing in for a
+remote worker, `C:c2\syncthing\`): a 23 MB case archive replicated
+worker -> master over a direct QUIC connection with identical SHA-256 and
+`needBytes 0`; a new 5 MB file then sat in `$WIND_DONE` for **45 s with
+nothing transferred** (watcher off, `rescanIntervalS 0`), and appeared on the
+master **2 s** after the runner's
+`POST /rest/db/scan?folder=wind-done&sub=<case>.tar.gz`. No inbound port was
+opened on either side.
+
+### Setting it up on a worker
+
+1. Run Syncthing (no admin needed: the release zip is a single binary,
+   `syncthing --home=<dir> --gui-address=127.0.0.1:8384 --no-browser --no-upgrade`;
+   v2 dropped `--no-default-folder`, so delete the auto-created folder).
+2. Add the master's device ID; the master adds the worker's.
+3. Create folder id **`wind-done`** on both -- worker: path `$WIND_DONE`,
+   `type sendonly`, `fsWatcherEnabled false`, `rescanIntervalS 0`; master:
+   its aggregation directory, `type receiveonly`, `ignoreDelete true`. Ignore
+   pattern `.tmp` on both. One folder id is shared by EVERY worker: case ids
+   are unique, so many send-only workers accumulate into one receive-only
+   master directory with no collisions and no per-worker folder admin.
+4. Put `WIND_SYNCTHING_URL/APIKEY/FOLDER` in `machine.env`.
+
+`C:c2\syncthing\configure.ps1` does steps 2-3 over the REST API and is the
+reference for the exact field values.
+
 **PACE: the master pulls.** A daemon does not fit shared login nodes or
 job-lifetime compute nodes, and compute nodes cannot be reached from outside
 anyway. The master already has SSH to the login nodes, so

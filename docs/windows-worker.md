@@ -71,10 +71,12 @@ without an inbound port on either side:
 
 - **Syncthing** (default for workstations). Install Syncthing on the worker,
   share `E:\wind\done` as *Send Only* with the master's device ID (master:
-  *Receive Only*, `ignoreDelete`). Then make it quiet: folder *Watch for
-  Changes* off, *Rescan Interval* 0, and put `WIND_SYNCTHING_APIKEY` +
-  `WIND_SYNCTHING_FOLDER` in `machine.env` -- the runner triggers one scan
-  per finished archive, so nothing else is ever hashed or sent.
+  *Receive Only*, `ignoreDelete`), folder id **`wind-done`**. Then make it
+  quiet: folder *Watch for Changes* off, *Rescan Interval* 0, and put
+  `WIND_SYNCTHING_URL/APIKEY/FOLDER` in `machine.env` -- the runner triggers
+  one scan per finished archive, so nothing else is ever hashed or sent.
+  Verified end to end on 2026-09-12; see `fleet.md`, "Setting it up on a
+  worker", for the exact field values.
 - **Manual/scripted pull** if the master can SSH to the worker
   (`scripts/pull_done.sh`), or a copy of `E:\wind\done` by hand -- the
   archives are self-contained.
