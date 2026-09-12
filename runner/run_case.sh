@@ -268,6 +268,11 @@ fi
 [ -f "$TERRAIN" ]   || retry_case "terrain STL not found: $TERRAIN"
 cp "$BUILDINGS" "$SCRATCH/buildings.stl"
 cp "$TERRAIN"   "$SCRATCH/terrain.stl"
+# Tree crowns, when the geometry builder found any (canopy_zones.py; absent on a
+# treeless or CHM-less site, and the case is then simply built without a canopy).
+CANOPY=$(printf '%s' "$SPEC" | "$PY" -c 'import json,sys; print(json.load(sys.stdin).get("canopy_stl",""))')
+[ -z "$CANOPY" ] && [ -n "$GEO_REPORT" ] && CANOPY="$(dirname "$GEO_REPORT")/${CASE_ID}_canopy.stl"
+if [ -n "$CANOPY" ] && [ -f "$CANOPY" ]; then cp "$CANOPY" "$SCRATCH/canopy.stl"; fi
 
 # Pedestrian-height reference for the flow-field screenshot below: the
 # terrain's own highest point, not the domain floor -- the domain typically
@@ -355,12 +360,19 @@ with open(scratch + "/spec.json") as f:
 # rather than carried 5,000 times through the database. fixed-box-1008 means a
 # 1008 m sampled core (half 504) inside an 800 m buffer -- the same +/-1304 m
 # box, -60..600 m tall at 16 m cells, that the validated Braselton case used.
-z0_by_direction = None
+z0_by_direction, vegetation = None, None
 try:
     with open(os.environ["GEO_REPORT"]) as f:
-        z0_by_direction = json.load(f).get("z0_by_direction") or None
+        _rep = json.load(f)
+    z0_by_direction = _rep.get("z0_by_direction") or None
+    vegetation = _rep.get("vegetation") or None
 except Exception:
     pass
+# The crown shell was copied to scratch/canopy.stl by the geometry step when the
+# site has one; its drag (LAD, Cd) comes from the report's vegetation class.
+canopy = {"canopyStl": scratch + "/canopy.stl"} if os.path.exists(scratch + "/canopy.stl") else {}
+veg_cfg = ({"lad": vegetation["lad"], "cd": vegetation["cd"], "label": vegetation.get("label")}
+           if canopy and vegetation else {})
 dom = spec.get("domain")
 if dom is None:
     # 4 m inside the terrain sheet, which spans 504+800 exactly. While terrain
@@ -392,10 +404,13 @@ json.dump({
     # report (real_cities/upstream_z0.py -- WorldCover, log-mean over a 3 km
     # upwind sector). "roughness" stays the fallback for directions without one
     # and for a site whose WorldCover tile is missing (report says None).
-    "wind": spec.get("wind", {"directions": [0, 45, 90, 135, 180, 225, 270, 315],
-                              "speed": 5, "refHeight": 10, "roughness": 0.5,
-                              "roughnessByDirection": z0_by_direction,
-                              "groundZ": float(os.environ.get("GROUND_Z", "0"))}),
+    # A spec's wind block overrides key by key, so a spec that only narrows the
+    # directions still gets the per-direction roughness and the ABL datum.
+    "wind": {**{"directions": [0, 45, 90, 135, 180, 225, 270, 315],
+                "speed": 5, "refHeight": 10, "roughness": 0.5,
+                "roughnessByDirection": z0_by_direction,
+                "groundZ": float(os.environ.get("GROUND_Z", "0"))},
+             **spec.get("wind", {})},
     # From a 55-configuration mesh study on this campaign's own geometry (one
     # GlobalBuildingAtlas tile, 1263 buildings, median height 9.3 m). Against
     # build-case's defaults on that same tile:
@@ -427,6 +442,7 @@ json.dump({
     # Spread AFTER, so a per-case spec can still override any of these.
     "geometry": {"buildingsStl": scratch + "/buildings.stl",
                  "terrainStl": scratch + "/terrain.stl",
+                 **canopy,
                  "buildingLevel": 3,
                  "groundLevel": 3,
                  "featureLevel": 0,
@@ -442,6 +458,7 @@ json.dump({
                       "writeInterval": int(os.environ.get("WIND_WRITE_INTERVAL", "200")),
                       "turbulenceModel": "kEpsilon", "numericsLevel": 4},
                    **spec.get("simulation", {}), "cpus": np_},
+    "vegetation": {**veg_cfg, **spec.get("vegetation", {})},
 }, sys.stdout, indent=2)
 PY
 "$CLI" build-case "$SCRATCH/cfg.json" > "$SCRATCH/build.json" \
@@ -530,6 +547,17 @@ for m in mesh mesh_*; do
       else echo "RECONSTRUCT_DID_NOT_REFRESH $m"; fi; :
     done
     checkMesh 2>/dev/null | grep -E "^ *cells:|Failed" | sed "s/^/$m /"
+    # Porous canopy: select the cells inside the crown shell into the canopy
+    # cellZone, on the reconstructed mesh so the zone is in constant/polyMesh
+    # and every direction case's decomposePar carries it. Serial: surfaceToCell
+    # is an octree test per cell, seconds even at 14M cells. A canopy that
+    # selects no cells is reported, not fatal -- the sink is then a no-op.
+    if [ -f system/topoSetDict ]; then
+      topoSet > 04.log 2>&1 || echo "TOPOSET_FAILED $m (see 04.log; canopy drag will be a no-op)"
+      # "; :" -- this grep is the subshell's last command, and a no-match exit 1
+      # would otherwise become the mesh step's exit status (smoke run 12).
+      grep -aE "cellZoneSet canopy now size" 04.log | sed "s/^/$m CANOPY /"; :
+    fi
   ) || exit $?
 done
 for c in case_*; do
@@ -817,6 +845,17 @@ tar -czf "$DONE_DIR/.tmp/$CASE_ID.tar.gz.part" -C "$SCRATCH" -T "$PACK" \
 mv -f "$DONE_DIR/.tmp/$CASE_ID.tar.gz.part" "$ARCHIVE" || retry_case "could not move archive into $DONE_DIR"
 # The checkpoint has served its purpose; the archive is the result now.
 rm -rf "$CKPT" 2>/dev/null
+# Syncthing, quiet mode: the client folder runs with its filesystem watcher off
+# and no periodic rescan (docs/fleet.md), so nothing is hashed or transferred
+# until this one scan announces the finished archive. Optional: unset, nothing
+# happens; a failed call is logged, never fatal -- the archive is on disk either
+# way and a manual rescan or the next case's scan picks it up.
+if [ -n "${WIND_SYNCTHING_APIKEY:-}" ] && [ -n "${WIND_SYNCTHING_FOLDER:-}" ]; then
+    if curl -sS -m 10 -X POST -H "X-API-Key: $WIND_SYNCTHING_APIKEY" \
+        "${WIND_SYNCTHING_URL:-http://127.0.0.1:8384}/rest/db/scan?folder=$WIND_SYNCTHING_FOLDER&sub=$CASE_ID.tar.gz" \
+        >/dev/null; then log "syncthing: scan requested for $CASE_ID.tar.gz"
+    else log "syncthing: scan request failed (archive is still in $DONE_DIR)"; fi
+fi
 [ -n "$PROGRESS_FILE" ] && rm -f "$PROGRESS_FILE" 2>/dev/null
 
 "$PY" - "$ARCHIVE" "$NP" "$RUNTIME" "$RESUMING" "$TIMES" <<'PY'

@@ -133,6 +133,23 @@ Syncthing would spend its life hashing them.
   discovery/relay network. Direct connections (port 22000 reachable on at
   least one side) are much faster than public relays for GB-scale archives.
 
+**Keep it quiet.** A default Syncthing folder watches the filesystem, rescans
+every hour, and keeps discovery/relay chatter going -- on a solving machine
+that is constant background traffic for nothing. Since a case finishes at
+one known moment, the runner announces it instead:
+
+- on the client folder: *Watch for Changes* off, *Rescan Interval* 0
+  (`fsWatcherEnabled=false`, `rescanIntervalS=0`), so Syncthing hashes and
+  sends nothing on its own;
+- in `machine.env`: `WIND_SYNCTHING_APIKEY` (Actions > Settings > General) and
+  `WIND_SYNCTHING_FOLDER` (the folder ID); the runner then calls
+  `POST /rest/db/scan?folder=<id>&sub=<case>.tar.gz` right after the archive
+  is renamed into place, and only that file is hashed and transferred.
+
+Unset, the runner does nothing and Syncthing behaves as configured. On a
+machine that should be silent between cases you can also pause the folder
+and have a cron unpause/pause it; the scan call is simpler and enough.
+
 **PACE: the master pulls.** A daemon does not fit shared login nodes or
 job-lifetime compute nodes, and compute nodes cannot be reached from outside
 anyway. The master already has SSH to the login nodes, so
@@ -140,6 +157,25 @@ anyway. The master already has SSH to the login nodes, so
 on a timer collects finished archives; `PULL_REMOVE=1` deletes on the cluster
 after a size-verified copy, which is what keeps ICE's 300 GB scratch from
 filling with results.
+
+## What the geometry step adds beyond buildings and terrain
+
+`real_cities/site_geometry.py` writes, next to the two STLs, a site report the
+runner reads into `build-case`:
+
+- `z0_by_direction` -- the inlet roughness per wind direction
+  (`upstream_z0.py`: ESA WorldCover, log-mean z0 of a 3 km upwind sector
+  beyond the domain edge). Goes to `wind.roughnessByDirection`; `roughness`
+  0.5 is the fallback for a site without a WorldCover tile.
+- `<case>_canopy.stl` + `vegetation` -- tree crown volumes from the Meta/WRI
+  1 m canopy height model (`canopy_zones.py`: crown = upper 59 % of the tree,
+  4 m columns, one closed shell) and the LAD/Cd class (a latitude-band
+  default from Eddy3D's vegetation library; recorded as such). Goes to
+  `geometry.canopyStl` + `vegetation`; `build-case` writes a `topoSetDict`
+  (mesh case) and a `porosityForce` on the `canopy` cellZone with
+  `f = 2·Cd·LAD` (direction cases); the runner runs `topoSet` after
+  reconstructing the mesh and prints `CANOPY ... now: N cells` in `run.log`.
+  A treeless site has no STL and no zone.
 
 ## Ranks per machine
 

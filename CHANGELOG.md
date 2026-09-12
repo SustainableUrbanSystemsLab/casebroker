@@ -43,6 +43,16 @@ finished case for Syncthing / a master-side pull to collect. See
   upwind sector beyond the domain edge, per direction); `roughness` 0.5 stays
   the fallback for a site without a WorldCover tile. Needs an `e3d` build
   with `WindConfig.RoughnessByDirection`; older builds ignore the key.
+- Runner: porous tree crowns. The geometry step writes a crown-volume STL and
+  a vegetation class (real_cities `canopy_zones.py`, Meta/WRI 1 m canopy
+  height model, LAD/Cd from Eddy3D's vegetation library by latitude band);
+  `build-case` gets `geometry.canopyStl` + `vegetation`, and the runner runs
+  `topoSet` after meshing so the `canopy` cellZone carries the
+  `porosityForce` sink (`f = 2·Cd·LAD`) into every direction case.
+- Runner: optional Syncthing hand-off -- with `WIND_SYNCTHING_APIKEY` and
+  `WIND_SYNCTHING_FOLDER` set, one `/rest/db/scan` for the new archive after
+  it is renamed into place, so a folder with its watcher and rescans off
+  moves nothing but finished cases.
 - `result_uri` now points at the case archive rather than a `results/`
   directory; `result_bytes`/`result_sha256` describe the archive.
 - The runner's default solver `writeInterval` is 200, not the whole iteration
