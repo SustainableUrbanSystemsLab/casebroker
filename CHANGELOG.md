@@ -32,6 +32,11 @@ finished case for Syncthing / a master-side pull to collect. See
   (`runner/lib/progress.py`); one `<case_id>.tar.gz` per case in `WIND_DONE`
   holding the reconstructed last time step, mesh, dictionaries, logs and
   samples, written atomically.
+- `setup_windows.ps1` + `docs/windows-worker.md`: one script that checks a
+  Windows box's prerequisites (uv, Git bash, Docker Desktop or blueCFD, e3d,
+  real_cities), writes `machine.env`, proves the token has write scope on the
+  broker, and with `-Smoke` runs `runner/smoke_spec.json` through the whole
+  runner. Rehearsed on a 48-core Docker workstation.
 - `start_worker.sh`, `start_worker.ps1`, `machine.env.example`,
   `runner/run_case.cmd` (Windows launcher), `scripts/pull_done.sh` (master
   pulls archives from PACE over SSH), `docs/fleet.md`.
@@ -64,6 +69,10 @@ finished case for Syncthing / a master-side pull to collect. See
   30 GB home.
 
 ### Fixed
+- `start_worker.ps1 --max-cases 1` bound `--max-cases` to `-EnvFile` (PowerShell
+  positional binding), so the profile was never read and the worker died with
+  `set CASEBROKER_URL`; extra worker arguments are positional now and `-EnvFile`
+  is named-only.
 - Solve gate: the nan/inf scan matched the `sigFpe : Enabling floating point
   exception trapping` banner every OpenFOAM log opens with, and then matched
   `iNf` in the raw bytes of `format binary` field files -- both failed clean,

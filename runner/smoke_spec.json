@@ -1,0 +1,36 @@
+{
+ "lat": 32.05546,
+ "lon": 118.76829,
+ "recipe": "smoke",
+ "domain": {
+  "min": [
+   -1300,
+   -1300,
+   -23.86
+  ],
+  "max": [
+   1300,
+   1300,
+   600
+  ],
+  "cellSize": 48
+ },
+ "wind": {
+  "directions": [
+   270
+  ],
+  "speed": 5,
+  "refHeight": 10,
+  "roughness": 0.5
+ },
+ "geometry": {
+  "buildingLevel": 1,
+  "groundLevel": 1,
+  "featureLevel": 0,
+  "cellsBetweenLevels": 2
+ },
+ "simulation": {
+  "iterations": 30,
+  "writeInterval": 10
+ }
+}

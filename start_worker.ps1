@@ -1,14 +1,20 @@
 # Start one worker on a Windows machine, in the foreground. Ctrl-C stops it
 # cleanly (checkpoint saved, lease released -- the case resumes here next time).
 #
-#   .\start_worker.ps1 [-EnvFile machine.env] [-- extra worker args]
+#   .\start_worker.ps1 [-EnvFile machine.env] [extra worker args, e.g. --max-cases 1]
+#
+# Extra arguments go straight to the worker. They are positional here (WorkerArgs
+# is Position 0), so `.\start_worker.ps1 --max-cases 1` works and -EnvFile must be
+# named -- before this, the first extra argument was silently taken AS the env
+# file ("--max-cases" -> no profile loaded -> "set CASEBROKER_URL"), found on the
+# first Windows dress rehearsal, 2026-09-11.
 #
 # The worker is native Python (uv); the runner is run_case.cmd, which finds a
 # bash (Git for Windows) and runs run_case.sh under it. Whether a case then
 # solves in Docker Desktop or natively in blueCFD-Core is WIND_RUNTIME's choice.
 param(
-    [string]$EnvFile = (Join-Path $PSScriptRoot "machine.env"),
-    [Parameter(ValueFromRemainingArguments = $true)] [string[]]$WorkerArgs
+    [Parameter(Position = 0, ValueFromRemainingArguments = $true)] [string[]]$WorkerArgs,
+    [Parameter()] [string]$EnvFile = (Join-Path $PSScriptRoot "machine.env")
 )
 $ErrorActionPreference = "Stop"
 
