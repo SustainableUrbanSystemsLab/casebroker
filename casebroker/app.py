@@ -301,6 +301,17 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
             raise HTTPException(status_code=401, detail="admin session required")
         return user
 
+    def _is_authenticated(request: Request) -> bool:
+        """Whether this caller is anybody at all -- without raising.
+
+        For endpoints that must answer an anonymous caller, but can say more to
+        an operator. `require_*` raise, which is wrong when the response has to
+        succeed either way.
+        """
+        if _session_principal(request) or _machine_principal(request):
+            return True
+        return _env_token_ok(_supplied_token(request), (*tokens, *readonly_tokens))
+
     WriteAuth = Depends(require_write_token)
     ReadAuth = Depends(require_read_token)
     AdminAuth = Depends(require_admin)
@@ -338,7 +349,7 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         return ok
 
     @app.get("/healthz")
-    def healthz() -> dict[str, Any]:
+    def healthz(request: Request) -> dict[str, Any]:
         # `version` is safe to expose unauthenticated -- it is already in the
         # public OpenAPI document and in the repo -- and it is what lets the
         # deploy smoke test assert that the RUNNING service is the commit that
@@ -356,7 +367,15 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
                 # process is up, and collapsing the two would leave the badge
                 # unable to tell "service down" from "database down".
                 "db_ok": _db_ok(),
-                "db": _redact_db_target(db_path)}
+                # The DSN summary is for OPERATORS, not for the internet.
+                # Masking the password is necessary but not sufficient: what is
+                # left still names the exact database instance, its host, port
+                # and username, which is reconnaissance handed out for free on
+                # an endpoint that by design needs no credential. `db_ok` above
+                # is the part a health check actually needs, and it stays
+                # public; the key stays present-but-null so a client reading it
+                # by name does not break.
+                "db": _redact_db_target(db_path) if _is_authenticated(request) else None}
 
 
     @app.get("/v1/share-token", dependencies=[WriteAuth])

@@ -166,7 +166,7 @@ def test_doctor_separates_a_stale_password_from_a_wrong_username():
 
     stale_pw = _diagnose_pg(
         'connection failed: FATAL:  password authentication failed for user "postgres"',
-        "postgres.vecnpzgabeynmqbszwrm")
+        "postgres.projectref")
     assert "stale password" in stale_pw
     assert "not a wrong username" in stale_pw
 

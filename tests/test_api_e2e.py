@@ -506,8 +506,12 @@ def test_healthz_route_actually_calls_the_redaction_helper(tmp_path, monkeypatch
     monkeypatch.setattr(app_module, "_redact_db_target",
                         lambda s: calls.append(s) or "REDACTED-FOR-TEST")
     db_path = str(tmp_path / "x.sqlite")
-    application = app_module.create_app(db_path=db_path, tokens=None)
-    body = TestClient(application).get("/healthz").json()
+    application = app_module.create_app(db_path=db_path, tokens=["operator"])
+    # Authenticated: the DSN summary is operator-only now (it names the exact
+    # database instance), so an anonymous call gets null and would prove
+    # nothing about whether the route routes through the redactor.
+    body = TestClient(application).get(
+        "/healthz", headers={"Authorization": "Bearer operator"}).json()
     assert body["db"] == "REDACTED-FOR-TEST"
     assert calls == [db_path]
 
@@ -677,3 +681,23 @@ def test_the_dashboard_sends_cookies_on_its_auth_calls(broker):
     auth_calls = [ln for ln in html.splitlines() if "/v1/auth/login" in ln or "/v1/workers/tokens" in ln]
     assert auth_calls, "expected the dashboard to call the auth endpoints"
     assert 'credentials: "include"' in html
+
+
+def test_healthz_tells_the_internet_less_than_it_tells_an_operator(broker):
+    """/healthz is deliberately unauthenticated so uptime checks work with no
+    credential -- which means everything in it is public.
+
+    Masking the password is necessary but not sufficient: the rest of a DSN
+    still names the exact database instance, its host, port and username. That
+    is reconnaissance, and it narrows an attack from "find their database" to
+    "guess the password for this known tenant". The health signal a badge
+    actually needs (`ok`, `version`, `db_ok`) stays public; the DSN summary
+    needs a credential.
+    """
+    anon = broker.get("/healthz", headers={"Authorization": ""}).json()
+    assert anon["ok"] is True
+    assert "db_ok" in anon, "a health check still has to distinguish 'db down'"
+    assert anon["db"] is None, "the DSN summary must not be public"
+
+    named = broker.get("/healthz").json()          # the fixture carries a token
+    assert named["db"], "an authenticated operator still gets the detail"

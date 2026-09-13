@@ -110,6 +110,14 @@ finished case for Syncthing / a master-side pull to collect. See
   30 GB home.
 
 ### Fixed
+- `/healthz` no longer hands the DSN summary to anonymous callers. Masking the
+  password was necessary but not sufficient -- what remained still named the
+  exact database instance, its host, port and username, on an endpoint that by
+  design needs no credential. That is reconnaissance for free, and it narrows an
+  attack from "find their database" to "guess the password for this known
+  tenant". `ok`, `version` and `db_ok` stay public (a badge needs to tell
+  "service down" from "database down"); the `db` field is present-but-null
+  unless the caller is authenticated.
 - **The native blueCFD runtime never worked, and failed quietly.** `FOAM_MPI`
   was hardcoded to `MS-MPI-10.1` while the installed directory is
   `MS-MPI-10.1.2`, so blueCFD's MPI `libPstream.dll` was never on PATH and only
