@@ -171,7 +171,11 @@ def test_the_pedestrian_sample_follows_the_terrain_instead_of_one_flat_plane():
     script = (pathlib.Path(__file__).resolve().parents[1] / "runner" / "run_case.sh").read_text(
         encoding="utf-8", errors="replace")
     assert "distanceSurface" in script
-    assert 'file            "ground.stl"' in script, "the drape needs the terrain triSurface"
+    # The quotes around the filename are backslash-escaped in the source: the
+    # dict is built inside a double-quoted bash string so that one surface can
+    # be emitted per requested height.
+    assert "ground.stl" in script, "the drape needs the terrain triSurface"
+    assert "distance        $H" in script, "each surface is offset by its own height"
     # The old formulation, in either spelling, must not come back.
     assert "planeType       pointAndNormal" not in script
     assert "TERRAIN_ZMAX) + 1.5" not in script

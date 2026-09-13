@@ -137,12 +137,35 @@ hostpath() {
 # batch file is the real environment, and MS-MPI's mpiexec is not under blueCFD
 # at all but in Program Files -- measured on the lab workstation, 2026-09-11.
 bluecfd_env() {
-    local b="$BLUECFD_HOME" opt=mingw_w64Gcc122DPInt32Opt bw
+    local b="$BLUECFD_HOME" opt=mingw_w64Gcc122DPInt32Opt bw mpi tp
     bw=$(cygpath -w "$b" 2>/dev/null || printf '%s' "$b")
+
+    # FOAM_MPI is DISCOVERED, not assumed. blueCFD ships two builds of
+    # libPstream.dll -- lib/dummy (serial) and lib/<FOAM_MPI> (MS-MPI) -- and
+    # picks between them purely by Windows DLL search order, i.e. by PATH. This
+    # was hardcoded to "MS-MPI-10.1" while the installed directory is
+    # "MS-MPI-10.1.2", so the MPI directory was never on PATH at all, only
+    # lib/dummy was, and every rank loaded the serial library. The symptom is
+    # not a missing-file error: snappyHexMesh starts, each rank reports
+    # "--> FOAM FATAL ERROR: This dummy library cannot be used in parallel
+    # mode", mpiexec exits 1, and the run continues with the unrefined
+    # blockMesh background -- 39,325 cells where 177,214 were expected. A mesh
+    # that plausible is exactly the kind that gets solved and believed.
+    mpi=$(basename "$(ls -d "$b/OpenFOAM-12/platforms/$opt/lib"/MS-MPI-* 2>/dev/null | head -1)" 2>/dev/null)
+    if [ -z "$mpi" ] || [ ! -f "$b/OpenFOAM-12/platforms/$opt/lib/$mpi/libPstream.dll" ]; then
+        log "blueCFD has no MPI libPstream under $b/OpenFOAM-12/platforms/$opt/lib/MS-MPI-*; parallel runs would silently load the serial library"
+        return 1
+    fi
+    tp=$(basename "$(ls -d "$b/ThirdParty-12/platforms/mingw_w64Gcc122DPInt32/lib"/MS-MPI-* 2>/dev/null | head -1)" 2>/dev/null)
+    tp=${tp:-$mpi}
+
     export WM_PROJECT=OpenFOAM WM_PROJECT_VERSION=12 WM_OPTIONS=$opt WM_MPLIB=MSMPI101 \
-           FOAM_MPI=MS-MPI-10.1 FOAM_SIGFPE=1 MPI_BUFFER_SIZE=20000000
+           FOAM_MPI="$mpi" FOAM_SIGFPE=1 MPI_BUFFER_SIZE=20000000
     export WM_PROJECT_DIR="$bw\\OpenFOAM-12" FOAM_ETC="$bw\\OpenFOAM-12\\etc"
-    export PATH="$b/OpenFOAM-12/platforms/$opt/bin:$b/OpenFOAM-12/bin:$b/ThirdParty-12/platforms/mingw_w64x86_64-w64-mingw32/gcc-12.2.0/bin:$b/msys64/mingw64/bin:$b/OpenFOAM-12/platforms/$opt/lib/MS-MPI-10.1:$b/ThirdParty-12/platforms/mingw_w64Gcc122DPInt32/lib/MS-MPI-10.1:$b/ThirdParty-12/platforms/mingw_w64Gcc122DPInt32/lib:$b/OpenFOAM-12/platforms/$opt/lib:$b/OpenFOAM-12/platforms/$opt/lib/dummy:$MSMPI_BIN:$PATH"
+    # lib/dummy stays on PATH but LAST: some serial utilities resolve Pstream
+    # from it, and the MPI directory ahead of it is what makes the parallel
+    # ones pick the real library.
+    export PATH="$b/OpenFOAM-12/platforms/$opt/bin:$b/OpenFOAM-12/bin:$b/ThirdParty-12/platforms/mingw_w64x86_64-w64-mingw32/gcc-12.2.0/bin:$b/msys64/mingw64/bin:$b/OpenFOAM-12/platforms/$opt/lib/$mpi:$b/ThirdParty-12/platforms/mingw_w64Gcc122DPInt32/lib/$tp:$b/ThirdParty-12/platforms/mingw_w64Gcc122DPInt32/lib:$b/OpenFOAM-12/platforms/$opt/lib:$b/OpenFOAM-12/platforms/$opt/lib/dummy:$MSMPI_BIN:$PATH"
 }
 
 # Run the inner script under the chosen runtime. Inside a container the scratch
@@ -155,13 +178,15 @@ engine_run() {
             # FIRST word of whatever follows -- pass the whole command as one
             # string or it silently runs bare "bash" and exits 0 in seconds.
             $POD run --rm --user 0:0 -e HOME=/home/openfoam -e WIND_MPIRUN -e WIND_ALLOW_UNCONVERGED \
+                -e WIND_SAMPLE_TIMES \
                 -v "$SCRATCH:/s" "$IMG" "bash /s/inner.sh /s $*" ;;
         docker)
             MSYS_NO_PATHCONV=1 docker run --rm --user 0:0 -e HOME=/home/openfoam -e WIND_MPIRUN \
-                -e WIND_ALLOW_UNCONVERGED \
+                -e WIND_ALLOW_UNCONVERGED -e WIND_SAMPLE_TIMES \
                 -v "$(hostpath "$SCRATCH"):/s" --entrypoint bash "$IMG" /s/inner.sh /s "$@" ;;
         native)
             ( bluecfd_env; export WIND_NATIVE=1 WIND_ALLOW_UNCONVERGED="${WIND_ALLOW_UNCONVERGED:-0}"
+              export WIND_SAMPLE_TIMES="${WIND_SAMPLE_TIMES:-}"
               bash "$SCRATCH/inner.sh" "$SCRATCH" "$@" ) ;;
     esac
 }
@@ -513,6 +538,7 @@ set -uo pipefail
 #             built are kept, converged directions are skipped, and a direction
 #             with a written time step continues from it.
 ROOT=$1; CASE=$2; NP=$3; PED_H=$4; RESUMING=${5:-0}
+SAMPLE_TIMES="${WIND_SAMPLE_TIMES:-}"
 MPIRUN="${WIND_MPIRUN:-mpirun --allow-run-as-root --oversubscribe -np}"
 NATIVE="${WIND_NATIVE:-0}"
 # The podman path enters through the image's interactive entrypoint, which
@@ -645,7 +671,13 @@ for c in case_*; do
     # "no flux" as if it were a real answer -- is dead code and has been removed.
     $MPIRUN "$RANKS" \
         foamPostProcess -func "patchFlowRate(patch=inlet)" -time "$LATEST" -parallel > fr.log 2>&1
-    FLUX=$(grep -a 'sum(inlet)' fr.log | tail -1 | awk '{print $NF}')
+    # Both spellings: the Linux container build prints sum(inlet), blueCFD on
+    # Windows prints sum("inlet") WITH QUOTES. Matching only the first made
+    # every native case report NONE and then fail the non-negative-flux gate --
+    # a perfectly good solve declared "the wind did not enter the domain",
+    # which is fatal and non-retryable, so it would have quarantined every case
+    # on a blueCFD machine (found on the first native run, 2026-09-12).
+    FLUX=$(grep -aE 'sum\("?inlet"?\)' fr.log | tail -1 | awk '{print $NF}')
     echo "INLET_FLUX $c ${FLUX:-NONE}"
 
     # Sample U on a horizontal plane at pedestrian height so run_case.sh can
@@ -653,6 +685,39 @@ for c in case_*; do
     # this image, so the render itself happens host-side -- see step 4).
     # Best effort: a failed sample must never fail an otherwise-good case.
     mkdir -p system
+    # One distanceSurface per requested height. PED_H is normally the single
+    # pedestrian height, but a GRID STUDY needs more: a label sampled at a fixed
+    # height while the first cell centre moves with refinement crosses that
+    # centre partway through the sequence, and cellPoint interpolation then
+    # blends toward the no-slip wall value on some grids and not others. Against
+    # the rough log law that is a -12.9 / 0.0 / -4.5 / -5.9 % non-monotone
+    # sampling artefact across c32/c24/c18/c13.5 -- the same size as the effect
+    # being measured, and enough to make an observed order of convergence
+    # numerology. Sampling each grid's OWN first-cell-centre height as well lets
+    # the wall-model-consistent label be reconstructed afterwards, where the
+    # artefact cancels by construction.
+    SURFACES=""
+    for H in $(echo "$PED_H" | tr ',' ' '); do
+      NAME="ped$(echo "$H" | tr -d '.' | tr '-' 'm')"
+      SURFACES="$SURFACES
+        $NAME
+        {
+            // distanceSurface over the terrain: a surface at a fixed normal
+            // distance from ground.stl, i.e. \"$H m above grade\" everywhere,
+            // which is what the label means. \"signed false\" because the
+            // terrain STL is an open SHEET (watertight.py builds it that way):
+            // signed distance needs a closed surface and fatals with \"could
+            // not be classified as either inside or outside\". Unsigned would
+            // also match $H m BELOW the terrain, but there is no mesh there,
+            // so nothing is sampled.
+            type            distanceSurface;
+            surfaceType     triSurfaceMesh;
+            file            \"ground.stl\";
+            distance        $H;
+            signed          false;
+            interpolate     true;
+        }"
+    done
     cat > system/sliceFO <<SLICEDICT
 FoamFile
 {
@@ -678,23 +743,7 @@ pedestrianSlice
     // entry as a primitive") and pointAndNormalDict are refused.
     surfaces
     (
-        slice
-        {
-            // distanceSurface over the terrain: a surface at a fixed normal
-            // distance from ground.stl, i.e. "1.5 m above grade" everywhere,
-            // which is what the label means. "signed false" because the
-            // terrain STL is an open SHEET (watertight.py builds it that way):
-            // signed distance needs a closed surface and fatals with "could
-            // not be classified as either inside or outside". Unsigned would
-            // also match 1.5 m BELOW the terrain, but there is no mesh there,
-            // so nothing is sampled.
-            type            distanceSurface;
-            surfaceType     triSurfaceMesh;
-            file            "ground.stl";
-            distance        $PED_H;
-            signed          false;
-            interpolate     true;
-        }
+$SURFACES
     );
 }
 SLICEDICT
@@ -702,8 +751,16 @@ SLICEDICT
     # build-case stages the STLs in the MESH case only.
     mkdir -p constant/triSurface
     cp -f ../mesh*/constant/triSurface/ground.stl constant/triSurface/ 2>/dev/null
+    # SAMPLE_TIMES defaults to the last step, so the campaign path is unchanged.
+    # A grid study sets it to a RANGE covering the last few write intervals:
+    # without two samples of the same grid there is no iterative noise floor,
+    # and "the label stopped moving between grids" has no threshold to be
+    # measured against -- steady RANS over an urban canopy limit-cycles at 1.5 m
+    # rather than reaching a fixed point, and residualControl says nothing about
+    # whether the LABEL is still swinging. The scratch these come from is
+    # node-local and deleted with the job, so this cannot be recovered later.
     $MPIRUN "$RANKS" \
-        foamPostProcess -dict system/sliceFO -time "$LATEST" -parallel > slice.log 2>&1 \
+        foamPostProcess -dict system/sliceFO -time "${SAMPLE_TIMES:-$LATEST}" -parallel > slice.log 2>&1 \
         || echo "SLICE_SAMPLE_FAILED $c (see slice.log; not fatal)"
 
     # The archive ships ONE reconstructed time step, not 24 processor
@@ -761,10 +818,18 @@ fi
 # OpenFOAM 12's raw surface writer lays the sample out as
 # postProcessing/<functionObject>/<time>/<surface>.xy (same columns as the
 # older surfaces/<time>/<surface>_U.raw: x y z Ux Uy Uz); both are matched.
-for RAWFILE in "$STUDY"/case_*/postProcessing/pedestrianSlice/*/*.xy \
-               "$STUDY"/case_*/postProcessing/surfaces/*/*_U.raw; do
+# One PNG per DIRECTION, not per sample. With several heights and several write
+# times the sampler can leave a dozen .xy files per direction, and a tricontourf
+# over a few million points is minutes each -- rendering all of them would cost
+# more than producing the samples did. `ls -t` puts the newest first, so each
+# direction is drawn from its latest sample and the rest are skipped.
+PREVIEWED=""
+for RAWFILE in $(ls -t "$STUDY"/case_*/postProcessing/pedestrianSlice/*/*.xy \
+                       "$STUDY"/case_*/postProcessing/surfaces/*/*_U.raw 2>/dev/null); do
     [ -f "$RAWFILE" ] || continue
     CDIR=$(echo "$RAWFILE" | sed -n "s#.*/\(case_[^/]*\)/postProcessing.*#\1#p")
+    case " $PREVIEWED " in *" $CDIR "*) continue ;; esac
+    PREVIEWED="$PREVIEWED $CDIR"
     PNG="$SCRATCH/preview_${CDIR#case_}.png"
     uv run --with matplotlib --with numpy python - "$RAWFILE" "$PNG" >>"$SCRATCH/preview.log" 2>&1 <<'PY' \
         || log "preview render failed for $CDIR (see preview.log; not fatal)"

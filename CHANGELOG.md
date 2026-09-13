@@ -87,6 +87,21 @@ finished case for Syncthing / a master-side pull to collect. See
   30 GB home.
 
 ### Fixed
+- **The native blueCFD runtime never worked, and failed quietly.** `FOAM_MPI`
+  was hardcoded to `MS-MPI-10.1` while the installed directory is
+  `MS-MPI-10.1.2`, so blueCFD's MPI `libPstream.dll` was never on PATH and only
+  `lib/dummy` was -- every rank loaded the SERIAL library. snappyHexMesh then
+  "succeeded" with each rank printing "This dummy library cannot be used in
+  parallel mode", mpiexec exited 1, and the run continued on the unrefined
+  blockMesh background: 39,325 cells where 177,214 were expected. `FOAM_MPI` is
+  discovered from disk now, and `bluecfd_env` refuses rather than proceeding if
+  no MPI `libPstream.dll` is found.
+- The inlet-flux gate only matched `sum(inlet)`; blueCFD prints `sum("inlet")`
+  WITH QUOTES, so every native case reported `NONE` and then failed the
+  non-negative-flux check -- which is fatal and non-retryable, so it would have
+  quarantined every case on a blueCFD machine. Both spellings match now.
+  With these two fixed, native and Docker agree exactly on the same case:
+  177,214 cells, canopy zone 6,063 vs 6,064, inlet flux -15,280,149 both.
 - **The pedestrian sample was not at pedestrian height.** The runner sliced one
   horizontal plane at `terrain_zmax + 1.5`; on a site with relief that is not
   "1.5 m above grade" anywhere but the summit. Measured on the campaign's own
