@@ -157,9 +157,19 @@ class Worker:
 
     def complete(self, result_uri: str, sha256: str | None = None,
                  nbytes: int | None = None, metrics: dict[str, Any] | None = None) -> None:
+        # A longer retry budget than anything else here, because this is the one
+        # call whose failure throws away real work: the case is solved, the
+        # archive is on disk, and only the broker has not been told. Losing it
+        # means the lease expires and hours of CFD get recomputed on some other
+        # machine. The default budget spans about 30 s, which is shorter than a
+        # platform redeploy -- so rotating the database credential, which
+        # restarts the service, would silently cost whichever case happened to
+        # finish during the restart. Nine attempts span roughly five minutes.
+        # Retrying is safe: a lease that has genuinely gone answers 409, which
+        # `_post` never retries.
         r = self._post("/v1/complete", {
             "lease_id": self._current_lease, "result_uri": result_uri,
-            "sha256": sha256, "bytes": nbytes, "metrics": metrics or {}})
+            "sha256": sha256, "bytes": nbytes, "metrics": metrics or {}}, retries=9)
         if r.status_code == 409:
             raise LeaseLost(r.text[:200])
         r.raise_for_status()

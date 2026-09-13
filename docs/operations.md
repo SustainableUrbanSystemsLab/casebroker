@@ -199,4 +199,9 @@ casebroker health --broker https://casebroker.onrender.com
 
 Workers do **not** hold the database credential — they talk to the broker over
 HTTP with a worker token — so the fleet needs no attention beyond surviving the
-Render restart, which it does: a lease outlives a redeploy.
+Render restart, which it does. A heartbeat that cannot reach the broker logs a
+warning and tries again on the next tick, and the 15-minute lease TTL is far
+longer than a redeploy. The one call that used to be at risk was `/v1/complete`
+— the case solved, the archive written, and only the broker not yet told — so
+it now retries across about four minutes rather than the ~30 s the other calls
+use. A definitive `409` is still never retried.

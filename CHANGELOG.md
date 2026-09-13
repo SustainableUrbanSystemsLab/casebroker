@@ -90,6 +90,13 @@ finished case for Syncthing / a master-side pull to collect. See
   command whose job is to end exactly that confusion. Bounded to one level
   and to files named `.env`; each string is still reported once even when two
   paths reach the same file.
+- **A finished case is no longer lost to a broker restart.** `/v1/complete` is
+  the one call whose failure throws away real work -- the case is solved and
+  the archive is on disk, and only the broker has not been told, so giving up
+  means the lease expires and hours of CFD are recomputed elsewhere. Its retry
+  budget was ~30 s, shorter than a platform redeploy, which made rotating the
+  database credential quietly cost whichever case happened to finish during the
+  restart. Now about four minutes. A `409` is still never retried.
 - **Documented how to rotate the database password.** The DSN lives in four
   places (Supabase, Render, the `DBSTRING` Actions secret, and a workstation
   file) and missing the third turns CI red on a commit that is fine. See
