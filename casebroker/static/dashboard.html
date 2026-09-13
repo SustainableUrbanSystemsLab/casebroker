@@ -941,6 +941,64 @@
       </div>
     </div>
 
+    <!-- Identity. Which of the three states shows is decided by /v1/auth/state:
+         a deployment with no account at all offers SETUP, one with an account
+         offers LOGIN, and a signed-in operator gets the machine list. The
+         bearer-token form below stays for the transition, but a logged-in
+         human never needs to see it. -->
+    <div id="authPanel" class="panel" style="display:none; margin-bottom:18px;">
+      <div class="panel-header">
+        <div class="panel-title-group">
+          <h2 id="authTitle">Sign in</h2>
+          <div class="panel-subtitle" id="authSubtitle"></div>
+        </div>
+        <div id="authWho" style="margin-left:auto; display:none; align-items:center; gap:12px;">
+          <span id="authUser" style="font-weight:600;"></span>
+          <button id="logoutBtn" type="button">Log out</button>
+        </div>
+      </div>
+
+      <form id="authForm" class="row" style="margin-top:4px;" autocomplete="on">
+        <div class="field" style="flex:1; min-width:200px;">
+          <label for="authUsername">Username</label>
+          <input type="text" id="authUsername" name="username" autocomplete="username" />
+        </div>
+        <div class="field" style="flex:1; min-width:200px;">
+          <label for="authPassword">Password
+            <span class="label-hint" id="authPwHint"></span>
+          </label>
+          <input type="password" id="authPassword" name="password"
+                 autocomplete="current-password" />
+        </div>
+        <div>
+          <button class="primary" id="authSubmit" type="submit">Sign in</button>
+        </div>
+      </form>
+
+      <!-- Machines: one credential per box, issued here. The token is shown
+           ONCE, because only its hash is stored -- a credential the server can
+           redisplay is one an attacker can read out of the database. -->
+      <div id="machines" style="display:none; margin-top:18px;">
+        <div class="panel-header" style="padding:0; border:none;">
+          <div class="panel-title-group">
+            <h2 style="font-size:15px;">Machines</h2>
+            <div class="panel-subtitle">One credential per worker. Revoking one leaves the rest running.</div>
+          </div>
+        </div>
+        <div class="row" style="margin-top:8px;">
+          <div class="field" style="flex:1; min-width:220px;">
+            <label for="newMachine">Worker id
+              <span class="label-hint">(must match the machine's CASEBROKER_WORKER_ID)</span>
+            </label>
+            <input type="text" id="newMachine" placeholder="lab-ws-02" />
+          </div>
+          <div><button id="issueBtn" type="button">Issue token</button></div>
+        </div>
+        <div id="issuedBox" style="display:none; margin-top:10px;"></div>
+        <div id="machineList" style="margin-top:12px;"></div>
+      </div>
+    </div>
+
     <form id="connectForm" autocomplete="on">
       <div class="row">
         <div class="field" style="flex: 2; min-width: 280px;">
@@ -2214,6 +2272,146 @@
     else if (grew > 0) fireNotification([`${grew} case(s)`], doneCount);
   }
 
+  // -- Identity ----------------------------------------------------------------
+  // Three states, decided by the server rather than guessed here: a deployment
+  // with no accounts offers SETUP (that endpoint closes itself after the first
+  // one), otherwise LOGIN, and a signed-in operator gets the machine list.
+  let authState = null;
+
+  async function loadAuthState() {
+    try {
+      authState = await api("/v1/auth/state");
+    } catch (e) {
+      $("authPanel").style.display = "none";
+      return;
+    }
+    const panel = $("authPanel");
+    panel.style.display = "";
+    const signedIn = !!authState.user;
+    const setup = authState.needs_setup;
+
+    $("authTitle").textContent = signedIn ? "Signed in" : (setup ? "Set up this broker" : "Sign in");
+    $("authSubtitle").textContent = signedIn
+      ? "Your session authenticates the dashboard -- no token to paste."
+      : (setup
+         ? "No account exists yet. The first one you create becomes the admin, and this form then closes for good."
+         : "Sign in to browse the campaign and manage machines.");
+    $("authPwHint").textContent = setup ? "(at least 12 characters)" : "";
+    $("authSubmit").textContent = setup ? "Create admin account" : "Sign in";
+    $("authForm").style.display = signedIn ? "none" : "";
+    $("authWho").style.display = signedIn ? "flex" : "none";
+    $("authUser").textContent = signedIn ? authState.user : "";
+    $("machines").style.display = signedIn ? "" : "none";
+    // A signed-in human has no use for the bearer-token form; it stays in the
+    // DOM because everything still reads $("token").value.
+    $("connectForm").style.display = signedIn ? "none" : "";
+    if (signedIn) loadMachines();
+  }
+
+  async function submitAuth(e) {
+    e.preventDefault();
+    const path = authState && authState.needs_setup ? "/v1/auth/setup" : "/v1/auth/login";
+    const body = { username: $("authUsername").value.trim(), password: $("authPassword").value };
+    if (!body.username || !body.password) { showToast("Username and password required"); return; }
+    try {
+      const r = await fetch($("broker").value.trim() + path, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        credentials: "include", body: JSON.stringify(body),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) { showToast(data.detail || ("failed: " + r.status)); return; }
+      $("authPassword").value = "";
+      showToast("Signed in as " + data.username);
+      await loadAuthState();
+      refresh();
+    } catch (err) {
+      showToast("Could not reach the broker: " + err.message);
+    }
+  }
+
+  async function doLogout() {
+    try {
+      await fetch($("broker").value.trim() + "/v1/auth/logout",
+                  { method: "POST", credentials: "include" });
+    } catch (e) { /* logging out locally is still the right outcome */ }
+    await loadAuthState();
+    refresh();
+  }
+
+  async function loadMachines() {
+    try {
+      const data = await api("/v1/workers/tokens");
+      const rows = data.tokens || [];
+      if (!rows.length) {
+        $("machineList").innerHTML =
+          '<div class="panel-subtitle">No machines yet. Issue a token above, then run ' +
+          '<code>bootstrap_worker.ps1</code> on that box with it.</div>';
+        return;
+      }
+      $("machineList").innerHTML =
+        '<table style="width:100%; border-collapse:collapse;">' +
+        '<thead><tr>' +
+        '<th style="text-align:left; padding:6px 8px;">Worker id</th>' +
+        '<th style="text-align:left; padding:6px 8px;">Issued by</th>' +
+        '<th style="text-align:left; padding:6px 8px;">Last seen</th>' +
+        '<th style="padding:6px 8px;"></th></tr></thead><tbody>' +
+        rows.map((t) => {
+          const revoked = !!t.revoked_at;
+          return '<tr style="opacity:' + (revoked ? "0.45" : "1") + '">' +
+            '<td style="padding:6px 8px; font-weight:600;">' + esc(t.name) +
+              (revoked ? ' <span class="label-hint">(revoked)</span>' : '') + '</td>' +
+            '<td style="padding:6px 8px;">' + esc(t.created_by || "-") + '</td>' +
+            '<td style="padding:6px 8px;">' +
+              (t.last_seen_at ? relTime(t.last_seen_at) : "never") + '</td>' +
+            '<td style="padding:6px 8px; text-align:right;">' +
+              (revoked ? "" :
+                '<button type="button" onclick="revokeMachine(\'' + esc(t.name) + '\')">Revoke</button>') +
+            '</td></tr>';
+        }).join("") + '</tbody></table>';
+    } catch (e) {
+      $("machineList").innerHTML =
+        '<div class="panel-subtitle">Could not list machines: ' + esc(e.message) + '</div>';
+    }
+  }
+
+  async function issueMachine() {
+    const name = $("newMachine").value.trim();
+    if (!name) { showToast("Give the machine a worker id first"); return; }
+    try {
+      const r = await fetch($("broker").value.trim() + "/v1/workers/tokens", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        credentials: "include", body: JSON.stringify({ name }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) { showToast(data.detail || ("failed: " + r.status)); return; }
+      // Shown once and never again: only the hash is stored.
+      $("issuedBox").style.display = "";
+      $("issuedBox").innerHTML =
+        '<div class="panel-subtitle" style="margin-bottom:6px;">' +
+        'Copy this now -- only its hash is stored, so it cannot be shown again.</div>' +
+        '<code style="display:block; padding:10px; word-break:break-all; ' +
+        'border:1px solid var(--border, #ccc); border-radius:6px;">' + esc(data.token) + '</code>' +
+        '<div class="panel-subtitle" style="margin-top:8px;">Then on that machine:<br>' +
+        '<code>.\\bootstrap_worker.ps1 -Token &lt;above&gt; -WorkerId ' + esc(name) + '</code></div>';
+      $("newMachine").value = "";
+      loadMachines();
+    } catch (err) {
+      showToast("Could not reach the broker: " + err.message);
+    }
+  }
+
+  window.revokeMachine = async (name) => {
+    if (!confirm("Revoke " + name + "? It stops being able to lease on its next request.")) return;
+    try {
+      const r = await fetch($("broker").value.trim() + "/v1/workers/tokens/" +
+                            encodeURIComponent(name),
+                            { method: "DELETE", credentials: "include" });
+      if (!r.ok) { showToast("revoke failed: " + r.status); return; }
+      showToast(name + " revoked");
+      loadMachines();
+    } catch (err) { showToast("revoke failed: " + err.message); }
+  };
+
   // -- Main Refresh Loop -------------------------------------------------------
   async function refresh() {
     const refreshIcon = $("refreshIcon");
@@ -2355,6 +2553,11 @@
   const autoOn = autoSaved === null ? true : autoSaved === "1";
   $("autoRefresh").checked = autoOn;
   setAutoRefresh(autoOn);
+
+  $("authForm").addEventListener("submit", submitAuth);
+  $("logoutBtn").addEventListener("click", doLogout);
+  $("issueBtn").addEventListener("click", issueMachine);
+  loadAuthState();
 
   $("autoRefresh").addEventListener("change", (e) => {
     localStorage.setItem(LS_AUTO, e.target.checked ? "1" : "0");

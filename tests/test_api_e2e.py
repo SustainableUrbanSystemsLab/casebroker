@@ -652,3 +652,28 @@ def test_purge_can_be_scoped_to_one_recipe(broker):
     r = broker.delete("/v1/cases?recipe=no-such-recipe&dry_run=false&expect=0")
     assert r.json()["deleted"] == 0
     assert broker.get("/v1/cases").json()["total"] == before
+
+
+def test_dashboard_offers_login_rather_than_only_a_token_box(broker):
+    """The dashboard used to have exactly one way in: paste a bearer token --
+    and the token that could read it was the same worker-grade secret that can
+    delete the campaign. The login panel has to actually be in the page, wired
+    to the endpoints, or the UI silently falls back to that."""
+    html = broker.get("/", headers={"Authorization": ""}).text
+    for needed in ('id="authPanel"', 'id="authForm"', 'id="authUsername"',
+                   'id="authPassword"', 'id="logoutBtn"'):
+        assert needed in html, needed
+    # And the machine-credential panel, which is what replaces sharing one token.
+    for needed in ('id="machines"', 'id="newMachine"', 'id="issueBtn"', 'id="machineList"'):
+        assert needed in html, needed
+    assert "/v1/auth/state" in html and "/v1/auth/login" in html
+    assert "/v1/workers/tokens" in html
+
+
+def test_the_dashboard_sends_cookies_on_its_auth_calls(broker):
+    """A session cookie that the fetch() calls do not carry is a login that
+    appears to work and then does nothing."""
+    html = broker.get("/", headers={"Authorization": ""}).text
+    auth_calls = [ln for ln in html.splitlines() if "/v1/auth/login" in ln or "/v1/workers/tokens" in ln]
+    assert auth_calls, "expected the dashboard to call the auth endpoints"
+    assert 'credentials: "include"' in html
