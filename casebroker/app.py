@@ -369,6 +369,31 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         return db.add_cases(conn, rows)
 
 
+    @app.delete("/v1/cases", dependencies=[WriteAuth])
+    def purge_cases(expect: int | None = None, recipe: str | None = None,
+                    state: str | None = None, dry_run: bool = True) -> dict[str, Any]:
+        """Delete cases from the campaign, with their events and footprints.
+
+        Exists so that "the 5,000 cases were built from a superseded recipe and
+        have to go" does not become a psql session against production. It runs
+        HERE because this is where the database credentials already are -- the
+        alternative is distributing them to every operator's laptop.
+
+        `dry_run` defaults to TRUE: the destructive form has to be asked for
+        explicitly, so a half-remembered curl reports what it would have done
+        instead of doing it. `expect` is the real interlock -- state the row
+        count you believe you are deleting and a mismatch aborts untouched,
+        which is what catches a filter that is subtly wrong rather than empty.
+
+        Deleting a case does not delete the archive a worker already wrote;
+        result_uri points at a file on the machine that produced it. The
+        response says how many doomed rows carried one, so orphaned archives
+        are a number you were told rather than one you discover later.
+        """
+        return db.purge_cases(conn, recipe=recipe, state=state,
+                              expect=expect, dry_run=dry_run)
+
+
     @app.post("/v1/lease", response_model=list[LeaseOut], dependencies=[WriteAuth])
     def lease(body: LeaseIn) -> list[LeaseOut]:
         """Claim the next case(s) to simulate. An empty list means the campaign is

@@ -861,3 +861,63 @@ def get_case(conn, case_id: str) -> dict[str, Any] | None:
     row = conn.execute("SELECT " + _CASE_COLS + " FROM cases WHERE case_id=?",
                        (case_id,)).fetchone()
     return dict(row) if row is not None else None
+
+
+@_locked
+def purge_cases(conn, recipe: str | None = None, state: str | None = None,
+                expect: int | None = None, dry_run: bool = False) -> dict[str, Any]:
+    """Delete cases (and their events and footprints) from the campaign.
+
+    This is the one destructive operation in the API, and it exists because the
+    alternative people reach for is a psql session against production. Three
+    interlocks, in order of how much they have saved:
+
+    * ``expect`` -- the caller states how many rows it believes it is deleting,
+      and a mismatch aborts before anything is touched. A filter that is subtly
+      wrong (a recipe that was renamed, a state spelled ``done`` when the column
+      says ``completed``) then fails loudly instead of deleting the campaign.
+    * ``dry_run`` -- returns the same counts having changed nothing, so the
+      number can be checked before it is committed to.
+    * one transaction -- events and footprints go with their cases, or nothing
+      does. Orphan events would otherwise outlive the cases they describe and
+      corrupt every later count.
+
+    Deleting a case does NOT delete whatever a worker already wrote to disk;
+    result_uri points at an archive on the machine that produced it. That is
+    deliberate -- the broker tracks work, it does not own the results -- but it
+    means a purge silently orphans archives, so the caller is told how many of
+    the doomed rows carry one.
+    """
+    where, params = [], []
+    if recipe is not None:
+        where.append("recipe = ?"); params.append(recipe)
+    if state is not None:
+        where.append("state = ?"); params.append(state)
+    clause = (" WHERE " + " AND ".join(where)) if where else ""
+
+    n = conn.execute("SELECT COUNT(*) FROM cases" + clause, params).fetchone()[0]
+    with_results = conn.execute(
+        "SELECT COUNT(*) FROM cases" + (clause + " AND " if clause else " WHERE ")
+        + "result_uri IS NOT NULL", params).fetchone()[0]
+    out = {"matched": int(n), "with_results": int(with_results),
+           "deleted": 0, "dry_run": bool(dry_run)}
+
+    if expect is not None and int(expect) != int(n):
+        out["error"] = (f"expected {int(expect)} matching cases, found {int(n)} -- "
+                        "refusing to delete")
+        return out
+    if dry_run or n == 0:
+        return out
+
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        sub = "SELECT case_id FROM cases" + clause
+        conn.execute(f"DELETE FROM events WHERE case_id IN ({sub})", params)
+        conn.execute(f"DELETE FROM footprints WHERE case_id IN ({sub})", params)
+        cur = conn.execute("DELETE FROM cases" + clause, params)
+        out["deleted"] = int(cur.rowcount or 0)
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    return out

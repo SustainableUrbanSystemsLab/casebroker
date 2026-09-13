@@ -598,3 +598,57 @@ def test_healthz_never_discloses_why_the_database_is_unreachable(tmp_path):
     with TestClient(app) as c:
         raw = c.get("/healthz").text
     assert "tenantref" not in raw and "authentication" not in raw
+
+
+# -- purging a superseded campaign ------------------------------------------
+
+def test_purge_is_a_dry_run_unless_the_destructive_form_is_asked_for(broker):
+    """The default has to be the safe one. A half-remembered curl, or a client
+    that drops an unfamiliar query parameter, must report what it WOULD delete
+    rather than deleting it."""
+    broker.post("/v1/cases", json=_cases(5))
+    r = broker.delete("/v1/cases")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["dry_run"] is True
+    assert body["deleted"] == 0
+    assert body["matched"] >= 1, "the fixture campaign should have cases to match"
+    assert broker.get("/v1/status").json()["by_state"], "nothing may have been deleted"
+
+
+def test_purge_refuses_when_the_expected_count_disagrees(broker):
+    """The interlock that matters. A filter that is subtly wrong -- a renamed
+    recipe, a state spelled differently from the column -- otherwise deletes
+    either everything or nothing, silently. Stating the expected row count turns
+    that into a loud refusal with nothing touched."""
+    broker.post("/v1/cases", json=_cases(5))
+    matched = broker.delete("/v1/cases").json()["matched"]
+    r = broker.delete(f"/v1/cases?dry_run=false&expect={matched + 1}")
+    body = r.json()
+    assert body["deleted"] == 0
+    assert "refusing to delete" in body["error"]
+    assert broker.get("/v1/cases").json()["total"] == matched, "campaign untouched"
+
+
+def test_purge_deletes_cases_and_their_events_together(broker):
+    """Events outliving their cases would corrupt every later count, so the
+    delete is one transaction over both tables."""
+    broker.post("/v1/cases", json=_cases(5))
+    matched = broker.delete("/v1/cases").json()["matched"]
+    r = broker.delete(f"/v1/cases?dry_run=false&expect={matched}")
+    body = r.json()
+    assert body["deleted"] == matched
+    assert broker.get("/v1/cases").json()["total"] == 0
+    st = broker.get("/v1/status").json()
+    assert not st["by_state"], f"campaign should be empty, got {st['by_state']}"
+
+
+def test_purge_can_be_scoped_to_one_recipe(broker):
+    """Republishing under a new recipe name is the non-destructive path, so the
+    destructive one has to be able to target exactly the superseded recipe and
+    leave the new campaign alone."""
+    broker.post("/v1/cases", json=_cases(5))
+    before = broker.get("/v1/cases").json()["total"]
+    r = broker.delete("/v1/cases?recipe=no-such-recipe&dry_run=false&expect=0")
+    assert r.json()["deleted"] == 0
+    assert broker.get("/v1/cases").json()["total"] == before

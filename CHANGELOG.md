@@ -15,6 +15,15 @@ finished case for Syncthing / a master-side pull to collect. See
 `docs/fleet.md`. MINOR: every protocol change is an optional addition.
 
 ### Added
+- `DELETE /v1/cases` and `db.purge_cases`: delete cases with their events and
+  footprints, so retiring a superseded campaign is not a psql session against
+  production. Three interlocks -- `dry_run` defaults to TRUE, `expect` aborts
+  untouched when the caller's row count disagrees with the filter's, and cases,
+  events and footprints go in one transaction. Optional `recipe`/`state`
+  filters, since republishing under a new recipe name is the non-destructive
+  alternative and the destructive form must be able to target only the old one.
+  The response reports how many doomed rows carried a `result_uri`, because
+  deleting a case does not delete the archive a worker already wrote.
 - Dashboard: optional desktop notifications when cases finish. A "notify on
   finished cases" toggle asks for permission from its own click (the only
   moment a browser will grant it), then each 60 s refresh diffs the most
