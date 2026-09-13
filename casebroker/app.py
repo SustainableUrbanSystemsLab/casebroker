@@ -22,11 +22,11 @@ import sys
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
-from . import __version__, db, footprints, ids
+from . import __version__, auth, db, footprints, ids
 
 MAX_LEASE_SECONDS = 24 * 3600
 
@@ -62,6 +62,22 @@ def _redact_db_target(db_path: str) -> str:
 
 
 # -- payloads -----------------------------------------------------------------
+
+class SetupIn(BaseModel):
+    username: str = Field(min_length=1, max_length=64)
+    password: str = Field(min_length=12, max_length=256)
+
+
+class LoginIn(BaseModel):
+    username: str = Field(min_length=1, max_length=64)
+    password: str = Field(min_length=1, max_length=256)
+
+
+class WorkerTokenIn(BaseModel):
+    # The worker id the machine will run under, so the credential and the
+    # dashboard row are the same thing.
+    name: str = Field(min_length=1, max_length=64)
+
 
 class CaseIn(BaseModel):
     lat: float
@@ -211,32 +227,83 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         prefix = "Bearer "
         return header[len(prefix):] if header.startswith(prefix) else ""
 
-    def require_write_token(request: Request) -> None:
-        # Neither bucket configured means auth is OFF entirely -- fine for a
-        # laptop smoke test, never how this should face a network -- /healthz
-        # reports which mode it is in so a misconfigured deployment is visible
-        # rather than silent. Configuring ONLY readonly_tokens (no worker
-        # tokens at all) is a valid, if unusual, deployment -- it must lock
-        # writes out entirely rather than silently falling back to open,
-        # which is why this checks `tokens` alone and never falls through to
-        # readonly_tokens.
-        if not tokens and not readonly_tokens:
-            return
+    SESSION_COOKIE = "wsb_session"
+
+    def _session_principal(request: Request):
+        """The logged-in human behind this request, if any."""
+        raw = request.cookies.get(SESSION_COOKIE)
+        if not raw:
+            return None
+        return db.session_user(conn, auth.hash_token(raw))
+
+    def _machine_principal(request: Request):
+        """The machine behind this request's bearer token, if the token is a
+        per-machine one issued from the admin UI.
+
+        Checked against the DATABASE, not a cached environment list, which is
+        what makes revocation take effect on the very next request instead of
+        at the next redeploy.
+        """
         supplied = _supplied_token(request)
+        if not supplied:
+            return None
+        return db.worker_token_owner(conn, auth.hash_token(supplied))
+
+    def _env_token_ok(supplied: str, bucket) -> bool:
         # compare_digest against each configured token: constant-time, and it
         # does not reveal which token matched.
-        if not any(hmac.compare_digest(supplied, t) for t in tokens):
-            raise HTTPException(status_code=401, detail="bad or missing bearer token")
+        return any(hmac.compare_digest(supplied, t) for t in bucket)
+
+    def require_write_token(request: Request) -> None:
+        """Three ways to be allowed to write, in the order they are cheapest.
+
+        A logged-in human, a per-machine token from the database, or one of the
+        shared environment tokens. The last is the OLD model and is kept working
+        on purpose: the fleet is running on one right now, and an auth change
+        that strands live workers mid-lease is a worse outcome than a
+        transitional period with both.
+        """
+        # Neither bucket configured AND no accounts means auth is OFF entirely
+        # -- fine for a laptop smoke test, never how this should face a network
+        # -- /healthz reports which mode it is in so a misconfigured deployment
+        # is visible rather than silent. Once an account exists the service is
+        # no longer open, even with no env tokens set.
+        if not tokens and not readonly_tokens and db.count_users(conn) == 0:
+            return
+        if _session_principal(request):
+            return
+        if _machine_principal(request):
+            return
+        # Configuring ONLY readonly_tokens (no worker tokens at all) is a valid,
+        # if unusual, deployment -- it must lock writes out entirely rather than
+        # silently falling back to open, which is why this checks `tokens`
+        # alone and never falls through to readonly_tokens.
+        if _env_token_ok(_supplied_token(request), tokens):
+            return
+        raise HTTPException(status_code=401, detail="log in, or send a valid bearer token")
 
     def require_read_token(request: Request) -> None:
-        if not tokens and not readonly_tokens:
+        if not tokens and not readonly_tokens and db.count_users(conn) == 0:
             return
-        supplied = _supplied_token(request)
-        if not any(hmac.compare_digest(supplied, t) for t in (*tokens, *readonly_tokens)):
-            raise HTTPException(status_code=401, detail="bad or missing bearer token")
+        if _session_principal(request) or _machine_principal(request):
+            return
+        if _env_token_ok(_supplied_token(request), (*tokens, *readonly_tokens)):
+            return
+        raise HTTPException(status_code=401, detail="log in, or send a valid bearer token")
+
+    def require_admin(request: Request):
+        """For the endpoints that manage identity itself. A machine token is
+        deliberately NOT enough here: a worker credential that could mint more
+        worker credentials would defeat the point of issuing them per machine.
+        """
+        user = _session_principal(request)
+        if not user:
+            raise HTTPException(status_code=401, detail="admin session required")
+        return user
 
     WriteAuth = Depends(require_write_token)
     ReadAuth = Depends(require_read_token)
+    AdminAuth = Depends(require_admin)
 
     # -- routes -------------------------------------------------------------------
 
@@ -346,6 +413,138 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         """A minimal ops UI: campaign status, workers, one-case lookup. Vanilla HTML/JS,
         no build step, no external requests other than to this broker's own API."""
         return FileResponse(_STATIC_DIR / "dashboard.html")
+
+
+    # -- identity: who you are, and which machine that is -------------------
+
+    @app.get("/v1/auth/state")
+    def auth_state(request: Request) -> dict[str, Any]:
+        """What the login UI needs before anything is entered.
+
+        Unauthenticated on purpose -- it is what tells a first-time visitor
+        whether to show the SETUP form or the LOGIN form, and it leaks nothing
+        beyond "does this deployment have an account yet", which is already
+        obvious from whether logging in is possible.
+        """
+        user = _session_principal(request)
+        return {
+            "needs_setup": db.count_users(conn) == 0,
+            "user": user["username"] if user else None,
+            "role": user["role"] if user else None,
+            # An env token still works; the UI says so, so the transition is
+            # visible rather than a mystery when a pasted token keeps working.
+            "env_tokens": bool(tokens or readonly_tokens),
+        }
+
+    @app.post("/v1/auth/setup")
+    def auth_setup(body: SetupIn, request: Request, response: Response) -> dict[str, Any]:
+        """Create the FIRST account. Open only while there are none.
+
+        This is the one endpoint that cannot require authentication -- there is
+        nobody to authenticate as yet -- so it closes permanently the moment it
+        succeeds. A second caller gets 409, not another admin.
+        """
+        if db.count_users(conn) > 0:
+            raise HTTPException(409, "already set up -- log in instead")
+        if len(body.password) < 12:
+            # Length over composition rules: this guards a service reachable
+            # from the internet, and a short password is the only property that
+            # reliably predicts a guessable one.
+            raise HTTPException(400, "password must be at least 12 characters")
+        user = db.create_user(conn, body.username, auth.hash_password(body.password))
+        _issue_session(request, response, user["id"])
+        return {"username": user["username"], "role": user["role"]}
+
+    def _is_https(request: Request) -> bool:
+        """Whether this request arrived over TLS.
+
+        Drives the cookie's Secure flag, and getting it wrong fails in a way
+        that gives no clue: a Secure cookie sent over http is DISCARDED by the
+        client silently, so login appears to succeed and the next request is
+        anonymous. Setting it from a static config is the footgun -- production
+        and localhost would need different values and nobody would remember.
+
+        X-Forwarded-Proto first because Render (like every TLS-terminating
+        proxy) speaks plain http to the app, so request.url.scheme alone would
+        say "http" in production and drop the Secure flag exactly where it
+        matters most.
+        """
+        forwarded = request.headers.get("x-forwarded-proto", "").split(",")[0].strip()
+        if forwarded:
+            return forwarded == "https"
+        return request.url.scheme == "https"
+
+    def _issue_session(request: Request, response: Response, user_id: int) -> str:
+        raw = auth.new_token()
+        db.start_session(conn, user_id, auth.hash_token(raw), auth.session_expiry())
+        response.set_cookie(
+            SESSION_COOKIE, raw,
+            max_age=auth.SESSION_TTL_SECONDS,
+            httponly=True,      # JavaScript must never be able to read it
+            samesite="lax",     # a cross-site POST must not carry it
+            secure=_is_https(request),
+            path="/",
+        )
+        return raw
+
+    @app.post("/v1/auth/login")
+    def auth_login(body: LoginIn, request: Request, response: Response) -> dict[str, Any]:
+        user = db.get_user(conn, body.username)
+        # Verify even when the user does not exist, against a throwaway hash, so
+        # a wrong USERNAME and a wrong PASSWORD take the same time. Otherwise the
+        # response time enumerates accounts.
+        stored = user["password_hash"] if user else auth.hash_password("decoy")
+        if not auth.verify_password(body.password, stored) or not user:
+            raise HTTPException(401, "wrong username or password")
+        _issue_session(request, response, user["id"])
+        return {"username": user["username"], "role": user["role"]}
+
+    @app.post("/v1/auth/logout")
+    def auth_logout(request: Request, response: Response) -> dict[str, Any]:
+        raw = request.cookies.get(SESSION_COOKIE)
+        if raw:
+            db.end_session(conn, auth.hash_token(raw))
+        response.delete_cookie(SESSION_COOKIE, path="/")
+        return {"ok": True}
+
+    # -- per-machine credentials -------------------------------------------
+
+    @app.get("/v1/workers/tokens")
+    def list_tokens(user=AdminAuth) -> dict[str, Any]:
+        """Every machine credential, with when it was last used.
+
+        `last_seen_at` is the question a shared secret could never answer: which
+        box is this, and is it still alive?
+        """
+        return {"tokens": db.list_worker_tokens(conn)}
+
+    @app.post("/v1/workers/tokens")
+    def issue_token(body: WorkerTokenIn, user=AdminAuth) -> dict[str, Any]:
+        """Mint a credential for one machine and return it ONCE.
+
+        Only the hash is stored, so this response is the only time the token
+        exists in readable form. That is deliberate: a credential the server can
+        show you again is a credential an attacker can read out of the database.
+        """
+        raw = auth.new_token()
+        try:
+            db.create_worker_token(conn, body.name, auth.hash_token(raw),
+                                   created_by=user["username"])
+        except Exception:
+            # UNIQUE(name): re-issuing for a machine that already has one would
+            # silently strand whichever credential the box is actually using.
+            raise HTTPException(409, f"a token for {body.name!r} already exists -- "
+                                     "revoke it first if the machine needs a new one")
+        return {"name": body.name, "token": raw,
+                "hint": "copy it now -- only its hash is stored, so it cannot be shown again"}
+
+    @app.delete("/v1/workers/tokens/{name}")
+    def revoke_token(name: str, user=AdminAuth) -> dict[str, Any]:
+        """Revoke one machine. Effective on its next request: the check is a row
+        read, not a cached environment variable, so there is no redeploy."""
+        if not db.revoke_worker_token(conn, name):
+            raise HTTPException(404, f"no active token named {name!r}")
+        return {"name": name, "revoked": True}
 
 
     @app.post("/v1/cases", dependencies=[WriteAuth])

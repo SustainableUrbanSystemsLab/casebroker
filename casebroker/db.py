@@ -131,6 +131,50 @@ CREATE TABLE IF NOT EXISTS events (
 );
 CREATE INDEX IF NOT EXISTS idx_events_case ON events(case_id, id);
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events(event, ts);
+
+-- Two kinds of principal, deliberately not one table with a flag.
+--
+-- A HUMAN is interactive: they log in with a password and get a session, which
+-- expires. A MACHINE is not: an unattended worker cannot type a password, so it
+-- carries a long-lived token. The old design gave both the same shared secret
+-- out of an environment variable, which meant no way to tell which machine had
+-- used it, and no way to revoke one machine without rotating every machine.
+CREATE TABLE IF NOT EXISTS users (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    username      TEXT UNIQUE NOT NULL,
+    -- scrypt, salted per user; see auth.hash_password. Never the password.
+    password_hash TEXT NOT NULL,
+    role          TEXT NOT NULL DEFAULT 'admin',
+    created_at    INTEGER NOT NULL,
+    last_login_at INTEGER
+);
+
+-- Server-side sessions rather than signed cookies carrying claims: logging a
+-- user out, or revoking everything after a laptop is lost, has to be a DELETE
+-- that takes effect immediately, not a wait for a signature to expire.
+-- Only the HASH is stored, so a database dump does not hand over live sessions.
+CREATE TABLE IF NOT EXISTS sessions (
+    token_hash TEXT PRIMARY KEY,
+    user_id    INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+
+-- One row per MACHINE. `name` is the worker id, so the dashboard can say which
+-- box last used a credential and when -- and revoking one is an UPDATE here
+-- rather than an environment-variable edit plus a redeploy.
+-- Stored hashed for the same reason as sessions.
+CREATE TABLE IF NOT EXISTS worker_tokens (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    name         TEXT UNIQUE NOT NULL,
+    token_hash   TEXT UNIQUE NOT NULL,
+    created_by   TEXT,
+    created_at   INTEGER NOT NULL,
+    last_seen_at INTEGER,
+    revoked_at   INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_worker_tokens_hash ON worker_tokens(token_hash);
 """
 
 # Same schema, Postgres-flavoured: no PRAGMAs (meaningless there), and the
@@ -211,6 +255,50 @@ CREATE TABLE IF NOT EXISTS events (
 );
 CREATE INDEX IF NOT EXISTS idx_events_case ON events(case_id, id);
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events(event, ts);
+
+-- Two kinds of principal, deliberately not one table with a flag.
+--
+-- A HUMAN is interactive: they log in with a password and get a session, which
+-- expires. A MACHINE is not: an unattended worker cannot type a password, so it
+-- carries a long-lived token. The old design gave both the same shared secret
+-- out of an environment variable, which meant no way to tell which machine had
+-- used it, and no way to revoke one machine without rotating every machine.
+CREATE TABLE IF NOT EXISTS users (
+    id            SERIAL PRIMARY KEY,
+    username      TEXT UNIQUE NOT NULL,
+    -- scrypt, salted per user; see auth.hash_password. Never the password.
+    password_hash TEXT NOT NULL,
+    role          TEXT NOT NULL DEFAULT 'admin',
+    created_at    INTEGER NOT NULL,
+    last_login_at INTEGER
+);
+
+-- Server-side sessions rather than signed cookies carrying claims: logging a
+-- user out, or revoking everything after a laptop is lost, has to be a DELETE
+-- that takes effect immediately, not a wait for a signature to expire.
+-- Only the HASH is stored, so a database dump does not hand over live sessions.
+CREATE TABLE IF NOT EXISTS sessions (
+    token_hash TEXT PRIMARY KEY,
+    user_id    INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+
+-- One row per MACHINE. `name` is the worker id, so the dashboard can say which
+-- box last used a credential and when -- and revoking one is an UPDATE here
+-- rather than an environment-variable edit plus a redeploy.
+-- Stored hashed for the same reason as sessions.
+CREATE TABLE IF NOT EXISTS worker_tokens (
+    id           SERIAL PRIMARY KEY,
+    name         TEXT UNIQUE NOT NULL,
+    token_hash   TEXT UNIQUE NOT NULL,
+    created_by   TEXT,
+    created_at   INTEGER NOT NULL,
+    last_seen_at INTEGER,
+    revoked_at   INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_worker_tokens_hash ON worker_tokens(token_hash);
 """
 
 
@@ -921,3 +1009,125 @@ def purge_cases(conn, recipe: str | None = None, state: str | None = None,
         conn.execute("ROLLBACK")
         raise
     return out
+
+
+# -- identity: humans with sessions, machines with tokens ---------------------
+
+@_locked
+def count_users(conn) -> int:
+    """How many accounts exist. Zero is what puts the service into first-run
+    setup, so this is the check that decides whether /setup is open."""
+    return int(conn.execute("SELECT COUNT(*) FROM users").fetchone()[0])
+
+
+@_locked
+def create_user(conn, username: str, password_hash: str, role: str = "admin",
+                now: int | None = None) -> dict[str, Any]:
+    now = now or _now()
+    conn.execute(
+        "INSERT INTO users (username, password_hash, role, created_at) VALUES (?,?,?,?)",
+        (username, password_hash, role, now))
+    row = conn.execute(
+        "SELECT id, username, role, created_at FROM users WHERE username = ?",
+        (username,)).fetchone()
+    return {"id": row[0], "username": row[1], "role": row[2], "created_at": row[3]}
+
+
+@_locked
+def get_user(conn, username: str):
+    row = conn.execute(
+        "SELECT id, username, password_hash, role FROM users WHERE username = ?",
+        (username,)).fetchone()
+    if not row:
+        return None
+    return {"id": row[0], "username": row[1], "password_hash": row[2], "role": row[3]}
+
+
+@_locked
+def start_session(conn, user_id: int, token_hash: str, expires_at: int,
+                  now: int | None = None) -> None:
+    now = now or _now()
+    conn.execute(
+        "INSERT INTO sessions (token_hash, user_id, created_at, expires_at) VALUES (?,?,?,?)",
+        (token_hash, user_id, now, expires_at))
+    conn.execute("UPDATE users SET last_login_at = ? WHERE id = ?", (now, user_id))
+
+
+@_locked
+def session_user(conn, token_hash: str, now: int | None = None):
+    """The user behind a session id, or None if it is unknown or expired.
+
+    Expiry is enforced HERE rather than by a background sweep: a sweep that
+    stops running would silently extend every session forever, and this is one
+    comparison on an indexed primary key.
+    """
+    now = now or _now()
+    row = conn.execute(
+        "SELECT u.id, u.username, u.role, s.expires_at FROM sessions s "
+        "JOIN users u ON u.id = s.user_id WHERE s.token_hash = ?",
+        (token_hash,)).fetchone()
+    if not row or int(row[3]) <= now:
+        return None
+    return {"id": row[0], "username": row[1], "role": row[2]}
+
+
+@_locked
+def end_session(conn, token_hash: str) -> None:
+    conn.execute("DELETE FROM sessions WHERE token_hash = ?", (token_hash,))
+
+
+@_locked
+def purge_expired_sessions(conn, now: int | None = None) -> int:
+    now = now or _now()
+    cur = conn.execute("DELETE FROM sessions WHERE expires_at <= ?", (now,))
+    return int(cur.rowcount or 0)
+
+
+@_locked
+def create_worker_token(conn, name: str, token_hash: str, created_by: str | None = None,
+                        now: int | None = None) -> dict[str, Any]:
+    """Issue a credential for ONE machine. `name` is the worker id, which is what
+    makes 'which box is this?' answerable on the dashboard."""
+    now = now or _now()
+    conn.execute(
+        "INSERT INTO worker_tokens (name, token_hash, created_by, created_at) "
+        "VALUES (?,?,?,?)", (name, token_hash, created_by, now))
+    return {"name": name, "created_by": created_by, "created_at": now}
+
+
+@_locked
+def worker_token_owner(conn, token_hash: str, now: int | None = None):
+    """The machine a token belongs to, or None if unknown or revoked.
+
+    Also stamps last_seen_at, which is how the dashboard can show a machine as
+    quiet without the worker having to report anything extra.
+    """
+    now = now or _now()
+    row = conn.execute(
+        "SELECT name, revoked_at FROM worker_tokens WHERE token_hash = ?",
+        (token_hash,)).fetchone()
+    if not row or row[1] is not None:
+        return None
+    conn.execute("UPDATE worker_tokens SET last_seen_at = ? WHERE token_hash = ?",
+                 (now, token_hash))
+    return {"name": row[0]}
+
+
+@_locked
+def revoke_worker_token(conn, name: str, now: int | None = None) -> bool:
+    """Revoke by machine name. Takes effect on the next request -- it is a row
+    read on every authenticated call, not a cached environment variable."""
+    now = now or _now()
+    cur = conn.execute(
+        "UPDATE worker_tokens SET revoked_at = ? WHERE name = ? AND revoked_at IS NULL",
+        (now, name))
+    return bool(cur.rowcount)
+
+
+@_locked
+def list_worker_tokens(conn) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        "SELECT name, created_by, created_at, last_seen_at, revoked_at "
+        "FROM worker_tokens ORDER BY created_at DESC").fetchall()
+    return [{"name": r[0], "created_by": r[1], "created_at": r[2],
+             "last_seen_at": r[3], "revoked_at": r[4]} for r in rows]
