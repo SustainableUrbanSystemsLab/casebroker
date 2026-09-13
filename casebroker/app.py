@@ -1,4 +1,4 @@
-"""HTTP API for the case broker.
+"""HTTP API for the Wind Simulation Broker.
 
 Deliberately small. Everything transactional lives in :mod:`casebroker.db`; this
 module is transport, auth and shape-checking only, so the storage engine can be
@@ -202,7 +202,7 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         readonly_tokens = _tokens_from_env("CASEBROKER_READ_TOKENS",
                                            "CASEBROKER_READONLY_TOKENS")
 
-    app = FastAPI(title="Wind v2 case broker", version=__version__)
+    app = FastAPI(title="Wind Simulation Broker", version=__version__)
     conn = db.connect(db_path)
     app.state.db_path = db_path
 

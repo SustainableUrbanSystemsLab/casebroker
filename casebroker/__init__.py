@@ -1,4 +1,4 @@
-"""Case Broker -- central scheduling service for the Wind v2 CFD campaign.
+"""Wind Simulation Broker -- central scheduling service for the CFD campaign.
 
 **The version is declared in ``pyproject.toml`` and nowhere else.** Everything
 that reports it -- the FastAPI app's OpenAPI metadata, ``/healthz``, the
