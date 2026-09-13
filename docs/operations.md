@@ -148,10 +148,55 @@ Three things are **not** done and must be before this faces the internet:
 
 **`/healthz` is intentionally unauthenticated** (so infrastructure health checks
 work with no token) **and therefore must never return anything that could be a
-credential.** It reports a redacted form of `CASEBROKER_DB` — the DSN with its
-password masked (`_redact_db_target` in `app.py`), never the raw value. This was
-not a hypothetical: an early version of this service returned the connection
-string verbatim, which meant hitting `/healthz` against a real deployment
-printed the live database password in plain text with no auth required to
-trigger it. If you ever add something else to this endpoint, check it for the
-same shape of mistake before shipping it.
+credential.** This was not a hypothetical: an early version of this service
+returned the connection string verbatim, which meant hitting `/healthz` against
+a real deployment printed the live database password in plain text with no auth
+required to trigger it. It was then fixed to mask the password
+(`_redact_db_target` in `app.py`).
+
+Masking the password turned out to be necessary but **not sufficient**. What
+survives redaction still names the exact database instance — host, port, user
+and database — which is reconnaissance handed out for free to anyone who can
+reach the URL. So the endpoint now answers two different callers differently:
+
+| field | anonymous | authenticated |
+| --- | --- | --- |
+| `ok`, `version`, `auth`, `db_ok` | yes | yes |
+| `db` (redacted DSN summary) | `null` | the summary |
+
+`db_ok` is the part a health check actually needs — it still distinguishes
+"service down" from "database down" with no credential. The `db` key stays
+*present but null* rather than disappearing, so a client that reads it by name
+does not break. If you ever add something else to this endpoint, ask not only
+"could this be a credential?" but "does this help someone attack the thing it
+describes?"
+
+### Rotating the database password
+
+The DSN lives in **four** places, and a rotation that misses one strands
+something. In this order:
+
+1. **Supabase** ▸ Project Settings ▸ Database ▸ Reset database password.
+   Copy the new DSN for the **transaction pooler** (port `6543`), not the
+   direct connection.
+2. **Render** ▸ the service ▸ Environment ▸ `CASEBROKER_DB`. Saving triggers a
+   redeploy, which is the restart the new credential needs.
+3. **GitHub** ▸ repo ▸ Settings ▸ Secrets ▸ Actions ▸ `DBSTRING`. The
+   `postgres` job in `.github/workflows/test.yml` runs against the real
+   database on every push to `main`; a stale secret turns that job red on a
+   commit that is perfectly fine.
+4. **Your workstation** — whichever file you keep it in. `casebroker doctor`
+   finds every copy on the box and tells you which ones still authenticate, so
+   run it rather than trying to remember.
+
+Then confirm, in this order:
+
+```bash
+casebroker doctor                       # every local copy, and whether it works
+curl -s https://casebroker.onrender.com/healthz   # db_ok must be true
+casebroker health --broker https://casebroker.onrender.com
+```
+
+Workers do **not** hold the database credential — they talk to the broker over
+HTTP with a worker token — so the fleet needs no attention beyond surviving the
+Render restart, which it does: a lease outlives a redeploy.

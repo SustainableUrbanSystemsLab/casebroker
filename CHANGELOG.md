@@ -83,6 +83,17 @@ finished case for Syncthing / a master-side pull to collect. See
   pulls archives from PACE over SSH), `docs/fleet.md`.
 
 ### Changed
+- **`casebroker doctor` now looks in sibling checkouts** (`../*/.env`), not
+  only its own working directory. The credential that was actually live sat
+  in a neighbouring repo, so doctor reported "no connection string found"
+  while a working one lay a directory over -- the worst possible answer for a
+  command whose job is to end exactly that confusion. Bounded to one level
+  and to files named `.env`; each string is still reported once even when two
+  paths reach the same file.
+- **Documented how to rotate the database password.** The DSN lives in four
+  places (Supabase, Render, the `DBSTRING` Actions secret, and a workstation
+  file) and missing the third turns CI red on a commit that is fine. See
+  "Rotating the database password" in `docs/operations.md`.
 - Runner: the inlet roughness is per wind direction. `build-case` gets
   `wind.roughnessByDirection` from the geometry report's `z0_by_direction`
   (real_cities `upstream_z0.py`: ESA WorldCover, log-mean z0 over a 3 km

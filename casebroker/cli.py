@@ -185,6 +185,16 @@ def cmd_fleet(args) -> int:
 DSN_ENV = ("CASEBROKER_DB", "DBSTRING")
 DSN_FILES = (".env", "../.env", "DBSTRING.md", "DBSTRIG.md")
 
+# Sibling checkouts. The copy that was ACTUALLY live during the 2026-09 rotation
+# sat in a neighbouring repo's `.env`, not in this one -- so a doctor that looks
+# only at its own working directory reports "no connection string found" while
+# a working credential sits one directory over. A rotation runbook that says
+# "doctor finds every copy" has to be true, or it quietly leaves a stale secret
+# behind. Bounded to one level and to files named `.env`, so this stays a
+# targeted look at where checkouts live rather than a scan of the disk.
+DSN_GLOBS = ("../*/.env",)
+MAX_SCANNED_BYTES = 1 << 20
+
 DSN_RE = r"postgres(?:ql)?://([^:\s]+):([^@\s]+)@([^:/\s]+):(\d+)/(\w+)"
 
 
@@ -210,11 +220,25 @@ def _dsn_candidates(explicit):
         add("--dsn", explicit)
     for name in DSN_ENV:
         add("$" + name, os.environ.get(name, ""))
-    for rel in DSN_FILES:
+    paths = [pathlib.Path(rel) for rel in DSN_FILES]
+    for pattern in DSN_GLOBS:
         try:
-            path = pathlib.Path(rel)
-            if path.is_file():
-                add(str(path), path.read_text(encoding="utf-8", errors="replace"))
+            paths.extend(sorted(pathlib.Path().glob(pattern)))
+        except OSError:
+            pass
+
+    done = set()
+    for path in paths:
+        try:
+            if not path.is_file():
+                continue
+            key = path.resolve()
+            if key in done:
+                continue
+            done.add(key)
+            if path.stat().st_size > MAX_SCANNED_BYTES:
+                continue
+            add(str(path), path.read_text(encoding="utf-8", errors="replace"))
         except OSError:
             pass
     return out

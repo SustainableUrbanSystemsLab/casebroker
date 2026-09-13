@@ -99,7 +99,7 @@ def test_the_drift_guard_actually_catches_the_form_that_motivated_it():
 
 
 def test_no_hardcoded_version():
-    """No source file may restate the version as a literal.
+    r"""No source file may restate the version as a literal.
 
     Matches an x.y.z that is not part of a longer token, skipping the one
     legitimate declaration in pyproject.toml and any dependency pin.
@@ -197,6 +197,53 @@ def test_doctor_finds_every_connection_string_not_just_the_first(tmp_path, monke
     assert origins[0] == "--dsn", "an explicitly supplied DSN must be tried first"
     assert ".env" in origins and "DBSTRIG.md" in origins
     assert len({d for _, d in found}) == 3, "distinct strings must not be collapsed"
+
+
+def test_doctor_looks_in_sibling_checkouts_too(tmp_path, monkeypatch):
+    """Where the live credential was actually hiding during the rotation.
+
+    It sat in a NEIGHBOURING repo's `.env`, so a doctor that searched only its
+    own working directory printed "no connection string found" while a working
+    one lay a directory over. That is the worst possible answer: a rotation
+    runbook that trusts it leaves a stale secret behind on the box.
+    """
+    from casebroker.cli import _dsn_candidates
+
+    root = tmp_path / "workspace"
+    (root / "broker").mkdir(parents=True)
+    (root / "other-project").mkdir()
+    (root / "other-project" / ".env").write_text(
+        "DBSTRING=postgresql://postgres.abc:siblingpw@h.example:6543/postgres\n",
+        encoding="utf-8")
+
+    monkeypatch.chdir(root / "broker")
+    monkeypatch.delenv("CASEBROKER_DB", raising=False)
+    monkeypatch.delenv("DBSTRING", raising=False)
+
+    found = _dsn_candidates(None)
+    assert any("other-project" in origin for origin, _ in found), \
+        "a sibling checkout's .env must be found"
+    assert any("siblingpw" in dsn for _, dsn in found)
+
+
+def test_doctor_reports_each_connection_string_once(tmp_path, monkeypatch):
+    """`.env` is reachable both directly and through the sibling glob. Listing
+    the same file twice would make one credential look like two, which is
+    precisely the confusion this command exists to end."""
+    from casebroker.cli import _dsn_candidates
+
+    root = tmp_path / "workspace"
+    (root / "broker").mkdir(parents=True)
+    (root / "broker" / ".env").write_text(
+        "DBSTRING=postgresql://postgres.abc:onlypw@h.example:6543/postgres\n",
+        encoding="utf-8")
+
+    monkeypatch.chdir(root / "broker")
+    monkeypatch.delenv("CASEBROKER_DB", raising=False)
+    monkeypatch.delenv("DBSTRING", raising=False)
+
+    found = _dsn_candidates(None)
+    assert len(found) == 1, f"one credential, reported once -- got {found}"
 
 
 def test_doctor_never_prints_a_password():
