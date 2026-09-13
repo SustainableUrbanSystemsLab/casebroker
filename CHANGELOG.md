@@ -78,6 +78,22 @@ finished case for Syncthing / a master-side pull to collect. See
   30 GB home.
 
 ### Fixed
+- **The pedestrian sample was not at pedestrian height.** The runner sliced one
+  horizontal plane at `terrain_zmax + 1.5`; on a site with relief that is not
+  "1.5 m above grade" anywhere but the summit. Measured on the campaign's own
+  Nanjing tile (terrain -24.4 .. 38.5 m): the plane sat a MEDIAN 47.6 m above
+  the ground and came within 10 m of it over 0.2% of the surface, so every
+  pedestrian label on a site with terrain was free-stream flow tens of metres
+  up. It is now a `distanceSurface` draped at `WIND_PEDESTRIAN_H` (default
+  1.5 m) over the terrain triSurface, `signed false` because that STL is an open
+  sheet. Verified end to end: the sample spans 62.6 m of z on a tile with
+  62.8 m of relief.
+
+  This one hid behind a plausible-looking render, and it also made the mesh look
+  settled: up in the free stream two independently converged meshes agree to
+  1.6%, while on the real pedestrian surface they differ by 24% in the mean and
+  by more than 10% at 84% of points. No mesh should be called converged for
+  training data on the old measurement.
 - `start_worker.ps1 --max-cases 1` bound `--max-cases` to `-EnvFile` (PowerShell
   positional binding), so the profile was never read and the worker died with
   `set CASEBROKER_URL`; extra worker arguments are positional now and `-EnvFile`

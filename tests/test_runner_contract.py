@@ -147,3 +147,31 @@ def test_run_forever_maps_a_fatal_runner_error_to_a_non_retryable_failure(tmp_pa
     assert row["state"] == "quarantined", "a fatal runner error must not be retried"
     assert row["attempts"] == 1
     assert "not watertight" in row["last_error"]
+
+
+def test_the_pedestrian_sample_follows_the_terrain_instead_of_one_flat_plane():
+    """The label an ML model trains on is wind speed at pedestrian height ABOVE
+    GRADE, and grade is not a constant on a site with relief.
+
+    The runner used to sample one horizontal plane at `terrain_zmax + 1.5`.
+    Measured on the campaign's own Nanjing tile, whose terrain spans
+    -24.4 .. 38.5 m, that plane sat a MEDIAN 47.6 m above the ground and came
+    within 10 m of it over 0.2% of the surface -- so every "pedestrian" sample
+    on a site with terrain was free-stream flow tens of metres up. It was
+    invisible precisely because such a slice renders perfectly plausibly, and
+    because up there two independently converged meshes agree to 1.6% (on the
+    real pedestrian surface they differ by 24%).
+
+    A string check is weak evidence about generated bash, so this only guards
+    the regression that a rerun would not notice: that the sampler is a
+    terrain-draped distanceSurface and NOT a constant-z cutPlane. The end-to-end
+    proof is the smoke run, whose sample spans 62.6 m of z on a tile with 62.8 m
+    of relief.
+    """
+    script = (pathlib.Path(__file__).resolve().parents[1] / "runner" / "run_case.sh").read_text(
+        encoding="utf-8", errors="replace")
+    assert "distanceSurface" in script
+    assert 'file            "ground.stl"' in script, "the drape needs the terrain triSurface"
+    # The old formulation, in either spelling, must not come back.
+    assert "planeType       pointAndNormal" not in script
+    assert "TERRAIN_ZMAX) + 1.5" not in script

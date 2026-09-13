@@ -307,7 +307,18 @@ PY
 )
 TERRAIN_ZMAX=$(printf '%s' "$TERRAIN_Z" | cut -d" " -f1)
 TERRAIN_ZMIN=$(printf '%s' "$TERRAIN_Z" | cut -d" " -f2)
-PEDESTRIAN_Z=$("$PY" -c "print(($TERRAIN_ZMAX) + 1.5)" 2>/dev/null || echo "1.5")
+# Pedestrian height is a height ABOVE GRADE, and grade is not a constant on a
+# site with relief -- so it is a distance draped over the terrain, not a z.
+#
+# This used to be `terrain_zmax + 1.5`, one horizontal plane through the whole
+# domain. Measured on this campaign's own Nanjing tile, whose terrain spans
+# -24.4 .. 38.5 m: that plane sat a MEDIAN 47.6 m above the ground and came
+# within 10 m of it over 0.2% of the surface. Every "pedestrian" sample on a
+# site with terrain was therefore free-stream flow tens of metres up -- and
+# silently so, because such a slice looks perfectly reasonable when rendered.
+# It also made the sample look mesh-independent (two converged meshes agreed
+# to 1.6% up there, against 24% on the real pedestrian surface).
+PEDESTRIAN_H="${WIND_PEDESTRIAN_H:-1.5}"
 # The domain floor is placed just ABOVE the terrain's lowest point, so the
 # terrain itself seals it. Measuring terrain.stl is the right way to find that
 # point and it survived the slab->sheet change, because both spell the same
@@ -501,7 +512,7 @@ set -uo pipefail
 #   resuming  1 when the study was restored from a checkpoint: meshes already
 #             built are kept, converged directions are skipped, and a direction
 #             with a written time step continues from it.
-ROOT=$1; CASE=$2; NP=$3; SLICE_Z=$4; RESUMING=${5:-0}
+ROOT=$1; CASE=$2; NP=$3; PED_H=$4; RESUMING=${5:-0}
 MPIRUN="${WIND_MPIRUN:-mpirun --allow-run-as-root --oversubscribe -np}"
 NATIVE="${WIND_NATIVE:-0}"
 # The podman path enters through the image's interactive entrypoint, which
@@ -669,15 +680,28 @@ pedestrianSlice
     (
         slice
         {
-            type            cutPlane;
-            planeType       pointAndNormal;
-            point           (0 0 $SLICE_Z);
-            normal          (0 0 1);
+            // distanceSurface over the terrain: a surface at a fixed normal
+            // distance from ground.stl, i.e. "1.5 m above grade" everywhere,
+            // which is what the label means. "signed false" because the
+            // terrain STL is an open SHEET (watertight.py builds it that way):
+            // signed distance needs a closed surface and fatals with "could
+            // not be classified as either inside or outside". Unsigned would
+            // also match 1.5 m BELOW the terrain, but there is no mesh there,
+            // so nothing is sampled.
+            type            distanceSurface;
+            surfaceType     triSurfaceMesh;
+            file            "ground.stl";
+            distance        $PED_H;
+            signed          false;
             interpolate     true;
         }
     );
 }
 SLICEDICT
+    # searchableSurface reads constant/triSurface of the case it runs in, and
+    # build-case stages the STLs in the MESH case only.
+    mkdir -p constant/triSurface
+    cp -f ../mesh*/constant/triSurface/ground.stl constant/triSurface/ 2>/dev/null
     $MPIRUN "$RANKS" \
         foamPostProcess -dict system/sliceFO -time "$LATEST" -parallel > slice.log 2>&1 \
         || echo "SLICE_SAMPLE_FAILED $c (see slice.log; not fatal)"
@@ -695,7 +719,7 @@ INNER
 sed -i 's/\r$//' "$SCRATCH/inner.sh"
 
 start_progress_writer
-engine_run "$CASE_ID" "$NP" "$PEDESTRIAN_Z" "$RESUMING" > "$SCRATCH/run.raw" 2>&1 &
+engine_run "$CASE_ID" "$NP" "$PEDESTRIAN_H" "$RESUMING" > "$SCRATCH/run.raw" 2>&1 &
 ENGINE_PID=$!
 wait "$ENGINE_PID"
 ENGINE_PID=""
