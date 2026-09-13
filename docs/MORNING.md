@@ -28,12 +28,19 @@ second, or you will oversubscribe the box.
 
 ## 2. Every other machine
 
+**Getting a token, the new way.** Open the dashboard, log in (first visit asks
+you to create the admin account), go to **Machines**, and issue one for that
+machine's worker id. It is shown once. Each machine gets its own, so one can be
+revoked without touching the others and the list shows when each was last seen.
+The old shared token still works while you switch over.
+
+
 One command per machine, from a normal (non-admin) PowerShell:
 
 ```powershell
 git clone https://github.com/SustainableUrbanSystemsLab/casebroker.git C:\src\casebroker
 cd C:\src\casebroker
-.\bootstrap_worker.ps1 -Token <the write token> -WorkerId <unique-per-machine> `
+.\bootstrap_worker.ps1 -Token <machine token from the dashboard> -WorkerId <unique-per-machine> `
     -E3dSource \\COD-PKAST-7865\wind\bin\e3d.exe -Smoke
 ```
 

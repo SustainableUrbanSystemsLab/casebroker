@@ -1,7 +1,13 @@
 # One command to turn a fresh Windows machine into a campaign worker.
 #
 #   iwr -useb <raw url>/bootstrap_worker.ps1 | iex        # not recommended: no args
-#   .\bootstrap_worker.ps1 -Token <write token> -WorkerId lab-ws-02
+#   .\bootstrap_worker.ps1 -Token <machine token> -WorkerId lab-ws-02
+#
+# Get the token from the dashboard: log in, Machines, "Issue token" with this
+# machine's worker id. It is shown once. That per-machine credential replaces the
+# single shared secret every box used to carry -- it can be revoked on its own,
+# and the dashboard shows when this machine was last seen. A shared env token
+# still works during the transition.
 #
 # What it does, in order, stopping at the first thing it cannot fix:
 #   1. checks/install-hints the prerequisites

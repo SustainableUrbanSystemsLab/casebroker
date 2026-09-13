@@ -15,6 +15,18 @@ finished case for Syncthing / a master-side pull to collect. See
 `docs/fleet.md`. MINOR: every protocol change is an optional addition.
 
 ### Added
+- **Accounts for people, per-machine tokens for machines.** First run serves a
+  setup form (the one endpoint that cannot require auth, so it closes itself
+  after the first account); thereafter password login and a server-side
+  session, so the dashboard no longer asks a human to paste the same
+  worker-grade secret that can delete the campaign. Machines get one credential
+  each, issued from the dashboard and shown once -- the row carries the worker
+  id and `last_seen_at`, and revoking one is a row update checked on every
+  request, so it takes effect immediately rather than at the next redeploy. A
+  machine token deliberately cannot mint machine tokens. The old shared env
+  tokens keep working through the transition. New: `GET /v1/auth/state`,
+  `POST /v1/auth/{setup,login,logout}`, `GET|POST /v1/workers/tokens`,
+  `DELETE /v1/workers/tokens/{name}`.
 - `casebroker doctor`: checks the database, the broker and the token in one go
   and names whichever is broken. It DISCOVERS every connection string it can
   find (`$CASEBROKER_DB`, `$DBSTRING`, `.env`, `DBSTRING.md`) and tests each
