@@ -148,3 +148,61 @@ def test_status_redacts_the_database_password_like_healthz_does(client):
     """A second endpoint exposing the DSN is a second place to leak it."""
     body = client.get("/v1/status", headers={"Authorization": "Bearer t"}).text
     assert "password" not in body.lower()
+
+
+# -- doctor: diagnosing the thing that is actually wrong ---------------------
+
+def test_doctor_separates_a_stale_password_from_a_wrong_username():
+    """The message that cost this project an evening.
+
+    Supabase's pooler answers a BAD PASSWORD with `password authentication
+    failed for user "postgres"` -- naming the upstream role rather than the
+    `postgres.<project-ref>` that was actually supplied. Read literally it looks
+    like the username is wrong, and the fix people then reach for (stripping the
+    project suffix) produces a DIFFERENT error, `Tenant or user not found`,
+    which looks like progress and is not. The two must be told apart.
+    """
+    from casebroker.cli import _diagnose_pg
+
+    stale_pw = _diagnose_pg(
+        'connection failed: FATAL:  password authentication failed for user "postgres"',
+        "postgres.vecnpzgabeynmqbszwrm")
+    assert "stale password" in stale_pw
+    assert "not a wrong username" in stale_pw
+
+    no_tenant = _diagnose_pg("connection failed: FATAL: Tenant or user not found", "postgres")
+    assert "project suffix" in no_tenant
+    assert "stale password" not in no_tenant
+
+
+def test_doctor_finds_every_connection_string_not_just_the_first(tmp_path, monkeypatch):
+    """The actual failure mode: three copies of the DSN, two of them stale, and
+    no way to tell which the tooling was using. Reporting only the first would
+    reproduce exactly that."""
+    import os
+    from casebroker.cli import _dsn_candidates
+
+    (tmp_path / ".env").write_text(
+        "DBSTRING=postgresql://postgres.abc:oldpw@aws-0-us-west-2.pooler.supabase.com:6543/postgres\n",
+        encoding="utf-8")
+    (tmp_path / "DBSTRIG.md").write_text(
+        "the string is postgresql://postgres.abc:otherpw@aws-0-us-west-2.pooler.supabase.com:6543/postgres\n",
+        encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("CASEBROKER_DB", raising=False)
+    monkeypatch.delenv("DBSTRING", raising=False)
+
+    found = _dsn_candidates("postgresql://postgres.abc:explicit@h.example:6543/postgres")
+    origins = [o for o, _ in found]
+    assert origins[0] == "--dsn", "an explicitly supplied DSN must be tried first"
+    assert ".env" in origins and "DBSTRIG.md" in origins
+    assert len({d for _, d in found}) == 3, "distinct strings must not be collapsed"
+
+
+def test_doctor_never_prints_a_password():
+    """Doctor output is the thing people paste into chat when asking for help."""
+    from casebroker.cli import _redact
+
+    out = _redact("postgresql://postgres.abc:SuperSecret123@host.example:6543/postgres")
+    assert "SuperSecret123" not in out
+    assert "postgres.abc" in out and "host.example" in out

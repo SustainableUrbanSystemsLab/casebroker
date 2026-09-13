@@ -15,6 +15,17 @@ finished case for Syncthing / a master-side pull to collect. See
 `docs/fleet.md`. MINOR: every protocol change is an optional addition.
 
 ### Added
+- `casebroker doctor`: checks the database, the broker and the token in one go
+  and names whichever is broken. It DISCOVERS every connection string it can
+  find (`$CASEBROKER_DB`, `$DBSTRING`, `.env`, `DBSTRING.md`) and tests each
+  rather than trusting the first, because the failure it was written for was
+  three copies of the DSN in three files with two of them stale. It also
+  translates the one error that actively misleads: Supabase's pooler answers a
+  BAD PASSWORD with `password authentication failed for user "postgres"`,
+  naming the upstream role instead of the `postgres.<project-ref>` supplied --
+  which reads as a username problem, and the "fix" for that produces
+  `Tenant or user not found`, which looks like progress and is not. Passwords
+  are redacted in the output.
 - `DELETE /v1/cases` and `db.purge_cases`: delete cases with their events and
   footprints, so retiring a superseded campaign is not a psql session against
   production. Three interlocks -- `dry_run` defaults to TRUE, `expect` aborts
