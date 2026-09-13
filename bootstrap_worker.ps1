@@ -38,6 +38,18 @@ function Pass($m) { Write-Host "  PASS  $m" -ForegroundColor Green }
 function Warn($m) { Write-Host "  warn  $m" -ForegroundColor Yellow }
 function Die($m) { Write-Host "  FAIL  $m" -ForegroundColor Red; exit 1 }
 
+# git reports progress, "Already on '<branch>'" and "Already up to date." on
+# STDERR. Windows PowerShell turns every one of those into a red
+# NativeCommandError block, so a successful bootstrap looks like a failed one.
+# Captured here and shown ONLY when git actually failed.
+function Git() {
+    $out = & git @args 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        $out | ForEach-Object { Write-Host "  git: $_" -ForegroundColor Red }
+        Die "git $($args -join ' ') failed"
+    }
+}
+
 Step "prerequisites"
 if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
     Die "git missing. Install Git for Windows (gitforwindows.org) -- the runner is bash and needs its cygpath/tar too."
@@ -64,11 +76,10 @@ Step "source"
 New-Item -ItemType Directory -Force $SrcDir | Out-Null
 $repo = Join-Path $SrcDir "casebroker"
 if (Test-Path (Join-Path $repo ".git")) {
-    git -C $repo pull --ff-only
+    Git -C $repo pull --ff-only
     Pass "casebroker updated"
 } else {
-    git clone https://github.com/SustainableUrbanSystemsLab/casebroker.git $repo
-    if ($LASTEXITCODE -ne 0) { Die "clone failed -- is this machine authenticated to GitHub?" }
+    Git clone https://github.com/SustainableUrbanSystemsLab/casebroker.git $repo
     Pass "casebroker cloned"
 }
 # real_cities lives in the sibling analysis repo and is what builds each site's
@@ -82,11 +93,11 @@ if (Test-Path (Join-Path $repo ".git")) {
 $rcRepo = Join-Path $SrcDir "JP-Wind-ML-Comparison"
 $rc = Join-Path $rcRepo "benchmark\real_cities"
 if (Test-Path (Join-Path $rcRepo ".git")) {
-    git -C $rcRepo fetch origin $RealCitiesBranch
-    git -C $rcRepo checkout $RealCitiesBranch
-    git -C $rcRepo pull --ff-only
+    Git -C $rcRepo fetch origin $RealCitiesBranch
+    Git -C $rcRepo checkout $RealCitiesBranch
+    Git -C $rcRepo pull --ff-only
 } else {
-    git clone -b $RealCitiesBranch https://github.com/SustainableUrbanSystemsLab/JP-Wind-ML-Comparison.git $rcRepo
+    Git clone -b $RealCitiesBranch https://github.com/SustainableUrbanSystemsLab/JP-Wind-ML-Comparison.git $rcRepo
 }
 if (-not (Test-Path (Join-Path $rc "site_geometry.py"))) {
     Die "real_cities at $rc has no site_geometry.py -- wrong branch? expected $RealCitiesBranch"
