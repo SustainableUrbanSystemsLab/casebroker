@@ -15,6 +15,44 @@ finished case for Syncthing / a master-side pull to collect. See
 `docs/fleet.md`. MINOR: every protocol change is an optional addition.
 
 ### Added
+- **Onboarding that a new operator can actually follow.** A complete first-run
+  path -- database, admin account, per-machine credential -- and the tooling and
+  documentation for each step. `casebroker account create|list|passwd|role|delete`
+  manages the human accounts straight against the database, so a headless
+  deployment can be bootstrapped and a forgotten password recovered without
+  hand-writing an scrypt hash into production; `casebroker init-db` applies the
+  schema without starting the service. Over HTTP the same is
+  `GET|POST /v1/users`, `POST /v1/users/{username}/{role,password}` and
+  `DELETE /v1/users/{username}`. Previously `/v1/auth/setup` was the ONLY way an
+  account could come into being, it closed permanently after the first success,
+  and nothing could add a second operator or change a password.
+- **`role` now authorises something.** The column was stored, returned by every
+  auth response, and read by nothing, so every account was an admin whatever its
+  row said. `admin` and `viewer` are now enforced: a viewer reads the campaign
+  and gets `403` from every mutating endpoint, from `/v1/users` and from
+  `/v1/workers/tokens`. That is the attributable, individually revocable version
+  of what a shared read-only env token was doing. The last admin cannot be
+  deleted or demoted -- there is no recovery endpoint, so that would leave a
+  deployment permanently unmanageable.
+- **`CASEBROKER_SETUP_TOKEN`**, optional. `/v1/auth/setup` cannot require a
+  login, so on a broker reachable before anyone has set it up, the first
+  stranger to find the form became its permanent sole admin. Setting this makes
+  setup demand a secret the operator already holds; the dashboard shows a field
+  for it when `GET /v1/auth/state` reports `setup_token_required`.
+- **A schema that upgrades itself.** Every `CREATE TABLE` is `IF NOT EXISTS`,
+  which upgraded cleanly whenever a release added a TABLE -- the only kind of
+  schema change this repo had ever made -- and did nothing whatsoever for a new
+  COLUMN: the statement no-ops on an existing table without comparing columns,
+  so the column never appeared and the first index over it failed at connect
+  time with `no such column: priority`, which reads like a corrupt database
+  rather than one release behind. The schema is now applied in three passes --
+  create tables, `ALTER TABLE ADD COLUMN` whatever is missing, then build the
+  indexes -- and records a version in a new `schema_meta` table. It only ever
+  adds; a column declared `NOT NULL` with no `DEFAULT` cannot be added to an
+  existing table on any engine, so startup refuses with a message naming the
+  column instead of failing later and obscurely.
+- Login throttling: 10 failures per account per source address in 5 minutes,
+  then `429`. Expired sessions are swept on login rather than accumulating.
 - **Accounts for people, per-machine tokens for machines.** First run serves a
   setup form (the one endpoint that cannot require auth, so it closes itself
   after the first account); thereafter password login and a server-side
@@ -27,7 +65,11 @@ finished case for Syncthing / a master-side pull to collect. See
   tokens keep working through the transition. New: `GET /v1/auth/state`,
   `POST /v1/auth/{setup,login,logout}`, `GET|POST /v1/workers/tokens`,
   `DELETE /v1/workers/tokens/{name}`.
-- `casebroker doctor`: checks the database, the broker and the token in one go
+- `casebroker doctor`: checks the identity tables (`users`, `sessions`,
+  `worker_tokens`) and whether an admin account exists, and reports the schema
+  version. It previously counted only the five campaign tables, so it reported
+  "schema present" against a database with no auth layer at all. It also
+  checks the database, the broker and the token in one go
   and names whichever is broken. It DISCOVERS every connection string it can
   find (`$CASEBROKER_DB`, `$DBSTRING`, `.env`, `DBSTRING.md`) and tests each
   rather than trusting the first, because the failure it was written for was
@@ -128,6 +170,33 @@ finished case for Syncthing / a master-side pull to collect. See
   30 GB home.
 
 ### Fixed
+- **`/healthz` and `/v1/whoami` no longer report a secured broker as OPEN.**
+  Both judged the auth posture from the environment token buckets ALONE, never
+  asking whether an account existed -- so a deployment secured entirely by
+  accounts (the whole from-scratch path) reported `"auth": "OPEN"`, and
+  `whoami` returned `scope: write` for any string whatsoever. Both documented
+  deploy gates therefore said the exact opposite of the truth: `casebroker
+  health` exited non-zero on a correctly locked-down broker. `/healthz` now
+  reports a third posture, `accounts`.
+- **`whoami` recognises per-machine tokens and sessions**, which it never did.
+  This broke the documented worker onboarding end to end: `bootstrap_worker.ps1`
+  reaches `setup_windows.ps1`, which runs `casebroker token check --expect
+  write`, which asks `whoami` -- and a dashboard-issued machine token, the
+  credential the docs tell you to use, came back `scope: none`, so the script
+  aborted. `token check` now also names which kind of credential answered.
+- **`docker compose up -d` after `cp .env.example .env` failed immediately.**
+  `compose.yaml` hard-required the DEPRECATED `CASEBROKER_TOKENS` while
+  `.env.example` defined `CASEBROKER_WRITE_TOKENS`, so the documented sequence
+  died before the broker started. No token is required to start at all now --
+  the broker is secured by an account.
+- **Documentation caught up with the accounts work.** `docs/dashboard.md` still
+  told operators to "paste in the broker's URL and a write token value", which
+  had not been true since the dashboard grew a login; `docs/operations.md` never
+  mentioned accounts and its deploy checklist stated an auth rule the code no
+  longer followed; `docs/protocol.md` listed none of the identity endpoints;
+  `README.md`'s quickstart still generated a shared token inside a command
+  substitution the operator never saw. There is now a "First run" section that
+  goes from an empty database to a logged-in admin issuing machine credentials.
 - `/healthz` no longer hands the DSN summary to anonymous callers. Masking the
   password was necessary but not sufficient -- what remained still named the
   exact database instance, its host, port and username, on an endpoint that by

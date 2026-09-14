@@ -79,9 +79,10 @@ reached the master 2 s after the scan call.
 
 ## 4. Watching it
 
-- Dashboard: the broker URL in a browser, paste the token. Tick **notify on
-  finished cases** to get a desktop notification per completion (tab must stay
-  open).
+- Dashboard: the broker URL in a browser, then sign in — there is no token to
+  paste. (First visit on a fresh deployment asks you to create the admin
+  account instead.) Tick **notify on finished cases** to get a desktop
+  notification per completion (tab must stay open).
 - `uv run casebroker health --broker <url>` for a one-line liveness check.
 
 ## Known-open, in priority order

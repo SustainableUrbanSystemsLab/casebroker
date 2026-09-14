@@ -32,26 +32,46 @@ Why a broker rather than splitting the case list across machines up front:
 | [`DOMAIN.md`](DOMAIN.md) | The nouns — case, lease, worker, fleet, geometry — and the invariants |
 | [`AGENTS.md`](AGENTS.md) | How to change this without breaking the campaign |
 | [`docs/protocol.md`](docs/protocol.md) | Client/server interaction, every endpoint, the state machine |
-| [`docs/operations.md`](docs/operations.md) | Tokens, storage, releases, deploying |
+| [`docs/operations.md`](docs/operations.md) | First run, accounts, tokens, storage, releases, deploying |
 | [`docs/dashboard.md`](docs/dashboard.md) | The ops UI and read-only sharing |
-| `casebroker/` | The service: `app.py` (API), `db.py` (both engines), `worker.py` (the client), `ids.py` (case identity and splits) |
+| `casebroker/` | The service: `app.py` (API), `db.py` (both engines, and the schema), `auth.py` (passwords, sessions, machine tokens), `worker.py` (the client), `cli.py` (`casebroker`), `ids.py` (case identity and splits) |
 | `runner/run_case.sh` | The seam to the CFD: geometry → mesh → solve → sample |
 | `slurm/` | Worker pools for Phoenix and ICE |
-| `tests/` | 103 tests on SQLite with no external dependency, plus 9 against a real Postgres |
+| `tests/` | The suite: SQLite-only by default, with a Postgres set that runs when `CASEBROKER_TEST_PG_DSN` is set |
 
 ## Run it
 
 ```bash
-# server
+# server. The schema creates itself on the first connection -- there is no
+# migration step, and no token needed to start.
 CASEBROKER_DB=campaign.sqlite \
-CASEBROKER_WRITE_TOKENS=$(uv run casebroker token new --quiet) \
   uv run uvicorn casebroker.app:app --host 0.0.0.0 --port 8000
+```
 
+Then open <http://localhost:8000> and **create the admin account** the page asks
+for. That is what turns auth on: until an account exists (and with no env tokens
+set) every caller has full access, and `/healthz` says so with `"auth": "OPEN"`.
+Signed in, **Machines** ▸ *Issue token* mints one credential per box and shows it
+once.
+
+```bash
 # a worker, anywhere that can reach it
 uv run python -m casebroker.worker \
-  --broker https://broker.example.org --token <write token> \
+  --broker https://broker.example.org --token <that machine's token> \
   --runner runner/run_case.sh --max-cases 4
 ```
+
+No browser? The same first two steps, headless:
+
+```bash
+uv run casebroker init-db      --db campaign.sqlite     # optional; the server does this too
+uv run casebroker account create --db campaign.sqlite --username ada --role admin
+```
+
+**Before this faces the internet**, set `CASEBROKER_SETUP_TOKEN` — the setup form
+cannot require a login, so otherwise whoever reaches it first becomes your
+permanent admin. Full sequence in
+[docs/operations.md](docs/operations.md#first-run-from-nothing-to-a-working-broker).
 
 Without `--runner` the worker uses a built-in echo runner — useful to smoke a new
 deployment without spending CFD time, though never against a real campaign, since
@@ -98,9 +118,14 @@ quarantined 173 perfectly good sites in under a minute.
 <summary><b>Quick reference</b> — the calls you will actually type</summary>
 
 ```bash
-uv run casebroker token new                                   # generate a token
+uv run casebroker account create --username ada --role admin  # the first admin, headless
+uv run casebroker account passwd --username ada               # forgot it -- no old password needed
+uv run casebroker account list                                # who exists, and last login
+uv run casebroker init-db                                     # create/upgrade the schema alone
+uv run casebroker token new                                   # generate a shared env token
 uv run casebroker token check --broker URL --expect write     # what can this one do?
 uv run casebroker health  --broker URL                        # version and auth posture
+uv run casebroker doctor  --broker URL                        # find the broken piece
 uv run casebroker fleet   --broker URL --cluster ICE          # report squeue (login node)
 ```
 
