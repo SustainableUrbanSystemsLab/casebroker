@@ -43,6 +43,19 @@ RUN = uuid.uuid4().hex[:8]
 # limits here -- this may be the live database.
 _RECON_TABLE = "pgtest_recon_%s" % RUN
 
+# The reconciler tests CREATE, ALTER and DROP tables, which is a different
+# contract from the per-run-UUID row cleanup the rest of this file relies on to
+# be safe against the SHARED production database (the main-only CI job points
+# CASEBROKER_TEST_PG_DSN at the real DBSTRING). Table DDL there is not worth the
+# coverage: a run interrupted between CREATE and DROP would leave a stray table
+# in the campaign's own database. So these run only where a throwaway Postgres
+# says so -- the service-container job in .github/workflows/test.yml.
+SCRATCH = os.environ.get("CASEBROKER_TEST_PG_SCRATCH")
+scratch_only = pytest.mark.skipif(
+    not SCRATCH,
+    reason="creates and drops tables; set CASEBROKER_TEST_PG_SCRATCH only "
+           "against a throwaway Postgres, never the shared campaign database")
+
 
 def prefix(s: str) -> str:
     return f"pgtest-{RUN}-{s}"
@@ -431,6 +444,7 @@ def test_a_bad_query_does_not_trigger_a_reconnect():
 
 # -- bringing a Postgres database forward -------------------------------------
 
+@scratch_only
 def test_the_column_reconciler_alters_a_real_postgres_table():
     """`CREATE TABLE IF NOT EXISTS` no-ops on an existing table without
     comparing columns, so a release that adds one used to leave the database
@@ -452,15 +466,22 @@ def test_the_column_reconciler_alters_a_real_postgres_table():
             note     TEXT
         );
     """ % _RECON_TABLE
-    added = db.reconcile_columns(conn, schema, is_pg=True)
-    assert sorted(added) == ["%s.note" % _RECON_TABLE, "%s.priority" % _RECON_TABLE]
+    try:
+        added = db.reconcile_columns(conn, schema, is_pg=True)
+        assert sorted(added) == ["%s.note" % _RECON_TABLE,
+                                 "%s.priority" % _RECON_TABLE]
 
-    row = conn.execute("SELECT id, priority, note FROM %s" % _RECON_TABLE).fetchone()
-    # The pre-existing row must carry the schema's DEFAULT, not NULL.
-    assert row["id"] == "row-1" and row["priority"] == 100 and row["note"] is None
+        row = conn.execute(
+            "SELECT id, priority, note FROM %s" % _RECON_TABLE).fetchone()
+        # The pre-existing row must carry the schema's DEFAULT, not NULL.
+        assert row["id"] == "row-1" and row["priority"] == 100 and row["note"] is None
 
-    # Idempotent: a second pass has nothing left to add.
-    assert db.reconcile_columns(conn, schema, is_pg=True) == []
+        # Idempotent: a second pass has nothing left to add.
+        assert db.reconcile_columns(conn, schema, is_pg=True) == []
+    finally:
+        # Its own cleanup, not the module teardown's: a teardown that does not
+        # run leaves a stray table behind.
+        fresh_conn().execute("DROP TABLE IF EXISTS %s" % _RECON_TABLE)
 
 
 def test_a_fresh_postgres_database_records_its_schema_version():
@@ -475,6 +496,7 @@ def test_the_identity_tables_exist_on_postgres():
     assert {"users", "sessions", "worker_tokens", "schema_meta"} <= present
 
 
+@scratch_only
 def test_losing_the_add_column_race_is_treated_as_success(monkeypatch):
     """_LOCK serialises one process. A rolling redeploy, or several uvicorn
     workers, start together -- both see the column missing, both ALTER, and the
@@ -515,6 +537,7 @@ def test_losing_the_add_column_race_is_treated_as_success(monkeypatch):
         fresh_conn().execute("DROP TABLE IF EXISTS %s" % table)
 
 
+@scratch_only
 def test_a_genuine_alter_failure_is_still_raised():
     """The tolerance must not swallow a broken migration: it re-raises unless
     the column is actually present afterwards."""
