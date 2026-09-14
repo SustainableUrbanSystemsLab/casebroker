@@ -15,6 +15,25 @@ finished case for Syncthing / a master-side pull to collect. See
 `docs/fleet.md`. MINOR: every protocol change is an optional addition.
 
 ### Added
+- **A contract E3D can implement against** -- `docs/e3d-contract.md`. When
+  `$E3D_TRACE_FILE` is set, the solver appends one JSON record per outer
+  iteration; the runner tails the last line for the heartbeat and archives the
+  whole file beside the result, so one file serves both readers and there is no
+  second live-progress file to keep in sync. Undecimated on purpose: ~290 KB per
+  2,000 iterations is noise beside the fields in the same archive, you can
+  always downsample a full trace but never upsample a decimated one, and
+  decimation hides exactly the oscillation worth finding later. A solver that
+  writes no trace, or a truncated final record from a crash, falls back to
+  parsing the log exactly as before -- that path is not deprecated.
+  Deliberately NOT over HTTP: E3D never reads `CASEBROKER_TOKEN`, and not
+  reading it is the guarantee that a misbehaving solver cannot touch the
+  campaign.
+- Heartbeats no longer write an event row per beat. The worker beats every 5
+  minutes for the whole multi-hour solve and reports "alive" until the runner
+  has a progress line, so a six-hour case left ~72 identical rows saying nothing
+  the one before it did not -- millions across a 30,000-case campaign, kept for
+  its lifetime. An identical detail now extends the lease without recording
+  anything, via the existing `(case_id, id)` index.
 - **`casebroker worker setup`** -- the one command to run ON a new worker box.
   It asks for your broker login, mints a credential for THAT machine, writes it
   into `machine.env` (preserving `WIND_NP` and the runtime paths already there),

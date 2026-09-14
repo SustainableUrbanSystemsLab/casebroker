@@ -996,7 +996,21 @@ def heartbeat(conn, lease_id: str, lease_seconds: int = 3600,
     conn.execute("UPDATE cases SET lease_expires=?, updated_at=? WHERE lease_id=?",
                  (now + lease_seconds, now, lease_id))
     if detail:
-        _event(conn, row["case_id"], row["lease_worker"], "progress", detail, now)
+        # Only when it CHANGED. The worker heartbeats every 5 minutes for the
+        # whole multi-hour solve, and reports "alive" whenever the runner has
+        # not written a progress line yet -- so without this, a six-hour case
+        # leaves ~72 identical rows saying nothing the one before it did not,
+        # and a 30,000-case campaign carries millions of them for the life of
+        # the campaign. A stalled solver dedupes the same way, which is also
+        # the honest record: nothing happened.
+        #
+        # idx_events_case is (case_id, id), so this seeks straight to the case
+        # and reads one row backwards rather than scanning.
+        previous = conn.execute(
+            "SELECT detail FROM events WHERE case_id = ? AND event = 'progress' "
+            "ORDER BY id DESC LIMIT 1", (row["case_id"],)).fetchone()
+        if previous is None or previous["detail"] != detail:
+            _event(conn, row["case_id"], row["lease_worker"], "progress", detail, now)
     return True
 
 
