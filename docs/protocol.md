@@ -108,7 +108,7 @@ than silent. Creating the first account closes it.
 | Endpoint | Purpose |
 | --- | --- |
 | `GET /v1/auth/state` | What the login UI needs before anything is typed: `needs_setup`, `setup_token_required`, and who you already are. **Unauthenticated** — it leaks nothing beyond "has this broker been set up", which is obvious from whether logging in is possible |
-| `POST /v1/auth/setup` | Create the FIRST account, which is an admin. **Open only while there are none**, and `409` forever after. Requires `CASEBROKER_SETUP_TOKEN` when the deployment sets one |
+| `POST /v1/auth/setup` | Create the FIRST account, which is an admin. **Open only while there are none**, and `409` forever after. Requires `CASEBROKER_SETUP_TOKEN` if set, else one of `CASEBROKER_WRITE_TOKENS` if any are set, else nothing — see [First run](operations.md#first-run-from-nothing-to-a-working-broker). A read token is never enough |
 | `POST /v1/auth/login` | Username and password for a session cookie. Throttled: 10 failures per account per source address in 5 minutes, then `429` |
 | `POST /v1/auth/logout` | Delete the session server-side |
 | `GET /v1/users` | Every account, its role, and when it last logged in. **Admin** |

@@ -37,13 +37,25 @@ It prompts for the password (twice, never as a command-line flag, which would
 land it in shell history and `ps`). It talks to the database directly, so it
 works when the service is down.
 
-> **If the broker is reachable from the internet before you have set it up,
-> set `CASEBROKER_SETUP_TOKEN` first.** `POST /v1/auth/setup` cannot require a
-> login — there is nobody to log in as yet — so without this, whoever reaches
-> it first becomes the permanent sole admin. With it set, setup demands a secret
-> you already hold, and the dashboard shows a field for it. Generate one with
-> `casebroker token new --quiet`. A laptop, or a host behind a firewall, does
-> not need it.
+> **Who is allowed to claim that first account.** `POST /v1/auth/setup` cannot
+> require a login — there is nobody to log in as yet — so it instead asks
+> whether this deployment already holds a credential that identifies its
+> operator, and demands one if so:
+>
+> | The deployment has | Setup requires |
+> | --- | --- |
+> | `CASEBROKER_SETUP_TOKEN` | that token |
+> | `CASEBROKER_WRITE_TOKENS` (the shape production was already in) | one of those write tokens |
+> | neither — a laptop, or a host behind a firewall | nothing; it is open |
+>
+> Present it as `Authorization: Bearer <value>` or as `setup_token` in the body;
+> the dashboard shows a field for it whenever `GET /v1/auth/state` reports
+> `setup_token_required`. A **read** token is deliberately not accepted: a
+> credential that cannot change the campaign must not create the account that
+> can. Generate a setup token with `casebroker token new --quiet`.
+>
+> Set `CASEBROKER_SETUP_TOKEN` before a broker with no tokens at all becomes
+> reachable, or the first stranger to find the form becomes its permanent admin.
 
 **3. Issue one credential per machine.** Signed in, go to **Machines** ▸ *Issue
 token*, naming it after the worker id that box will run under. The token is

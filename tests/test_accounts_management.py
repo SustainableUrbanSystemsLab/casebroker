@@ -375,3 +375,28 @@ def test_a_wrong_setup_token_in_both_carriers_is_still_refused(tmp_path):
                json={"username": "mallory", "password": PW, "setup_token": "wrong"},
                headers={"Authorization": "Bearer also-wrong"})
     assert r.status_code == 403
+
+
+def test_the_login_throttle_holds_under_concurrent_attempts(admin):
+    """Reading the counter, deciding, and recording a failure from separate
+    critical sections would let N concurrent attempts all read the same
+    under-limit count and sail past together. FastAPI runs sync endpoints in a
+    threadpool, so that race is reachable."""
+    import concurrent.futures as cf
+    admin.post("/v1/auth/logout")
+    with cf.ThreadPoolExecutor(max_workers=8) as pool:
+        codes = [f.result().status_code for f in
+                 [pool.submit(_login, admin, "ada", "wrong-password-here")
+                  for _ in range(24)]]
+    # However the 24 interleave, no more than the limit may be answered 401.
+    assert codes.count(401) <= 10
+    assert 429 in codes
+
+
+def test_a_non_ascii_setup_token_is_refused_rather_than_crashing(tmp_path):
+    app = create_app(db_path=str(tmp_path / "na.sqlite"), tokens=[], readonly_tokens=[],
+                     setup_token="the-bootstrap-secret")
+    c = TestClient(app)
+    r = c.post("/v1/auth/setup",
+               json={"username": "ada", "password": PW, "setup_token": "café-☕"})
+    assert r.status_code == 403

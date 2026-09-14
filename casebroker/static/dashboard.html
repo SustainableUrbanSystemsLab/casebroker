@@ -970,13 +970,13 @@
           <input type="password" id="authPassword" name="password"
                  autocomplete="current-password" />
         </div>
-        <!-- Only shown when the broker sets CASEBROKER_SETUP_TOKEN, which is how
-             a deployment that is already reachable stops the first stranger to
-             find this form from becoming its permanent admin. -->
+<!-- Shown when the broker already holds a credential -- CASEBROKER_SETUP_TOKEN
+     if set, otherwise a write token. That is what stops the first stranger to
+     find this form from becoming the permanent admin of a reachable broker. -->
         <div class="field" id="authSetupTokenField"
              style="flex:1; min-width:200px; display:none;">
           <label for="authSetupToken">Setup token
-            <span class="label-hint">from CASEBROKER_SETUP_TOKEN</span>
+            <span class="label-hint">CASEBROKER_SETUP_TOKEN, or a write token</span>
           </label>
           <input type="password" id="authSetupToken" name="setup_token"
                  autocomplete="off" />
@@ -2334,7 +2334,7 @@
     if (!body.username || !body.password) { showToast("Username and password required"); return; }
     if (authState && authState.needs_setup && authState.setup_token_required) {
       const st = $("authSetupToken").value.trim();
-      if (!st) { showToast("This broker requires its setup token"); return; }
+      if (!st) { showToast("This broker requires its setup token, or a write token"); return; }
       body.setup_token = st;
     }
     try {
