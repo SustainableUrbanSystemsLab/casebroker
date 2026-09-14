@@ -38,6 +38,11 @@ pytestmark = pytest.mark.skipif(
 
 RUN = uuid.uuid4().hex[:8]
 
+# A table name unique to this run. The column reconciler has to be exercised
+# against a table it is willing to ALTER, and the campaign tables are off
+# limits here -- this may be the live database.
+_RECON_TABLE = "pgtest_recon_%s" % RUN
+
 
 def prefix(s: str) -> str:
     return f"pgtest-{RUN}-{s}"
@@ -57,6 +62,8 @@ def cleanup_after_module():
     conn.execute("DELETE FROM sessions WHERE user_id IN "
                  "(SELECT id FROM users WHERE username LIKE ?)", (like,))
     conn.execute("DELETE FROM users WHERE username LIKE ?", (like,))
+    # The scratch table the reconciler test creates, if that test ran.
+    conn.execute("DROP TABLE IF EXISTS %s" % _RECON_TABLE)
 
 
 _POOL: list = []
@@ -420,3 +427,49 @@ def test_a_bad_query_does_not_trigger_a_reconnect():
     with pytest.raises(psycopg.Error):
         conn.execute("SELECT * FROM a_table_that_does_not_exist")
     assert conn._raw is before, "a SQL error must not churn the connection"
+
+
+# -- bringing a Postgres database forward -------------------------------------
+
+def test_the_column_reconciler_alters_a_real_postgres_table():
+    """`CREATE TABLE IF NOT EXISTS` no-ops on an existing table without
+    comparing columns, so a release that adds one used to leave the database
+    behind and fail at the first index over it. This is that repair, against a
+    real engine rather than SQLite standing in for one.
+
+    Deliberately NOT against `cases`: this may be the live campaign database,
+    and the test owns a table of its own instead.
+    """
+    conn = fresh_conn()
+    conn.execute("DROP TABLE IF EXISTS %s" % _RECON_TABLE)
+    conn.execute("CREATE TABLE %s (id TEXT PRIMARY KEY)" % _RECON_TABLE)
+    conn.execute("INSERT INTO %s(id) VALUES ('row-1')" % _RECON_TABLE)
+
+    schema = """
+        CREATE TABLE IF NOT EXISTS %s (
+            id       TEXT PRIMARY KEY,
+            priority INTEGER NOT NULL DEFAULT 100,
+            note     TEXT
+        );
+    """ % _RECON_TABLE
+    added = db.reconcile_columns(conn, schema, is_pg=True)
+    assert sorted(added) == ["%s.note" % _RECON_TABLE, "%s.priority" % _RECON_TABLE]
+
+    row = conn.execute("SELECT id, priority, note FROM %s" % _RECON_TABLE).fetchone()
+    # The pre-existing row must carry the schema's DEFAULT, not NULL.
+    assert row["id"] == "row-1" and row["priority"] == 100 and row["note"] is None
+
+    # Idempotent: a second pass has nothing left to add.
+    assert db.reconcile_columns(conn, schema, is_pg=True) == []
+
+
+def test_a_fresh_postgres_database_records_its_schema_version():
+    assert db.schema_version(fresh_conn()) == db.SCHEMA_VERSION
+
+
+def test_the_identity_tables_exist_on_postgres():
+    """The upgrade this repo actually shipped -- a campaign database gaining
+    users/sessions/worker_tokens -- applied to the Postgres schema too."""
+    conn = fresh_conn()
+    present = db._existing_tables(conn, is_pg=True)
+    assert {"users", "sessions", "worker_tokens", "schema_meta"} <= present
