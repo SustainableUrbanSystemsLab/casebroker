@@ -109,3 +109,53 @@ def test_a_revoked_lease_is_not_retried_even_by_complete(monkeypatch):
         pass                                  # raise_for_status or LeaseLost
     assert Gone.calls == 1, "a 409 is definitive, not a transient failure"
     assert slept == [], "and must not have waited at all"
+
+
+def test_an_unchanged_heartbeat_detail_does_not_write_another_event(tmp_path):
+    """The worker heartbeats every 5 minutes for a multi-hour solve, and sends
+    "alive" until the runner has written a progress line -- so without this a
+    six-hour case left ~72 identical rows saying nothing the one before it did
+    not, and a 30,000-case campaign carried millions for the life of the
+    campaign. A stalled solver dedupes the same way, which is the honest
+    record: nothing happened."""
+    import sys as _sys, pathlib as _pathlib
+    _sys.path.insert(0, str(_pathlib.Path(__file__).resolve().parents[1]))
+    from casebroker import db
+
+    conn = db.connect(str(tmp_path / "hb.sqlite"))
+    db.add_cases(conn, [{"case_id": "c1", "spec": {}, "recipe": "r",
+                         "city_cluster": "atl", "split": "train"}])
+    lease = db.lease(conn, "lab-ws-02", 1)[0]
+
+    def rows():
+        return conn.execute("SELECT count(*) AS n FROM events "
+                            "WHERE event = 'progress'").fetchone()["n"]
+
+    for _ in range(12):
+        assert db.heartbeat(conn, lease.lease_id, 900, "alive")
+    assert rows() == 1
+
+    for _ in range(10):
+        db.heartbeat(conn, lease.lease_id, 900, "case_270 iter 412 p=3.2e-05")
+    assert rows() == 2
+
+    db.heartbeat(conn, lease.lease_id, 900, "case_270 iter 512 p=1.1e-05")
+    assert rows() == 3
+
+
+def test_deduping_never_shortens_the_lease_itself(tmp_path):
+    """The heartbeat's real job is extending the lease. Skipping a duplicate
+    EVENT must not skip the extension, or a quiet solve would lose its case."""
+    import sys as _sys, pathlib as _pathlib
+    _sys.path.insert(0, str(_pathlib.Path(__file__).resolve().parents[1]))
+    from casebroker import db
+
+    conn = db.connect(str(tmp_path / "hb2.sqlite"))
+    db.add_cases(conn, [{"case_id": "c1", "spec": {}, "recipe": "r",
+                         "city_cluster": "atl", "split": "train"}])
+    lease = db.lease(conn, "lab-ws-02", 1, lease_seconds=60)[0]
+    first = conn.execute("SELECT lease_expires AS e FROM cases").fetchone()["e"]
+    assert db.heartbeat(conn, lease.lease_id, 7200, "alive")
+    assert db.heartbeat(conn, lease.lease_id, 7200, "alive")   # the duplicate
+    later = conn.execute("SELECT lease_expires AS e FROM cases").fetchone()["e"]
+    assert later > first
