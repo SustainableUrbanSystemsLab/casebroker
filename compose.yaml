@@ -24,6 +24,18 @@ services:
       # DEPRECATED name while .env.example defines the current one.
       CASEBROKER_WRITE_TOKENS: ${CASEBROKER_WRITE_TOKENS:-}
       CASEBROKER_READ_TOKENS: ${CASEBROKER_READ_TOKENS:-}
+      # The DEPRECATED spellings are forwarded too, and dropping them here would
+      # be a fail-open. There is no `env_file:` on this service, so a variable
+      # reaches the container only by being named in this block -- and every
+      # deployment that predates the rename has CASEBROKER_TOKENS in its .env,
+      # because it is the only name the old compose would accept. Without these
+      # two lines, `docker compose up -d` after pulling this change restarts the
+      # broker with NO tokens at all: auth off, on a public TLS endpoint, while
+      # the live workers carry on as if nothing happened. app.py collapses
+      # canonical-or-legacy and refuses the both-set-to-different-values case,
+      # so forwarding both is safe.
+      CASEBROKER_TOKENS: ${CASEBROKER_TOKENS:-}
+      CASEBROKER_READONLY_TOKENS: ${CASEBROKER_READONLY_TOKENS:-}
       CASEBROKER_SETUP_TOKEN: ${CASEBROKER_SETUP_TOKEN:-}
     volumes:
       - ./data:/data

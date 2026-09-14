@@ -207,3 +207,18 @@ def test_an_account_can_be_deleted_once_another_admin_exists(dbpath, monkeypatch
             stdin=PW, monkeypatch=monkeypatch)
     assert run(["account", "delete", "--db", dbpath, "--username", "ada"]) == 0
     assert db.get_user(db.connect(dbpath), "ada") is None
+
+
+def test_account_commands_find_a_sqlite_database_from_the_environment(tmp_path, monkeypatch, capsys):
+    """docs/operations.md documents `casebroker account create --username ada`
+    with no --db. The DSN discovery it used recognises only `postgres://`, so a
+    SQLite CASEBROKER_DB -- what the service itself accepts, and what every
+    local deployment sets -- was invisible and the command refused to run."""
+    path = str(tmp_path / "fromenv.sqlite")
+    monkeypatch.setenv("CASEBROKER_DB", path)
+    assert run(["init-db"]) == 0
+    code = run(["account", "create", "--username", "ada", "--password-stdin"],
+               stdin=PW, monkeypatch=monkeypatch)
+    assert code == 0
+    assert db.get_user(db.connect(path), "ada")["role"] == "admin"
+    assert "using $CASEBROKER_DB" in capsys.readouterr().err

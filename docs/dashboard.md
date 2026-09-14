@@ -38,11 +38,13 @@ server-side is what makes logging out, or revoking everything after a laptop goe
 missing, take effect immediately rather than waiting for a signature to expire.
 There is no token to paste and nothing kept in local storage.
 
-> If the broker sets `CASEBROKER_SETUP_TOKEN`, the setup form asks for it too.
-> That variable exists because `/v1/auth/setup` cannot require a login — there is
-> nobody to log in as yet — so on a deployment that is reachable before you have
-> set it up, whoever finds the form first would otherwise become its permanent
-> admin. See [First run](operations.md#first-run-from-nothing-to-a-working-broker).
+> The setup form asks for a credential whenever the broker already holds one:
+> `CASEBROKER_SETUP_TOKEN` if it is set, otherwise one of `CASEBROKER_WRITE_TOKENS`.
+> `/v1/auth/setup` cannot require a login — there is nobody to log in as yet —
+> so on a deployment reachable before you have set it up, whoever found the form
+> first would otherwise become its permanent admin. A broker with neither
+> configured (a laptop, or a host behind a firewall) has nothing to ask for.
+> See [First run](operations.md#first-run-from-nothing-to-a-working-broker).
 
 **Admins and viewers.** A `viewer` can log in and read the campaign and nothing
 else: every mutating endpoint answers `403`, and the Machines panel is not shown

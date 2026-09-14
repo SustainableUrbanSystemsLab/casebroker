@@ -387,6 +387,20 @@ def _account_db(args):
     from . import db
     dsn = args.db
     if not dsn:
+        # $CASEBROKER_DB first, and taken VERBATIM. _dsn_candidates finds
+        # connection strings by matching DSN_RE, which only recognises
+        # `postgres://` -- so a SQLite path, which is what the service itself
+        # accepts and what every local deployment sets, was invisible to it and
+        # these commands answered "no database given" with CASEBROKER_DB
+        # plainly set. db.connect() decides the engine from the shape of the
+        # string, exactly as the service does, so nothing here needs to.
+        for env in DSN_ENV:
+            value = os.environ.get(env, "").strip()
+            if value:
+                dsn = value
+                print("using $%s: %s" % (env, _redact(dsn)), file=sys.stderr)
+                break
+    if not dsn:
         candidates = _dsn_candidates(None)
         if not candidates:
             print("no database given and none found in " +

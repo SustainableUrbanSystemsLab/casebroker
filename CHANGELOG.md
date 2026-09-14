@@ -70,6 +70,31 @@ finished case for Syncthing / a master-side pull to collect. See
   attempts admitted against a limit of 10 before that change. Expired sessions
   are swept on login rather than accumulating, and the failure map is capped so
   unauthenticated callers cannot grow it without bound.
+- compose forwards the DEPRECATED token names again. Dropping them while making
+  the canonical ones optional was a fail-OPEN: there is no `env_file:` on the
+  broker service, so a variable reaches the container only by being named, and
+  every deployment predating the rename has `CASEBROKER_TOKENS` in its `.env`
+  because it is the only name the old compose accepted. `docker compose up -d`
+  after a pull would have restarted the broker with no tokens at all -- auth
+  off, on a public TLS endpoint, with the live workers carrying on as if
+  nothing had changed. The old `:?` at least refused to start; the new `:-`
+  started wide open.
+- `/healthz` no longer answers 500 when the database is unreachable. The account
+  lookup added for the new posture ran unguarded in the handler, while every
+  other database touch there goes through the cached probe that deliberately
+  fails soft. That defeated the one distinction the endpoint exists to draw:
+  the Dockerfile HEALTHCHECK reads a 500 as unhealthy and would have
+  restart-looped a broker that was itself fine, and `casebroker health` reports
+  an HTTP error as "could not reach", misdiagnosing a database outage as an
+  unreachable service. The lookup is now folded into the same 30-second probe
+  (so it is also no longer a query per unauthenticated request), reports
+  `accounts: null` and `auth: "unknown"` when it cannot tell, and the cache is
+  dropped the moment an account is created or deleted -- otherwise the first
+  run would report "OPEN" for another 30 seconds, which is exactly when the
+  instructions tell an operator to check it.
+- `casebroker account` and `init-db` find a SQLite `CASEBROKER_DB`. Discovery
+  matched only `postgres://`, so the usage the docs give without `--db` refused
+  to run against the engine every local deployment uses.
 - The column reconciler tolerates losing a race. `_LOCK` serialises one
   process; a rolling redeploy or several uvicorn workers start together, both
   see the column missing, both ALTER, and the loser gets "duplicate column".
