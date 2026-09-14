@@ -15,6 +15,26 @@ finished case for Syncthing / a master-side pull to collect. See
 `docs/fleet.md`. MINOR: every protocol change is an optional addition.
 
 ### Added
+- **`casebroker worker setup`** -- the one command to run ON a new worker box.
+  It asks for your broker login, mints a credential for THAT machine, writes it
+  into `machine.env` (preserving `WIND_NP` and the runtime paths already there),
+  and drops the admin session again, so nothing long-lived is left on a shared
+  lab machine. The worker id defaults to the hostname. Previously every machine
+  cost an admin a browser round-trip -- sign in, Machines, Issue token, copy it
+  out, carry it over -- which does not scale past a handful of boxes and is the
+  step people skip, falling back to pasting the shared token everywhere and
+  losing the per-machine attribution entirely.
+- **A machine token may only lease as its own worker id.** The dashboard has
+  always said the token name "must match the machine's CASEBROKER_WORKER_ID" and
+  nothing enforced it, so every row in the Machines list and the workers table
+  was a claim rather than a fact -- which is exactly the attribution that
+  issuing one credential per box exists to provide. `/v1/lease` is the only
+  place identity is asserted (heartbeat, complete, fail and release are keyed by
+  `lease_id`, and the lease already records its holder), so the check lives
+  there. Shared environment tokens are deliberately unaffected: they are shared
+  by design, so there is no machine identity for a worker id to contradict, and
+  enforcing there would strand the fleet the live campaign runs on.
+- The product is the **E3D Simulation Broker** (was "Wind Simulation Broker").
 - **Onboarding that a new operator can actually follow.** A complete first-run
   path -- database, admin account, per-machine credential -- and the tooling and
   documentation for each step. `casebroker account create|list|passwd|role|delete`

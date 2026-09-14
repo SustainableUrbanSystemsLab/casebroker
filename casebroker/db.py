@@ -1,4 +1,4 @@
-"""Storage for the Wind Simulation Broker: SQLite for local dev/tests, Postgres for production.
+"""Storage for the E3D Simulation Broker: SQLite for local dev/tests, Postgres for production.
 
 Every statement lives in this one module, so the storage engine is a property of
 what string you hand :func:`connect` — a file path opens SQLite, a

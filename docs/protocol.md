@@ -96,7 +96,7 @@ Three kinds of principal, and every endpoint below is gated on one of them.
 | --- | --- | --- |
 | A logged-in **admin** | session cookie from `POST /v1/auth/login` | everything |
 | A logged-in **viewer** | the same | reads only; `403` from every mutating endpoint |
-| A **machine** | `Authorization: Bearer <per-machine token>` | read and write, but never the identity endpoints — a worker credential that could mint more worker credentials would defeat the point of issuing them per machine |
+| A **machine** | `Authorization: Bearer <per-machine token>` | read and write, but never the identity endpoints — a worker credential that could mint more worker credentials would defeat the point of issuing them per machine. It may only lease as **its own** worker id (`403` otherwise), so the Machines list is a fact rather than a claim |
 | A **shared env token** | `Authorization: Bearer <value>` | read and write (`CASEBROKER_WRITE_TOKENS`) or read only (`CASEBROKER_READ_TOKENS`). The older model; still honoured |
 
 With **no env tokens and no accounts**, auth is off entirely and every caller
