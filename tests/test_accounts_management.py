@@ -423,3 +423,52 @@ def test_a_viewer_cookie_does_not_veto_a_valid_write_token(tmp_path):
     r = c.post("/v1/lease", json={"worker_id": "w", "count": 1})
     assert r.status_code == 403
     assert "viewer" in r.json()["detail"]
+
+
+def test_healthz_survives_the_accounts_query_failing(tmp_path, monkeypatch):
+    """Every database touch on /healthz has to fail SOFT. An unguarded account
+    count made it answer 500 during an outage instead of reporting the outage --
+    and the Dockerfile HEALTHCHECK reads a 500 as unhealthy, so a database blip
+    would restart-loop a broker that is itself fine."""
+    import casebroker.app as appmod
+    from casebroker import db as dbmod
+
+    app = create_app(db_path=str(tmp_path / "outage.sqlite"),
+                     tokens=["tok"], readonly_tokens=[])
+    c = TestClient(app, raise_server_exceptions=False)
+    assert c.get("/healthz").status_code == 200
+
+    def dead(*a, **k):
+        raise RuntimeError("connection is closed")
+
+    monkeypatch.setattr(dbmod, "count_users", dead)
+    # Jump past the 30s probe cache, or the pre-outage answer is simply replayed.
+    real_monotonic = appmod.time.monotonic
+    monkeypatch.setattr(appmod.time, "monotonic",
+                        lambda: real_monotonic() + 10_000)
+
+    r = c.get("/healthz")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is True
+    assert body["accounts"] is None        # unknowable, not guessed
+
+
+def test_healthz_says_unknown_rather_than_open_when_it_cannot_tell(tmp_path, monkeypatch):
+    """Reporting OPEN when the account query failed would raise a false alarm
+    about auth during what is really a database problem -- and `casebroker
+    health` exits non-zero on OPEN."""
+    import casebroker.app as appmod
+    from casebroker import db as dbmod
+
+    app = create_app(db_path=str(tmp_path / "unknown.sqlite"),
+                     tokens=[], readonly_tokens=[])
+    c = TestClient(app, raise_server_exceptions=False)
+    assert c.get("/healthz").json()["auth"] == "OPEN"
+
+    monkeypatch.setattr(dbmod, "count_users",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("closed")))
+    real_monotonic = appmod.time.monotonic
+    monkeypatch.setattr(appmod.time, "monotonic",
+                        lambda: real_monotonic() + 10_000)
+    assert c.get("/healthz").json()["auth"] == "unknown"

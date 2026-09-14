@@ -4,11 +4,19 @@ Deliberately small. Everything transactional lives in :mod:`casebroker.db`; this
 module is transport, auth and shape-checking only, so the storage engine can be
 swapped for Postgres without touching the protocol the workers speak.
 
-Auth is a shared bearer token. That is proportionate: the service hands out CFD
-case specs and accepts result pointers, so the worst a leaked token buys an
-attacker is the ability to waste our compute or poison result rows -- bad, but
-not a reason to run an identity provider for a research campaign. Rotate by
-changing ``CASEBROKER_TOKENS`` and restarting.
+Three kinds of principal, and the differences are deliberate. A HUMAN logs in
+with a password and gets an expiring server-side session; an ``admin`` may change
+the campaign and manage identity, a ``viewer`` may only read it. A MACHINE cannot
+type a password, so it carries a long-lived per-machine token, checked against
+the database on every request so revoking one box takes effect on its next call
+rather than at the next redeploy -- and a machine token deliberately cannot mint
+more machine tokens. A SHARED ENVIRONMENT TOKEN is the older model and still
+works: the live fleet runs on one, and an auth change that stranded workers
+mid-lease would be worse than carrying both for a while.
+
+With no environment tokens and no accounts, auth is off entirely -- fine for a
+laptop smoke test, and ``/healthz`` says so rather than leaving it silent.
+See ``docs/operations.md`` for the first-run sequence.
 """
 
 from __future__ import annotations
@@ -420,12 +428,29 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
     # probe is a free way to make the broker open a connection per request, and
     # Supabase's pooler answers a flood of those by tripping its breaker --
     # turning the health check into the outage it exists to detect.
-    _db_probe: dict[str, Any] = {"at": 0.0, "ok": None}
+    _db_probe: dict[str, Any] = {"at": 0.0, "ok": None, "accounts": None}
 
-    def _db_ok() -> bool | None:
+    def _db_state() -> tuple[bool | None, bool | None]:
+        """(is the database reachable, does it hold any account) -- one cached
+        probe for both.
+
+        The account count belongs in HERE, not in the handler body. Every
+        database touch on this endpoint has to fail SOFT: an unguarded count
+        made /healthz answer 500 during an outage instead of `db_ok: false`,
+        which is the single distinction the endpoint exists to draw. The
+        Dockerfile HEALTHCHECK reads a 500 as unhealthy, so a database blip
+        would have restart-looped a broker that was itself fine, and
+        `casebroker health` would have reported "could not reach" -- a database
+        outage misdiagnosed as an unreachable service, exactly the confusion
+        `db_ok` was added to remove.
+
+        Caching it matters for the same reason the reachability probe is cached:
+        this endpoint is unauthenticated and the badge polls it, so an uncached
+        count is a free way to make anyone open a connection per request.
+        """
         now = time.monotonic()
         if _db_probe["ok"] is not None and now - _db_probe["at"] < 30.0:
-            return _db_probe["ok"]
+            return _db_probe["ok"], _db_probe["accounts"]
         try:
             conn.execute("select 1")
             ok: bool | None = True
@@ -435,9 +460,28 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
             # role, TLS posture -- is not ours to publish. False is the whole
             # signal; the logs carry the rest.
             ok = False
-        _db_probe["at"] = now
-        _db_probe["ok"] = ok
-        return ok
+        accounts: bool | None = None
+        if ok:
+            try:
+                # Separately guarded, and separate from `select 1` on purpose: a
+                # database that predates the identity tables answers the former
+                # and not the latter, and that is a schema problem, not an
+                # unreachable database.
+                accounts = db.count_users(conn) > 0
+            except Exception:                                # noqa: BLE001
+                accounts = None
+        _db_probe.update({"at": now, "ok": ok, "accounts": accounts})
+        return ok, accounts
+
+    def _forget_db_probe() -> None:
+        """Drop the cached posture after something that changes it.
+
+        Without this, creating the first account leaves /healthz reporting
+        "OPEN" for up to the cache window -- which is precisely the moment an
+        operator runs `casebroker health` to confirm the opposite, because the
+        first-run instructions tell them to.
+        """
+        _db_probe.update({"at": 0.0, "ok": None, "accounts": None})
 
     @app.get("/healthz")
     def healthz(request: Request) -> dict[str, Any]:
@@ -448,10 +492,17 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         # "accounts" is a THIRD posture, and reporting it as OPEN was the bug
         # that made `casebroker health` exit non-zero -- its documented use as a
         # deploy gate -- against a broker that was properly locked down.
+        db_ok, has_accounts = _db_state()
         if tokens or readonly_tokens:
             posture = "token"
-        elif db.count_users(conn) > 0:
+        elif has_accounts:
             posture = "accounts"
+        elif has_accounts is None:
+            # The database is unreachable, so whether an account exists is not
+            # knowable. Saying "OPEN" here would raise a false alarm about auth
+            # during what is really a database outage -- and `db_ok` below
+            # already reports that outage accurately.
+            posture = "unknown"
         else:
             posture = "OPEN"
         return {"ok": True, "version": __version__,
@@ -460,7 +511,7 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
                 # anonymous caller whether this broker has been set up, so this
                 # discloses nothing new, and the exact number of operators is
                 # not the internet's business.
-                "accounts": db.count_users(conn) > 0,
+                "accounts": has_accounts,
                 # COUNTS, never values: how many credentials of each capability
                 # exist is what an operator needs to answer "did my rotation
                 # actually land?", and it discloses nothing usable.
@@ -471,7 +522,7 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
                 # to merely having started. `ok` stays True either way: the
                 # process is up, and collapsing the two would leave the badge
                 # unable to tell "service down" from "database down".
-                "db_ok": _db_ok(),
+                "db_ok": db_ok,
                 # The DSN summary is for OPERATORS, not for the internet.
                 # Masking the password is necessary but not sufficient: what is
                 # left still names the exact database instance, its host, port
@@ -628,6 +679,7 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         # every other one, and UserIn defaults the other direction.
         user = db.create_user(conn, body.username,
                               auth.hash_password(body.password), role="admin")
+        _forget_db_probe()          # this deployment is no longer "OPEN"
         _issue_session(request, response, user["id"])
         return {"username": user["username"], "role": user["role"]}
 
@@ -802,6 +854,7 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
             # separate probe -- this endpoint is admin-only, so there is no
             # enumeration concern, but one code path is one thing to get wrong.
             raise HTTPException(409, f"an account named {body.username!r} already exists")
+        _forget_db_probe()
         return {"username": created["username"], "role": created["role"]}
 
     @app.delete("/v1/users/{username}")
@@ -812,6 +865,7 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
             raise HTTPException(409, str(exc))
         if not removed:
             raise HTTPException(404, f"no account named {username!r}")
+        _forget_db_probe()
         return {"username": username, "deleted": True}
 
     @app.post("/v1/users/{username}/role")

@@ -78,7 +78,7 @@ Two roles, and the difference is real rather than cosmetic:
 | Role | Can |
 | --- | --- |
 | `admin` | everything: lease and complete cases, add and purge them, create accounts, issue and revoke machine credentials |
-| `viewer` | read the campaign — status, case list, one case. `403` from every mutating endpoint and from everything under `/v1/users` and `/v1/workers/tokens` |
+| `viewer` | read the campaign — status, case list, one case. `403` from every mutating endpoint, from `/v1/workers/tokens`, and from every `/v1/users` route **except changing their own password** |
 
 `viewer` is what "let someone watch the campaign" should have meant all along:
 a read-only *env token* did the same job with a shared secret that nobody could
