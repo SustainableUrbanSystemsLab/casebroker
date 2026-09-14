@@ -34,6 +34,17 @@ finished case for Syncthing / a master-side pull to collect. See
   of what a shared read-only env token was doing. The last admin cannot be
   deleted or demoted -- there is no recovery endpoint, so that would leave a
   deployment permanently unmanageable.
+- **Setup no longer hands the admin account to a stranger.** `/v1/auth/setup`
+  cannot require a login -- there is nobody to log in as yet -- and it used to
+  be open to ANY anonymous caller whenever no account existed. That is exactly
+  the shape production was in: `CASEBROKER_WRITE_TOKENS` set, no account
+  created. Verified end to end before the fix -- an anonymous POST created the
+  admin and then minted a worker token. Setup now asks whether the deployment
+  already holds a credential identifying its operator, and demands it:
+  `CASEBROKER_SETUP_TOKEN` if set, else one of `CASEBROKER_WRITE_TOKENS` if any
+  are, else nothing (a laptop, or a host behind a firewall). A READ token is
+  never enough -- a credential that cannot change the campaign must not create
+  the account that can.
 - **`CASEBROKER_SETUP_TOKEN`**, optional. `/v1/auth/setup` cannot require a
   login, so on a broker reachable before anyone has set it up, the first
   stranger to find the form became its permanent sole admin. Setting this makes
@@ -52,7 +63,19 @@ finished case for Syncthing / a master-side pull to collect. See
   existing table on any engine, so startup refuses with a message naming the
   column instead of failing later and obscurely.
 - Login throttling: 10 failures per account per source address in 5 minutes,
-  then `429`. Expired sessions are swept on login rather than accumulating.
+  then `429`. The slot is reserved BEFORE the password is checked and released
+  on success -- counting the failure afterwards bounds nothing under
+  concurrency, since verify_password is ~100 ms of scrypt, so a whole wave of
+  simultaneous attempts passes while the count is still zero. Measured at 15
+  attempts admitted against a limit of 10 before that change. Expired sessions
+  are swept on login rather than accumulating, and the failure map is capped so
+  unauthenticated callers cannot grow it without bound.
+- A non-ASCII credential no longer 500s. `hmac.compare_digest` refuses a
+  non-ASCII `str` with TypeError, and the bearer header is attacker-chosen --
+  the server decodes it as latin-1, so any byte becomes a character. A single
+  `\xe9` in an Authorization header returned 500 from `/healthz`, which needs no
+  credential to reach and which the uptime badge polls, and from `/v1/whoami`
+  and `/v1/auth/setup`.
 - **Accounts for people, per-machine tokens for machines.** First run serves a
   setup form (the one endpoint that cannot require auth, so it closes itself
   after the first account); thereafter password login and a server-side

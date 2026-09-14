@@ -16,6 +16,7 @@ from __future__ import annotations
 import hmac
 import json
 import os
+import threading
 import time
 import pathlib
 import sys
@@ -299,10 +300,24 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         """
         return not tokens and not readonly_tokens and db.count_users(conn) == 0
 
+    def _ct_eq(a: str, b: str) -> bool:
+        """Constant-time equality that cannot raise.
+
+        `hmac.compare_digest` refuses a non-ASCII str with TypeError, and the
+        credential compared here is attacker-chosen: a bearer header (which the
+        server decodes as latin-1, so any byte becomes a character) or a JSON
+        body. A single `\xe9` in an Authorization header used to 500 /healthz --
+        an endpoint that by design needs no credential to reach, and that the
+        uptime badge polls. Encoding both sides first makes every input
+        comparable without changing the timing property.
+        """
+        return hmac.compare_digest(a.encode("utf-8", "surrogatepass"),
+                                   b.encode("utf-8", "surrogatepass"))
+
     def _env_token_ok(supplied: str, bucket) -> bool:
-        # compare_digest against each configured token: constant-time, and it
-        # does not reveal which token matched.
-        return any(hmac.compare_digest(supplied, t) for t in bucket)
+        # Constant-time against each configured token, and it does not reveal
+        # which one matched.
+        return any(_ct_eq(supplied, t) for t in bucket)
 
     def require_write_token(request: Request) -> None:
         """Three ways to be allowed to write, in the order they are cheapest.
@@ -553,7 +568,7 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
             # So the setup form can ask for the bootstrap secret up front
             # instead of failing the submit. Whether one is REQUIRED is not
             # itself a secret; its value never leaves the server.
-            "setup_token_required": bool(setup_token) and db.count_users(conn) == 0,
+            "setup_token_required": bool(setup_token or tokens) and db.count_users(conn) == 0,
             "user": user["username"] if user else None,
             "role": user["role"] if user else None,
             # An env token still works; the UI says so, so the transition is
@@ -571,17 +586,36 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         """
         if db.count_users(conn) > 0:
             raise HTTPException(409, "already set up -- log in instead")
-        # EITHER carrier is accepted, and each is compared in constant time.
-        # Giving the header precedence would mean a stale bearer token left in a
-        # client's config blocked a correct value in the body.
-        offered = [t for t in (_supplied_token(request), body.setup_token or "") if t]
-        if setup_token and not any(
-                hmac.compare_digest(t, setup_token) for t in offered):
-            # 403 rather than 401: the caller is not expected to have a session,
-            # so "authenticate yourself" would be misleading advice.
-            raise HTTPException(
-                403, "this broker requires the setup token (CASEBROKER_SETUP_TOKEN) "
-                     "to create its first account")
+        # WHO may claim the first account.
+        #
+        # Nobody can be authenticated here -- there is no account yet -- so the
+        # question is whether this deployment already holds a credential that
+        # identifies its operator. If it does, setup must demand one.
+        #
+        # Without this, a broker running on a shared env token -- which is
+        # EXACTLY what production looks like before anyone has set it up -- hands
+        # its permanent admin account, and with it the power to mint machine
+        # credentials, to the first stranger who finds the form. Read tokens are
+        # deliberately not accepted: a credential that cannot change the campaign
+        # must not be able to create the account that can.
+        if setup_token:
+            accepted = [setup_token]
+            hint = "the setup token (CASEBROKER_SETUP_TOKEN)"
+        elif tokens:
+            accepted = list(tokens)
+            hint = "one of its write tokens (CASEBROKER_WRITE_TOKENS)"
+        else:
+            accepted = []       # nothing configured: a laptop, or behind a firewall
+            hint = ""
+        if accepted:
+            # EITHER carrier. Giving the header precedence would mean a stale
+            # bearer token left in a client's config blocked a correct body value.
+            offered = [t for t in (_supplied_token(request), body.setup_token or "") if t]
+            if not any(_ct_eq(o, a) for o in offered for a in accepted):
+                # 403 rather than 401: the caller is not expected to have a
+                # session, so "authenticate yourself" would be misleading.
+                raise HTTPException(
+                    403, f"this broker requires {hint} to create its first account")
         if len(body.password) < 12:
             # Length over composition rules: this guards a service reachable
             # from the internet, and a short password is the only property that
@@ -632,8 +666,15 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
     # to survive a distributed attack; scrypt already makes each attempt cost
     # ~100 ms, and this caps how many of those an attacker gets.
     _login_failures: dict[str, list[float]] = {}
+    _login_lock = threading.Lock()
     LOGIN_FAIL_WINDOW = 300.0
     LOGIN_FAIL_LIMIT = 10
+    # The username is attacker-chosen and need not exist, so without a cap an
+    # anonymous caller can grow this map indefinitely. Well above any real
+    # deployment's account count, and evicting the stalest entry is correct
+    # behaviour rather than a mere safeguard: the stalest is also the one whose
+    # window is most likely to have expired anyway.
+    LOGIN_FAIL_MAX_KEYS = 4096
 
     def _throttle_key(request: Request, username: str) -> str:
         client = request.client.host if request.client else "?"
@@ -643,22 +684,34 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
     def auth_login(body: LoginIn, request: Request, response: Response) -> dict[str, Any]:
         key = _throttle_key(request, body.username)
         now = time.monotonic()
-        recent = [t for t in _login_failures.get(key, [])
-                  if now - t < LOGIN_FAIL_WINDOW]
-        if len(recent) >= LOGIN_FAIL_LIMIT:
-            _login_failures[key] = recent
-            raise HTTPException(
-                429, "too many failed logins for this account from this address; "
-                     "wait a few minutes")
+        # The slot is RESERVED before the password is checked, and released
+        # again only on success. Counting a failure afterwards instead would
+        # bound nothing under concurrency: verify_password is ~100 ms of scrypt,
+        # so a whole wave of simultaneous attempts passes the check while the
+        # count is still zero and only the NEXT wave sees the failures. Measured
+        # at 15 attempts admitted against a limit of 10 before this.
+        with _login_lock:
+            recent = [t for t in _login_failures.get(key, [])
+                      if now - t < LOGIN_FAIL_WINDOW]
+            if len(recent) >= LOGIN_FAIL_LIMIT:
+                _login_failures[key] = recent
+                raise HTTPException(
+                    429, "too many failed logins for this account from this "
+                         "address; wait a few minutes")
+            _login_failures[key] = recent + [now]
+            if len(_login_failures) > LOGIN_FAIL_MAX_KEYS:
+                stalest = min(_login_failures, key=lambda k: _login_failures[k][-1])
+                _login_failures.pop(stalest, None)
         user = db.get_user(conn, body.username)
         # Verify even when the user does not exist, against a throwaway hash, so
         # a wrong USERNAME and a wrong PASSWORD take the same time. Otherwise the
         # response time enumerates accounts.
         stored = user["password_hash"] if user else auth.hash_password("decoy")
         if not auth.verify_password(body.password, stored) or not user:
-            _login_failures[key] = recent + [now]
+            # The reservation above stands as the failure record.
             raise HTTPException(401, "wrong username or password")
-        _login_failures.pop(key, None)
+        with _login_lock:
+            _login_failures.pop(key, None)      # success releases the whole run
         # The one place a sweep costs nothing and cannot be forgotten: expiry is
         # already enforced at read time, so this only stops the table growing
         # without bound over a long-lived campaign.
