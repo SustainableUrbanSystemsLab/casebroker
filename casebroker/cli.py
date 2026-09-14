@@ -1,4 +1,9 @@
-"""``casebroker`` -- generate, inspect and verify the broker's tokens.
+"""``casebroker`` -- set up a broker, and work out why one is misbehaving.
+
+Two jobs. The first is credentials: generate a token, ask a deployment what a
+given one can actually do, and manage the human accounts that log into the
+dashboard. The second is diagnosis: `doctor` finds every connection string on
+the box, says which one works, and names the broken piece rather than a symptom.
 
 Existed as a dangling ``[project.scripts]`` entry pointing at a module that was
 never written, so the installed command died with ``ModuleNotFoundError``. It was
@@ -9,6 +14,9 @@ of operating this service and had no tooling at all.
 Deliberately dependency-free (``secrets``, ``urllib``, ``argparse``): the thing
 you reach for when a deployment is misbehaving must not itself need an install
 step, and this has to run on a login node where ``uv sync`` may not have happened.
+The ``account`` and ``init-db`` commands import ``casebroker.db``, which is also
+standard library only until it opens a Postgres DSN -- and they import it inside
+the command, so the commands that do not need a database stay unaffected.
 """
 
 from __future__ import annotations
@@ -88,6 +96,21 @@ def cmd_check(args) -> int:
     scope = got.get("scope", "none")
     detail = got.get("detail")
     print(f"scope: {scope}" + (f"  ({detail})" if detail else ""))
+    # Which credential answered, not just what it can do. A per-machine token
+    # and a shared env token both report write, and "which one is this box
+    # actually using?" is the question that matters when revoking one.
+    kind = got.get("auth")
+    # Only when something was actually recognised. `whoami` labels an
+    # UNRECOGNISED credential `auth: "token"` too, so printing the kind
+    # unconditionally told you a revoked machine token was a shared env one.
+    if scope == "none":
+        kind = None
+    if kind == "machine":
+        print(f"kind:  per-machine token for {got.get('machine')!r}")
+    elif kind == "session":
+        print(f"kind:  logged in as {got.get('user')!r} ({got.get('role')})")
+    elif kind == "token":
+        print("kind:  shared environment token")
     if not token:
         print("note: no token was sent (none given, none in the environment)",
               file=sys.stderr)
@@ -110,9 +133,13 @@ def cmd_health(args) -> int:
           f"  (write tokens: {scopes.get('write', '?')},"
           f" read tokens: {scopes.get('read', '?')})")
     print(f"db:      {got.get('db')}")
+    if got.get("auth") == "accounts":
+        print("         (secured by accounts -- no shared token configured)")
     if got.get("auth") == "OPEN":
         print("\nWARNING: auth is OFF -- every caller can lease, complete and add "
-              "cases.\nSet CASEBROKER_WRITE_TOKENS before this faces a network.",
+              "cases.\nOpen the dashboard and create an admin account, or run "
+              "`casebroker account create`,\nbefore this faces a network. "
+              "(CASEBROKER_WRITE_TOKENS still works too.)",
               file=sys.stderr)
         return 1
     return 0
@@ -291,14 +318,46 @@ def _check_dsn(dsn):
                 cur.execute("SELECT current_user, version()")
                 who, ver = cur.fetchone()
                 lines.append("    connected as " + who + " -- " + ver.split(",")[0])
-                cur.execute("SELECT count(*) FROM information_schema.tables "
-                            "WHERE table_schema = 'public' AND table_name IN "
-                            "('cases','events','workers','fleet','footprints')")
-                n_tables = cur.fetchone()[0]
-                if n_tables == 0:
+                # Campaign tables AND identity tables. Checking only the
+                # five campaign ones reported "schema present" on a database
+                # with no auth layer at all -- which is exactly the database
+                # you get from a deployment that never finished upgrading.
+                cur.execute("SELECT table_name FROM information_schema.tables "
+                            "WHERE table_schema = 'public'")
+                have = {r[0] for r in cur.fetchall()}
+                campaign = {'cases', 'events', 'workers', 'fleet', 'footprints'}
+                identity = {'users', 'sessions', 'worker_tokens'}
+                if not have & campaign:
                     lines.append("    schema NOT present -- no campaign tables here")
                     return False, lines
-                lines.append("    schema present (%d/5 campaign tables)" % n_tables)
+                lines.append("    campaign tables: %d/%d" % (len(have & campaign), len(campaign)))
+                missing_campaign = sorted(campaign - have)
+                if missing_campaign:
+                    lines.append("    MISSING: " + ", ".join(missing_campaign))
+                if identity <= have:
+                    cur.execute("SELECT count(*) FILTER (WHERE role = 'admin'), count(*) "
+                                "FROM users")
+                    admins, users = cur.fetchone()
+                    if users == 0:
+                        lines.append("    accounts: none -- this broker is still in "
+                                     "first-run setup, and /v1/auth/setup is open to "
+                                     "whoever reaches it first")
+                    elif admins == 0:
+                        lines.append("    accounts: %d, but NONE is an admin -- nobody "
+                                     "can manage this broker" % users)
+                    else:
+                        lines.append("    accounts: %d (%d admin)" % (users, admins))
+                else:
+                    lines.append("    identity tables MISSING (%s) -- accounts, sessions "
+                                 "and per-machine worker tokens cannot work; start the "
+                                 "broker once, or run `casebroker init-db`, to create them"
+                                 % ", ".join(sorted(identity - have)))
+                if 'schema_meta' in have:
+                    cur.execute("SELECT value FROM schema_meta WHERE key = 'version'")
+                    row = cur.fetchone()
+                    lines.append("    schema version: " + (row[0] if row else "unrecorded"))
+                else:
+                    lines.append("    schema version: predates the version marker")
                 cur.execute("SELECT state, count(*) FROM cases GROUP BY state ORDER BY 2 DESC")
                 rows = cur.fetchall()
                 summary = ", ".join("%s %s" % (st, format(n, ",")) for st, n in rows)
@@ -307,6 +366,181 @@ def _check_dsn(dsn):
     except Exception as e:                      # noqa: BLE001 -- reported, never fatal
         lines.append("    " + _diagnose_pg(str(e), user))
         return False, lines
+
+
+
+# -- accounts, straight against the database ---------------------------------
+#
+# The browser flow (first visit -> "Set up this broker") is the pleasant path and
+# stays the recommended one. This exists for the three cases it cannot serve:
+# a broker already on the internet, where whoever reaches /v1/auth/setup first
+# becomes the permanent admin; a forgotten password, which previously meant
+# hand-writing an scrypt hash into production; and any headless deployment where
+# there is no browser to open.
+#
+# These talk to the DATABASE, not to the broker's API, so they work when the
+# service is down and need no credential beyond the one that reaches Postgres.
+
+
+def _account_db(args):
+    """Open the campaign database the same way `doctor` finds it."""
+    from . import db
+    dsn = args.db
+    if not dsn:
+        candidates = _dsn_candidates(None)
+        if not candidates:
+            print("no database given and none found in " +
+                  ", ".join("$" + e for e in DSN_ENV) +
+                  "\n  -> pass --db <path-or-dsn>", file=sys.stderr)
+            return None
+        origin, dsn = candidates[0]
+        print("using %s: %s" % (origin, _redact(dsn)), file=sys.stderr)
+    return db.connect(dsn)
+
+
+def _read_password(args, prompt: str) -> str | None:
+    """From stdin when asked, otherwise an interactive double-entry prompt.
+
+    Never from a command-line flag: an argv password lands in shell history, in
+    `ps` output, and in any process listing the machine keeps.
+    """
+    if args.password_stdin:
+        pw = sys.stdin.readline().rstrip("\n")
+        if len(pw) < 12:
+            print("password must be at least 12 characters", file=sys.stderr)
+            return None
+        return pw
+    import getpass
+    first = getpass.getpass(prompt)
+    if len(first) < 12:
+        # Length over composition rules, matching the API: it is the only
+        # property that reliably predicts a guessable password.
+        print("password must be at least 12 characters", file=sys.stderr)
+        return None
+    if first != getpass.getpass("again: "):
+        print("passwords do not match", file=sys.stderr)
+        return None
+    return first
+
+
+def cmd_account_create(args) -> int:
+    from . import auth, db
+    conn = _account_db(args)
+    if conn is None:
+        return 2
+    pw = _read_password(args, "password for %s: " % args.username)
+    if pw is None:
+        return 2
+    try:
+        user = db.create_user(conn, args.username, auth.hash_password(pw), role=args.role)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    except Exception:                                    # noqa: BLE001
+        print("an account named %r already exists" % args.username, file=sys.stderr)
+        return 1
+    print("created %s (%s)" % (user["username"], user["role"]))
+    return 0
+
+
+def cmd_account_list(args) -> int:
+    from . import db
+    conn = _account_db(args)
+    if conn is None:
+        return 2
+    users = db.list_users(conn)
+    if not users:
+        print("no accounts yet -- this broker is still in first-run setup")
+        return 0
+    width = max(len(u["username"]) for u in users)
+    for u in users:
+        seen = u["last_login_at"]
+        print("  %-*s  %-6s  last login %s"
+              % (width, u["username"], u["role"],
+                 _stamp(seen) if seen else "never"))
+    return 0
+
+
+def cmd_account_passwd(args) -> int:
+    """Set a password without knowing the old one. This is the recovery path."""
+    from . import auth, db
+    conn = _account_db(args)
+    if conn is None:
+        return 2
+    pw = _read_password(args, "new password for %s: " % args.username)
+    if pw is None:
+        return 2
+    if not db.set_password(conn, args.username, auth.hash_password(pw)):
+        print("no account named %r" % args.username, file=sys.stderr)
+        return 1
+    # Worth saying out loud: the operator may be doing this because a laptop was
+    # lost, and "did that actually kick them out?" is the question they have.
+    print("password changed for %s; every session it held is now revoked"
+          % args.username)
+    return 0
+
+
+def cmd_account_role(args) -> int:
+    from . import db
+    conn = _account_db(args)
+    if conn is None:
+        return 2
+    try:
+        changed = db.set_role(conn, args.username, args.role)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    if not changed:
+        print("no account named %r" % args.username, file=sys.stderr)
+        return 1
+    print("%s is now %s" % (args.username, args.role))
+    return 0
+
+
+def cmd_account_delete(args) -> int:
+    from . import db
+    conn = _account_db(args)
+    if conn is None:
+        return 2
+    try:
+        removed = db.delete_user(conn, args.username)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    if not removed:
+        print("no account named %r" % args.username, file=sys.stderr)
+        return 1
+    print("deleted %s" % args.username)
+    return 0
+
+
+def cmd_initdb(args) -> int:
+    """Create or bring forward the schema without starting the service.
+
+    The broker already does this on its first connection, so this is not
+    normally necessary. It is here for the two moments when doing it separately
+    is the point: proving a new database and its credentials work before a
+    deploy depends on them, and applying a column that a running service would
+    hit mid-request.
+    """
+    from . import db
+    conn = _account_db(args)
+    if conn is None:
+        return 2
+    version = db.schema_version(conn)
+    tables = sorted(db.parse_schema_columns(db.SCHEMA))
+    print("schema applied -- version %s, %d tables" % (version, len(tables)))
+    print("  " + ", ".join(tables))
+    if db.count_users(conn) == 0:
+        print("\nno accounts yet. Either open the dashboard and set one up, or:")
+        print("  casebroker account create --username <you> --role admin")
+    return 0
+
+
+def _stamp(epoch) -> str:
+    import datetime
+    return datetime.datetime.fromtimestamp(
+        int(epoch), datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
 
 def cmd_doctor(args) -> int:
@@ -381,9 +615,13 @@ def cmd_doctor(args) -> int:
             scope = _get(args.broker, "/v1/whoami", token).get("scope", "none")
             if scope == "none":
                 ok = False
-                print("  FAIL  the broker does not recognise this token. A freshly issued token "
-                      "only works once it is in CASEBROKER_WRITE_TOKENS on the service AND the "
-                      "service has been redeployed")
+                print("  FAIL  the broker does not recognise this token.")
+                print("        A per-machine token (dashboard > Machines > Issue token) "
+                      "works immediately\n        and needs no redeploy -- if this is one, "
+                      "it has been revoked or mistyped.")
+                print("        A shared environment token only works once it is in "
+                      "CASEBROKER_WRITE_TOKENS\n        on the service AND the service "
+                      "has been redeployed.")
             else:
                 print("  PASS  scope " + scope)
         except Exception as e:                  # noqa: BLE001
@@ -446,6 +684,48 @@ def main(argv: list[str] | None = None) -> int:
     d.add_argument("--dsn", default=None,
                    help="a connection string to test in addition to the ones discovered")
     d.set_defaults(func=cmd_doctor)
+
+    ac = sub.add_parser("account", help="create and manage the human accounts that "
+                                       "log into the dashboard").add_subparsers(
+        dest="subcmd", required=True)
+
+    def _account_common(p, *, role_default=None):
+        p.add_argument("--db", default=None,
+                       help="database path or DSN (default: discovered, like doctor)")
+        p.add_argument("--username", required=True)
+        if role_default is not None:
+            p.add_argument("--role", choices=("admin", "viewer"), default=role_default)
+        return p
+
+    acn = _account_common(ac.add_parser(
+        "create", help="create an account (the headless equivalent of first-run setup)"),
+        role_default="admin")
+    acn.add_argument("--password-stdin", action="store_true",
+                     help="read the password from stdin instead of prompting")
+    acn.set_defaults(func=cmd_account_create)
+
+    acl = ac.add_parser("list", help="every account, with when it last logged in")
+    acl.add_argument("--db", default=None)
+    acl.set_defaults(func=cmd_account_list)
+
+    acp = _account_common(ac.add_parser(
+        "passwd", help="set a password without knowing the old one -- the recovery path"))
+    acp.add_argument("--password-stdin", action="store_true")
+    acp.set_defaults(func=cmd_account_passwd)
+
+    acr = _account_common(ac.add_parser("role", help="promote or demote an account"),
+                          role_default=None)
+    acr.add_argument("--role", choices=("admin", "viewer"), required=True)
+    acr.set_defaults(func=cmd_account_role)
+
+    acd = _account_common(ac.add_parser("delete", help="remove an account and its sessions"))
+    acd.set_defaults(func=cmd_account_delete)
+
+    idb = sub.add_parser("init-db", help="create or bring forward the schema without "
+                                         "starting the service")
+    idb.add_argument("--db", default=None,
+                     help="database path or DSN (default: discovered, like doctor)")
+    idb.set_defaults(func=cmd_initdb)
 
     args = ap.parse_args(argv)
     return args.func(args)

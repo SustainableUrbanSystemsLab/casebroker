@@ -66,6 +66,10 @@ def _redact_db_target(db_path: str) -> str:
 class SetupIn(BaseModel):
     username: str = Field(min_length=1, max_length=64)
     password: str = Field(min_length=12, max_length=256)
+    # Only consulted when the deployment sets CASEBROKER_SETUP_TOKEN. Accepted
+    # in the body as well as a bearer header so the browser setup form can send
+    # it without inventing a header.
+    setup_token: str | None = Field(default=None, max_length=256)
 
 
 class LoginIn(BaseModel):
@@ -77,6 +81,28 @@ class WorkerTokenIn(BaseModel):
     # The worker id the machine will run under, so the credential and the
     # dashboard row are the same thing.
     name: str = Field(min_length=1, max_length=64)
+
+
+class UserIn(BaseModel):
+    username: str = Field(min_length=1, max_length=64)
+    password: str = Field(min_length=12, max_length=256)
+    # Defaults to the LESSER privilege on purpose: an operator adding a
+    # colleague to watch the campaign should have to ask for admin explicitly,
+    # not discover afterwards that they handed over the keys.
+    role: str = Field(default="viewer")
+
+
+class PasswordIn(BaseModel):
+    # Required when changing your OWN password, so that a borrowed session
+    # cannot lock the real owner out. An admin resetting someone ELSE'S
+    # password does not supply it -- the whole point of a reset is that the
+    # current one is lost.
+    current_password: str | None = Field(default=None, max_length=256)
+    new_password: str = Field(min_length=12, max_length=256)
+
+
+class RoleIn(BaseModel):
+    role: str = Field(min_length=1, max_length=32)
 
 
 class CaseIn(BaseModel):
@@ -182,7 +208,8 @@ def _tokens_from_env(canonical: str, legacy: str) -> list[str]:
 
 
 def create_app(db_path: str | None = None, tokens: list[str] | None = None,
-               readonly_tokens: list[str] | None = None) -> FastAPI:
+               readonly_tokens: list[str] | None = None,
+               setup_token: str | None = None) -> FastAPI:
     """Build an app bound to one database and token set(s).
 
     Two independent buckets, not one list with a flag on each entry: ``tokens``
@@ -217,6 +244,14 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
     if readonly_tokens is None:
         readonly_tokens = _tokens_from_env("CASEBROKER_READ_TOKENS",
                                            "CASEBROKER_READONLY_TOKENS")
+    # Optional, and the answer to "who gets to be the admin of a broker that is
+    # already on the internet?". /v1/auth/setup cannot require a session -- there
+    # is nobody to authenticate as yet -- so on a public deployment the first
+    # stranger to find it becomes the permanent sole admin. Setting this makes
+    # setup require a secret the operator already holds. Unset keeps the open
+    # first-run flow, which is right for a laptop or a broker behind a firewall.
+    if setup_token is None:
+        setup_token = os.environ.get("CASEBROKER_SETUP_TOKEN", "").strip() or None
 
     app = FastAPI(title="Wind Simulation Broker", version=__version__)
     conn = db.connect(db_path)
@@ -249,6 +284,21 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
             return None
         return db.worker_token_owner(conn, auth.hash_token(supplied))
 
+    def _auth_is_open() -> bool:
+        """No env tokens configured AND no accounts: every caller has full
+        access. Fine for a laptop smoke test, never how this should face a
+        network.
+
+        Both halves matter, and the account half was missing from everything
+        that reported this posture (`/healthz`, `/v1/whoami`) while being
+        present in the gates themselves. A deployment secured entirely by
+        accounts -- the from-scratch path -- therefore reported "OPEN" and
+        handed `scope: write` to any string at all, which made `casebroker
+        health` and `casebroker token check` report the exact opposite of the
+        truth on a correctly secured broker.
+        """
+        return not tokens and not readonly_tokens and db.count_users(conn) == 0
+
     def _env_token_ok(supplied: str, bucket) -> bool:
         # compare_digest against each configured token: constant-time, and it
         # does not reveal which token matched.
@@ -268,9 +318,15 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         # -- /healthz reports which mode it is in so a misconfigured deployment
         # is visible rather than silent. Once an account exists the service is
         # no longer open, even with no env tokens set.
-        if not tokens and not readonly_tokens and db.count_users(conn) == 0:
+        if _auth_is_open():
             return
-        if _session_principal(request):
+        user = _session_principal(request)
+        if user:
+            if user["role"] != "admin":
+                raise HTTPException(
+                    status_code=403,
+                    detail="this account is a viewer; it can read the campaign "
+                           "but not change it")
             return
         if _machine_principal(request):
             return
@@ -283,7 +339,7 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         raise HTTPException(status_code=401, detail="log in, or send a valid bearer token")
 
     def require_read_token(request: Request) -> None:
-        if not tokens and not readonly_tokens and db.count_users(conn) == 0:
+        if _auth_is_open():
             return
         if _session_principal(request) or _machine_principal(request):
             return
@@ -299,6 +355,14 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         user = _session_principal(request)
         if not user:
             raise HTTPException(status_code=401, detail="admin session required")
+        if user["role"] != "admin":
+            # The `role` column existed from the start and nothing read it, so
+            # every account was an admin whatever its row said. A viewer that
+            # could mint machine credentials would make the role decorative.
+            raise HTTPException(
+                status_code=403,
+                detail="this account is a viewer; managing accounts and machine "
+                       "credentials needs an admin")
         return user
 
     def _is_authenticated(request: Request) -> bool:
@@ -312,9 +376,18 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
             return True
         return _env_token_ok(_supplied_token(request), (*tokens, *readonly_tokens))
 
+    def require_session(request: Request):
+        """Any logged-in human, viewer included. For the endpoints a viewer must
+        reach on their own behalf -- changing their own password."""
+        user = _session_principal(request)
+        if not user:
+            raise HTTPException(status_code=401, detail="log in first")
+        return user
+
     WriteAuth = Depends(require_write_token)
     ReadAuth = Depends(require_read_token)
     AdminAuth = Depends(require_admin)
+    SessionAuth = Depends(require_session)
 
     # -- routes -------------------------------------------------------------------
 
@@ -354,8 +427,22 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         # public OpenAPI document and in the repo -- and it is what lets the
         # deploy smoke test assert that the RUNNING service is the commit that
         # was just pushed, instead of trusting a deploy's own status field.
+        # "accounts" is a THIRD posture, and reporting it as OPEN was the bug
+        # that made `casebroker health` exit non-zero -- its documented use as a
+        # deploy gate -- against a broker that was properly locked down.
+        if tokens or readonly_tokens:
+            posture = "token"
+        elif db.count_users(conn) > 0:
+            posture = "accounts"
+        else:
+            posture = "OPEN"
         return {"ok": True, "version": __version__,
-                "auth": "token" if (tokens or readonly_tokens) else "OPEN",
+                "auth": posture,
+                # A boolean, never the count: /v1/auth/state already tells an
+                # anonymous caller whether this broker has been set up, so this
+                # discloses nothing new, and the exact number of operators is
+                # not the internet's business.
+                "accounts": db.count_users(conn) > 0,
                 # COUNTS, never values: how many credentials of each capability
                 # exist is what an operator needs to answer "did my rotation
                 # actually land?", and it discloses nothing usable.
@@ -417,14 +504,29 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         point, and a 401 would conflate them. This reveals no more than any guarded
         endpoint already does -- the token is either in a bucket or it is not.
         """
+        # Most specific principal first, so the answer names WHICH credential
+        # was recognised rather than merely what it can do.
+        user = _session_principal(request)
+        if user:
+            return {"scope": "read" if user["role"] != "admin" else "write",
+                    "auth": "session", "user": user["username"],
+                    "role": user["role"]}
+        machine = _machine_principal(request)
+        if machine:
+            # Previously absent, and the reason the documented worker
+            # onboarding aborted: setup_windows.ps1 runs `token check --expect
+            # write` against this endpoint, and a dashboard-issued per-machine
+            # token -- the credential the docs tell you to use -- came back
+            # `scope: none`.
+            return {"scope": "write", "auth": "machine", "machine": machine["name"]}
         supplied = _supplied_token(request)
-        if not tokens and not readonly_tokens:
-            return {"scope": "write", "auth": "OPEN",
-                    "detail": "no tokens configured; every caller has full access"}
-        if any(hmac.compare_digest(supplied, t) for t in tokens):
+        if _env_token_ok(supplied, tokens):
             return {"scope": "write", "auth": "token"}
-        if any(hmac.compare_digest(supplied, t) for t in readonly_tokens):
+        if _env_token_ok(supplied, readonly_tokens):
             return {"scope": "read", "auth": "token"}
+        if _auth_is_open():
+            return {"scope": "write", "auth": "OPEN",
+                    "detail": "no tokens and no accounts; every caller has full access"}
         return {"scope": "none", "auth": "token"}
 
     @app.get("/", include_in_schema=False)
@@ -448,6 +550,10 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         user = _session_principal(request)
         return {
             "needs_setup": db.count_users(conn) == 0,
+            # So the setup form can ask for the bootstrap secret up front
+            # instead of failing the submit. Whether one is REQUIRED is not
+            # itself a secret; its value never leaves the server.
+            "setup_token_required": bool(setup_token) and db.count_users(conn) == 0,
             "user": user["username"] if user else None,
             "role": user["role"] if user else None,
             # An env token still works; the UI says so, so the transition is
@@ -465,12 +571,26 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         """
         if db.count_users(conn) > 0:
             raise HTTPException(409, "already set up -- log in instead")
+        # EITHER carrier is accepted, and each is compared in constant time.
+        # Giving the header precedence would mean a stale bearer token left in a
+        # client's config blocked a correct value in the body.
+        offered = [t for t in (_supplied_token(request), body.setup_token or "") if t]
+        if setup_token and not any(
+                hmac.compare_digest(t, setup_token) for t in offered):
+            # 403 rather than 401: the caller is not expected to have a session,
+            # so "authenticate yourself" would be misleading advice.
+            raise HTTPException(
+                403, "this broker requires the setup token (CASEBROKER_SETUP_TOKEN) "
+                     "to create its first account")
         if len(body.password) < 12:
             # Length over composition rules: this guards a service reachable
             # from the internet, and a short password is the only property that
             # reliably predicts a guessable one.
             raise HTTPException(400, "password must be at least 12 characters")
-        user = db.create_user(conn, body.username, auth.hash_password(body.password))
+        # Explicitly admin: this is the account that has to be able to create
+        # every other one, and UserIn defaults the other direction.
+        user = db.create_user(conn, body.username,
+                              auth.hash_password(body.password), role="admin")
         _issue_session(request, response, user["id"])
         return {"username": user["username"], "role": user["role"]}
 
@@ -506,15 +626,43 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         )
         return raw
 
+    # Failed logins, for the throttle below. In-process, so it resets on a
+    # redeploy and is per worker process -- the honest scope for it. The goal is
+    # to make ONLINE guessing impractical against a handful of lab accounts, not
+    # to survive a distributed attack; scrypt already makes each attempt cost
+    # ~100 ms, and this caps how many of those an attacker gets.
+    _login_failures: dict[str, list[float]] = {}
+    LOGIN_FAIL_WINDOW = 300.0
+    LOGIN_FAIL_LIMIT = 10
+
+    def _throttle_key(request: Request, username: str) -> str:
+        client = request.client.host if request.client else "?"
+        return f"{username}|{client}"
+
     @app.post("/v1/auth/login")
     def auth_login(body: LoginIn, request: Request, response: Response) -> dict[str, Any]:
+        key = _throttle_key(request, body.username)
+        now = time.monotonic()
+        recent = [t for t in _login_failures.get(key, [])
+                  if now - t < LOGIN_FAIL_WINDOW]
+        if len(recent) >= LOGIN_FAIL_LIMIT:
+            _login_failures[key] = recent
+            raise HTTPException(
+                429, "too many failed logins for this account from this address; "
+                     "wait a few minutes")
         user = db.get_user(conn, body.username)
         # Verify even when the user does not exist, against a throwaway hash, so
         # a wrong USERNAME and a wrong PASSWORD take the same time. Otherwise the
         # response time enumerates accounts.
         stored = user["password_hash"] if user else auth.hash_password("decoy")
         if not auth.verify_password(body.password, stored) or not user:
+            _login_failures[key] = recent + [now]
             raise HTTPException(401, "wrong username or password")
+        _login_failures.pop(key, None)
+        # The one place a sweep costs nothing and cannot be forgotten: expiry is
+        # already enforced at read time, so this only stops the table growing
+        # without bound over a long-lived campaign.
+        db.purge_expired_sessions(conn)
         _issue_session(request, response, user["id"])
         return {"username": user["username"], "role": user["role"]}
 
@@ -564,6 +712,83 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         if not db.revoke_worker_token(conn, name):
             raise HTTPException(404, f"no active token named {name!r}")
         return {"name": name, "revoked": True}
+
+    # -- accounts ----------------------------------------------------------
+    #
+    # Until these existed there was exactly ONE way an account could come into
+    # being -- the one-shot /v1/auth/setup -- and no way at all to add a second
+    # operator, change a password, or recover from a forgotten one. A lab
+    # broker with one permanent credential and no reset is a deployment one
+    # departure away from being unmanageable.
+
+    @app.get("/v1/users")
+    def list_accounts(user=AdminAuth) -> dict[str, Any]:
+        return {"users": db.list_users(conn)}
+
+    @app.post("/v1/users")
+    def create_account(body: UserIn, user=AdminAuth) -> dict[str, Any]:
+        """Add an operator. Admin-only, and never a way to escalate: the caller
+        is already an admin, so it grants nothing it does not itself hold."""
+        if body.role not in db.ROLES:
+            raise HTTPException(400, "role must be one of %s" % ", ".join(db.ROLES))
+        try:
+            created = db.create_user(conn, body.username,
+                                     auth.hash_password(body.password), role=body.role)
+        except Exception:
+            # UNIQUE(username). Deliberately not "does this user exist?" as a
+            # separate probe -- this endpoint is admin-only, so there is no
+            # enumeration concern, but one code path is one thing to get wrong.
+            raise HTTPException(409, f"an account named {body.username!r} already exists")
+        return {"username": created["username"], "role": created["role"]}
+
+    @app.delete("/v1/users/{username}")
+    def delete_account(username: str, user=AdminAuth) -> dict[str, Any]:
+        try:
+            removed = db.delete_user(conn, username)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc))
+        if not removed:
+            raise HTTPException(404, f"no account named {username!r}")
+        return {"username": username, "deleted": True}
+
+    @app.post("/v1/users/{username}/role")
+    def set_account_role(username: str, body: RoleIn, user=AdminAuth) -> dict[str, Any]:
+        try:
+            changed = db.set_role(conn, username, body.role)
+        except ValueError as exc:
+            # Covers both an unknown role and demoting the last admin, which is
+            # the one change that can leave a deployment unmanageable.
+            raise HTTPException(409, str(exc))
+        if not changed:
+            raise HTTPException(404, f"no account named {username!r}")
+        return {"username": username, "role": body.role}
+
+    @app.post("/v1/users/{username}/password")
+    def change_password(username: str, body: PasswordIn, request: Request,
+                        response: Response, caller=SessionAuth) -> dict[str, Any]:
+        """Change your own password, or -- as an admin -- reset someone else's.
+
+        Changing your OWN requires the current one even for an admin: a session
+        cookie that leaked from a logged-in laptop should not be enough to lock
+        the actual owner out of their account.
+        """
+        target = db.get_user(conn, username)
+        if not target:
+            raise HTTPException(404, f"no account named {username!r}")
+        if caller["username"] == username:
+            if not body.current_password or not auth.verify_password(
+                    body.current_password, target["password_hash"]):
+                raise HTTPException(403, "current password is wrong")
+        elif caller["role"] != "admin":
+            raise HTTPException(403, "only an admin can reset another account's password")
+        db.set_password(conn, username, auth.hash_password(body.new_password))
+        if caller["username"] == username:
+            # set_password revoked every session this account held, this one
+            # included. Re-issue so changing your own password does not log you
+            # out of the tab you changed it in.
+            _issue_session(request, response, caller["id"])
+        return {"username": username, "password_changed": True,
+                "sessions_revoked": True}
 
 
     @app.post("/v1/cases", dependencies=[WriteAuth])

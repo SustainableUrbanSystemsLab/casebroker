@@ -917,7 +917,7 @@
         <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
         <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
       </svg>
-      <span><strong>Authentication Required:</strong> This broker requires a bearer token to display live campaign telemetry and cases.</span>
+      <span id="authNoticeText"><strong>Authentication Required:</strong> This broker requires a credential to display live campaign telemetry and cases.</span>
     </div>
     <button class="subtle" id="focusTokenBtn" style="color:inherit;text-decoration:underline">Enter Token &rarr;</button>
   </div>
@@ -969,6 +969,17 @@
           </label>
           <input type="password" id="authPassword" name="password"
                  autocomplete="current-password" />
+        </div>
+        <!-- Only shown when the broker sets CASEBROKER_SETUP_TOKEN, which is how
+             a deployment that is already reachable stops the first stranger to
+             find this form from becoming its permanent admin. -->
+        <div class="field" id="authSetupTokenField"
+             style="flex:1; min-width:200px; display:none;">
+          <label for="authSetupToken">Setup token
+            <span class="label-hint">from CASEBROKER_SETUP_TOKEN</span>
+          </label>
+          <input type="password" id="authSetupToken" name="setup_token"
+                 autocomplete="off" />
         </div>
         <div>
           <button class="primary" id="authSubmit" type="submit">Sign in</button>
@@ -1718,7 +1729,9 @@
     const parts = [];
     if (h.version) parts.push(`v${h.version}`);
     if (h.db) parts.push(h.db.startsWith("postgres") ? "Postgres" : "SQLite");
-    if (h.auth) parts.push(h.auth === "token" ? "auth required" : "open");
+    // "accounts" is auth too. Comparing only against "token" labelled a broker
+    // secured entirely by accounts as "open", which is the opposite of true.
+    if (h.auth) parts.push(h.auth === "OPEN" ? "open" : "auth required");
     if (parts.length) {
       badge.textContent = parts.join(" • ");
       badge.hidden = false;
@@ -2298,14 +2311,20 @@
          : "Sign in to browse the campaign and manage machines.");
     $("authPwHint").textContent = setup ? "(at least 12 characters)" : "";
     $("authSubmit").textContent = setup ? "Create admin account" : "Sign in";
+    $("authSetupTokenField").style.display =
+      (setup && authState.setup_token_required) ? "" : "none";
     $("authForm").style.display = signedIn ? "none" : "";
     $("authWho").style.display = signedIn ? "flex" : "none";
-    $("authUser").textContent = signedIn ? authState.user : "";
-    $("machines").style.display = signedIn ? "" : "none";
+    // The role matters now that it authorises something: a viewer sees the
+    // campaign and cannot mint machine credentials or change anything.
+    $("authUser").textContent = signedIn
+      ? authState.user + (authState.role ? " (" + authState.role + ")" : "")
+      : "";
+    $("machines").style.display = (signedIn && authState.role === "admin") ? "" : "none";
     // A signed-in human has no use for the bearer-token form; it stays in the
     // DOM because everything still reads $("token").value.
     $("connectForm").style.display = signedIn ? "none" : "";
-    if (signedIn) loadMachines();
+    if (signedIn && authState.role === "admin") loadMachines();
   }
 
   async function submitAuth(e) {
@@ -2313,6 +2332,11 @@
     const path = authState && authState.needs_setup ? "/v1/auth/setup" : "/v1/auth/login";
     const body = { username: $("authUsername").value.trim(), password: $("authPassword").value };
     if (!body.username || !body.password) { showToast("Username and password required"); return; }
+    if (authState && authState.needs_setup && authState.setup_token_required) {
+      const st = $("authSetupToken").value.trim();
+      if (!st) { showToast("This broker requires its setup token"); return; }
+      body.setup_token = st;
+    }
     try {
       const r = await fetch($("broker").value.trim() + path, {
         method: "POST", headers: { "Content-Type": "application/json" },
@@ -2321,7 +2345,8 @@
       const data = await r.json().catch(() => ({}));
       if (!r.ok) { showToast(data.detail || ("failed: " + r.status)); return; }
       $("authPassword").value = "";
-      showToast("Signed in as " + data.username);
+      $("authSetupToken").value = "";
+      showToast("Signed in as " + data.username + " (" + data.role + ")");
       await loadAuthState();
       refresh();
     } catch (err) {
@@ -2423,13 +2448,25 @@
       const health = await checkHealth();
       const token = $("token").value.trim();
 
-      // If server requires token and user has none:
-      if (health && health.auth === "token" && !token) {
+      // If the server requires SOME credential and this visitor has none.
+      // A session counts: on an account-secured broker there is no token to
+      // type, and checking only for a bearer token told a signed-in operator
+      // to paste one that does not exist.
+      const signedIn = !!(authState && authState.user);
+      if (health && health.auth && health.auth !== "OPEN" && !token && !signedIn) {
         setConn(null, "auth required");
         $("authNotice").style.display = "flex";
         showErr(null);
-        $("statusEmpty").textContent = "Enter your bearer token above to view live campaign data.";
-        $("casesEmpty").textContent = "Enter your bearer token above to browse cases.";
+        const accounts = health.auth === "accounts";
+        const how = accounts ? "Sign in above" : "Enter your bearer token above";
+        $("authNoticeText").innerHTML = "<strong>Authentication Required:</strong> "
+          + (accounts
+             ? "Sign in to display live campaign telemetry and cases."
+             : "This broker requires a bearer token to display live campaign "
+               + "telemetry and cases.");
+        $("focusTokenBtn").textContent = accounts ? "Sign in \u2192" : "Enter Token \u2192";
+        $("statusEmpty").textContent = how + " to view live campaign data.";
+        $("casesEmpty").textContent = how + " to browse cases.";
         return;
       }
 
