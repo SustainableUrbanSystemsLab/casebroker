@@ -1,4 +1,4 @@
-"""HTTP API for the Wind Simulation Broker.
+"""HTTP API for the E3D Simulation Broker.
 
 Deliberately small. Everything transactional lives in :mod:`casebroker.db`; this
 module is transport, auth and shape-checking only, so the storage engine can be
@@ -262,7 +262,7 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
     if setup_token is None:
         setup_token = os.environ.get("CASEBROKER_SETUP_TOKEN", "").strip() or None
 
-    app = FastAPI(title="Wind Simulation Broker", version=__version__)
+    app = FastAPI(title="E3D Simulation Broker", version=__version__)
     conn = db.connect(db_path)
     app.state.db_path = db_path
 
@@ -955,10 +955,28 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
 
 
     @app.post("/v1/lease", response_model=list[LeaseOut], dependencies=[WriteAuth])
-    def lease(body: LeaseIn) -> list[LeaseOut]:
+    def lease(body: LeaseIn, request: Request) -> list[LeaseOut]:
         """Claim the next case(s) to simulate. An empty list means the campaign is
         drained (or everything left is leased by someone else) -- the worker should
         back off and retry, not treat it as an error."""
+        # A per-machine credential may only claim work AS its own machine.
+        #
+        # This is the only endpoint where identity is asserted: heartbeat,
+        # complete, fail and release are all keyed by lease_id, and the lease
+        # already records who holds it. So checking here covers the rest.
+        #
+        # The dashboard has always told operators the token name "must match the
+        # machine's CASEBROKER_WORKER_ID" and nothing enforced it, which made
+        # every row in the Machines list and the workers table a claim rather
+        # than a fact -- exactly the attribution that issuing one credential per
+        # box exists to provide. Env tokens are deliberately unaffected: they are
+        # shared by design, so there is no machine identity to contradict.
+        machine = _machine_principal(request)
+        if machine and machine["name"] != body.worker_id:
+            raise HTTPException(
+                403, f"this credential belongs to {machine['name']!r}, so it "
+                     f"cannot lease as {body.worker_id!r}. Use that machine's own "
+                     "token, or set CASEBROKER_WORKER_ID to match it.")
         got = db.lease(conn, body.worker_id, count=body.count,
                        lease_seconds=body.lease_seconds, splits=body.splits,
                        host=body.host, cluster=body.cluster,

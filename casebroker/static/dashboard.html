@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Wind Simulation Broker</title>
+<title>E3D Simulation Broker</title>
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A//www.w3.org/2000/svg%27%20viewBox%3D%270%200%2024%2024%27%3E%3Crect%20width%3D%2724%27%20height%3D%2724%27%20rx%3D%276%27%20fill%3D%27%2322272e%27/%3E%3Cpath%20d%3D%27M17.7%207.7a2.5%202.5%200%201%201%201.8%204.3H2M9.6%204.6A2%202%200%201%201%2011%208H2M12.6%2019.4A2%202%200%201%200%2014%2016H2%27%20fill%3D%27none%27%20stroke%3D%27%2357ab5a%27%20stroke-width%3D%272.2%27%20stroke-linecap%3D%27round%27%20stroke-linejoin%3D%27round%27/%3E%3C/svg%3E" />
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -864,7 +864,7 @@
       </div>
       <div>
         <h1 class="brand-title">
-          Wind Simulation Broker
+          E3D Simulation Broker
           <span class="brand-badge" id="brokerDbBadge" hidden></span>
         </h1>
       </div>
@@ -2505,7 +2505,7 @@
         showErr("Authentication failed: invalid or expired bearer token");
       } else {
         setConn("bad", "disconnected");
-        showErr("Could not reach the Wind Simulation Broker: " + e.message);
+        showErr("Could not reach the E3D Simulation Broker: " + e.message);
       }
     } finally {
       if (refreshIcon) refreshIcon.classList.remove("spin");

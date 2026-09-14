@@ -294,12 +294,16 @@ def test_whoami_agrees_with_the_gates_for_every_principal(admin):
     admin.post("/v1/users", json={"username": "bob", "password": PW2})
     admin.post("/v1/auth/logout")
 
-    for headers, cookies in [({"Authorization": f"Bearer {issued}"}, None),
-                             ({"Authorization": "Bearer nonsense"}, None)]:
+    # Each credential leases as the identity it is entitled to. A machine token
+    # leasing as ANOTHER machine is refused, but that is an identity check on
+    # the payload, not a statement about the credential's scope -- conflating
+    # the two here would make this test assert the opposite of what it means.
+    for headers, worker_id in [({"Authorization": f"Bearer {issued}"}, "box"),
+                               ({"Authorization": "Bearer nonsense"}, "box")]:
         scope = admin.get("/v1/whoami", headers=headers).json()["scope"]
-        wrote = admin.post("/v1/lease", json={"worker_id": "w", "count": 1},
+        wrote = admin.post("/v1/lease", json={"worker_id": worker_id, "count": 1},
                            headers=headers)
-        assert (wrote.status_code != 401 and wrote.status_code != 403) == (scope == "write")
+        assert (wrote.status_code not in (401, 403)) == (scope == "write")
 
 
 # -- the first-run race -------------------------------------------------------
@@ -472,3 +476,32 @@ def test_healthz_says_unknown_rather_than_open_when_it_cannot_tell(tmp_path, mon
     monkeypatch.setattr(appmod.time, "monotonic",
                         lambda: real_monotonic() + 10_000)
     assert c.get("/healthz").json()["auth"] == "unknown"
+
+
+def test_a_machine_token_cannot_lease_as_a_different_machine(admin):
+    """The dashboard has always said the token name "must match the machine's
+    CASEBROKER_WORKER_ID" and nothing enforced it, so every row in the Machines
+    list and the workers table was a claim rather than a fact -- which is the
+    attribution that issuing one credential per box exists to provide."""
+    issued = admin.post("/v1/workers/tokens", json={"name": "lab-ws-02"}).json()["token"]
+    admin.post("/v1/auth/logout")
+    headers = {"Authorization": f"Bearer {issued}"}
+
+    assert admin.post("/v1/lease", json={"worker_id": "lab-ws-02", "count": 1},
+                      headers=headers).status_code == 200
+    r = admin.post("/v1/lease", json={"worker_id": "someone-elses-box", "count": 1},
+                   headers=headers)
+    assert r.status_code == 403
+    assert "lab-ws-02" in r.json()["detail"]
+
+
+def test_a_shared_env_token_may_still_lease_as_any_worker(tmp_path):
+    """Env tokens are shared BY DESIGN -- one value across the fleet -- so there
+    is no machine identity for a worker id to contradict. Enforcing there would
+    strand every worker the live campaign is running on."""
+    app = create_app(db_path=str(tmp_path / "shared.sqlite"), tokens=["shared-secret"])
+    c = TestClient(app)
+    headers = {"Authorization": "Bearer shared-secret"}
+    for worker_id in ("phoenix-01", "ice-07", "lab-ws-02"):
+        assert c.post("/v1/lease", json={"worker_id": worker_id, "count": 1},
+                      headers=headers).status_code == 200

@@ -118,6 +118,7 @@ quarantined 173 perfectly good sites in under a minute.
 <summary><b>Quick reference</b> — the calls you will actually type</summary>
 
 ```bash
+uv run casebroker worker setup --broker URL                   # enrol THIS machine as a worker
 uv run casebroker account create --username ada --role admin  # the first admin, headless
 uv run casebroker account passwd --username ada               # forgot it -- no old password needed
 uv run casebroker account list                                # who exists, and last login

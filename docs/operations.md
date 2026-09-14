@@ -57,12 +57,28 @@ works when the service is down.
 > Set `CASEBROKER_SETUP_TOKEN` before a broker with no tokens at all becomes
 > reachable, or the first stranger to find the form becomes its permanent admin.
 
-**3. Issue one credential per machine.** Signed in, go to **Machines** ▸ *Issue
-token*, naming it after the worker id that box will run under. The token is
-shown **once** — only its hash is stored — along with the exact
-`bootstrap_worker.ps1` line to paste on that machine. Revoking one is a button,
-takes effect on that machine's next request, and leaves every other machine
-running.
+**3. Enrol each machine.** The one command to run **on** the new box:
+
+```bash
+uv run casebroker worker setup --broker https://broker.example.org
+```
+
+It asks for your broker login, mints a credential for **this** machine, writes
+it into `machine.env`, and drops the admin session again — nothing long-lived is
+left on a shared lab machine. The worker id defaults to the hostname; pass
+`--worker-id` to override, and `--rotate` if the box has lost its credential and
+needs a fresh one. Existing settings in `machine.env` (`WIND_NP`, the runtime
+paths) are preserved.
+
+Or from the dashboard, if you would rather not log in at the box: **Machines** ▸
+*Issue token*, named after the worker id that box will run under. The token is
+shown **once** — only its hash is stored — with the exact `bootstrap_worker.ps1`
+line to paste there.
+
+Either way, revoking one machine is a button, takes effect on its next request,
+and leaves every other machine running. **A machine's credential may only lease
+as its own worker id**: the broker refuses `403` if they disagree, so the
+Machines list and the workers table cannot drift apart.
 
 Then confirm from outside:
 
