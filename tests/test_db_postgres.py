@@ -53,6 +53,10 @@ def cleanup_after_module():
     conn.execute("DELETE FROM events WHERE case_id LIKE ? OR worker_id LIKE ?", (like, like))
     conn.execute("DELETE FROM cases WHERE case_id LIKE ?", (like,))
     conn.execute("DELETE FROM workers WHERE worker_id LIKE ?", (like,))
+    conn.execute("DELETE FROM worker_tokens WHERE name LIKE ?", (like,))
+    conn.execute("DELETE FROM sessions WHERE user_id IN "
+                 "(SELECT id FROM users WHERE username LIKE ?)", (like,))
+    conn.execute("DELETE FROM users WHERE username LIKE ?", (like,))
 
 
 _POOL: list = []
@@ -122,6 +126,84 @@ def seed(n: int, tag: str) -> list[str]:
     r = db.add_cases(conn, rows)
     assert r["added"] == n
     return ids_out
+
+
+# -- identity: accounts, sessions, worker tokens ------------------------------
+#
+# The bug that motivated this section: every one of these functions indexed a
+# fetched row positionally (``row[0]``, ``row[1]``, ...). ``sqlite3.Row`` -- what
+# every OTHER test in this repo runs against -- supports both positional and
+# name access, so the whole suite passed. A real Postgres connection here uses
+# psycopg's ``dict_row`` factory, where a row is a plain ``dict`` and positional
+# indexing raises ``KeyError(0)``. The result: setup, login, and every worker
+# token endpoint returned 500 the moment this ran against the actual production
+# database, and nothing in CI caught it because nothing in CI exercised these
+# functions over a real connection. This section exists so that gap cannot
+# reopen silently.
+
+from casebroker import auth  # noqa: E402
+
+
+def test_count_users_and_create_user_round_trip_over_a_real_connection():
+    conn = fresh_conn()
+    before = db.count_users(conn)
+    username = prefix("user-a")
+    created = db.create_user(conn, username, auth.hash_password("a-long-enough-passphrase"))
+    assert created["username"] == username
+    assert created["id"] is not None
+    assert db.count_users(conn) == before + 1
+
+
+def test_get_user_returns_every_column_by_name():
+    conn = fresh_conn()
+    username = prefix("user-b")
+    db.create_user(conn, username, auth.hash_password("a-long-enough-passphrase"), role="admin")
+    fetched = db.get_user(conn, username)
+    assert fetched["username"] == username
+    assert fetched["role"] == "admin"
+    assert auth.verify_password("a-long-enough-passphrase", fetched["password_hash"])
+    assert db.get_user(conn, prefix("does-not-exist")) is None
+
+
+def test_a_session_authenticates_and_then_expires_over_a_real_connection():
+    conn = fresh_conn()
+    username = prefix("user-c")
+    user = db.create_user(conn, username, auth.hash_password("a-long-enough-passphrase"))
+    token_hash = auth.hash_token(auth.new_token())
+
+    import time
+    now = int(time.time())
+    db.start_session(conn, user["id"], token_hash, now + 3600, now=now)
+    live = db.session_user(conn, token_hash, now=now)
+    assert live is not None and live["username"] == username
+
+    # Expiry is checked on read, not by a background sweep -- so a session
+    # already past its expiry must read back as gone even though the row is
+    # still there.
+    stale = db.session_user(conn, token_hash, now=now + 7200)
+    assert stale is None
+
+    db.end_session(conn, token_hash)
+    assert db.session_user(conn, token_hash, now=now) is None
+
+
+def test_worker_token_issue_authenticate_and_revoke_over_a_real_connection():
+    conn = fresh_conn()
+    name = prefix("worker-a")
+    token = auth.new_token()
+    token_hash = auth.hash_token(token)
+
+    db.create_worker_token(conn, name, token_hash, created_by=prefix("admin"))
+    owner = db.worker_token_owner(conn, token_hash)
+    assert owner is not None and owner["name"] == name
+
+    listed = db.list_worker_tokens(conn)
+    assert any(t["name"] == name for t in listed)
+
+    db.revoke_worker_token(conn, name)
+    # Revocation must be visible immediately on the SAME connection it was
+    # written from -- there is no cache in front of this table to go stale.
+    assert db.worker_token_owner(conn, token_hash) is None
 
 
 def test_connects_and_reports_a_real_engine():

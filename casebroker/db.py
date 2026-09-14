@@ -983,10 +983,10 @@ def purge_cases(conn, recipe: str | None = None, state: str | None = None,
         where.append("state = ?"); params.append(state)
     clause = (" WHERE " + " AND ".join(where)) if where else ""
 
-    n = conn.execute("SELECT COUNT(*) FROM cases" + clause, params).fetchone()[0]
+    n = conn.execute("SELECT COUNT(*) n FROM cases" + clause, params).fetchone()["n"]
     with_results = conn.execute(
-        "SELECT COUNT(*) FROM cases" + (clause + " AND " if clause else " WHERE ")
-        + "result_uri IS NOT NULL", params).fetchone()[0]
+        "SELECT COUNT(*) n FROM cases" + (clause + " AND " if clause else " WHERE ")
+        + "result_uri IS NOT NULL", params).fetchone()["n"]
     out = {"matched": int(n), "with_results": int(with_results),
            "deleted": 0, "dry_run": bool(dry_run)}
 
@@ -1017,7 +1017,7 @@ def purge_cases(conn, recipe: str | None = None, state: str | None = None,
 def count_users(conn) -> int:
     """How many accounts exist. Zero is what puts the service into first-run
     setup, so this is the check that decides whether /setup is open."""
-    return int(conn.execute("SELECT COUNT(*) FROM users").fetchone()[0])
+    return int(conn.execute("SELECT COUNT(*) n FROM users").fetchone()["n"])
 
 
 @_locked
@@ -1030,7 +1030,11 @@ def create_user(conn, username: str, password_hash: str, role: str = "admin",
     row = conn.execute(
         "SELECT id, username, role, created_at FROM users WHERE username = ?",
         (username,)).fetchone()
-    return {"id": row[0], "username": row[1], "role": row[2], "created_at": row[3]}
+    # By column name, not position: a Postgres row here is a dict (dict_row),
+    # while only sqlite3.Row supports both -- positional indexing passed every
+    # test against SQLite and raised KeyError on every call in production.
+    return {"id": row["id"], "username": row["username"], "role": row["role"],
+            "created_at": row["created_at"]}
 
 
 @_locked
@@ -1040,7 +1044,8 @@ def get_user(conn, username: str):
         (username,)).fetchone()
     if not row:
         return None
-    return {"id": row[0], "username": row[1], "password_hash": row[2], "role": row[3]}
+    return {"id": row["id"], "username": row["username"],
+            "password_hash": row["password_hash"], "role": row["role"]}
 
 
 @_locked
@@ -1066,9 +1071,9 @@ def session_user(conn, token_hash: str, now: int | None = None):
         "SELECT u.id, u.username, u.role, s.expires_at FROM sessions s "
         "JOIN users u ON u.id = s.user_id WHERE s.token_hash = ?",
         (token_hash,)).fetchone()
-    if not row or int(row[3]) <= now:
+    if not row or int(row["expires_at"]) <= now:
         return None
-    return {"id": row[0], "username": row[1], "role": row[2]}
+    return {"id": row["id"], "username": row["username"], "role": row["role"]}
 
 
 @_locked
@@ -1106,11 +1111,11 @@ def worker_token_owner(conn, token_hash: str, now: int | None = None):
     row = conn.execute(
         "SELECT name, revoked_at FROM worker_tokens WHERE token_hash = ?",
         (token_hash,)).fetchone()
-    if not row or row[1] is not None:
+    if not row or row["revoked_at"] is not None:
         return None
     conn.execute("UPDATE worker_tokens SET last_seen_at = ? WHERE token_hash = ?",
                  (now, token_hash))
-    return {"name": row[0]}
+    return {"name": row["name"]}
 
 
 @_locked
@@ -1129,5 +1134,6 @@ def list_worker_tokens(conn) -> list[dict[str, Any]]:
     rows = conn.execute(
         "SELECT name, created_by, created_at, last_seen_at, revoked_at "
         "FROM worker_tokens ORDER BY created_at DESC").fetchall()
-    return [{"name": r[0], "created_by": r[1], "created_at": r[2],
-             "last_seen_at": r[3], "revoked_at": r[4]} for r in rows]
+    return [{"name": r["name"], "created_by": r["created_by"],
+             "created_at": r["created_at"], "last_seen_at": r["last_seen_at"],
+             "revoked_at": r["revoked_at"]} for r in rows]
