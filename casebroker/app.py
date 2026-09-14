@@ -336,12 +336,7 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         if _auth_is_open():
             return
         user = _session_principal(request)
-        if user:
-            if user["role"] != "admin":
-                raise HTTPException(
-                    status_code=403,
-                    detail="this account is a viewer; it can read the campaign "
-                           "but not change it")
+        if user and user["role"] == "admin":
             return
         if _machine_principal(request):
             return
@@ -351,6 +346,14 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         # alone and never falls through to readonly_tokens.
         if _env_token_ok(_supplied_token(request), tokens):
             return
+        if user:
+            # Checked LAST, not on sight: a viewer's cookie rides along on every
+            # request from that browser, and rejecting immediately would refuse
+            # a request that also carried a perfectly good write credential.
+            raise HTTPException(
+                status_code=403,
+                detail="this account is a viewer; it can read the campaign "
+                       "but not change it")
         raise HTTPException(status_code=401, detail="log in, or send a valid bearer token")
 
     def require_read_token(request: Request) -> None:
@@ -677,6 +680,13 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
     LOGIN_FAIL_MAX_KEYS = 4096
 
     def _throttle_key(request: Request, username: str) -> str:
+        # The SOCKET address deliberately, not X-Forwarded-For -- unlike the
+        # Secure-cookie decision, which reads X-Forwarded-Proto. A forwarded
+        # header's leftmost value is supplied by the caller, so keying on it
+        # would let an attacker rotate it and evade the throttle entirely,
+        # which is worse than the cost of not using it: behind a
+        # TLS-terminating proxy every caller shares one apparent address, so
+        # one attacker can throttle the others for that username.
         client = request.client.host if request.client else "?"
         return f"{username}|{client}"
 

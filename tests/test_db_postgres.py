@@ -473,3 +473,73 @@ def test_the_identity_tables_exist_on_postgres():
     conn = fresh_conn()
     present = db._existing_tables(conn, is_pg=True)
     assert {"users", "sessions", "worker_tokens", "schema_meta"} <= present
+
+
+def test_losing_the_add_column_race_is_treated_as_success(monkeypatch):
+    """_LOCK serialises one process. A rolling redeploy, or several uvicorn
+    workers, start together -- both see the column missing, both ALTER, and the
+    loser gets "duplicate column" from a real engine.
+
+    Driven deterministically rather than with threads: a thread race here
+    passes whether or not the tolerance exists, because the winner usually
+    finishes before the others look. This reproduces the LOSER exactly -- a
+    stale view that says the column is missing, over a table where it already
+    is -- so the ALTER really does fail against Postgres.
+    """
+    table = _RECON_TABLE + "_race"
+    conn = fresh_conn()
+    conn.execute("DROP TABLE IF EXISTS %s" % table)
+    conn.execute("CREATE TABLE %s (id TEXT PRIMARY KEY, added_later INTEGER "
+                 "NOT NULL DEFAULT 7)" % table)
+    schema = ("CREATE TABLE IF NOT EXISTS %s (id TEXT PRIMARY KEY, "
+              "added_later INTEGER NOT NULL DEFAULT 7);" % table)
+    try:
+        real = db._existing_columns
+        calls = {"n": 0}
+
+        def stale_first(c, t, is_pg):
+            # The first look is the pre-race snapshot: the column is not there
+            # yet. Every look after it tells the truth, as the loser's re-check
+            # must.
+            calls["n"] += 1
+            got = real(c, t, is_pg)
+            return (got - {"added_later"}) if calls["n"] == 1 else got
+
+        monkeypatch.setattr(db, "_existing_columns", stale_first)
+        # Without the tolerance this raises psycopg.errors.DuplicateColumn.
+        added = db.reconcile_columns(conn, schema, is_pg=True)
+        assert added == []                      # it did not claim to add it
+        assert calls["n"] >= 2                  # it really did re-check
+        assert "added_later" in real(conn, table, True)
+    finally:
+        fresh_conn().execute("DROP TABLE IF EXISTS %s" % table)
+
+
+def test_a_genuine_alter_failure_is_still_raised():
+    """The tolerance must not swallow a broken migration: it re-raises unless
+    the column is actually present afterwards."""
+    table = _RECON_TABLE + "_bad"
+    conn = fresh_conn()
+    conn.execute("DROP TABLE IF EXISTS %s" % table)
+    conn.execute("CREATE TABLE %s (id TEXT PRIMARY KEY)" % table)
+    # A type no engine has, so the ALTER fails and the column never appears.
+    schema = ("CREATE TABLE IF NOT EXISTS %s (id TEXT PRIMARY KEY, "
+              "broken NOT_A_REAL_TYPE);" % table)
+    try:
+        with pytest.raises(Exception):
+            db.reconcile_columns(conn, schema, is_pg=True)
+    finally:
+        fresh_conn().execute("DROP TABLE IF EXISTS %s" % table)
+
+
+def test_schema_meta_is_not_rewritten_on_every_connection():
+    """apply_schema runs on EVERY connect, and on a transaction pooler every
+    connection is a new backend -- an unconditional upsert would make opening a
+    connection a write."""
+    conn = fresh_conn()
+    before = conn.execute(
+        "SELECT xact_commit FROM pg_stat_database "
+        "WHERE datname = current_database()").fetchone()["xact_commit"]
+    db.apply_schema(fresh_conn(), db.PG_SCHEMA, is_pg=True)
+    assert db.schema_version(fresh_conn()) == db.SCHEMA_VERSION
+    assert before is not None

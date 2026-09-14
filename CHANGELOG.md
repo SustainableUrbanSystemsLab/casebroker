@@ -70,6 +70,20 @@ finished case for Syncthing / a master-side pull to collect. See
   attempts admitted against a limit of 10 before that change. Expired sessions
   are swept on login rather than accumulating, and the failure map is capped so
   unauthenticated callers cannot grow it without bound.
+- The column reconciler tolerates losing a race. `_LOCK` serialises one
+  process; a rolling redeploy or several uvicorn workers start together, both
+  see the column missing, both ALTER, and the loser gets "duplicate column".
+  Losing that race is a success -- the column is there -- so it is swallowed
+  only when a re-check confirms the column now exists, and re-raised otherwise
+  so a genuinely broken migration still fails loudly. Bringing a database
+  forward is also logged rather than silent, and `schema_meta` is written only
+  when the version actually changed: apply_schema runs on every connection, and
+  on a transaction pooler every connection is a new backend, so an
+  unconditional upsert made opening a connection a write.
+- A viewer's session cookie no longer vetoes a stronger credential on the same
+  request. It rides along on every request from that browser, and rejecting on
+  sight refused requests that also carried a perfectly good write token; the
+  viewer is now checked last, after the machine and environment credentials.
 - A non-ASCII credential no longer 500s. `hmac.compare_digest` refuses a
   non-ASCII `str` with TypeError, and the bearer header is attacker-chosen --
   the server decodes it as latin-1, so any byte becomes a character. A single

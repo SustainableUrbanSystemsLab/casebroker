@@ -400,3 +400,26 @@ def test_a_non_ascii_setup_token_is_refused_rather_than_crashing(tmp_path):
     r = c.post("/v1/auth/setup",
                json={"username": "ada", "password": PW, "setup_token": "café-☕"})
     assert r.status_code == 403
+
+
+def test_a_viewer_cookie_does_not_veto_a_valid_write_token(tmp_path):
+    """A viewer's cookie rides along on every request from that browser.
+    Rejecting on sight refused a request that also carried a perfectly good
+    write credential, so the viewer session vetoed a stronger one."""
+    app = create_app(db_path=str(tmp_path / "veto.sqlite"),
+                     tokens=["a-shared-write-secret"], readonly_tokens=[])
+    c = TestClient(app)
+    c.post("/v1/auth/setup", json={"username": "ada", "password": PW},
+           headers={"Authorization": "Bearer a-shared-write-secret"})
+    c.post("/v1/users", json={"username": "bob", "password": PW2})
+    c.post("/v1/auth/logout")
+    assert _login(c, "bob", PW2).status_code == 200      # bob's cookie is now set
+
+    # Same request: viewer cookie AND a valid write token.
+    r = c.post("/v1/lease", json={"worker_id": "w", "count": 1},
+               headers={"Authorization": "Bearer a-shared-write-secret"})
+    assert r.status_code == 200, r.text
+    # Without the token the viewer is still refused, and told why.
+    r = c.post("/v1/lease", json={"worker_id": "w", "count": 1})
+    assert r.status_code == 403
+    assert "viewer" in r.json()["detail"]

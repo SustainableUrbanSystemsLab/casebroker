@@ -46,6 +46,7 @@ import functools
 import json
 import re
 import sqlite3
+import sys
 import threading
 import time
 import uuid
@@ -522,7 +523,18 @@ def reconcile_columns(conn, script: str, is_pg: bool) -> list[str]:
                     "%s.%s is declared %s, which cannot be added to a table that "
                     "already exists. Add it by hand, or recreate the table, "
                     "before starting this version." % (table, column, why))
-            conn.execute("ALTER TABLE %s ADD COLUMN %s" % (table, ddl))
+            try:
+                conn.execute("ALTER TABLE %s ADD COLUMN %s" % (table, ddl))
+            except Exception:                                # noqa: BLE001
+                # _LOCK serialises this process only. Two of them starting at
+                # once -- a rolling redeploy, or several uvicorn workers --
+                # both see the column missing and both ALTER, and the loser
+                # gets "duplicate column". Losing that race is a success: the
+                # column is there. Anything else is a real failure and is
+                # re-raised, so this cannot mask a broken migration.
+                if column not in _existing_columns(conn, table, is_pg):
+                    raise
+                continue
             added.append("%s.%s" % (table, column))
     return added
 
@@ -545,10 +557,22 @@ def apply_schema(conn, script: str, is_pg: bool) -> list[str]:
     added = reconcile_columns(conn, script, is_pg)
     for stmt in indexes:
         conn.execute(stmt)
-    conn.execute(
-        "INSERT INTO schema_meta(key, value) VALUES ('version', ?) "
-        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        (str(SCHEMA_VERSION),))
+    if added:
+        # Bringing a database forward is exactly the event an operator wants in
+        # the log when something looks different afterwards, and it happens
+        # unattended on the first connection after a deploy.
+        print("[schema] brought this database forward: added " + ", ".join(added),
+              file=sys.stderr)
+    # Only when it actually changed. This runs on EVERY connection, and on a
+    # transaction pooler every connection is a new backend -- an unconditional
+    # upsert would make opening a connection a write.
+    row = conn.execute(
+        "SELECT value FROM schema_meta WHERE key = 'version'").fetchone()
+    if row is None or row["value"] != str(SCHEMA_VERSION):
+        conn.execute(
+            "INSERT INTO schema_meta(key, value) VALUES ('version', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (str(SCHEMA_VERSION),))
     return added
 
 
