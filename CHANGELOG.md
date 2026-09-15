@@ -226,6 +226,32 @@ finished case for Syncthing / a master-side pull to collect. See
   pulls archives from PACE over SSH), `docs/fleet.md`.
 
 ### Changed
+- **The dashboard wears the RhinoPackages design language.** Its neutrals
+  replace the GitHub Primer ones wholesale -- Tailwind gray 50/100/200/500/600/
+  900 on white in the light theme, and in the dark the four zinc values that
+  project's `tailwind.config.ts` overrides Tailwind's own zinc with (950
+  `#0d1117`, 900 `#161b22`, 800 `#30363d`, 700 `#484f58`), which is a full step
+  harder than the "Dark Dimmed" it replaces. Its brand pink arrives as a
+  separate `--brand` family wired ONLY to identity and interaction: the logo
+  mark's gradient, the primary button, the focus ring. It is deliberately not
+  wired to `--accent`/`--primary`/`--warn`/`--bad`, because those four ARE the
+  campaign's state scale -- they read green / blue / amber / red across the stat
+  cards, the progress bar and every badge, and recolouring a "done" case to
+  brand pink would make the dashboard prettier and unreadable at a glance.
+  Every pairing was measured rather than eyeballed: brand-600 is the source's
+  text colour but lands at 4.40:1 on this page's gray-50 canvas and 3.91:1 on
+  its own brand-100 chip, so light uses brand-700, and dark lifts muted text a
+  step to zinc-300/400 because zinc-500 on zinc-900 is 3.58:1. One deliberate
+  deviation: `--border` stays at zinc-700 (2.09:1), faithful to the source, for
+  dividers that carry no identification duty, while `--btn-border` is lifted to
+  zinc-500 (3.58:1) so the edges of interactive controls clear WCAG 1.4.11.
+- **The KPI row fits on one line by default.** The rule said eight columns; the
+  row renders seven (total, done, leased, pending, quarantined, remaining, and
+  the SLURM queue), so there was a permanently empty column making every card
+  narrower than it needed to be, and the breakpoint that applied it sat at
+  1480px -- above the 1280 and 1366 laptops most of this is read on, which left
+  the set wrapping into two rows on the machines where reading the campaign's
+  state as a single set matters most. Seven columns now, from 1240px up.
 - **`casebroker doctor` now looks in sibling checkouts** (`../*/.env`), not
   only its own working directory. The credential that was actually live sat
   in a neighbouring repo, so doctor reported "no connection string found"
