@@ -19,24 +19,23 @@
     --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
     --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 
-    /* GitHub Light (Primer). Every value is a real Primer token -- this block
-       used to be Tailwind (slate #f8fafc/#0f172a, emerald #059669, blue #2563eb,
-       rose #e11d48), which is why the light theme never looked like GitHub even
-       after the dark one was converted.
-       bg=canvas.subtle, surface=canvas.default, surface-elevated=canvas.inset,
-       border=border.default, border-subtle=border.muted, text=fg.default/muted/
-       subtle, accent=success.fg (GitHub's primary BUTTON is green),
-       primary=accent.fg (GitHub's LINK blue), warn=attention.fg,
-       bad=danger.fg. */
-    --bg: #f6f8fa;
+    /* Neutrals from the RhinoPackages design language (its tailwind.config.ts
+       and the `gray-*` utilities its components actually use), which is
+       Tailwind's gray scale on white surfaces. Every value below is a real
+       scale value -- keep it that way; picking an arbitrary nearby hex is what
+       makes a neutral palette look muddy.
+       bg=gray-50, surface=white, surface-elevated/hover=gray-100,
+       border=gray-200 (border-gray-200), border-subtle=gray-100,
+       text=gray-900/600/500 (text-gray-900, text-gray-600, text-gray-500). */
+    --bg: #f9fafb;
     --surface: #ffffff;
-    --surface-elevated: #f6f8fa;
-    --surface-hover: #eaeef2;
-    --border: #d0d7de;
-    --border-subtle: #d8dee4;
-    --text-primary: #1f2328;
-    --text-secondary: #656d76;
-    --text-muted: #6e7781;
+    --surface-elevated: #f3f4f6;
+    --surface-hover: #f3f4f6;
+    --border: #e5e7eb;
+    --border-subtle: #f3f4f6;
+    --text-primary: #111827;
+    --text-secondary: #4b5563;
+    --text-muted: #6b7280;
     --accent: #1a7f37;
     --accent-rgb: 26, 127, 55;
     --accent-light: #dafbe1;
@@ -50,34 +49,57 @@
     --bad-light: #ffebe9;
     --info: #0969da;
     --info-light: #ddf4ff;
+
+    /* BRAND -- identity and interaction, never state. RhinoPackages' accent is
+       the pink of its logo ramp; these are its `brand-*` scale verbatim.
+       Deliberately NOT wired to --accent/--primary/--warn/--bad above: those
+       four ARE the campaign's state scale (done / leased / pending /
+       quarantined) and they read green-blue-amber-red in the stat cards, the
+       progress bar and every badge. Recolouring a "done" case to brand pink
+       would make the dashboard prettier and unreadable at a glance. */
+    /* brand-700, not the brand-600 the source uses for text: measured against
+       THIS page's grounds, brand-600 is 4.40:1 on the gray-50 canvas and 3.91:1
+       on its own brand-100 chip -- both under AA. brand-700 clears every pairing
+       here (6.04 on white, 5.78 on the canvas, 5.14 on the chip) and is still a
+       pinned value from the same scale. */
+    --brand: #be185d;                         /* brand-700 */
+    --brand-hover: #9d174d;                   /* brand-800 */
+    --brand-light: #fce7f3;                   /* brand-100, bg-brand-50/100 */
+    --brand-rgb: 190, 24, 93;
     --shadow-sm: 0 1px 0 rgba(31, 35, 40, 0.04);
     --shadow: 0 3px 6px rgba(140, 149, 159, 0.15);
     --shadow-md: 0 8px 24px rgba(140, 149, 159, 0.2);
-    --ring: rgba(9, 105, 218, 0.3);
-    --btn-bg: #f6f8fa;
-    --btn-border: rgba(31, 35, 40, 0.15);
+    --ring: rgba(236, 72, 153, 0.4);          /* ring-brand-500 */
+    --btn-bg: #f9fafb;
+    --btn-border: #d1d5db;                    /* ring-gray-300 */
   }
 
-  /* GitHub "Dark Dimmed" (Primer). Each value below is a real Primer token --
-     keep it that way; picking an arbitrary nearby hex is what makes a dimmed
-     theme look muddy. Mapping: bg=canvas.default, surface=canvas.overlay,
-     surface-elevated=canvas.inset (a RECESSED well -- inputs, table headers,
-     hover fills -- despite the name), surface-hover/border-subtle=border.muted,
-     border=border.default, text-primary=fg.default, text-muted=fg.muted,
-     accent=success.fg, primary=accent.fg, warn=attention.fg, bad=danger.fg.
-     --text-secondary is the one deliberate interpolation, sitting between
-     fg.default and fg.muted for the reduced-contrast look. */
+  /* The RhinoPackages dark scale, pinned verbatim from its tailwind.config.ts
+     -- zinc 700 #484f58, 800 #30363d, 900 #161b22, 950 #0d1117. That config
+     overrides Tailwind's own zinc with these four, so they are the design
+     language rather than a nearby approximation, and they are a full step
+     harder than the GitHub "Dark Dimmed" this replaced.
+     Mapping: bg=zinc-950, surface=zinc-900 (dark:bg-zinc-900),
+     surface-elevated=zinc-950 (a RECESSED well -- inputs, table headers --
+     despite the name, so it goes DARKER than the surface, not lighter),
+     surface-hover=zinc-800 (hover:bg-zinc-800), border=zinc-700
+     (dark:border-zinc-700), border-subtle=zinc-800 (dark:border-zinc-800),
+     text=zinc-100/400/500 (dark:text-zinc-100, -400, -500). */
   [data-theme="dark"] {
     color-scheme: dark;
-    --bg: #22272e;
-    --surface: #2d333b;
-    --surface-elevated: #1c2128;
-    --surface-hover: #373e47;
-    --border: #444c56;
-    --border-subtle: #373e47;
-    --text-primary: #adbac7;
-    --text-secondary: #768390;
-    --text-muted: #636e7b;
+    --bg: #0d1117;
+    --surface: #161b22;
+    --surface-elevated: #0d1117;
+    --surface-hover: #30363d;
+    --border: #484f58;
+    --border-subtle: #30363d;
+    --text-primary: #f4f4f5;                  /* zinc-100 */
+    /* Each shifted one step brighter than the source's zinc-400/500 pairing:
+       zinc-500 on zinc-900 measures 3.58:1, under AA, and muted text here is
+       timestamps and counts rather than decoration. zinc-300/400 keeps three
+       distinct levels (15.7 / 11.7 / 6.8) and clears AA at every one. */
+    --text-secondary: #d4d4d8;                /* zinc-300 */
+    --text-muted: #a1a1aa;                    /* zinc-400 */
     --accent: #57ab5a;
     --accent-rgb: 87, 171, 90;
     --accent-light: rgba(70, 149, 74, 0.15);
@@ -91,30 +113,42 @@
     --bad-light: rgba(229, 83, 75, 0.1);
     --info: #539bf5;
     --info-light: rgba(65, 132, 228, 0.15);
+
+    /* Brand lightens in the dark, exactly as the source does: its components
+       pair `text-brand-600` with `dark:text-brand-400`, because brand-600 on a
+       near-black surface is too dim to read as an accent. */
+    --brand: #f472b6;                         /* brand-400, dark:text-brand-400 */
+    --brand-hover: #f9a8d4;                   /* brand-300 */
+    --brand-light: rgba(131, 24, 67, 0.45);   /* brand-900, dark:bg-brand-900 */
+    --brand-rgb: 244, 114, 182;
     --shadow-sm: 0 0 transparent;
     --shadow: 0 3px 6px #010409;
     --shadow-md: 0 8px 24px #010409;
-    --ring: rgba(83, 155, 245, 0.35);
-    --btn-bg: #373e47;                        /* btn.bg */
-    --btn-border: rgba(205, 217, 229, 0.1);   /* btn.border */
+    --ring: rgba(244, 114, 182, 0.4);         /* ring-brand-400 */
+    --btn-bg: #30363d;                        /* zinc-800 */
+    /* zinc-500, not the zinc-700 used for dividers: a button or input edge is
+       what IDENTIFIES the control, so 1.4.11 wants 3:1 against the surface
+       behind it. zinc-700 gives 2.09; zinc-500 gives 3.58. Dividers stay at
+       zinc-700 below -- they carry no identification duty. */
+    --btn-border: #71717a;                    /* zinc-500 */
   }
 
 
+  /* dark:bg-brand-600 is what the source fills its primary actions with -- one
+     step DARKER than the brand-400 it uses for brand TEXT, so white label text
+     keeps its contrast. */
   [data-theme="dark"] button.primary {
-    background: #347d39;                      /* btn.primary.bg */
-    /* btn.primary.border is a translucent light edge, not a colour. The old
-       #3fb950 is GitHub DARK's green, not Dimmed's, and ringing a green button
-       in a brighter green is most of why this control shouted. */
-    border-color: rgba(205, 217, 229, 0.1);
-    color: #ffffff;                           /* btn.primary.text */
+    background: #db2777;                      /* brand-600 */
+    border-color: #9d174d;                    /* brand-800 */
+    color: #ffffff;
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
   }
   [data-theme="dark"] button.primary:hover {
-    background: #46954a;                      /* btn.primary.hoverBg */
-    border-color: rgba(205, 217, 229, 0.1);
+    background: #be185d;                      /* brand-700 */
+    border-color: #9d174d;
   }
   [data-theme="dark"] .brand-logo {
-    background: linear-gradient(135deg, #347d39 0%, #316dca 100%);
+    background: linear-gradient(135deg, #96236f 0%, #b12a83 50%, #e23c80 100%);
     box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3);
   }
 
@@ -169,7 +203,10 @@
     width: 32px;
     height: 32px;
     border-radius: 8px;
-    background: linear-gradient(135deg, var(--accent) 0%, var(--primary) 100%);
+    /* The ramp out of the RhinoPackages logo (#96236f -> #b12a83 -> #e23c80),
+       not the state scale's green-to-blue. This is the one place the brand is
+       allowed to be purely decorative. */
+    background: linear-gradient(135deg, #96236f 0%, #b12a83 50%, #e23c80 100%);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -401,15 +438,17 @@
     cursor: not-allowed;
     transform: none;
   }
+  /* Brand, not --accent: --accent is the state scale's "done" green, and a
+     primary button wearing it reads as a status chip. */
   button.primary {
-    background: var(--accent);
-    border-color: var(--accent);
+    background: var(--brand);
+    border-color: var(--brand);
     color: #ffffff;
-    box-shadow: 0 2px 4px rgba(var(--accent-rgb), 0.25);
+    box-shadow: 0 2px 4px rgba(var(--brand-rgb), 0.25);
   }
   button.primary:hover {
-    background: var(--accent-hover);
-    border-color: var(--accent-hover);
+    background: var(--brand-hover);
+    border-color: var(--brand-hover);
   }
   button.subtle {
     border-color: transparent;
@@ -507,16 +546,22 @@
   /* KPI Stats Grid */
   .stats-grid {
     display: grid;
-    /* Eight across on a wide screen, wrapping only when the viewport genuinely
-       cannot hold them. auto-fit with a 160px minimum let the seventh card wrap
-       to a second row on a 1200px page, which breaks the one thing this row is
-       for: reading the campaign's state as a single set. */
-    grid-template-columns: repeat(auto-fit, minmax(min(170px, 100%), 1fr));
+    /* SEVEN across, because seven is what this row renders: total, done,
+       leased, pending, quarantined, remaining, and the SLURM queue. The rule
+       below used to say eight, which left a permanently empty column and made
+       every card narrower than it needed to be.
+       The minimum is 150px so the set still fits on one line down to a ~1175px
+       viewport; below that it wraps, which is the right tradeoff -- the one
+       thing this row is for is reading the campaign's state as a single set. */
+    grid-template-columns: repeat(auto-fit, minmax(min(150px, 100%), 1fr));
     gap: 12px;
     margin-bottom: 20px;
   }
-  @media (min-width: 1480px) {
-    .stats-grid { grid-template-columns: repeat(8, 1fr); }
+  /* 7 x 150 + 6 x 12 gaps = 1192, plus main's 40px of side padding = 1232. The
+     breakpoint sits just above that, so every common laptop width (1280, 1366,
+     1440, 1512, 1920) gets the full row by default rather than by luck. */
+  @media (min-width: 1240px) {
+    .stats-grid { grid-template-columns: repeat(7, 1fr); }
   }
   .stat-card {
     border: 1px solid var(--border);
