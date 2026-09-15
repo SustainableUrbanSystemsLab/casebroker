@@ -128,6 +128,75 @@ def test_no_hardcoded_version():
     )
 
 
+# -- the release actually happening ------------------------------------------
+#
+# Everything above compares the three COPIES of the version to each other. That
+# is drift, and it was the bug of the day when it was written -- but it says
+# nothing about whether the declared version was ever RELEASED, and it cannot.
+# Between v0.2.0 and v0.3.0 four pull requests merged, the version moved once,
+# and nothing tagged it: the README's tag badge read v0.2.0 while the running
+# service's /healthz read 0.3.0, and every test in this file passed the whole
+# time because the copies agreed perfectly with one another.
+
+WORKFLOW = ROOT / ".github" / "workflows" / "release.yml"
+
+
+def test_the_declared_version_is_the_newest_one_in_the_changelog():
+    """A bump and its entry are one commit, by convention -- so the newest
+    release heading must be the version the package declares. Catches both
+    halves of the mistake: bumping without writing it up, and writing up a
+    version that was never declared."""
+    from casebroker import __version__
+    text = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    headings = re.findall(r"^## \[([0-9][^\]]*)\]", text, re.MULTILINE)
+    assert headings, "CHANGELOG.md has no release headings at all"
+    assert headings[0] == __version__, (
+        f"CHANGELOG.md's newest release is {headings[0]}, but the package "
+        f"declares {__version__}. Move the Unreleased entries under a "
+        f"'## [{__version__}]' heading, or bump to {headings[0]}."
+    )
+
+
+def test_a_version_bump_on_main_cuts_its_own_tag():
+    """The half of a release that gets forgotten is the tag, so merging the
+    bump has to be enough. Tagging by hand must keep working too -- it is what
+    the runbook in docs/operations.md tells you to do."""
+    wf = WORKFLOW.read_text(encoding="utf-8")
+    triggers = wf.split("jobs:", 1)[0]
+    assert "branches: [main]" in triggers, \
+        "a merge that moves the version has to be able to cut the tag"
+    assert "tags:" in triggers, "and an explicit tag push must still publish"
+    assert "contents: write" in wf, "creating a tag and a release both need it"
+
+
+def test_the_release_is_published_by_the_job_that_creates_the_tag():
+    """A tag pushed with GITHUB_TOKEN does NOT start another workflow run --
+    GitHub suppresses that to stop loops. So a job that pushed the tag and left
+    the `on: push: tags:` trigger to publish would create tags that never
+    became releases: the same bug, one layer quieter. Both steps therefore live
+    in one job."""
+    wf = WORKFLOW.read_text(encoding="utf-8")
+    jobs = wf.split("jobs:", 1)[1]
+    assert jobs.count("\n  release:") == 1 and "\n  tag:" not in jobs, \
+        "splitting tagging and publishing across jobs reintroduces the trap"
+    assert "git push origin" in jobs and "gh release create" in jobs
+
+
+def test_a_tag_that_disagrees_with_pyproject_still_fails():
+    """The original guard. Automating the usual path must not quietly drop the
+    check on the manual one."""
+    wf = WORKFLOW.read_text(encoding="utf-8")
+    assert "does not match pyproject.toml" in wf
+    assert "exit 1" in wf
+
+
+def test_nothing_is_published_without_tests_and_a_changelog_entry():
+    """Automating the bump makes the write-up the easy half to skip."""
+    wf = WORKFLOW.read_text(encoding="utf-8")
+    assert "pytest tests/" in wf
+    assert "CHANGELOG.md" in wf and "no '## [$pkg]' heading" in wf
+
+
 def test_status_identifies_the_broker_without_needing_healthz(client):
     """The dashboard must not need a second request to name what it connected to.
 
