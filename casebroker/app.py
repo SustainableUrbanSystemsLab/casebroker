@@ -359,28 +359,62 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         # -- /healthz reports which mode it is in so a misconfigured deployment
         # is visible rather than silent. Once an account exists the service is
         # no longer open, even with no env tokens set.
-        if _auth_is_open():
+        if _may_write_as(request, ("admin", "operator")):
             return
         user = _session_principal(request)
-        if user and user["role"] == "admin":
-            return
-        if _machine_principal(request):
-            return
-        # Configuring ONLY readonly_tokens (no worker tokens at all) is a valid,
-        # if unusual, deployment -- it must lock writes out entirely rather than
-        # silently falling back to open, which is why this checks `tokens`
-        # alone and never falls through to readonly_tokens.
-        if _env_token_ok(_supplied_token(request), tokens):
-            return
         if user:
             # Checked LAST, not on sight: a viewer's cookie rides along on every
             # request from that browser, and rejecting immediately would refuse
             # a request that also carried a perfectly good write credential.
             raise HTTPException(
                 status_code=403,
-                detail="this account is a viewer; it can read the campaign "
-                       "but not change it")
+                detail=f"this account is a {user['role']}; it can read the "
+                       "campaign but not change it")
         raise HTTPException(status_code=401, detail="log in, or send a valid bearer token")
+
+    def require_purge(request: Request) -> None:
+        """For DELETE /v1/cases, which retires a whole campaign.
+
+        Identical to the write gate except that an `operator` session is not
+        enough: adding, leasing and completing cases is the daily work, while
+        deleting them and their events and footprints is the one campaign
+        operation with nothing behind it. An admin, or a bearer write token,
+        still passes -- a machine token could always call this, and narrowing
+        that here would strand the documented `curl` in operations.md without
+        making anything safer, since the token holder can simply use it.
+        """
+        if _may_write_as(request, ("admin",)):
+            return
+        user = _session_principal(request)
+        if user:
+            raise HTTPException(
+                status_code=403,
+                detail=f"this account is a {user['role']}; purging a campaign "
+                       "needs an admin")
+        raise HTTPException(status_code=401, detail="log in, or send a valid bearer token")
+
+    def _may_write_as(request: Request, roles: tuple[str, ...]) -> bool:
+        """Shared by the write and purge gates, which differ ONLY in which
+        logged-in roles they accept.
+
+        The order matters and is the same in both: a session of a sufficient
+        role, then a machine token, then an environment write token. A session
+        whose role is too weak falls THROUGH to the token checks rather than
+        refusing on sight, so a browser that is logged in as a viewer and also
+        carrying a real write token is not turned away by the cookie.
+        """
+        if _auth_is_open():
+            return True
+        user = _session_principal(request)
+        if user and user["role"] in roles:
+            return True
+        if _machine_principal(request):
+            return True
+        # Configuring ONLY readonly_tokens (no worker tokens at all) is a valid,
+        # if unusual, deployment -- it must lock writes out entirely rather than
+        # silently falling back to open, which is why this checks `tokens`
+        # alone and never falls through to readonly_tokens.
+        return _env_token_ok(_supplied_token(request), tokens)
 
     def require_read_token(request: Request) -> None:
         if _auth_is_open():
@@ -401,12 +435,14 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
             raise HTTPException(status_code=401, detail="admin session required")
         if user["role"] != "admin":
             # The `role` column existed from the start and nothing read it, so
-            # every account was an admin whatever its row said. A viewer that
-            # could mint machine credentials would make the role decorative.
+            # every account was an admin whatever its row said. An operator that
+            # could mint machine credentials or create accounts would make the
+            # role decorative -- and a credential it issued would outlive the
+            # account that issued it.
             raise HTTPException(
                 status_code=403,
-                detail="this account is a viewer; managing accounts and machine "
-                       "credentials needs an admin")
+                detail=f"this account is a {user['role']}; managing accounts and "
+                       "machine credentials needs an admin")
         return user
 
     def _is_authenticated(request: Request) -> bool:
@@ -429,6 +465,7 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         return user
 
     WriteAuth = Depends(require_write_token)
+    PurgeAuth = Depends(require_purge)
     ReadAuth = Depends(require_read_token)
     AdminAuth = Depends(require_admin)
     SessionAuth = Depends(require_session)
@@ -646,6 +683,12 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
             # An env token still works; the UI says so, so the transition is
             # visible rather than a mystery when a pasted token keeps working.
             "env_tokens": bool(tokens or readonly_tokens),
+            # So the dashboard's role pickers offer exactly what this broker
+            # accepts. Restating the list in the page would let the two drift,
+            # and the drift shows up as a 400 at the moment someone is trying to
+            # add a colleague. The names are public -- they are in the docs and
+            # in every auth response -- so this leaks nothing.
+            "roles": list(db.ROLES),
         }
 
     @app.post("/v1/auth/setup")
@@ -864,8 +907,13 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
 
     @app.post("/v1/users")
     def create_account(body: UserIn, user=AdminAuth) -> dict[str, Any]:
-        """Add an operator. Admin-only, and never a way to escalate: the caller
-        is already an admin, so it grants nothing it does not itself hold."""
+        """Add an account. Admin-only, and never a way to escalate: the caller
+        is already an admin, so it grants nothing it does not itself hold.
+
+        Defaults to `viewer` rather than `operator`: the least privilege that is
+        still useful is the right default for the endpoint a script calls, and
+        the caller has to say `operator` or `admin` on purpose.
+        """
         if body.role not in db.ROLES:
             raise HTTPException(400, "role must be one of %s" % ", ".join(db.ROLES))
         try:
@@ -951,7 +999,7 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         return db.add_cases(conn, rows)
 
 
-    @app.delete("/v1/cases", dependencies=[WriteAuth])
+    @app.delete("/v1/cases", dependencies=[PurgeAuth])
     def purge_cases(expect: int | None = None, recipe: str | None = None,
                     state: str | None = None, dry_run: bool = True) -> dict[str, Any]:
         """Delete cases from the campaign, with their events and footprints.

@@ -1355,7 +1355,14 @@ def get_user(conn, username: str):
 # and read the campaign and nothing else, which is what "let someone watch
 # progress" needed all along: the read-only env token did it with a shared
 # secret nobody could attribute or revoke individually.
-ROLES = ("admin", "viewer")
+# `operator` is the middle of the three, and the one most accounts should be:
+# it reads and writes the CAMPAIGN -- add cases, lease, heartbeat, complete,
+# fail, release, report fleet -- and manages NOTHING. It cannot create or delete
+# accounts, cannot change anyone's role, cannot issue or revoke machine
+# credentials, and cannot purge a campaign. Before it existed, "let this person
+# run the campaign" and "let this person delete every account including yours"
+# were the same grant, because `admin` was the only role that could write.
+ROLES = ("admin", "operator", "viewer")
 
 
 @_locked

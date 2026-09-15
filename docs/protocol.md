@@ -95,6 +95,7 @@ Three kinds of principal, and every endpoint below is gated on one of them.
 | Principal | How it authenticates | Gets |
 | --- | --- | --- |
 | A logged-in **admin** | session cookie from `POST /v1/auth/login` | everything |
+| A logged-in **operator** | the same | runs the campaign: everything a worker can do, plus adding cases. `403` from `DELETE /v1/cases`, from the identity endpoints, and from `/v1/workers/tokens`. The role most accounts should have |
 | A logged-in **viewer** | the same | reads only; `403` from every mutating endpoint |
 | A **machine** | `Authorization: Bearer <per-machine token>` | read and write, but never the identity endpoints — a worker credential that could mint more worker credentials would defeat the point of issuing them per machine. It may only lease as **its own** worker id or one under it — `phoenix` covers `phoenix-<job>-<task>`, which is how a cluster gets one revocable credential — and gets `403` otherwise, so the Machines list is a fact rather than a claim |
 | A **shared env token** | `Authorization: Bearer <value>` | read and write (`CASEBROKER_WRITE_TOKENS`) or read only (`CASEBROKER_READ_TOKENS`). The older model; still honoured |
@@ -107,12 +108,12 @@ than silent. Creating the first account closes it.
 
 | Endpoint | Purpose |
 | --- | --- |
-| `GET /v1/auth/state` | What the login UI needs before anything is typed: `needs_setup`, `setup_token_required`, and who you already are. **Unauthenticated** — it leaks nothing beyond "has this broker been set up", which is obvious from whether logging in is possible |
+| `GET /v1/auth/state` | What the login UI needs before anything is typed: `needs_setup`, `setup_token_required`, the `roles` this broker accepts (so a picker cannot drift from the server), and who you already are. **Unauthenticated** — it leaks nothing beyond "has this broker been set up", which is obvious from whether logging in is possible |
 | `POST /v1/auth/setup` | Create the FIRST account, which is an admin. **Open only while there are none**, and `409` forever after. Requires `CASEBROKER_SETUP_TOKEN` if set, else one of `CASEBROKER_WRITE_TOKENS` if any are set, else nothing — see [First run](operations.md#first-run-from-nothing-to-a-working-broker). A read token is never enough |
 | `POST /v1/auth/login` | Username and password for a session cookie. Throttled: 10 failures per account per source address in 5 minutes, then `429` |
 | `POST /v1/auth/logout` | Delete the session server-side |
 | `GET /v1/users` | Every account, its role, and when it last logged in. **Admin** |
-| `POST /v1/users` | Add an operator. Defaults to `viewer` unless `role` says otherwise. **Admin** |
+| `POST /v1/users` | Add an account. Defaults to `viewer` unless `role` says otherwise, so a privilege is asked for rather than inherited by omission. **Admin** |
 | `POST /v1/users/{username}/role` | Promote or demote. Refuses to demote the last admin. **Admin** |
 | `POST /v1/users/{username}/password` | Change your own (needs `current_password`) or, as an admin, reset someone else's. Revokes every session that account holds |
 | `DELETE /v1/users/{username}` | Remove an account and its sessions. Refuses the last admin |
@@ -132,7 +133,7 @@ than silent. Creating the first account closes it.
 | `POST /v1/complete` | Report a result pointer + metrics |
 | `POST /v1/fail` | Report a failure; `retryable=false` quarantines immediately |
 | `POST /v1/release` | Graceful preemption — requeues and **refunds the attempt** |
-| `DELETE /v1/cases` | Purge a superseded campaign, with its events and footprints. `dry_run` defaults to **true**, so a half-remembered curl reports what it would have deleted instead of deleting it; `expect` is the real interlock — state the row count you believe you are removing, and a mismatch refuses |
+| `DELETE /v1/cases` | Purge a superseded campaign, with its events and footprints. **Admin session** (a write bearer token also passes, as it always has; an `operator` session does not). `dry_run` defaults to **true**, so a half-remembered curl reports what it would have deleted instead of deleting it; `expect` is the real interlock — state the row count you believe you are removing, and a mismatch refuses |
 | `GET /v1/status` | Counts by state and split, expired leases, 24 h throughput, ETA |
 | `GET /healthz` | Liveness, plus the running `version`, auth posture (`token` / `accounts` / `OPEN`), per-scope token counts and redacted DB target. **Unauthenticated** — see Deploying |
 | `GET /v1/whoami` | What the presented credential can do (`write` / `read` / `none`) **and which kind it is** — a session, a per-machine token, or a shared env token. **Unauthenticated** — it answers *about* a credential rather than gating on one |
