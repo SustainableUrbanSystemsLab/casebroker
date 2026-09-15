@@ -361,6 +361,21 @@ finished case for Syncthing / a master-side pull to collect. See
   30 GB home.
 
 ### Fixed
+- **Semantic versioning that nothing enforced had stopped happening.** Between
+  `v0.2.0` and `v0.3.0` four pull requests merged, the version moved once, and
+  nothing tagged it: the README's version badge read `v0.2.0` while the running
+  service's `/healthz` read `0.3.0`. Every version test passed the entire time,
+  because all seven of them compare the three *copies* of the number to each
+  other — and those agreed perfectly. The guard was on the wrong axis: internal
+  consistency, never release consistency. Merging a version bump now cuts the
+  tag and publishes the release itself, after running the suite and checking
+  `CHANGELOG.md` has a heading for that version; a merge that does not move the
+  version is a no-op. Tagging by hand is unchanged, mismatch check included.
+  The tag and the release are created in **one job** deliberately: a tag pushed
+  with `GITHUB_TOKEN` does not start another workflow run, so splitting them
+  would create tags that never became releases — the same bug, one layer
+  quieter. `tests/test_version.py` gains the check that was missing, that the
+  newest `CHANGELOG.md` release heading is the version the package declares.
 - **A revoked machine could never be given a new credential.** Revoke-then-
   reissue is the documented recovery for a box that has lost its token --
   `casebroker worker setup --rotate`, and Revoke then Issue in the dashboard --

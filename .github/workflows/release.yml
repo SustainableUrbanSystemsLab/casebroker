@@ -1,13 +1,33 @@
 name: release
 
-# Triggered by pushing a semver tag, e.g.:
-#   git tag v1.2.3 && git push origin v1.2.3
+# Two ways in, ending in the same place.
 #
-# Validates that the tag version matches pyproject.toml before creating the
-# GitHub Release, so the two sources can never drift.
+#   1. A MERGE TO MAIN that changes [project].version in pyproject.toml. The
+#      bump IS the release decision -- pyproject has always said "bumping it
+#      here and tagging v<version> is the whole release" -- so this does the
+#      half that gets forgotten. When a tag for that version already exists the
+#      run is a no-op, which is what every ordinary merge is.
+#
+#   2. A SEMVER TAG pushed by hand, exactly as before:
+#        git tag -a v1.2.3 -m v1.2.3 && git push origin v1.2.3
+#      The tag must agree with pyproject.toml or the run fails.
+#
+# Why this exists: between v0.2.0 and v0.3.0, FOUR pull requests merged, the
+# version moved once, and nothing ever tagged it -- so the README's tag badge
+# read v0.2.0 while the running service's /healthz read 0.3.0. Every version
+# test in the repo passed throughout, because they all compare the three COPIES
+# of the number to each other and those agreed perfectly. The check that was
+# missing was never "do the copies match" but "did the release actually happen".
+#
+# The tag is created and the release published in ONE job on purpose. A tag
+# pushed with GITHUB_TOKEN does not start another workflow run -- GitHub
+# suppresses that to prevent loops -- so a job that pushed the tag and left the
+# `on: push: tags:` trigger to publish would quietly create tags that never
+# became releases, which is a subtler version of the bug being fixed here.
 
 on:
   push:
+    branches: [main]
     tags:
       - "v[0-9]+.[0-9]+.[0-9]+"        # v1.2.3
       - "v[0-9]+.[0-9]+.[0-9]+-*"       # v1.2.3-rc.1, v1.2.3-beta.2, …
@@ -17,16 +37,16 @@ jobs:
     name: Validate & publish GitHub Release
     runs-on: ubuntu-latest
     permissions:
-      contents: write   # needed to create the release
+      contents: write   # create the tag, and the release
 
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0   # full history so we can diff commits since last tag
+          fetch-depth: 0   # full history AND tags; both are read below
 
       - uses: astral-sh/setup-uv@v3
 
-      # ── 1. Extract the version declared in pyproject.toml ──────────────────
+      # ── 1. The version this commit declares ───────────────────────────────
       - name: Read version from pyproject.toml
         id: pkg
         run: |
@@ -39,48 +59,90 @@ jobs:
           echo "version=$pkg_version" >> "$GITHUB_OUTPUT"
           echo "pyproject.toml version: $pkg_version"
 
-      # ── 2. Strip the leading 'v' from the git tag ──────────────────────────
-      - name: Parse git tag
-        id: tag
+      # ── 2. Is this run a no-op, a tag to cut, or a tag to validate? ───────
+      - name: Decide what to release
+        id: plan
         run: |
-          tag="${GITHUB_REF_NAME}"             # e.g. v1.2.3
-          semver="${tag#v}"                     # e.g. 1.2.3
-          echo "tag=$tag"   >> "$GITHUB_OUTPUT"
-          echo "semver=$semver" >> "$GITHUB_OUTPUT"
-          echo "git tag: $tag  →  semver: $semver"
-
-      # ── 3. Guard: tag must match pyproject.toml ────────────────────────────
-      - name: Verify tag matches pyproject.toml
-        run: |
-          tag_ver="${{ steps.tag.outputs.semver }}"
-          pkg_ver="${{ steps.pkg.outputs.version }}"
-          if [ "$tag_ver" != "$pkg_ver" ]; then
-            echo "::error::Tag version ($tag_ver) does not match pyproject.toml version ($pkg_ver)."
-            echo "::error::Update [project].version in pyproject.toml before tagging."
-            exit 1
+          pkg="${{ steps.pkg.outputs.version }}"
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            tag="$GITHUB_REF_NAME"
+            semver="${tag#v}"
+            # The original guard, unchanged: a tag that disagrees with
+            # pyproject.toml would publish a release describing code that does
+            # not report that version.
+            if [ "$semver" != "$pkg" ]; then
+              echo "::error::Tag version ($semver) does not match pyproject.toml ($pkg)."
+              echo "::error::Update [project].version in pyproject.toml before tagging."
+              exit 1
+            fi
+            echo "✓ tag $semver matches pyproject.toml"
+            echo "tag=$tag"          >> "$GITHUB_OUTPUT"
+            echo "create_tag=false"  >> "$GITHUB_OUTPUT"
+            echo "publish=true"      >> "$GITHUB_OUTPUT"
+          else
+            tag="v$pkg"
+            if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+              # The common case by far: a merge that changed code, not the
+              # version. Nothing to do, and saying so beats a silent skip.
+              echo "$tag already exists — nothing to release."
+              echo "publish=false"   >> "$GITHUB_OUTPUT"
+            else
+              echo "version is $pkg and $tag does not exist yet — cutting it"
+              echo "tag=$tag"        >> "$GITHUB_OUTPUT"
+              echo "create_tag=true" >> "$GITHUB_OUTPUT"
+              echo "publish=true"    >> "$GITHUB_OUTPUT"
+            fi
           fi
-          echo "✓ tag $tag_ver matches pyproject.toml $pkg_ver"
 
-      # ── 4. Run the full test suite before releasing ────────────────────────
+      # ── 3. Nothing is published until the suite passes ────────────────────
       - name: Run tests
+        if: steps.plan.outputs.publish == 'true'
         run: uv run --extra dev pytest tests/ --ignore=tests/test_db_postgres.py -q
 
-      # ── 5. Build changelog since the previous tag ──────────────────────────
+      # ── 4. …and until the changelog actually names this version ───────────
+      #     A bump nobody wrote up is a release nobody can read, and it is the
+      #     easy half to skip when the bump itself is automated.
+      - name: Check CHANGELOG names this version
+        if: steps.plan.outputs.publish == 'true'
+        run: |
+          pkg="${{ steps.pkg.outputs.version }}"
+          if ! grep -q "^## \[$pkg\]" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no '## [$pkg]' heading — move the"
+            echo "::error::Unreleased entries under it before releasing $pkg."
+            exit 1
+          fi
+          echo "✓ CHANGELOG.md documents $pkg"
+
+      # ── 5. Cut the tag, when this run is the one cutting it ───────────────
+      - name: Create the tag
+        if: steps.plan.outputs.create_tag == 'true'
+        run: |
+          tag="${{ steps.plan.outputs.tag }}"
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$tag" -m "$tag"
+          git push origin "$tag"
+          echo "pushed $tag at $GITHUB_SHA"
+
+      # ── 6. Notes, from the commits since the previous tag ─────────────────
       - name: Generate changelog
+        if: steps.plan.outputs.publish == 'true'
         id: changelog
         run: |
-          prev_tag=$(git tag --sort=-version:refname | grep -v "^${{ steps.tag.outputs.tag }}$" | head -1)
+          tag="${{ steps.plan.outputs.tag }}"
+          prev_tag=$(git tag --sort=-version:refname | grep -v "^${tag}$" | head -1)
           if [ -z "$prev_tag" ]; then
             range="HEAD"
             header="Initial release"
           else
-            range="${prev_tag}..${{ steps.tag.outputs.tag }}"
+            range="${prev_tag}..${tag}"
             header="Changes since ${prev_tag}"
           fi
 
           changelog=$(git log "$range" --pretty=format:"- %s (%h)" --no-merges)
 
-          # Write to file so the multiline content survives GITHUB_OUTPUT quoting
+          # Written to a file so the multiline content survives GITHUB_OUTPUT
+          # quoting.
           {
             echo "## $header"
             echo ""
@@ -89,17 +151,19 @@ jobs:
 
           cat /tmp/changelog.md
 
-      # ── 6. Create the GitHub Release ───────────────────────────────────────
+      # ── 7. Publish ────────────────────────────────────────────────────────
       - name: Create GitHub Release
+        if: steps.plan.outputs.publish == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          tag="${{ steps.plan.outputs.tag }}"
           is_prerelease=false
-          if echo "${{ steps.tag.outputs.tag }}" | grep -qE '-(alpha|beta|rc)'; then
+          if echo "$tag" | grep -qE '-(alpha|beta|rc)'; then
             is_prerelease=true
           fi
 
-          gh release create "${{ steps.tag.outputs.tag }}" \
-            --title "casebroker ${{ steps.tag.outputs.tag }}" \
+          gh release create "$tag" \
+            --title "casebroker $tag" \
             --notes-file /tmp/changelog.md \
             $([ "$is_prerelease" = "true" ] && echo "--prerelease")
