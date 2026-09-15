@@ -49,7 +49,9 @@ all three; only how it is launched and how MPI is spelled differ:
      `CASEBROKER_WORKER_ID` above. It is shown once, works immediately, and can
      be revoked for this one box without touching the rest of the fleet. A
      shared `CASEBROKER_WRITE_TOKENS` value still works too -- it is simply the
-     older model.
+     older model. A cluster gets **one credential per cluster**, named after
+     it: every SLURM task runs as `phoenix-<job>-<task>`, and a credential
+     covers every worker id under its own name.
    - `WIND_NP` -- ranks per case, **measured per machine** (below). Until
      measured, `min(24, cores/2)`.
 3. **Start it**: `./start_worker.sh` (Linux, WSL, git-bash) or
