@@ -36,6 +36,11 @@ DSN = os.environ.get("CASEBROKER_TEST_PG_DSN")
 pytestmark = pytest.mark.skipif(
     not DSN, reason="set CASEBROKER_TEST_PG_DSN to a real Postgres URL to run these")
 
+# Turns an unusable credential back into a hard failure -- see preflight below.
+# Off by default because these tests point at a THIRD-PARTY database whose
+# availability is not a statement about the commit under test.
+REQUIRED = os.environ.get("CASEBROKER_TEST_PG_REQUIRED")
+
 RUN = uuid.uuid4().hex[:8]
 
 # A table name unique to this run. The column reconciler has to be exercised
@@ -75,10 +80,28 @@ def preflight():
     Render deploy inside that same window. So a bad credential is established
     once, up front, and the run stops there with the reason.
 
-    Deliberately an exit, not a skip: a green job that quietly tested nothing is
-    how a stale deploy went unnoticed for three pushes (see deploy-smoke-test in
-    the workflow). Where the connection works -- the throwaway container, a
-    correct secret -- this is one connection handed to the pool, nothing more.
+    A credential that cannot connect SKIPS this module rather than failing it,
+    which is the same answer `pytestmark` above already gives when no DSN is
+    configured at all. Splitting those two apart -- green when the secret is
+    absent, red when it is stale -- draws the line at "is a secret set" when the
+    only question worth asking is "did this coverage run". Both cases ran
+    nothing; neither is a statement about the commit, and a red X that means
+    "somebody must rotate a secret" trains people to ignore red Xs on a branch
+    that gates deploys.
+
+    What it must never be is SILENT, which is the real failure mode and the one
+    `skipif` had: coverage that quietly stops running is coverage you no longer
+    have. So the reason is published two ways that survive: pytest's short
+    summary (the workflow passes -rs, without which -v prints a bare "SKIPPED"
+    and nothing else), and GitHub's step summary, which renders on the run's own
+    page. Note it is written to $GITHUB_STEP_SUMMARY rather than printed: pytest
+    captures stdout inside a fixture and discards it for a skip, so a
+    ``print("::warning::...")`` here reaches nobody -- measured, not assumed.
+    Set CASEBROKER_TEST_PG_REQUIRED=1 to make an unusable credential fail the
+    job instead.
+
+    A connection that SUCCEEDS changes nothing: the tests run exactly as before,
+    and a real failure among them is still a real failure.
     """
     if not DSN:
         return
@@ -97,8 +120,20 @@ def preflight():
                    "nothing here can pass until that lifts, and trying only prolongs it.")
         else:
             why = "the database is unreachable from here."
-        pytest.exit(f"test database refused the pre-flight connection: {reason}\n{why}",
-                    returncode=1)
+        note = f"Postgres tests did not run: {why} ({reason})"
+        if REQUIRED:
+            pytest.exit(f"test database refused the pre-flight connection: {reason}\n{why}",
+                        returncode=1)
+        summary = os.environ.get("GITHUB_STEP_SUMMARY")
+        if summary:
+            # Appended, not printed: see the docstring. Best effort -- a skip
+            # that cannot write its note is still a skip, not an error.
+            try:
+                with open(summary, "a", encoding="utf-8") as fh:
+                    fh.write(f"### :warning: Postgres coverage skipped\n\n{note}\n\n")
+            except OSError:
+                pass
+        pytest.skip(note)
     release_conn(conn)
 
 
@@ -265,6 +300,21 @@ def test_worker_token_issue_authenticate_and_revoke_over_a_real_connection():
     # Revocation must be visible immediately on the SAME connection it was
     # written from -- there is no cache in front of this table to go stale.
     assert db.worker_token_owner(conn, token_hash) is None
+
+    # Re-issuing under the same worker id -- the recovery path for a box that
+    # lost its credential. Worth proving against a REAL engine rather than only
+    # SQLite: create_worker_token now reclaims a revoked row by UPDATE and falls
+    # through to INSERT only when that matched nothing, and `rowcount` after an
+    # UPDATE is exactly the kind of thing the two drivers need not agree on.
+    fresh_token = auth.new_token()
+    fresh_hash = auth.hash_token(fresh_token)
+    db.create_worker_token(conn, name, fresh_hash, created_by=prefix("admin"))
+    back = db.worker_token_owner(conn, fresh_hash)
+    assert back is not None and back["name"] == name
+    assert db.worker_token_owner(conn, token_hash) is None, \
+        "the revoked credential must not come back to life with the name"
+    rows = [t for t in db.list_worker_tokens(conn) if t["name"] == name]
+    assert len(rows) == 1 and rows[0]["revoked_at"] is None
 
 
 def test_connects_and_reports_a_real_engine():
