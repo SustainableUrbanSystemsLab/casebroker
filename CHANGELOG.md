@@ -17,6 +17,34 @@ finished case for Syncthing / a master-side pull to collect. See
 `docs/fleet.md`. MINOR: every protocol change is an optional addition.
 
 ### Added
+- **An `operator` role, and a Users tab to hand it out.** `admin` was the only
+  role that could write anything, so "let this person run the campaign" and
+  "let this person delete every account including yours" were the same grant --
+  which is how a deployment ends up with everyone an admin. An operator adds
+  cases, leases, heartbeats, completes, fails, releases and reports fleet
+  counts, and manages nothing: no accounts, no machine credentials, and no
+  purging. It is the role most accounts should have.
+
+  Two things stay with `admin` deliberately. **Purging** (`DELETE /v1/cases`)
+  takes the cases, their events and their footprints, and is the one campaign
+  operation with nothing behind it. **Machine credentials** can write the
+  campaign and outlive the account that issued them, so an operator who could
+  mint one would be an admin with extra steps -- revoking the person would not
+  revoke what they left behind. A write BEARER token can still purge, as it
+  always could: the documented `curl` depends on it, and narrowing it would not
+  make anything safer, since whoever holds the token can simply use it. What
+  changed is that an operator session is not enough.
+
+  Handing out a role no longer needs shell access to a box holding the DSN:
+  **Settings ▸ Users** lists every account with its role and last login, adds
+  one, changes a role (effective on that account's next request, with no
+  re-login), resets a password and deletes. `GET /v1/auth/state` now reports
+  the `roles` this broker accepts, so the picker is built from the server
+  rather than from a list in the page that could drift -- a drift that would
+  surface as a `400` at the moment someone is adding a colleague. Rows are
+  wired by data attribute rather than inline `onclick`, since a username is
+  attacker-chosen text. `casebroker account create --role operator` reads the
+  same list, so the CLI cannot fall behind either.
 - **Settings, with the first-run wizard behind it.** The dashboard opened on a
   Connection panel -- a form you had already filled in, a bearer-token box a
   signed-in operator has no use for, and a bar naming the live database host on
