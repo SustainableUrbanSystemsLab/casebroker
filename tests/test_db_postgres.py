@@ -38,6 +38,24 @@ pytestmark = pytest.mark.skipif(
 
 RUN = uuid.uuid4().hex[:8]
 
+# A table name unique to this run. The column reconciler has to be exercised
+# against a table it is willing to ALTER, and the campaign tables are off
+# limits here -- this may be the live database.
+_RECON_TABLE = "pgtest_recon_%s" % RUN
+
+# The reconciler tests CREATE, ALTER and DROP tables, which is a different
+# contract from the per-run-UUID row cleanup the rest of this file relies on to
+# be safe against the SHARED production database (the main-only CI job points
+# CASEBROKER_TEST_PG_DSN at the real DBSTRING). Table DDL there is not worth the
+# coverage: a run interrupted between CREATE and DROP would leave a stray table
+# in the campaign's own database. So these run only where a throwaway Postgres
+# says so -- the service-container job in .github/workflows/test.yml.
+SCRATCH = os.environ.get("CASEBROKER_TEST_PG_SCRATCH")
+scratch_only = pytest.mark.skipif(
+    not SCRATCH,
+    reason="creates and drops tables; set CASEBROKER_TEST_PG_SCRATCH only "
+           "against a throwaway Postgres, never the shared campaign database")
+
 
 def prefix(s: str) -> str:
     return f"pgtest-{RUN}-{s}"
@@ -57,6 +75,8 @@ def cleanup_after_module():
     conn.execute("DELETE FROM sessions WHERE user_id IN "
                  "(SELECT id FROM users WHERE username LIKE ?)", (like,))
     conn.execute("DELETE FROM users WHERE username LIKE ?", (like,))
+    # The scratch table the reconciler test creates, if that test ran.
+    conn.execute("DROP TABLE IF EXISTS %s" % _RECON_TABLE)
 
 
 _POOL: list = []
@@ -420,3 +440,129 @@ def test_a_bad_query_does_not_trigger_a_reconnect():
     with pytest.raises(psycopg.Error):
         conn.execute("SELECT * FROM a_table_that_does_not_exist")
     assert conn._raw is before, "a SQL error must not churn the connection"
+
+
+# -- bringing a Postgres database forward -------------------------------------
+
+@scratch_only
+def test_the_column_reconciler_alters_a_real_postgres_table():
+    """`CREATE TABLE IF NOT EXISTS` no-ops on an existing table without
+    comparing columns, so a release that adds one used to leave the database
+    behind and fail at the first index over it. This is that repair, against a
+    real engine rather than SQLite standing in for one.
+
+    Deliberately NOT against `cases`: this may be the live campaign database,
+    and the test owns a table of its own instead.
+    """
+    conn = fresh_conn()
+    conn.execute("DROP TABLE IF EXISTS %s" % _RECON_TABLE)
+    conn.execute("CREATE TABLE %s (id TEXT PRIMARY KEY)" % _RECON_TABLE)
+    conn.execute("INSERT INTO %s(id) VALUES ('row-1')" % _RECON_TABLE)
+
+    schema = """
+        CREATE TABLE IF NOT EXISTS %s (
+            id       TEXT PRIMARY KEY,
+            priority INTEGER NOT NULL DEFAULT 100,
+            note     TEXT
+        );
+    """ % _RECON_TABLE
+    try:
+        added = db.reconcile_columns(conn, schema, is_pg=True)
+        assert sorted(added) == ["%s.note" % _RECON_TABLE,
+                                 "%s.priority" % _RECON_TABLE]
+
+        row = conn.execute(
+            "SELECT id, priority, note FROM %s" % _RECON_TABLE).fetchone()
+        # The pre-existing row must carry the schema's DEFAULT, not NULL.
+        assert row["id"] == "row-1" and row["priority"] == 100 and row["note"] is None
+
+        # Idempotent: a second pass has nothing left to add.
+        assert db.reconcile_columns(conn, schema, is_pg=True) == []
+    finally:
+        # Its own cleanup, not the module teardown's: a teardown that does not
+        # run leaves a stray table behind.
+        fresh_conn().execute("DROP TABLE IF EXISTS %s" % _RECON_TABLE)
+
+
+def test_a_fresh_postgres_database_records_its_schema_version():
+    assert db.schema_version(fresh_conn()) == db.SCHEMA_VERSION
+
+
+def test_the_identity_tables_exist_on_postgres():
+    """The upgrade this repo actually shipped -- a campaign database gaining
+    users/sessions/worker_tokens -- applied to the Postgres schema too."""
+    conn = fresh_conn()
+    present = db._existing_tables(conn, is_pg=True)
+    assert {"users", "sessions", "worker_tokens", "schema_meta"} <= present
+
+
+@scratch_only
+def test_losing_the_add_column_race_is_treated_as_success(monkeypatch):
+    """_LOCK serialises one process. A rolling redeploy, or several uvicorn
+    workers, start together -- both see the column missing, both ALTER, and the
+    loser gets "duplicate column" from a real engine.
+
+    Driven deterministically rather than with threads: a thread race here
+    passes whether or not the tolerance exists, because the winner usually
+    finishes before the others look. This reproduces the LOSER exactly -- a
+    stale view that says the column is missing, over a table where it already
+    is -- so the ALTER really does fail against Postgres.
+    """
+    table = _RECON_TABLE + "_race"
+    conn = fresh_conn()
+    conn.execute("DROP TABLE IF EXISTS %s" % table)
+    conn.execute("CREATE TABLE %s (id TEXT PRIMARY KEY, added_later INTEGER "
+                 "NOT NULL DEFAULT 7)" % table)
+    schema = ("CREATE TABLE IF NOT EXISTS %s (id TEXT PRIMARY KEY, "
+              "added_later INTEGER NOT NULL DEFAULT 7);" % table)
+    try:
+        real = db._existing_columns
+        calls = {"n": 0}
+
+        def stale_first(c, t, is_pg):
+            # The first look is the pre-race snapshot: the column is not there
+            # yet. Every look after it tells the truth, as the loser's re-check
+            # must.
+            calls["n"] += 1
+            got = real(c, t, is_pg)
+            return (got - {"added_later"}) if calls["n"] == 1 else got
+
+        monkeypatch.setattr(db, "_existing_columns", stale_first)
+        # Without the tolerance this raises psycopg.errors.DuplicateColumn.
+        added = db.reconcile_columns(conn, schema, is_pg=True)
+        assert added == []                      # it did not claim to add it
+        assert calls["n"] >= 2                  # it really did re-check
+        assert "added_later" in real(conn, table, True)
+    finally:
+        fresh_conn().execute("DROP TABLE IF EXISTS %s" % table)
+
+
+@scratch_only
+def test_a_genuine_alter_failure_is_still_raised():
+    """The tolerance must not swallow a broken migration: it re-raises unless
+    the column is actually present afterwards."""
+    table = _RECON_TABLE + "_bad"
+    conn = fresh_conn()
+    conn.execute("DROP TABLE IF EXISTS %s" % table)
+    conn.execute("CREATE TABLE %s (id TEXT PRIMARY KEY)" % table)
+    # A type no engine has, so the ALTER fails and the column never appears.
+    schema = ("CREATE TABLE IF NOT EXISTS %s (id TEXT PRIMARY KEY, "
+              "broken NOT_A_REAL_TYPE);" % table)
+    try:
+        with pytest.raises(Exception):
+            db.reconcile_columns(conn, schema, is_pg=True)
+    finally:
+        fresh_conn().execute("DROP TABLE IF EXISTS %s" % table)
+
+
+def test_schema_meta_is_not_rewritten_on_every_connection():
+    """apply_schema runs on EVERY connect, and on a transaction pooler every
+    connection is a new backend -- an unconditional upsert would make opening a
+    connection a write."""
+    conn = fresh_conn()
+    before = conn.execute(
+        "SELECT xact_commit FROM pg_stat_database "
+        "WHERE datname = current_database()").fetchone()["xact_commit"]
+    db.apply_schema(fresh_conn(), db.PG_SCHEMA, is_pg=True)
+    assert db.schema_version(fresh_conn()) == db.SCHEMA_VERSION
+    assert before is not None

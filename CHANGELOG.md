@@ -15,6 +15,145 @@ finished case for Syncthing / a master-side pull to collect. See
 `docs/fleet.md`. MINOR: every protocol change is an optional addition.
 
 ### Added
+- **A contract E3D can implement against** -- `docs/e3d-contract.md`. When
+  `$E3D_TRACE_FILE` is set, the solver appends one JSON record per outer
+  iteration; the runner tails the last line for the heartbeat and archives the
+  whole file beside the result, so one file serves both readers and there is no
+  second live-progress file to keep in sync. Undecimated on purpose: ~290 KB per
+  2,000 iterations is noise beside the fields in the same archive, you can
+  always downsample a full trace but never upsample a decimated one, and
+  decimation hides exactly the oscillation worth finding later. A solver that
+  writes no trace, or a truncated final record from a crash, falls back to
+  parsing the log exactly as before -- that path is not deprecated.
+  Deliberately NOT over HTTP: E3D never reads `CASEBROKER_TOKEN`, and not
+  reading it is the guarantee that a misbehaving solver cannot touch the
+  campaign.
+- Heartbeats no longer write an event row per beat. The worker beats every 5
+  minutes for the whole multi-hour solve and reports "alive" until the runner
+  has a progress line, so a six-hour case left ~72 identical rows saying nothing
+  the one before it did not -- millions across a 30,000-case campaign, kept for
+  its lifetime. An identical detail now extends the lease without recording
+  anything, via the existing `(case_id, id)` index.
+- **`casebroker worker setup`** -- the one command to run ON a new worker box.
+  It asks for your broker login, mints a credential for THAT machine, writes it
+  into `machine.env` (preserving `WIND_NP` and the runtime paths already there),
+  and drops the admin session again, so nothing long-lived is left on a shared
+  lab machine. The worker id defaults to the hostname. Previously every machine
+  cost an admin a browser round-trip -- sign in, Machines, Issue token, copy it
+  out, carry it over -- which does not scale past a handful of boxes and is the
+  step people skip, falling back to pasting the shared token everywhere and
+  losing the per-machine attribution entirely.
+- **A machine token may only lease as its own worker id.** The dashboard has
+  always said the token name "must match the machine's CASEBROKER_WORKER_ID" and
+  nothing enforced it, so every row in the Machines list and the workers table
+  was a claim rather than a fact -- which is exactly the attribution that
+  issuing one credential per box exists to provide. `/v1/lease` is the only
+  place identity is asserted (heartbeat, complete, fail and release are keyed by
+  `lease_id`, and the lease already records its holder), so the check lives
+  there. Shared environment tokens are deliberately unaffected: they are shared
+  by design, so there is no machine identity for a worker id to contradict, and
+  enforcing there would strand the fleet the live campaign runs on.
+- The product is the **E3D Simulation Broker** (was "Wind Simulation Broker").
+- **Onboarding that a new operator can actually follow.** A complete first-run
+  path -- database, admin account, per-machine credential -- and the tooling and
+  documentation for each step. `casebroker account create|list|passwd|role|delete`
+  manages the human accounts straight against the database, so a headless
+  deployment can be bootstrapped and a forgotten password recovered without
+  hand-writing an scrypt hash into production; `casebroker init-db` applies the
+  schema without starting the service. Over HTTP the same is
+  `GET|POST /v1/users`, `POST /v1/users/{username}/{role,password}` and
+  `DELETE /v1/users/{username}`. Previously `/v1/auth/setup` was the ONLY way an
+  account could come into being, it closed permanently after the first success,
+  and nothing could add a second operator or change a password.
+- **`role` now authorises something.** The column was stored, returned by every
+  auth response, and read by nothing, so every account was an admin whatever its
+  row said. `admin` and `viewer` are now enforced: a viewer reads the campaign
+  and gets `403` from every mutating endpoint, from `/v1/users` and from
+  `/v1/workers/tokens`. That is the attributable, individually revocable version
+  of what a shared read-only env token was doing. The last admin cannot be
+  deleted or demoted -- there is no recovery endpoint, so that would leave a
+  deployment permanently unmanageable.
+- **Setup no longer hands the admin account to a stranger.** `/v1/auth/setup`
+  cannot require a login -- there is nobody to log in as yet -- and it used to
+  be open to ANY anonymous caller whenever no account existed. That is exactly
+  the shape production was in: `CASEBROKER_WRITE_TOKENS` set, no account
+  created. Verified end to end before the fix -- an anonymous POST created the
+  admin and then minted a worker token. Setup now asks whether the deployment
+  already holds a credential identifying its operator, and demands it:
+  `CASEBROKER_SETUP_TOKEN` if set, else one of `CASEBROKER_WRITE_TOKENS` if any
+  are, else nothing (a laptop, or a host behind a firewall). A READ token is
+  never enough -- a credential that cannot change the campaign must not create
+  the account that can.
+- **`CASEBROKER_SETUP_TOKEN`**, optional. `/v1/auth/setup` cannot require a
+  login, so on a broker reachable before anyone has set it up, the first
+  stranger to find the form became its permanent sole admin. Setting this makes
+  setup demand a secret the operator already holds; the dashboard shows a field
+  for it when `GET /v1/auth/state` reports `setup_token_required`.
+- **A schema that upgrades itself.** Every `CREATE TABLE` is `IF NOT EXISTS`,
+  which upgraded cleanly whenever a release added a TABLE -- the only kind of
+  schema change this repo had ever made -- and did nothing whatsoever for a new
+  COLUMN: the statement no-ops on an existing table without comparing columns,
+  so the column never appeared and the first index over it failed at connect
+  time with `no such column: priority`, which reads like a corrupt database
+  rather than one release behind. The schema is now applied in three passes --
+  create tables, `ALTER TABLE ADD COLUMN` whatever is missing, then build the
+  indexes -- and records a version in a new `schema_meta` table. It only ever
+  adds; a column declared `NOT NULL` with no `DEFAULT` cannot be added to an
+  existing table on any engine, so startup refuses with a message naming the
+  column instead of failing later and obscurely.
+- Login throttling: 10 failures per account per source address in 5 minutes,
+  then `429`. The slot is reserved BEFORE the password is checked and released
+  on success -- counting the failure afterwards bounds nothing under
+  concurrency, since verify_password is ~100 ms of scrypt, so a whole wave of
+  simultaneous attempts passes while the count is still zero. Measured at 15
+  attempts admitted against a limit of 10 before that change. Expired sessions
+  are swept on login rather than accumulating, and the failure map is capped so
+  unauthenticated callers cannot grow it without bound.
+- compose forwards the DEPRECATED token names again. Dropping them while making
+  the canonical ones optional was a fail-OPEN: there is no `env_file:` on the
+  broker service, so a variable reaches the container only by being named, and
+  every deployment predating the rename has `CASEBROKER_TOKENS` in its `.env`
+  because it is the only name the old compose accepted. `docker compose up -d`
+  after a pull would have restarted the broker with no tokens at all -- auth
+  off, on a public TLS endpoint, with the live workers carrying on as if
+  nothing had changed. The old `:?` at least refused to start; the new `:-`
+  started wide open.
+- `/healthz` no longer answers 500 when the database is unreachable. The account
+  lookup added for the new posture ran unguarded in the handler, while every
+  other database touch there goes through the cached probe that deliberately
+  fails soft. That defeated the one distinction the endpoint exists to draw:
+  the Dockerfile HEALTHCHECK reads a 500 as unhealthy and would have
+  restart-looped a broker that was itself fine, and `casebroker health` reports
+  an HTTP error as "could not reach", misdiagnosing a database outage as an
+  unreachable service. The lookup is now folded into the same 30-second probe
+  (so it is also no longer a query per unauthenticated request), reports
+  `accounts: null` and `auth: "unknown"` when it cannot tell, and the cache is
+  dropped the moment an account is created or deleted -- otherwise the first
+  run would report "OPEN" for another 30 seconds, which is exactly when the
+  instructions tell an operator to check it.
+- `casebroker account` and `init-db` find a SQLite `CASEBROKER_DB`. Discovery
+  matched only `postgres://`, so the usage the docs give without `--db` refused
+  to run against the engine every local deployment uses.
+- The column reconciler tolerates losing a race. `_LOCK` serialises one
+  process; a rolling redeploy or several uvicorn workers start together, both
+  see the column missing, both ALTER, and the loser gets "duplicate column".
+  Losing that race is a success -- the column is there -- so it is swallowed
+  only when a re-check confirms the column now exists, and re-raised otherwise
+  so a genuinely broken migration still fails loudly. Bringing a database
+  forward is also logged rather than silent, and `schema_meta` is written only
+  when the version actually changed: apply_schema runs on every connection, and
+  on a transaction pooler every connection is a new backend, so an
+  unconditional upsert made opening a connection a write.
+- A viewer's session cookie no longer vetoes a stronger credential on the same
+  request. It rides along on every request from that browser, and rejecting on
+  sight refused requests that also carried a perfectly good write token; the
+  viewer is now checked last, after the machine and environment credentials.
+- A non-ASCII credential no longer 500s. `hmac.compare_digest` refuses a
+  non-ASCII `str` with TypeError, and the bearer header is attacker-chosen --
+  the server decodes it as latin-1, so any byte becomes a character. A single
+  `\xe9` in an Authorization header returned 500 from `/healthz`, which needs no
+  credential to reach and which the uptime badge polls, and from `/v1/whoami`
+  and `/v1/auth/setup`.
 - **Accounts for people, per-machine tokens for machines.** First run serves a
   setup form (the one endpoint that cannot require auth, so it closes itself
   after the first account); thereafter password login and a server-side
@@ -27,7 +166,11 @@ finished case for Syncthing / a master-side pull to collect. See
   tokens keep working through the transition. New: `GET /v1/auth/state`,
   `POST /v1/auth/{setup,login,logout}`, `GET|POST /v1/workers/tokens`,
   `DELETE /v1/workers/tokens/{name}`.
-- `casebroker doctor`: checks the database, the broker and the token in one go
+- `casebroker doctor`: checks the identity tables (`users`, `sessions`,
+  `worker_tokens`) and whether an admin account exists, and reports the schema
+  version. It previously counted only the five campaign tables, so it reported
+  "schema present" against a database with no auth layer at all. It also
+  checks the database, the broker and the token in one go
   and names whichever is broken. It DISCOVERS every connection string it can
   find (`$CASEBROKER_DB`, `$DBSTRING`, `.env`, `DBSTRING.md`) and tests each
   rather than trusting the first, because the failure it was written for was
@@ -83,6 +226,32 @@ finished case for Syncthing / a master-side pull to collect. See
   pulls archives from PACE over SSH), `docs/fleet.md`.
 
 ### Changed
+- **The dashboard wears the RhinoPackages design language.** Its neutrals
+  replace the GitHub Primer ones wholesale -- Tailwind gray 50/100/200/500/600/
+  900 on white in the light theme, and in the dark the four zinc values that
+  project's `tailwind.config.ts` overrides Tailwind's own zinc with (950
+  `#0d1117`, 900 `#161b22`, 800 `#30363d`, 700 `#484f58`), which is a full step
+  harder than the "Dark Dimmed" it replaces. Its brand pink arrives as a
+  separate `--brand` family wired ONLY to identity and interaction: the logo
+  mark's gradient, the primary button, the focus ring. It is deliberately not
+  wired to `--accent`/`--primary`/`--warn`/`--bad`, because those four ARE the
+  campaign's state scale -- they read green / blue / amber / red across the stat
+  cards, the progress bar and every badge, and recolouring a "done" case to
+  brand pink would make the dashboard prettier and unreadable at a glance.
+  Every pairing was measured rather than eyeballed: brand-600 is the source's
+  text colour but lands at 4.40:1 on this page's gray-50 canvas and 3.91:1 on
+  its own brand-100 chip, so light uses brand-700, and dark lifts muted text a
+  step to zinc-300/400 because zinc-500 on zinc-900 is 3.58:1. One deliberate
+  deviation: `--border` stays at zinc-700 (2.09:1), faithful to the source, for
+  dividers that carry no identification duty, while `--btn-border` is lifted to
+  zinc-500 (3.58:1) so the edges of interactive controls clear WCAG 1.4.11.
+- **The KPI row fits on one line by default.** The rule said eight columns; the
+  row renders seven (total, done, leased, pending, quarantined, remaining, and
+  the SLURM queue), so there was a permanently empty column making every card
+  narrower than it needed to be, and the breakpoint that applied it sat at
+  1480px -- above the 1280 and 1366 laptops most of this is read on, which left
+  the set wrapping into two rows on the machines where reading the campaign's
+  state as a single set matters most. Seven columns now, from 1240px up.
 - **`casebroker doctor` now looks in sibling checkouts** (`../*/.env`), not
   only its own working directory. The credential that was actually live sat
   in a neighbouring repo, so doctor reported "no connection string found"
@@ -128,6 +297,33 @@ finished case for Syncthing / a master-side pull to collect. See
   30 GB home.
 
 ### Fixed
+- **`/healthz` and `/v1/whoami` no longer report a secured broker as OPEN.**
+  Both judged the auth posture from the environment token buckets ALONE, never
+  asking whether an account existed -- so a deployment secured entirely by
+  accounts (the whole from-scratch path) reported `"auth": "OPEN"`, and
+  `whoami` returned `scope: write` for any string whatsoever. Both documented
+  deploy gates therefore said the exact opposite of the truth: `casebroker
+  health` exited non-zero on a correctly locked-down broker. `/healthz` now
+  reports a third posture, `accounts`.
+- **`whoami` recognises per-machine tokens and sessions**, which it never did.
+  This broke the documented worker onboarding end to end: `bootstrap_worker.ps1`
+  reaches `setup_windows.ps1`, which runs `casebroker token check --expect
+  write`, which asks `whoami` -- and a dashboard-issued machine token, the
+  credential the docs tell you to use, came back `scope: none`, so the script
+  aborted. `token check` now also names which kind of credential answered.
+- **`docker compose up -d` after `cp .env.example .env` failed immediately.**
+  `compose.yaml` hard-required the DEPRECATED `CASEBROKER_TOKENS` while
+  `.env.example` defined `CASEBROKER_WRITE_TOKENS`, so the documented sequence
+  died before the broker started. No token is required to start at all now --
+  the broker is secured by an account.
+- **Documentation caught up with the accounts work.** `docs/dashboard.md` still
+  told operators to "paste in the broker's URL and a write token value", which
+  had not been true since the dashboard grew a login; `docs/operations.md` never
+  mentioned accounts and its deploy checklist stated an auth rule the code no
+  longer followed; `docs/protocol.md` listed none of the identity endpoints;
+  `README.md`'s quickstart still generated a shared token inside a command
+  substitution the operator never saw. There is now a "First run" section that
+  goes from an empty database to a logged-in admin issuing machine credentials.
 - `/healthz` no longer hands the DSN summary to anonymous callers. Masking the
   password was necessary but not sufficient -- what remained still named the
   exact database instance, its host, port and username, on an endpoint that by

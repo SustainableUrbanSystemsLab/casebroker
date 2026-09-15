@@ -13,7 +13,7 @@ submodule.
 
 Production is Supabase Postgres behind Render. **SQLite is the test engine, not a
 smaller production option** — it needs no network and no credentials, which is
-why 103 tests run in seconds with zero external dependencies.
+why the suite runs in seconds with zero external dependencies.
 
 ## Before you change anything
 

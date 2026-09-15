@@ -21,6 +21,7 @@ Two things here are deliberate:
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 from typing import Any
@@ -62,16 +63,69 @@ def parse_log(text: str) -> dict[str, Any]:
     return out
 
 
+def last_line(path: str) -> str:
+    """The final line of a file, read from the END rather than by scanning it.
+
+    The trace grows for the whole solve -- hours, one record per outer
+    iteration -- and this runs on a 60-second timer, so reading it whole would
+    make the cost of reporting progress grow with the progress reported.
+    """
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            window = min(size, 8192)
+            f.seek(size - window)
+            tail = f.read(window).decode("utf-8", "ignore")
+    except OSError:
+        return ""
+    lines = [ln for ln in tail.splitlines() if ln.strip()]
+    return lines[-1] if lines else ""
+
+
+def parse_trace_line(line: str) -> dict[str, Any]:
+    """One record of the solver's OWN trace, in the shape parse_log returns.
+
+    E3D reports its residuals directly (see docs/e3d-contract.md) rather than
+    leaving them to be recovered from its log with a regex. Same output shape,
+    so every consumer below is indifferent to which source it came from -- and
+    an older E3D that writes no trace still works through parse_log.
+    """
+    try:
+        rec = json.loads(line)
+    except (ValueError, TypeError):
+        return {}
+    if not isinstance(rec, dict) or "iteration" not in rec:
+        return {}
+    residuals = rec.get("residuals") or {}
+    out: dict[str, Any] = {"iteration": rec["iteration"],
+                           "converged": bool(rec.get("converged"))}
+    for f in ("p", "Ux"):
+        value = residuals.get(f)
+        if isinstance(value, (int, float)):
+            out[f] = float(value)
+    return out
+
+
 def summarize(log_path: str, direction: str | None = None,
-              wall_seconds: float | None = None) -> str:
+              wall_seconds: float | None = None,
+              trace_path: str | None = None) -> str:
     """The single line the heartbeat carries, e.g.
     ``case_270 iter 412 p=3.2e-05 Ux=8.1e-07 (2.3 h)``; empty string if there
     is nothing to say yet."""
-    try:
-        with open(log_path, errors="ignore") as f:
-            info = parse_log(f.read())
-    except OSError:
-        return ""
+    # The solver's own trace when there is one, the log otherwise. Preferring
+    # it is not just tidier: parse_log has to infer the outer-iteration boundary
+    # from the interleaved corrector stages, and that inference is exactly what
+    # misread a monotone descent as an oscillation once already.
+    info: dict[str, Any] = {}
+    if trace_path:
+        info = parse_trace_line(last_line(trace_path))
+    if not info:
+        try:
+            with open(log_path, errors="ignore") as f:
+                info = parse_log(f.read())
+        except OSError:
+            return ""
     if not info:
         return ""
     parts = []
@@ -103,8 +157,9 @@ def main(argv: list[str]) -> int:
             print("{}")
         return 0
     direction = argv[1] if len(argv) > 1 else None
+    trace = os.environ.get("E3D_TRACE_FILE") or None
     wall = float(argv[2]) if len(argv) > 2 else None
-    print(summarize(log, direction, wall))
+    print(summarize(log, direction, wall, trace))
     return 0
 
 

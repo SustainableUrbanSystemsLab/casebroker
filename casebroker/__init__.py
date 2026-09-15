@@ -1,4 +1,4 @@
-"""Wind Simulation Broker -- central scheduling service for the CFD campaign.
+"""E3D Simulation Broker -- central scheduling service for the CFD campaign.
 
 **The version is declared in ``pyproject.toml`` and nowhere else.** Everything
 that reports it -- the FastAPI app's OpenAPI metadata, ``/healthz``, the
