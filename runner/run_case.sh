@@ -233,7 +233,14 @@ start_progress_writer() {
             dir=$(basename "$(dirname "$latest")")
             ndone=$(grep -ls "SIMPLE solution converged" "$SCRATCH/$CASE_ID"/case_*/12.log 2>/dev/null | wc -l | tr -d ' ')
             ntot=$(ls -d "$SCRATCH/$CASE_ID"/case_* 2>/dev/null | wc -l | tr -d ' ')
-            line=$("$PY" "$SCRIPT_DIR/lib/progress.py" "$latest" "$dir [$ndone/$ntot dirs]" "$(( $(date +%s) - t0 ))" 2>/dev/null)
+            # progress.py reads $E3D_TRACE_FILE when it names a readable
+            # trace and falls back to parsing $latest otherwise. The assignment
+            # goes INSIDE the substitution, as an environment prefix on $PY:
+            # `VAR=x line=$(...)` would be two assignments rather than a command
+            # with an environment, and the subshell here need not have inherited
+            # an exported E3D_TRACE_FILE -- it forks before the solve loop sets one.
+            trace="$(dirname "$latest")/e3d-trace.jsonl"
+            line=$(E3D_TRACE_FILE="$trace" "$PY" "$SCRIPT_DIR/lib/progress.py" "$latest" "$dir [$ndone/$ntot dirs]" "$(( $(date +%s) - t0 ))" 2>/dev/null)
             [ -n "$line" ] || continue
             printf '%s\n' "$line" > "$PROGRESS_FILE.tmp" && mv -f "$PROGRESS_FILE.tmp" "$PROGRESS_FILE"
         done
@@ -618,6 +625,13 @@ for c in case_*; do
       if [ -L constant/polyMesh ]; then rm -f constant/polyMesh; else rm -rf constant/polyMesh; fi
       ln -sfn "../../$MESH/constant/polyMesh" constant/polyMesh
     fi
+    # Where a trace-aware solver appends one record per outer iteration
+    # (docs/e3d-contract.md). Per DIRECTION, beside that direction's 12.log, so
+    # the progress writer can find it next to the log it already picked and the
+    # archive carries one per direction. A solver that ignores it -- foamRun
+    # today -- changes nothing: the progress writer falls back to the log.
+    E3D_TRACE_FILE="$PWD/e3d-trace.jsonl"
+    export E3D_TRACE_FILE
     LATEST0=$(ls -d processor0/[0-9]* 2>/dev/null | xargs -n1 basename 2>/dev/null | sort -g | tail -1)
     RANKS0=$(ls -d processor[0-9]* 2>/dev/null | wc -l | tr -d ' ')
     if [ "$RESUMING" = 1 ] && [ -n "$LATEST0" ] && [ "$LATEST0" != 0 ] && [ "$RANKS0" = "$NP" ]; then
@@ -900,6 +914,10 @@ for c in "$STUDY"/case_*; do
     for f in "$c"/constant/*; do [ -f "$f" ] && echo "$CASE_ID/$cn/constant/$(basename "$f")" >> "$PACK"; done
     [ -d "$c/postProcessing" ] && echo "$CASE_ID/$cn/postProcessing" >> "$PACK"
     for l in "$c"/*.log; do [ -f "$l" ] && echo "$CASE_ID/$cn/$(basename "$l")" >> "$PACK"; done
+    # The full convergence trace, undecimated. ~290 KB per 2,000 iterations,
+    # which is noise beside the fields in the same archive -- and a decimated
+    # trace hides exactly the oscillation worth finding later.
+    [ -f "$c/e3d-trace.jsonl" ] && echo "$CASE_ID/$cn/e3d-trace.jsonl" >> "$PACK"
     if grep -aq "^SIMPLE solution converged in" "$c/12.log" 2>/dev/null; then conv=1; else conv=0; fi
     TIMES="$TIMES$cn=$latest:$conv "
 done

@@ -40,10 +40,16 @@ all three; only how it is launched and how MPI is spelled differ:
    both clusters); a checkout of this repo and of `real_cities` beside it;
    Git for Windows on a Windows box (`run_case.cmd` finds its bash).
 2. **Profile**: copy `machine.env.example` to `machine.env` (gitignored) and
-   fill it in. The two that matter most:
+   fill it in. The three that matter most:
    - `CASEBROKER_WORKER_ID` -- stable **per machine**. It is what lets a
      restarted worker get its own half-finished case back. Never reuse one
      across machines.
+   - `CASEBROKER_TOKEN` -- this machine's own credential. Get it from the
+     dashboard: sign in, **Machines** > *Issue token*, naming it after the
+     `CASEBROKER_WORKER_ID` above. It is shown once, works immediately, and can
+     be revoked for this one box without touching the rest of the fleet. A
+     shared `CASEBROKER_WRITE_TOKENS` value still works too -- it is simply the
+     older model.
    - `WIND_NP` -- ranks per case, **measured per machine** (below). Until
      measured, `min(24, cores/2)`.
 3. **Start it**: `./start_worker.sh` (Linux, WSL, git-bash) or

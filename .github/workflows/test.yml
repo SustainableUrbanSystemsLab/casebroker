@@ -1,12 +1,22 @@
 name: test
 
-# Two tiers, matching the two-engine design in casebroker/db.py: the SQLite suite
-# needs no secret and runs on every push and PR (including from forks, where
-# secrets are never exposed regardless); the real-Postgres suite exercises the
-# actual production database via the DBSTRING secret and only runs on pushes to
-# main, where GitHub secrets are actually available and where "this touched the
-# real database and cleaned up after itself" is worth re-confirming on every
-# change to db.py.
+# Three tiers, matching the two-engine design in casebroker/db.py:
+#
+#   sqlite              no secret, every push and PR (including forks, where
+#                       secrets are never exposed regardless).
+#   postgres (throwaway) a disposable service container, every push and PR. This
+#                       is where the Postgres-specific code is actually
+#                       exercised on a PR -- the suite below runs only on main,
+#                       so before this job existed a change to the Postgres
+#                       branch of db.py reached main having never run against
+#                       any Postgres at all. It is also the only place the
+#                       SCHEMA RECONCILER may run: those tests CREATE, ALTER and
+#                       DROP tables, which is a different contract from the
+#                       row-level cleanup the shared database below relies on.
+#   real postgres       the ACTUAL production database via the DBSTRING secret,
+#                       pushes to main only -- where "this touched the real
+#                       database and cleaned up after itself" is worth
+#                       re-confirming on every change to db.py.
 on:
   push:
     branches: [main]
@@ -22,6 +32,30 @@ jobs:
       - uses: astral-sh/setup-uv@v3
       - run: uv run --with pytest --with httpx python -m pytest tests/ --ignore=tests/test_db_postgres.py -v
 
+  postgres-throwaway:
+    name: postgres (throwaway container)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: campaign
+        options: >-
+          --health-cmd pg_isready --health-interval 5s
+          --health-timeout 5s --health-retries 10
+        ports: ["5432:5432"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+      - run: uv run --with pytest python -m pytest tests/test_db_postgres.py -v
+        env:
+          # Disposable, so the DDL the reconciler tests need is free of
+          # consequence here. sslmode=disable because this is a loopback
+          # container, not a network hop -- db.py defaults to require.
+          CASEBROKER_TEST_PG_DSN: postgresql://postgres:postgres@127.0.0.1:5432/campaign?sslmode=disable
+          CASEBROKER_TEST_PG_SCRATCH: "1"
+
   postgres:
     name: real postgres (main only)
     runs-on: ubuntu-latest
@@ -34,7 +68,11 @@ jobs:
           # test_db_postgres.py prefixes every row it creates with a per-run UUID
           # and deletes them all in a module-scoped teardown -- see that file's
           # docstring. It is safe to point this at the same database the
-          # deployed service uses.
+          # deployed service uses. The tests that CREATE and DROP tables (the
+          # schema reconciler) skip themselves unless
+          # CASEBROKER_TEST_PG_SCRATCH is set, which only the throwaway job
+          # above sets: a stray table left behind by an interrupted run would
+          # be a worse outcome here than the coverage is worth.
           CASEBROKER_TEST_PG_DSN: ${{ secrets.DBSTRING }}
 
   deploy-smoke-test:

@@ -46,8 +46,16 @@ Rules that are easy to get wrong:
 - `-Np` (ranks per case) defaults to `min(24, cores/2)`. Measure it later
   with the scaling sweep; do not oversubscribe a box that also does other
   work.
-- The token is a **write** token (`CASEBROKER_WRITE_TOKENS` on the broker).
-  A read token makes the worker fail on its first lease with 401.
+- The token must be able to **write** — leasing is a mutating call, so a
+  read-only credential fails on the first lease with 401. Get it from the
+  dashboard: sign in, **Machines** ▸ *Issue token*, naming it after this
+  machine's `-WorkerId`. It works immediately and needs no redeploy, and
+  revoking this one box later leaves every other machine running.
+  A shared `CASEBROKER_WRITE_TOKENS` value also still works, but it is the
+  older model: it cannot be attributed to a machine or revoked on its own.
+  Check either with
+  `uv run casebroker token check --broker <url> --token <t> --expect write`,
+  which also names which kind you handed it.
 
 ## 3. Run
 

@@ -207,8 +207,56 @@ def test_the_old_shared_env_token_keeps_working(legacy):
 
 def test_setup_is_still_offered_on_a_deployment_that_has_env_tokens(legacy):
     """Otherwise the only way to adopt accounts would be to first remove the
-    credential the running fleet depends on."""
+    credential the running fleet depends on.
+
+    Offered, but no longer to ANYONE: a broker already holding a write token
+    makes the operator present it. See the takeover test below for why.
+    """
     assert legacy.get("/v1/auth/state").json()["needs_setup"] is True
     assert legacy.get("/v1/auth/state").json()["env_tokens"] is True
     assert legacy.post("/v1/auth/setup",
-                       json={"username": "ada", "password": PW}).status_code == 200
+                       json={"username": "ada", "password": PW},
+                       headers={"Authorization": "Bearer shared-secret"}
+                       ).status_code == 200
+
+
+def test_a_stranger_cannot_claim_the_admin_account_on_a_token_secured_broker(legacy):
+    """The shape production was actually in: CASEBROKER_WRITE_TOKENS set, no
+    account yet. /v1/auth/setup cannot require a session -- there is nobody to
+    log in as -- so it used to hand the permanent admin account, and with it the
+    power to mint machine credentials, to the first anonymous caller who found
+    the form."""
+    r = legacy.post("/v1/auth/setup",
+                    json={"username": "mallory", "password": PW})
+    assert r.status_code == 403
+    assert "write token" in r.json()["detail"]
+    assert legacy.get("/v1/auth/state").json()["needs_setup"] is True
+
+
+def test_a_read_token_cannot_claim_the_admin_account(tmp_path):
+    """A credential that cannot change the campaign must not be able to create
+    the account that can."""
+    app = create_app(db_path=str(tmp_path / "ro.sqlite"),
+                     tokens=["write-secret"], readonly_tokens=["read-secret"])
+    c = TestClient(app)
+    r = c.post("/v1/auth/setup", json={"username": "mallory", "password": PW},
+               headers={"Authorization": "Bearer read-secret"})
+    assert r.status_code == 403
+
+
+def test_setup_stays_open_when_the_deployment_has_no_credential_at_all(fresh):
+    """A laptop, or a broker behind a firewall, has nothing to present."""
+    assert fresh.get("/v1/auth/state").json()["setup_token_required"] is False
+    assert fresh.post("/v1/auth/setup",
+                      json={"username": "ada", "password": PW}).status_code == 200
+
+
+def test_a_non_ascii_credential_does_not_500_an_unauthenticated_endpoint(legacy):
+    """hmac.compare_digest refuses a non-ASCII str with TypeError, and the
+    bearer header is attacker-chosen -- the server decodes it as latin-1, so any
+    byte becomes a character. One \xe9 used to 500 /healthz, which needs no
+    credential to reach and which the uptime badge polls."""
+    header = {"Authorization": "Bearer caf\xe9".encode("latin-1")}
+    assert legacy.get("/healthz", headers=header).status_code == 200
+    assert legacy.get("/v1/whoami", headers=header).json()["scope"] == "none"
+    assert legacy.get("/v1/status", headers=header).status_code == 401

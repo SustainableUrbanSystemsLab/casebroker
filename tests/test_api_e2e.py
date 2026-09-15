@@ -286,7 +286,7 @@ def test_dashboard_is_served_with_no_auth_but_data_stays_gated(broker):
     r = broker.get("/", headers={"Authorization": ""})
     assert r.status_code == 200
     assert r.headers["content-type"].startswith("text/html")
-    assert "<title>Wind Simulation Broker</title>" in r.text
+    assert "<title>E3D Simulation Broker</title>" in r.text
     # The page's own fetch() calls carry the token; the page load itself must not.
     assert "secret-a" not in r.text and "secret-b" not in r.text
 

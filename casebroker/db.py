@@ -1,4 +1,4 @@
-"""Storage for the Wind Simulation Broker: SQLite for local dev/tests, Postgres for production.
+"""Storage for the E3D Simulation Broker: SQLite for local dev/tests, Postgres for production.
 
 Every statement lives in this one module, so the storage engine is a property of
 what string you hand :func:`connect` — a file path opens SQLite, a
@@ -44,7 +44,9 @@ from __future__ import annotations
 
 import functools
 import json
+import re
 import sqlite3
+import sys
 import threading
 import time
 import uuid
@@ -175,6 +177,15 @@ CREATE TABLE IF NOT EXISTS worker_tokens (
     revoked_at   INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_worker_tokens_hash ON worker_tokens(token_hash);
+
+-- What schema revision this database is at. Written by apply_schema on every
+-- connect; read by `casebroker doctor`. Nothing branches on it -- the column
+-- reconciler makes the schema self-healing without a version to compare -- but
+-- "which revision is production actually at" was previously unanswerable.
+CREATE TABLE IF NOT EXISTS schema_meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 """
 
 # Same schema, Postgres-flavoured: no PRAGMAs (meaningless there), and the
@@ -299,7 +310,281 @@ CREATE TABLE IF NOT EXISTS worker_tokens (
     revoked_at   INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_worker_tokens_hash ON worker_tokens(token_hash);
+
+-- What schema revision this database is at. Written by apply_schema on every
+-- connect; read by `casebroker doctor`. Nothing branches on it -- the column
+-- reconciler makes the schema self-healing without a version to compare -- but
+-- "which revision is production actually at" was previously unanswerable.
+CREATE TABLE IF NOT EXISTS schema_meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 """
+
+
+# -- applying the schema, including to a database that predates part of it ----
+#
+# Every statement above is `IF NOT EXISTS`, which makes ADDING A TABLE upgrade
+# itself on the next restart -- and that is exactly what this repo's history has
+# always done (a262e4f added users/sessions/worker_tokens, dd3e831 added fleet).
+# It does nothing at all for ADDING A COLUMN: `CREATE TABLE IF NOT EXISTS` sees
+# the table already there and no-ops without comparing columns, so the new column
+# never appears. The failure that follows is not subtle but it is badly
+# misleading -- an index over the new column raises
+#
+#     sqlite3.OperationalError: no such column: priority
+#
+# at connect() time, which reads like a corrupt database rather than a schema one
+# release behind. So the schema is applied in three passes instead of one
+# executescript: create the tables, reconcile the columns of the ones that
+# already existed, and only then build the indexes -- an index is very often the
+# thing that references the newly added column.
+
+SCHEMA_VERSION = 2
+
+# A column definition that cannot be bolted onto a table that already exists.
+# Detected and reported by name, because the alternative -- quietly adding the
+# column without its constraint -- produces a database that looks migrated and
+# is not.
+_UNADDABLE = ("primary key", "unique", "autoincrement", "serial",
+              "references", "generated")
+
+# The first word of an entry in a CREATE TABLE body, when it names a TABLE
+# constraint rather than a column.
+_TABLE_CONSTRAINTS = ("primary", "foreign", "unique", "check",
+                      "constraint", "exclude")
+
+
+def _strip_sql_comments(script: str) -> str:
+    """Drop `--` comments, respecting single-quoted literals.
+
+    Quote-aware because the schema really does carry literals (`DEFAULT
+    'pending'`), and a blind strip would be one stray `--` inside one of them
+    away from truncating a statement.
+    """
+    out, i, n, in_str = [], 0, len(script), False
+    while i < n:
+        ch = script[i]
+        if in_str:
+            out.append(ch)
+            if ch == "'":
+                in_str = False
+            i += 1
+        elif ch == "'":
+            in_str = True
+            out.append(ch)
+            i += 1
+        elif ch == "-" and i + 1 < n and script[i + 1] == "-":
+            while i < n and script[i] != "\n":
+                i += 1
+        else:
+            out.append(ch)
+            i += 1
+    return "".join(out)
+
+
+def _split_statements(script: str) -> list[str]:
+    """Split on semicolons that are at paren depth 0 and outside a literal."""
+    stmts, cur, depth, in_str = [], [], 0, False
+    for ch in script:
+        if in_str:
+            cur.append(ch)
+            if ch == "'":
+                in_str = False
+            continue
+        if ch == "'":
+            in_str = True
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        elif ch == ";" and depth == 0:
+            if "".join(cur).strip():
+                stmts.append("".join(cur).strip())
+            cur = []
+            continue
+        cur.append(ch)
+    if "".join(cur).strip():
+        stmts.append("".join(cur).strip())
+    return stmts
+
+
+def _split_top_level(body: str) -> list[str]:
+    """Split a CREATE TABLE body on commas at paren depth 0."""
+    parts, cur, depth = [], [], 0
+    for ch in body:
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            parts.append("".join(cur))
+            cur = []
+            continue
+        cur.append(ch)
+    parts.append("".join(cur))
+    return [p.strip() for p in parts if p.strip()]
+
+
+def parse_schema_columns(script: str) -> dict[str, dict[str, str]]:
+    """``{table: {column: its full DDL}}`` for every CREATE TABLE in `script`.
+
+    Public because a test asserts it agrees with what the database itself
+    reports after running the same DDL -- a hand-written parser that silently
+    disagreed with the engine would make the reconciler below confidently wrong.
+    """
+    clean = _strip_sql_comments(script)
+    tables: dict[str, dict[str, str]] = {}
+    for m in re.finditer(r"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?"
+                         r"([A-Za-z_][A-Za-z0-9_]*)\s*\(", clean, re.IGNORECASE):
+        depth, i = 1, m.end()
+        while i < len(clean) and depth:
+            if clean[i] == "(":
+                depth += 1
+            elif clean[i] == ")":
+                depth -= 1
+            i += 1
+        cols: dict[str, str] = {}
+        for part in _split_top_level(clean[m.end():i - 1]):
+            # The leading identifier, stopping at whitespace OR an opening
+            # paren -- `UNIQUE(a, b)` is a table constraint just as much as
+            # `UNIQUE (a, b)` is, and splitting on whitespace alone would read
+            # the first as a column named "UNIQUE(a,".
+            lead = re.match(r"[A-Za-z_][A-Za-z0-9_]*", part)
+            if lead is None or lead.group(0).lower() in _TABLE_CONSTRAINTS:
+                continue
+            cols[lead.group(0)] = " ".join(part.split())
+        tables[m.group(1)] = cols
+    return tables
+
+
+def _existing_tables(conn, is_pg: bool) -> set[str]:
+    if is_pg:
+        rows = conn.execute(
+            "SELECT table_name AS n FROM information_schema.tables "
+            "WHERE table_schema = current_schema()").fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT name AS n FROM sqlite_master WHERE type = 'table'").fetchall()
+    return {r["n"] for r in rows}
+
+
+def _existing_columns(conn, table: str, is_pg: bool) -> set[str]:
+    if is_pg:
+        rows = conn.execute(
+            "SELECT column_name AS n FROM information_schema.columns "
+            "WHERE table_schema = current_schema() AND table_name = ?",
+            (table,)).fetchall()
+        return {r["n"] for r in rows}
+    # PRAGMA takes no placeholder. `table` comes from our own schema constant,
+    # never from a caller, so there is no injection surface here.
+    return {r["name"] for r in conn.execute("PRAGMA table_info(%s)" % table).fetchall()}
+
+
+def _why_unaddable(ddl: str) -> str | None:
+    """Why this column cannot be added to a table that already exists.
+
+    The column's own NAME is dropped before looking for constraint keywords, and
+    the match is on whole words: `references_count INTEGER DEFAULT 0` and
+    `unique_id TEXT` are both perfectly addable, and a substring search over the
+    whole definition would refuse them and block a legitimate upgrade.
+    """
+    words = ddl.split()
+    rest = " ".join(words[1:]).lower() if len(words) > 1 else ""
+    for kw in _UNADDABLE:
+        if re.search(r"\b" + kw.replace(" ", r"\s+") + r"\b", rest):
+            return kw.upper()
+    if re.search(r"\bnot\s+null\b", rest) and not re.search(r"\bdefault\b", rest):
+        return "NOT NULL without a DEFAULT"
+    return None
+
+
+def reconcile_columns(conn, script: str, is_pg: bool) -> list[str]:
+    """ALTER TABLE ADD COLUMN for every column the schema has and the database
+    does not. Returns what it added, as ``table.column`` strings.
+
+    Only ever ADDS. A column the database has and the schema no longer does is
+    left strictly alone: dropping it would destroy data to satisfy a code version
+    that may itself be about to be rolled back.
+    """
+    added: list[str] = []
+    present = _existing_tables(conn, is_pg)
+    for table, columns in parse_schema_columns(script).items():
+        if table not in present:
+            continue                      # the CREATE TABLE pass just made it
+        have = _existing_columns(conn, table, is_pg)
+        for column, ddl in columns.items():
+            if column in have:
+                continue
+            why = _why_unaddable(ddl)
+            if why is not None:
+                raise RuntimeError(
+                    "cannot bring this database up to date automatically: "
+                    "%s.%s is declared %s, which cannot be added to a table that "
+                    "already exists. Add it by hand, or recreate the table, "
+                    "before starting this version." % (table, column, why))
+            try:
+                conn.execute("ALTER TABLE %s ADD COLUMN %s" % (table, ddl))
+            except Exception:                                # noqa: BLE001
+                # _LOCK serialises this process only. Two of them starting at
+                # once -- a rolling redeploy, or several uvicorn workers --
+                # both see the column missing and both ALTER, and the loser
+                # gets "duplicate column". Losing that race is a success: the
+                # column is there. Anything else is a real failure and is
+                # re-raised, so this cannot mask a broken migration.
+                if column not in _existing_columns(conn, table, is_pg):
+                    raise
+                continue
+            added.append("%s.%s" % (table, column))
+    return added
+
+
+def apply_schema(conn, script: str, is_pg: bool) -> list[str]:
+    """Create the tables, reconcile the ones that predate this version, then
+    build the indexes. Returns the columns added, so a caller can log that an
+    upgrade actually happened rather than leaving it silent.
+    """
+    pre, tables, indexes = [], [], []
+    for stmt in _split_statements(_strip_sql_comments(script)):
+        if re.match(r"CREATE\s+TABLE", stmt, re.IGNORECASE):
+            tables.append(stmt)
+        elif re.match(r"CREATE\s+(UNIQUE\s+)?INDEX", stmt, re.IGNORECASE):
+            indexes.append(stmt)
+        else:
+            pre.append(stmt)              # the PRAGMAs, on SQLite
+    for stmt in pre + tables:
+        conn.execute(stmt)
+    added = reconcile_columns(conn, script, is_pg)
+    for stmt in indexes:
+        conn.execute(stmt)
+    if added:
+        # Bringing a database forward is exactly the event an operator wants in
+        # the log when something looks different afterwards, and it happens
+        # unattended on the first connection after a deploy.
+        print("[schema] brought this database forward: added " + ", ".join(added),
+              file=sys.stderr)
+    # Only when it actually changed. This runs on EVERY connection, and on a
+    # transaction pooler every connection is a new backend -- an unconditional
+    # upsert would make opening a connection a write.
+    row = conn.execute(
+        "SELECT value FROM schema_meta WHERE key = 'version'").fetchone()
+    if row is None or row["value"] != str(SCHEMA_VERSION):
+        conn.execute(
+            "INSERT INTO schema_meta(key, value) VALUES ('version', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (str(SCHEMA_VERSION),))
+    return added
+
+
+def schema_version(conn) -> int | None:
+    """What schema revision this database is at, or None if it predates the
+    marker. `casebroker doctor` reports it; nothing branches on it."""
+    try:
+        row = conn.execute(
+            "SELECT value FROM schema_meta WHERE key = 'version'").fetchone()
+    except Exception:                                        # noqa: BLE001
+        return None
+    return int(row["value"]) if row else None
 
 
 @dataclass(frozen=True)
@@ -459,7 +744,7 @@ def connect(path_or_dsn: str):
                            check_same_thread=False)
     conn.row_factory = sqlite3.Row
     with _LOCK:
-        conn.executescript(SCHEMA)
+        apply_schema(conn, SCHEMA, is_pg=False)
     return conn
 
 
@@ -504,7 +789,7 @@ def _connect_postgres(dsn: str) -> PgConnection:
     raw = psycopg.connect(dsn, **kwargs)
     wrapped = PgConnection(raw, dsn)
     with _LOCK:
-        wrapped.executescript(PG_SCHEMA)
+        apply_schema(wrapped, PG_SCHEMA, is_pg=True)
     return wrapped
 
 
@@ -711,7 +996,21 @@ def heartbeat(conn, lease_id: str, lease_seconds: int = 3600,
     conn.execute("UPDATE cases SET lease_expires=?, updated_at=? WHERE lease_id=?",
                  (now + lease_seconds, now, lease_id))
     if detail:
-        _event(conn, row["case_id"], row["lease_worker"], "progress", detail, now)
+        # Only when it CHANGED. The worker heartbeats every 5 minutes for the
+        # whole multi-hour solve, and reports "alive" whenever the runner has
+        # not written a progress line yet -- so without this, a six-hour case
+        # leaves ~72 identical rows saying nothing the one before it did not,
+        # and a 30,000-case campaign carries millions of them for the life of
+        # the campaign. A stalled solver dedupes the same way, which is also
+        # the honest record: nothing happened.
+        #
+        # idx_events_case is (case_id, id), so this seeks straight to the case
+        # and reads one row backwards rather than scanning.
+        previous = conn.execute(
+            "SELECT detail FROM events WHERE case_id = ? AND event = 'progress' "
+            "ORDER BY id DESC LIMIT 1", (row["case_id"],)).fetchone()
+        if previous is None or previous["detail"] != detail:
+            _event(conn, row["case_id"], row["lease_worker"], "progress", detail, now)
     return True
 
 
@@ -1023,6 +1322,9 @@ def count_users(conn) -> int:
 @_locked
 def create_user(conn, username: str, password_hash: str, role: str = "admin",
                 now: int | None = None) -> dict[str, Any]:
+    if role not in ROLES:
+        raise ValueError("unknown role %r; expected one of %s"
+                         % (role, ", ".join(ROLES)))
     now = now or _now()
     conn.execute(
         "INSERT INTO users (username, password_hash, role, created_at) VALUES (?,?,?,?)",
@@ -1046,6 +1348,92 @@ def get_user(conn, username: str):
         return None
     return {"id": row["id"], "username": row["username"],
             "password_hash": row["password_hash"], "role": row["role"]}
+
+
+# The two things a human account can be. `admin` manages identity itself --
+# other accounts, and the per-machine worker credentials. `viewer` can log in
+# and read the campaign and nothing else, which is what "let someone watch
+# progress" needed all along: the read-only env token did it with a shared
+# secret nobody could attribute or revoke individually.
+ROLES = ("admin", "viewer")
+
+
+@_locked
+def list_users(conn) -> list[dict[str, Any]]:
+    """Every account, newest last. No password material of any kind."""
+    rows = conn.execute(
+        "SELECT id, username, role, created_at, last_login_at FROM users "
+        "ORDER BY id").fetchall()
+    return [{"id": r["id"], "username": r["username"], "role": r["role"],
+             "created_at": r["created_at"], "last_login_at": r["last_login_at"]}
+            for r in rows]
+
+
+@_locked
+def count_admins(conn) -> int:
+    """Used to refuse the two operations that can lock everyone out: deleting
+    the last admin, and demoting them."""
+    return int(conn.execute(
+        "SELECT COUNT(*) n FROM users WHERE role = 'admin'").fetchone()["n"])
+
+
+@_locked
+def set_password(conn, username: str, password_hash: str) -> bool:
+    """Change a password and INVALIDATE every session that account holds.
+
+    Revoking the sessions is the point, not a side effect: the reason to change
+    a password in a hurry is that someone else may have it, and leaving their
+    already-issued fortnight-long session alive would make the change
+    cosmetic. The caller re-issues its own session afterwards, so changing your
+    own password does not log you out of the tab you did it from.
+    """
+    cur = conn.execute("UPDATE users SET password_hash = ? WHERE username = ?",
+                       (password_hash, username))
+    if not cur.rowcount:
+        return False
+    conn.execute(
+        "DELETE FROM sessions WHERE user_id IN (SELECT id FROM users WHERE username = ?)",
+        (username,))
+    return True
+
+
+@_locked
+def set_role(conn, username: str, role: str) -> bool:
+    if role not in ROLES:
+        raise ValueError("unknown role %r; expected one of %s"
+                         % (role, ", ".join(ROLES)))
+    row = conn.execute("SELECT role FROM users WHERE username = ?",
+                       (username,)).fetchone()
+    if not row:
+        return False
+    if row["role"] == "admin" and role != "admin" and count_admins(conn) <= 1:
+        raise ValueError(
+            "%r is the only admin; promote another account before demoting it, "
+            "or nobody will be able to manage this broker" % username)
+    conn.execute("UPDATE users SET role = ? WHERE username = ?", (role, username))
+    return True
+
+
+@_locked
+def delete_user(conn, username: str) -> bool:
+    """Remove an account and every session it holds.
+
+    Refuses the last admin. There is no recovery endpoint and no password-reset
+    email -- deleting the only account that can manage the broker would leave
+    the deployment permanently unmanageable, with the database the only way
+    back in.
+    """
+    row = conn.execute("SELECT id, role FROM users WHERE username = ?",
+                       (username,)).fetchone()
+    if not row:
+        return False
+    if row["role"] == "admin" and count_admins(conn) <= 1:
+        raise ValueError(
+            "%r is the only admin; create another before deleting it, or "
+            "nobody will be able to manage this broker" % username)
+    conn.execute("DELETE FROM sessions WHERE user_id = ?", (row["id"],))
+    conn.execute("DELETE FROM users WHERE id = ?", (row["id"],))
+    return True
 
 
 @_locked
