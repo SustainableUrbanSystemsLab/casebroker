@@ -330,16 +330,32 @@ and **fails if a version literal is ever pasted into a source file again**, whic
 is how the three copies that used to exist got out of step in the first place.
 
 Cutting a release is therefore: bump `version` in `pyproject.toml`, move the
-`Unreleased` entries in `CHANGELOG.md` under the new number, commit, and tag it:
+`Unreleased` entries in `CHANGELOG.md` under the new number, and merge it.
+**Merging the bump is the release** — `.github/workflows/release.yml` sees the
+version change on `main`, runs the suite, checks `CHANGELOG.md` actually has a
+`## [x.y.z]` heading for it, creates the tag and publishes the GitHub Release.
+A merge that does not move the version is a no-op there, which is nearly all of
+them.
+
+Tagging by hand still works and is unchanged:
 
 ```bash
-git tag -a v0.2.0 -m "v0.2.0" && git push origin v0.2.0
+git tag -a v0.3.0 -m "v0.3.0" && git push origin v0.3.0
 ```
 
-Pushing that tag is what publishes the release: `.github/workflows/release.yml`
-fires on any `v*.*.*` tag, **refuses to publish if the tag disagrees with
-`pyproject.toml`**, and creates the GitHub Release. So the tag cannot drift from
-the declared version any more than the code can.
+That path still **refuses to publish if the tag disagrees with
+`pyproject.toml`**, so the tag cannot drift from the declared version any more
+than the code can.
+
+> **Why the merge cuts the tag rather than a human.** Between `v0.2.0` and
+> `v0.3.0`, four pull requests merged, the version moved once, and nobody
+> tagged it — so the README's version badge read `v0.2.0` while the running
+> service's `/healthz` read `0.3.0`. Every version test passed throughout,
+> because they all compare the three *copies* of the number to each other and
+> those agreed perfectly. The missing check was never "do the copies match" but
+> "did the release happen", and the reliable answer to that is not a step in a
+> runbook. `tests/test_version.py` now also pins that the newest `CHANGELOG.md`
+> release heading is the version the package declares.
 
 `/healthz` reporting `version` is what makes a deploy checkable from outside:
 
