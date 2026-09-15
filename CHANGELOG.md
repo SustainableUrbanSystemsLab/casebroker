@@ -8,6 +8,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-15
+
 Hooking heterogeneous machines into the campaign: Windows workstations (Docker
 or native blueCFD-Core) alongside the PACE clusters, with progress visible on
 the dashboard, stopped solves resuming on the same machine, and one archive per
