@@ -75,3 +75,76 @@ def test_env_example_names_only_variables_the_app_actually_reads():
     app_py = (ROOT / "casebroker" / "app.py").read_text()
     for name in re.findall(r"^#?([A-Z_]*CASEBROKER\w+)=", ENV_EXAMPLE, re.M):
         assert name in app_py or name in COMPOSE, name
+
+
+# -- the production-database CI job: what an unusable credential must do -----
+#
+# Run as a SUBPROCESS pytest rather than by calling the fixture, because the
+# thing being pinned is the exit code of the whole run -- that is what turns a
+# CI job red or green, and it is not observable from inside the session the
+# fixture belongs to.
+
+def _pg_suite(env_extra: dict) -> "tuple[int, str]":
+    import os
+    import subprocess
+    import sys
+    env = dict(os.environ)
+    # A DSN that cannot possibly connect, pointed at a port nothing listens on,
+    # so this test never touches a real database of any kind.
+    env["CASEBROKER_TEST_PG_DSN"] = "postgresql://nobody:wrong@127.0.0.1:5/nothing"
+    env.pop("CASEBROKER_TEST_PG_REQUIRED", None)
+    env.pop("GITHUB_STEP_SUMMARY", None)
+    env.update(env_extra)
+    r = subprocess.run(
+        [sys.executable, "-m", "pytest", str(ROOT / "tests" / "test_db_postgres.py"),
+         "-rs", "-p", "no:cacheprovider"],
+        capture_output=True, text=True, env=env, cwd=str(ROOT), timeout=300)
+    return r.returncode, r.stdout + r.stderr
+
+
+def test_an_unusable_production_credential_skips_rather_than_failing():
+    """A stale DBSTRING said nothing about the commit under test, and turned
+    main red anyway -- on a branch that gates deploys, which trains people to
+    ignore a red X. It is also inconsistent: with the secret ABSENT the same
+    job went green having tested exactly as much (nothing), because the
+    module's skipif fires. The line belongs at "did this coverage run", not at
+    "is a secret set"."""
+    code, out = _pg_suite({})
+    assert code == 0, out[-3000:]
+    assert "19 skipped" in out or "skipped" in out
+
+
+def test_the_skip_says_why_rather_than_passing_silently():
+    """The real hazard of a skip is coverage that quietly stops running. -rs is
+    what makes the reason visible: with -v alone pytest prints a bare SKIPPED,
+    and a print() inside the fixture is swallowed by pytest's own capture and
+    discarded for a skip -- so the reason has to travel this way."""
+    code, out = _pg_suite({})
+    assert code == 0
+    assert "Postgres tests did not run" in out, out[-3000:]
+
+
+def test_github_gets_the_reason_on_the_run_page(tmp_path):
+    """$GITHUB_STEP_SUMMARY is a FILE, so it survives the output capture that
+    eats a printed annotation."""
+    summary = tmp_path / "summary.md"
+    code, _ = _pg_suite({"GITHUB_ACTIONS": "true", "GITHUB_STEP_SUMMARY": str(summary)})
+    assert code == 0
+    written = summary.read_text(encoding="utf-8")
+    assert "Postgres coverage skipped" in written
+    assert "Postgres tests did not run" in written
+
+
+def test_required_turns_an_unusable_credential_back_into_a_failure():
+    """The escape hatch for a deployment that would rather CI enforce this
+    coverage than report on it."""
+    code, out = _pg_suite({"CASEBROKER_TEST_PG_REQUIRED": "1"})
+    assert code == 1, out[-3000:]
+    assert "refused the pre-flight connection" in out
+
+
+def test_ci_passes_rs_so_the_skip_reason_is_not_swallowed():
+    """The behaviour above is only visible in CI if the workflow asks for it."""
+    wf = (ROOT / ".github" / "workflows" / "test.yml").read_text(encoding="utf-8")
+    real_pg = wf.split("real postgres (main only)", 1)[1].split("deploy-smoke-test", 1)[0]
+    assert "-rs" in real_pg, "without -rs a skipped production-DB job states no reason"
