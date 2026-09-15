@@ -216,6 +216,24 @@ def _tokens_from_env(canonical: str, legacy: str) -> list[str]:
     return new or old
 
 
+def _may_lease_as(credential_name: str, worker_id: str) -> bool:
+    """Whether a per-machine credential may claim work as ``worker_id``.
+
+    Exact match is the workstation case. The prefix form is the CLUSTER case:
+    the sbatch scripts run every SLURM task as ``phoenix-<job>-<task>``, ids
+    the scheduler hands out, so one credential per task is impossible and an
+    exact-match rule left clusters on the shared env token forever -- the
+    un-revocable, un-attributed model per-machine credentials exist to
+    replace. A credential named ``phoenix`` therefore covers everything under
+    ``phoenix-``. Attribution holds at the only granularity a cluster credential
+    can have: the lease records the per-task id, and the credential that
+    produced it is its prefix.
+
+    The dash is load-bearing: ``lab`` does not cover ``laboratory``.
+    """
+    return worker_id == credential_name or worker_id.startswith(credential_name + "-")
+
+
 def create_app(db_path: str | None = None, tokens: list[str] | None = None,
                readonly_tokens: list[str] | None = None,
                setup_token: str | None = None) -> FastAPI:
@@ -971,12 +989,17 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         # than a fact -- exactly the attribution that issuing one credential per
         # box exists to provide. Env tokens are deliberately unaffected: they are
         # shared by design, so there is no machine identity to contradict.
+        #
+        # "Its own" includes every id UNDER its name (see _may_lease_as): a
+        # cluster credential named `phoenix` covers the `phoenix-<job>-<task>`
+        # ids its SLURM tasks actually run as.
         machine = _machine_principal(request)
-        if machine and machine["name"] != body.worker_id:
+        if machine and not _may_lease_as(machine["name"], body.worker_id):
             raise HTTPException(
                 403, f"this credential belongs to {machine['name']!r}, so it "
                      f"cannot lease as {body.worker_id!r}. Use that machine's own "
-                     "token, or set CASEBROKER_WORKER_ID to match it.")
+                     "token, or set CASEBROKER_WORKER_ID to match it -- or to "
+                     f"anything under it, such as {machine['name']}-<job>-<task>.")
         got = db.lease(conn, body.worker_id, count=body.count,
                        lease_seconds=body.lease_seconds, splits=body.splits,
                        host=body.host, cluster=body.cluster,

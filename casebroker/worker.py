@@ -45,6 +45,14 @@ class LeaseLost(RuntimeError):
     """The broker says this worker no longer owns the case."""
 
 
+class CredentialRefused(RuntimeError):
+    """The broker rejected this worker's credential outright (401 or 403).
+
+    Waiting does not fix a credential, so this is the one lease failure the
+    run loop does not retry. main() turns it into exit code 2.
+    """
+
+
 class Worker:
     def __init__(self, broker: str, token: str | None, worker_id: str | None = None,
                  lease_seconds: int = 900, heartbeat_seconds: int = 300,
@@ -231,6 +239,18 @@ class Worker:
             try:
                 got = self.lease(count=1, splits=splits)
             except Exception as e:
+                status = getattr(getattr(e, "response", None), "status_code", None)
+                if status in (401, 403):
+                    # A credential problem does not fix itself by waiting. The
+                    # retry below would otherwise run every idle_backoff seconds
+                    # for the whole SLURM walltime, holding the allocation with
+                    # nothing but "[warn] lease failed: 403" in the log -- twenty
+                    # of them, on an array job. Stop, say why, and let the
+                    # scheduler have the nodes back.
+                    self._stop.set()
+                    raise CredentialRefused(
+                        f"broker refused this credential ({status}): "
+                        f"{e.response.text[:300]}") from e
                 print(f"[warn] lease failed: {e}", file=sys.stderr)
                 time.sleep(idle_backoff)
                 continue
@@ -379,8 +399,15 @@ def main(argv: list[str] | None = None) -> int:
     w.progress_file = a.progress_file or os.path.join(
         tempfile.gettempdir(), f"casebroker-progress-{w.worker_id}.txt")
     runner = script_runner(a.runner) if a.runner else echo_runner
-    n = w.run_forever(runner, splits=a.splits, max_cases=a.max_cases,
-                      idle_backoff=a.idle_backoff)
+    try:
+        n = w.run_forever(runner, splits=a.splits, max_cases=a.max_cases,
+                          idle_backoff=a.idle_backoff)
+    except CredentialRefused as e:
+        # Non-zero on purpose: it is what makes an sbatch log end with
+        # "exit=2" and the sentence that explains it, instead of the job
+        # holding its nodes to the wall clock.
+        print(f"[fatal] {e}", file=sys.stderr)
+        return 2
     print(f"[info] worker {w.worker_id} finished {n} case(s)")
     return 0
 
