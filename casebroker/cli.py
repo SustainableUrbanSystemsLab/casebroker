@@ -412,6 +412,18 @@ def _account_db(args):
     return db.connect(dsn)
 
 
+def db_roles() -> tuple[str, ...]:
+    """The role names, read from db.ROLES rather than restated here.
+
+    Spelled out in argparse `choices`, a role the CLI had not heard of would be
+    refused before the database ever saw it -- so the list has to come from the
+    one place that defines it. Imported lazily like every other db use in this
+    module, since building the parser must not need a database driver.
+    """
+    from . import db
+    return db.ROLES
+
+
 def _read_password(args, prompt: str) -> str | None:
     """From stdin when asked, otherwise an interactive double-entry prompt.
 
@@ -859,7 +871,7 @@ def main(argv: list[str] | None = None) -> int:
                        help="database path or DSN (default: discovered, like doctor)")
         p.add_argument("--username", required=True)
         if role_default is not None:
-            p.add_argument("--role", choices=("admin", "viewer"), default=role_default)
+            p.add_argument("--role", choices=db_roles(), default=role_default)
         return p
 
     acn = _account_common(ac.add_parser(
@@ -880,7 +892,7 @@ def main(argv: list[str] | None = None) -> int:
 
     acr = _account_common(ac.add_parser("role", help="promote or demote an account"),
                           role_default=None)
-    acr.add_argument("--role", choices=("admin", "viewer"), required=True)
+    acr.add_argument("--role", choices=db_roles(), required=True)
     acr.set_defaults(func=cmd_account_role)
 
     acd = _account_common(ac.add_parser("delete", help="remove an account and its sessions"))

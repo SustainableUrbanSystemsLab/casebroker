@@ -46,12 +46,33 @@ There is no token to paste and nothing kept in local storage.
 > configured (a laptop, or a host behind a firewall) has nothing to ask for.
 > See [First run](operations.md#first-run-from-nothing-to-a-working-broker).
 
-**Admins and viewers.** A `viewer` can log in and read the campaign and nothing
-else: every mutating endpoint answers `403`, and the Machines panel is not shown
-because every action in it would be refused. That is the safe way to let someone
-watch progress — unlike a shared read-only token, it is attributable to a person
-and revocable on its own. Create one with
-`casebroker account create --username bob --role viewer`, or `POST /v1/users`.
+**Three roles.** An `admin` can do everything. An **`operator`** runs the
+campaign — adds cases, leases, completes, fails, releases — and manages nothing:
+no accounts, no machine credentials, and no purging. A `viewer` reads and
+nothing else. Operator is the one most accounts should have; before it existed,
+`admin` was the only role that could write, which is how a deployment ends up
+with everyone an admin.
+
+A viewer or an operator sees neither the Users nor the Machines panel, because
+every action in them would be refused.
+
+## Users: people, as opposed to machines
+
+Signed in as an admin, **Settings ▸ Users** lists every account with its role
+and last login, and adds one with a username, an initial password and a role.
+The role of an existing account is a dropdown — changing it takes effect on that
+account's next request, without them signing in again — and each row offers a
+password reset (which revokes every session that account holds) and a delete.
+
+The role picker is built from what `GET /v1/auth/state` reports rather than from
+a list written into the page, so it can never offer a role the broker would
+refuse.
+
+The last admin cannot be demoted or deleted here any more than over the API:
+there is no recovery endpoint, so that would leave the deployment unmanageable.
+
+Everything here is also `casebroker account ...` on a box that can reach the
+database, which is what recovers a deployment nobody can log into.
 
 ## Machines: one credential per box
 
@@ -78,7 +99,7 @@ nothing else.
 ## Sharing a read-only view
 
 The good way is a `viewer` account: attributable, individually revocable, and it
-needs no link handling.
+needs no link handling. Settings ▸ Users creates one in about ten seconds.
 
 The older way still works. Set `CASEBROKER_READ_TOKENS` (same comma-separated
 shape as `CASEBROKER_WRITE_TOKENS`) to a *separate* value from your worker
