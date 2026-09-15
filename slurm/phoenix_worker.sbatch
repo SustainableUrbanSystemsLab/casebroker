@@ -39,6 +39,11 @@ set -uo pipefail
 
 : "${CASEBROKER_URL:?set CASEBROKER_URL}"
 : "${CASEBROKER_TOKEN:?set CASEBROKER_TOKEN}"
+# CASEBROKER_TOKEN: this cluster's OWN credential -- dashboard, Machines >
+# Issue token, named `phoenix`. It covers every `phoenix-<job>-<task>` id below, and
+# revoking it stops this cluster and nothing else. The shared write token still
+# works, but cannot be revoked for one cluster alone. A refused credential makes
+# the worker exit 2 instead of holding the allocation and retrying.
 
 WC=${WIND_ROOT:-/storage/scratch1/3/pkastner3/windcomfort/v2}
 REPO=${WIND_REPO:-$WC/repo/JP-Wind-ML-Comparison}

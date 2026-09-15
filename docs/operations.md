@@ -77,8 +77,18 @@ line to paste there.
 
 Either way, revoking one machine is a button, takes effect on its next request,
 and leaves every other machine running. **A machine's credential may only lease
-as its own worker id**: the broker refuses `403` if they disagree, so the
-Machines list and the workers table cannot drift apart.
+as its own worker id, or one under it**: the broker refuses `403` otherwise, so
+the Machines list and the workers table cannot drift apart.
+
+"Under it" is what makes one credential per **cluster** possible. The sbatch
+scripts run every SLURM task as `phoenix-<job>-<task>` — ids the scheduler
+hands out, so a credential per task is impossible — and a credential named
+`phoenix` covers all of them. Issue one per cluster from **Machines**, named
+after the cluster, and export it as `CASEBROKER_TOKEN` in the job's
+environment where the shared token used to go; revoking it stops that cluster
+and nothing else. A worker whose credential is refused exits with code `2`
+rather than retrying, so a wrong token costs seconds of allocation, not the
+wall clock.
 
 Then confirm from outside:
 

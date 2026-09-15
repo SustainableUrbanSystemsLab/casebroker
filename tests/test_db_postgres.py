@@ -62,7 +62,48 @@ def prefix(s: str) -> str:
 
 
 @pytest.fixture(scope="module", autouse=True)
-def cleanup_after_module():
+def preflight():
+    """One connection before any test, so a refused credential costs ONE refusal.
+
+    Each test here opens its own connection, and psycopg tries every address the
+    pooler's hostname resolves to (three, in practice) before giving up. With a
+    stale password that was ~48 failed logins per run -- and fresh_conn's
+    backoff, written for a transient ECIRCUITBREAKER burst, then turned every
+    later refusal into five more, for close to five minutes of hammering.
+    Supabase answers that by blocking NEW connections project-wide -- the live
+    broker's and every reconnecting worker's -- and deploy-smoke-test triggers a
+    Render deploy inside that same window. So a bad credential is established
+    once, up front, and the run stops there with the reason.
+
+    Deliberately an exit, not a skip: a green job that quietly tested nothing is
+    how a stale deploy went unnoticed for three pushes (see deploy-smoke-test in
+    the workflow). Where the connection works -- the throwaway container, a
+    correct secret -- this is one connection handed to the pool, nothing more.
+    """
+    if not DSN:
+        return
+    try:
+        conn = db.connect(DSN)
+    except Exception as e:                            # noqa: BLE001 -- any refusal
+        reason = str(e).splitlines()[0]
+        if "password authentication failed" in reason:
+            why = ("the credential in CASEBROKER_TEST_PG_DSN is wrong -- in CI that is "
+                   "the DBSTRING secret. The pooler names the upstream role rather "
+                   "than the one supplied, so this is a stale PASSWORD, not a wrong "
+                   "username; see 'Rotating the database password' in "
+                   "docs/operations.md.")
+        elif "ECIRCUITBREAKER" in reason:
+            why = ("the pooler is refusing new connections after earlier failures; "
+                   "nothing here can pass until that lifts, and trying only prolongs it.")
+        else:
+            why = "the database is unreachable from here."
+        pytest.exit(f"test database refused the pre-flight connection: {reason}\n{why}",
+                    returncode=1)
+    release_conn(conn)
+
+
+@pytest.fixture(scope="module", autouse=True)
+def cleanup_after_module(preflight):
     """Runs once per module; deletes every row this run created, whatever the
     outcome of the tests. Nothing else in the shared database is touched."""
     yield

@@ -69,6 +69,12 @@ effect on that machine's very next request — the check is a row read, not a
 cached environment variable, so there is no redeploy — and leaves every other
 machine running.
 
+A cluster is one machine here, not one per node. Name the credential after the
+cluster (`phoenix`) and it covers every worker id under that name —
+`phoenix-<job>-<task>`, which is what `slurm/phoenix_worker.sbatch` runs each
+task as. Revoking it stops that cluster's workers on their next lease and
+nothing else.
+
 ## Sharing a read-only view
 
 The good way is a `viewer` account: attributable, individually revocable, and it
