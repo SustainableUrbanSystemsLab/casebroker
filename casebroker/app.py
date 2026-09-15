@@ -1088,8 +1088,9 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
     footprints_locks: weakref.WeakValueDictionary = weakref.WeakValueDictionary()
     footprints_locks_guard = threading.Lock()
 
-    def _building_query(lat: float, lon: float) -> dict[str, Any]:
-        """The buildings and the terrain for one site, read side by side.
+    def _building_query(lat: float, lon: float, source: str) -> dict[str, Any]:
+        """The buildings and the terrain for one site, read side by side, the
+        buildings from ``source`` -- the one the case's mesh was built from.
 
         In sequence a first look cost the SUM of two remote reads whose times
         swing by site and by minute -- measured 2026-09-15, GBA 2.1-8.7 s and
@@ -1097,6 +1098,14 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         stopped somewhere different every time. Side by side it costs the
         slower of the two.
         """
+        def buildings(src: str) -> dict[str, Any]:
+            # Looked up on each call rather than bound once, so a test can
+            # replace them.
+            fc = (footprints.fetch_gba(lat, lon) if src == footprints.GBA
+                  else footprints.fetch(lat, lon))
+            fc["source"] = src
+            return fc
+
         with ThreadPoolExecutor(max_workers=1) as pool:
             # Whether this site has real bare-earth terrain or will be meshed
             # flat. Cached with the footprints because it is the same question --
@@ -1104,17 +1113,20 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
             # out after 66 core-hours is worse than finding out now.
             terrain = pool.submit(footprints.terrain, lat, lon)
             try:
-                # GBA is what the geometry builder now defaults to, so it is what
-                # gets meshed, so it is what this must draw. Overture stays as the
-                # fallback rather than being deleted: it is one HTTP dependency
-                # against another, and an inspector that 502s is useless exactly
-                # when someone is trying to find out why a case looks wrong.
+                # The mesh's own source first, because that is what this must
+                # draw. The other stays as a fallback rather than nothing: it is
+                # one HTTP dependency against another, and an inspector that 502s
+                # is useless exactly when someone is trying to find out why a case
+                # looks wrong. `fallback_from` then says the picture is not the
+                # mesh's, and why.
+                other = (footprints.OVERTURE if source == footprints.GBA
+                         else footprints.GBA)
                 try:
-                    fc = footprints.fetch_gba(lat, lon)
-                except Exception as gba_err:             # noqa: BLE001
-                    fc = footprints.fetch(lat, lon)
-                    fc["source"] = "overture"
-                    fc["fallback_from"] = f"gba unavailable: {str(gba_err)[:120]}"
+                    fc = buildings(source)
+                except Exception as err:                 # noqa: BLE001
+                    fc = buildings(other)
+                    name = "gba" if source == footprints.GBA else "overture"
+                    fc["fallback_from"] = f"{name} unavailable: {str(err)[:120]}"
                 fc["terrain"] = terrain.result()
             except Exception as e:                       # noqa: BLE001
                 # 502, not 500: the failure is upstream at the building-data source,
@@ -1124,26 +1136,38 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
 
     @app.get("/v1/cases/{case_id}/footprints", dependencies=[ReadAuth])
     def case_footprints(case_id: str, refresh: bool = False) -> dict[str, Any]:
-        """Building footprints for this case, as GeoJSON: GlobalBuildingAtlas, or
-        Overture when GBA cannot be read (`source` says which).
+        """Building footprints for this case, as GeoJSON, from the source its mesh
+        was built from.
+
+        Which source that is comes from :func:`footprints.mesh_source`: what the
+        case's run reported, Overture for a case that finished before the builder
+        could mesh GBA, and GBA otherwise. The response carries it as
+        `mesh_source`, with `mesh_source_basis` saying how it is known; `source`
+        is what actually answered, and `fallback_from` says why the two differ
+        when they do.
 
         The dashboard cannot fetch these itself: both sources publish GeoParquet
         for range reads, with no REST API and no published tile endpoint, so a
         browser has nothing to call. The broker runs the query.
 
         It is deliberately the SAME source and the same bbox derivation the
-        runner uses, so the picture is the geometry that gets meshed. Drawing
-        OSM footprints or a map tile instead would be worse than drawing
-        nothing: it would look like a check while disagreeing with the mesh, and
-        it would disagree most exactly where checking matters -- the sites where
-        Overture is empty but OSM is not.
+        runner used, so the picture is the geometry that got meshed. Drawing OSM
+        footprints, a map tile, or the OTHER building source would be worse than
+        drawing nothing: it would look like a check while disagreeing with the
+        mesh, and it would disagree most exactly where checking matters.
 
-        Cached after the first fetch; `refresh=true` forces a re-query.
+        Cached after the first fetch; `refresh=true` forces a re-query, and so
+        does a cached row from a source other than the mesh's.
         """
         row = conn.execute("SELECT * FROM cases WHERE case_id=?", (case_id,)).fetchone()
         if row is None:
             raise HTTPException(404, "no such case")
         row = dict(row)
+        metrics = row.get("metrics") or {}
+        if isinstance(metrics, str):
+            metrics = json.loads(metrics)
+        source, basis = footprints.mesh_source(row["state"], metrics, row.get("updated_at"))
+        meshed = {"mesh_source": source, "mesh_source_basis": basis}
 
         def cached() -> dict[str, Any] | None:
             if refresh:
@@ -1151,8 +1175,16 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
             hit = db.get_footprints(conn, case_id)
             if not hit:
                 return None
-            return {**json.loads(hit["geojson"]), "cached": True,
-                    "fetched_at": hit["fetched_at"]}
+            fc = json.loads(hit["geojson"])
+            # Rows cached before the switch to GBA carry no `source`: Overture.
+            fc["source"] = fc.get("source") or footprints.OVERTURE
+            # A row from the other source is not this case's picture: the
+            # pre-switch Overture row of a case GBA will mesh, the GBA row of a
+            # case whose run reported Overture, or a fallback answer. Served from
+            # the cache it would stay the wrong picture for good.
+            if fc["source"] != source:
+                return None
+            return {**fc, **meshed, "cached": True, "fetched_at": hit["fetched_at"]}
 
         if (hit := cached()) is not None:
             return hit
@@ -1168,9 +1200,9 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
             # Whoever held the lock before us may have just answered this case.
             if (hit := cached()) is not None:
                 return hit
-            fc = _building_query(float(lat), float(lon))
+            fc = _building_query(float(lat), float(lon), source)
             db.put_footprints(conn, case_id, json.dumps(fc), fc["n"])
-        return {**fc, "cached": False}
+        return {**fc, **meshed, "cached": False}
 
     @app.get("/v1/cases/{case_id}", dependencies=[ReadAuth])
     def get_case(case_id: str) -> dict[str, Any]:

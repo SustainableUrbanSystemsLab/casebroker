@@ -120,6 +120,169 @@ def test_dashboard_geometry_panel_says_what_it_draws(broker):
     html = broker.get("/", headers={"Authorization": ""}).text
     assert "same release the runner meshes" not in html
     assert "querying Overture" not in html
-    assert "GlobalBuildingAtlas, the source the runner meshes" in html
+    assert "mesh_source" in html, "the panel must name the mesh's source, not assume one"
     assert "predicted height" in html
     assert 'id="geoTick"' not in html
+
+
+# -- which source a case is drawn from ----------------------------------------
+
+RECIPE = "fixed-cyl-500/of12"
+PRE_SWITCH_ROW = {"type": "FeatureCollection", "release": "2026-08-19.0",
+                  "centre": [32.0603, 118.7969], "half_m": 520.0, "n": 0, "features": []}
+
+
+def _case(client, lat, lon) -> str:
+    from casebroker import ids
+    assert client.post("/v1/cases", json=[{
+        "lat": lat, "lon": lon, "recipe": RECIPE, "city_cluster": "c",
+        "lcz": "LCZ4"}]).json()["added"] == 1
+    return ids.case_id(lat, lon, RECIPE)
+
+
+def _finish(client, metrics) -> str:
+    """Lease the one pending case and complete it with these metrics, as a worker
+    relaying its runner's result line does."""
+    lease = client.post("/v1/lease", json={"worker_id": "w1"}).json()[0]
+    r = client.post("/v1/complete", json={
+        "lease_id": lease["lease_id"], "result_uri": f"file:///done/{lease['case_id']}",
+        "metrics": metrics})
+    assert r.status_code == 200, r.text
+    return lease["case_id"]
+
+
+def _sources(monkeypatch, fail=()):
+    """Both building reads replaced. Returns the list each call is recorded in."""
+    from casebroker import footprints
+    calls = []
+
+    def gba(lat, lon):
+        calls.append("gba")
+        if "gba" in fail:
+            raise RuntimeError("source.coop unreachable")
+        return _gba(lat, lon)
+
+    def overture(lat, lon):
+        calls.append("overture")
+        if "overture" in fail:
+            raise RuntimeError("overture download failed")
+        # What footprints.fetch returns: no `source` of its own.
+        return {**PRE_SWITCH_ROW, "centre": [lat, lon]}
+
+    monkeypatch.setattr(footprints, "fetch_gba", gba)
+    monkeypatch.setattr(footprints, "fetch", overture)
+    monkeypatch.setattr(footprints, "terrain", lambda lat, lon: {"source": "flat"})
+    return calls
+
+
+def _seen(body):
+    # .get, so a response that says nothing fails as a wrong answer, not a KeyError.
+    return body.get("source"), body.get("mesh_source"), body.get("mesh_source_basis")
+
+
+def test_a_finished_case_is_drawn_from_the_source_its_run_reported(broker, monkeypatch):
+    """The failure this exists for: a case meshed from Overture was drawn from GBA,
+    because the endpoint tried GBA first whatever the mesh had been built from --
+    a picture of different buildings than the mesh holds, which looks like a check."""
+    calls = _sources(monkeypatch)
+    _case(broker, 32.0603, 118.7969)
+    overture = _finish(broker, {"stage": "archived", "height_source": "overture"})
+    _case(broker, 33.7490, -84.3880)
+    gba = _finish(broker, {"stage": "archived", "height_source": "gba-lod1"})
+
+    body = broker.get(f"/v1/cases/{overture}/footprints").json()
+    assert calls == ["overture"], "a case meshed from Overture must be read from Overture"
+    assert _seen(body) == ("overture", "overture", "reported")
+    body = broker.get(f"/v1/cases/{gba}/footprints").json()
+    assert calls == ["overture", "gba"], "each read from its own source, and only that"
+    assert _seen(body) == ("globalbuildingatlas", "globalbuildingatlas", "reported")
+
+
+def test_a_case_not_finished_is_drawn_from_gba(broker, monkeypatch):
+    calls = _sources(monkeypatch)
+    case = _case(broker, 32.0603, 118.7969)
+    assert _seen(broker.get(f"/v1/cases/{case}/footprints").json()) == \
+        ("globalbuildingatlas", "globalbuildingatlas", "not_done")
+    assert calls == ["gba"]
+
+
+def test_a_finished_case_that_never_reported_is_dated_against_the_switch(broker, monkeypatch):
+    """Every case already done will never report a source. One that finished
+    before the builder could mesh GBA was meshed from Overture -- certain, in that
+    direction only. One that finished after is drawn from GBA and labelled an
+    assumption: an old checkout, or cached geometry, meshes Overture after the
+    switch too."""
+    from casebroker import db, footprints
+    calls = _sources(monkeypatch)
+    now = db._now
+    monkeypatch.setattr(db, "_now", lambda: footprints.GBA_BUILDER_SINCE - 3600)
+    _case(broker, 32.0603, 118.7969)
+    before = _finish(broker, {"stage": "archived"})
+    monkeypatch.setattr(db, "_now", now)
+    _case(broker, 33.7490, -84.3880)
+    after = _finish(broker, {"stage": "archived"})
+
+    assert _seen(broker.get(f"/v1/cases/{before}/footprints").json()) == \
+        ("overture", "overture", "before_gba")
+    assert _seen(broker.get(f"/v1/cases/{after}/footprints").json()) == \
+        ("globalbuildingatlas", "globalbuildingatlas", "unreported")
+    assert calls == ["overture", "gba"]
+
+
+def test_a_source_the_broker_cannot_draw_is_not_mistaken_for_one_it_can():
+    from casebroker import footprints
+    # Reported outranks the date, even for a case that finished long before.
+    assert footprints.mesh_source("done", {"height_source": "osm"}, 0) == \
+        ("globalbuildingatlas", "unrecognized")
+
+
+def test_a_cached_picture_from_the_wrong_source_is_queried_again(broker, monkeypatch):
+    """A row cached before the switch carries no `source`, and is Overture. It was
+    served for good -- including for cases still pending, which GBA will mesh."""
+    import json
+    from casebroker import db
+    calls = _sources(monkeypatch)
+    case = _case(broker, 32.0603, 118.7969)
+    db.put_footprints(db.connect(broker.app.state.db_path), case,
+                      json.dumps(PRE_SWITCH_ROW), 0)
+
+    body = broker.get(f"/v1/cases/{case}/footprints").json()
+    assert (body.get("source"), body["cached"]) == ("globalbuildingatlas", False)
+    body = broker.get(f"/v1/cases/{case}/footprints").json()
+    assert (body.get("source"), body["cached"]) == ("globalbuildingatlas", True), \
+        "the right picture, once fetched, is what the cache keeps"
+    assert calls == ["gba"]
+
+
+def test_a_pre_switch_row_still_answers_for_a_case_meshed_from_overture(broker, monkeypatch):
+    import json
+    from casebroker import db
+    calls = _sources(monkeypatch)
+    _case(broker, 32.0603, 118.7969)
+    case = _finish(broker, {"stage": "archived", "height_source": "overture"})
+    db.put_footprints(db.connect(broker.app.state.db_path), case,
+                      json.dumps(PRE_SWITCH_ROW), 0)
+
+    body = broker.get(f"/v1/cases/{case}/footprints").json()
+    assert calls == [] and body["cached"] is True
+    assert _seen(body) == ("overture", "overture", "reported"), \
+        "`source` is stated, not left for the reader to infer from its absence"
+
+
+def test_when_the_mesh_source_cannot_be_read_the_other_answers_and_says_so(broker, monkeypatch):
+    """An inspector that 502s is useless exactly when someone is trying to find out
+    why a case looks wrong. But a fallback picture is not the mesh's: the response
+    must say so, and the cache must not keep serving it."""
+    calls = _sources(monkeypatch, fail=("overture",))
+    _case(broker, 32.0603, 118.7969)
+    case = _finish(broker, {"stage": "archived", "height_source": "overture"})
+
+    r = broker.get(f"/v1/cases/{case}/footprints")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert _seen(body) == ("globalbuildingatlas", "overture", "reported")
+    assert body["fallback_from"].startswith("overture unavailable: overture download failed")
+    assert calls == ["overture", "gba"]
+
+    broker.get(f"/v1/cases/{case}/footprints")
+    assert calls == ["overture", "gba", "overture", "gba"], "a fallback is retried, not cached"

@@ -8,7 +8,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+### Added
+- **The runner reports which building source it meshed.** `height_source` in the
+  completion metrics, read from the geometry report beside the STLs the run used:
+  the builder's `gba-lod1` tag, or `overture` for a report from its Overture path,
+  which carries `height_provenance` and no tag. A run with no report -- STLs
+  staged by the spec -- reports nothing rather than a guess.
+
 ### Fixed
+- **A case is drawn from the source its mesh was built from.** The footprints
+  endpoint always tried GBA first, so a case meshed from Overture before the
+  switch was drawn from GBA the first time anyone opened it, and a row cached
+  before the switch -- Overture, with no `source` -- was served for good, pending
+  cases GBA will mesh included. It now takes the reported `height_source`,
+  Overture for a case that finished before the builder could mesh GBA
+  (2026-09-08 15:20 -04:00), and GBA otherwise; says which and how it knows
+  (`mesh_source`, `mesh_source_basis`); queries a cached row from the other
+  source again; and falls back in either direction, saying so in `fallback_from`.
 - **The case inspector's geometry panel says what it draws.** The footprints
   endpoint switched to GlobalBuildingAtlas in `c9d22fa`, but the panel kept
   announcing "Overture, same release the runner meshes", counted "querying

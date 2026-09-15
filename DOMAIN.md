@@ -107,12 +107,27 @@ mislead.
 
 ## Footprints
 
-Building geometry for a case, cached per case, from the **same source the runner
-meshes** — GlobalBuildingAtlas by default, Overture if GBA is unreachable (the
-response says which, via `source`). Rendering anything merely similar — OSM, a
-map tile, or the other building source — would look like a check while
-disagreeing with the mesh, and would disagree most exactly where checking
-matters.
+Building geometry for a case, cached per case, from the **same source its mesh
+was built from**: the `height_source` its run reported on completion; Overture
+for a case that finished before the builder could mesh GBA (2026-09-08 15:20
+-04:00, parent `27dfd3a`); GlobalBuildingAtlas otherwise, which is what the
+builder meshes now. The response says all of it — `mesh_source` and
+`mesh_source_basis` (`reported`, `before_gba`, `not_done`, `unreported`,
+`unrecognized`) for the mesh, `source` for what actually answered, and
+`fallback_from` when the mesh's source could not be read and the other one did.
+A cached row from a source other than the mesh's is queried again. Rendering
+anything merely similar — OSM, a map tile, or the other building source — would
+look like a check while disagreeing with the mesh, and would disagree most
+exactly where checking matters.
+
+**Only a finished run can say which source it meshed.** The date proves one
+direction only: a case that finished before the switch was meshed from Overture,
+but a cluster on an older checkout, or geometry cached by an earlier attempt,
+meshes Overture after it too. So the runner reads the geometry report beside the
+STLs it used — the builder tags its GBA path `height_source: "gba-lod1"`, and its
+Overture path carries `tile_lod()`'s `height_provenance` instead — and reports
+`height_source` in its completion metrics. A case finished after the switch
+without one is `unreported`: drawn from GBA, and labelled an assumption.
 
 Read from the Source Cooperative GeoParquet mirror, not TUM's own WFS: that
 endpoint now answers `GetFeature` with `PARAMETER_NOT_ALLOWED`, serving only

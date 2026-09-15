@@ -63,7 +63,10 @@ Step by step:
    case was taken away — the worker abandons it rather than finishing work it no
    longer owns.
 5. **Report.** The runner's last stdout line carries `result_uri`; the worker
-   posts it with metrics, wall time and which machine produced it.
+   posts it with metrics, wall time and which machine produced it. Among the
+   metrics, `height_source` names the building source the mesh was built from
+   (`gba-lod1`, or `overture`), read from the geometry report beside the STLs —
+   the case inspector draws a finished case from it.
 6. **Repeat.**
 
 Defaults are the client's: `lease_seconds=900`, `heartbeat_seconds=300`.
@@ -138,7 +141,7 @@ than silent. Creating the first account closes it.
 | `GET /v1/whoami` | What the presented credential can do (`write` / `read` / `none`) **and which kind it is** — a session, a per-machine token, or a shared env token. **Unauthenticated** — it answers *about* a credential rather than gating on one |
 | `GET /v1/share-token` | The read-only token, so the dashboard can mint a shareable link. **Write auth** — not an escalation, since a write token already passes every read gate |
 | `POST /v1/fleet` | Report what a scheduler holds (`cluster`, `queued`, `running`). The broker cannot see SLURM; `casebroker fleet` pushes this from a login node |
-| `GET /v1/cases/{case_id}/footprints` | Building footprints for a case, as GeoJSON, cached: GlobalBuildingAtlas, or Overture when GBA cannot be read (`source` says which). Same source and bbox the runner meshes, so the picture is the geometry. Concurrent requests for one case share one query |
+| `GET /v1/cases/{case_id}/footprints` | Building footprints for a case, as GeoJSON, cached, from the source its mesh was built from: its reported `height_source`, Overture if it finished before the switch to GBA, GBA otherwise (`mesh_source`, with `mesh_source_basis` saying how that is known). `source` is what answered — the other source when the mesh's cannot be read, with `fallback_from`. A cached row from the wrong source is queried again; concurrent requests for one case share one query |
 
 State machine:
 

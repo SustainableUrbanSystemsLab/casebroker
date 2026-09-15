@@ -92,6 +92,56 @@ def gba_tile_for(lat: float, lon: float) -> str:
     return f"{lonf(west)}_{latf(north)}_{lonf(east)}_{latf(south)}"
 
 
+# The two building sources, as a response's `source` names them.
+GBA = "globalbuildingatlas"
+OVERTURE = "overture"
+
+# When the geometry builder began meshing GBA by default: parent repo commit
+# 27dfd3a, 2026-09-08T15:20:02-04:00 (this broker followed 17 s later, c9d22fa).
+# A case that FINISHED before this instant built its geometry before it, when
+# the builder had only Overture. That holds in one direction only: a case that
+# finished afterwards may still have been meshed from Overture -- a cluster on an
+# older checkout, or geometry cached by an earlier attempt -- which is why a
+# run's own report outranks the date.
+GBA_BUILDER_SINCE = 1788895202
+
+
+def mesh_source(state: str, metrics: dict[str, Any] | None,
+                updated_at: int | None) -> tuple[str, str]:
+    """The building source this case's mesh was built from, or will be, and how
+    that is known: ``(source, basis)``.
+
+    The basis matters as much as the answer, because the answers are not equally
+    certain and the inspector owes its reader the difference:
+
+    - ``reported``: the run said so -- ``height_source`` in its completion
+      metrics, from the geometry report beside the STLs it actually meshed.
+    - ``unrecognized``: the run named a source this broker cannot draw. GBA.
+    - ``before_gba``: finished before the builder could mesh GBA at all. Overture.
+    - ``unreported``: finished after the switch without saying. GBA, as the
+      builder's default -- an assumption, and labelled one.
+    - ``not_done``: not finished. GBA, what the builder meshes now.
+
+    ``updated_at`` is when a done case finished: ``db.complete`` sets it, and
+    nothing touches a done row afterwards without changing its state.
+    """
+    reported = (metrics or {}).get("height_source")
+    if isinstance(reported, str) and reported.strip():
+        spelled = reported.strip().lower()
+        # The builder tags GBA geometry "gba-lod1"; the runner reports "overture"
+        # for a report from the builder's Overture path (see run_case.sh).
+        if spelled.startswith("gba") or spelled == GBA:
+            return GBA, "reported"
+        if spelled.startswith("overture"):
+            return OVERTURE, "reported"
+        return GBA, "unrecognized"
+    if state != "done":
+        return GBA, "not_done"
+    if updated_at is not None and int(updated_at) < GBA_BUILDER_SINCE:
+        return OVERTURE, "before_gba"
+    return GBA, "unreported"
+
+
 def fetch_gba(lat: float, lon: float, half_m: float = HALF_M,
               timeout: int = 300) -> dict[str, Any]:
     """GBA footprints and predicted heights, as a compact FeatureCollection.
@@ -154,9 +204,10 @@ def fetch_gba(lat: float, lon: float, half_m: float = HALF_M,
 def fetch(lat: float, lon: float, timeout: int = 120) -> dict[str, Any]:
     """Overture footprints as a compact GeoJSON FeatureCollection.
 
-    Superseded by :func:`fetch_gba` for the campaign; kept because a case built
-    before the switch was meshed from THIS source, and redrawing it from GBA
-    would misrepresent what was actually solved.
+    Superseded by :func:`fetch_gba` for the campaign, and still what a case whose
+    mesh was built from Overture is drawn from (:func:`mesh_source`): redrawing
+    it from GBA would misrepresent what was actually solved. Also the fallback
+    when GBA cannot be read.
 
     Only the polygon rings and a height survive: the full Overture record carries
     sources, ids and classifications that would multiply the payload for a
