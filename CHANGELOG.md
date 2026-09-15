@@ -17,6 +17,21 @@ finished case for Syncthing / a master-side pull to collect. See
 `docs/fleet.md`. MINOR: every protocol change is an optional addition.
 
 ### Added
+- **Settings, with the first-run wizard behind it.** The dashboard opened on a
+  Connection panel -- a form you had already filled in, a bearer-token box a
+  signed-in operator has no use for, and a bar naming the live database host on
+  a page that needs no credential to load. All of it moves behind a gear:
+  Setup, Connection, Machines and Preferences, with the campaign now the first
+  thing on the page. The wizard is `docs/operations.md`'s "First run" answered
+  from state the page has already fetched -- a database, an admin account, a
+  session, a machine credential, and a worker that has actually leased
+  something -- so it costs no extra request. A finished step collapses to one
+  line and only the first unfinished one expands, which is what makes it a
+  checklist rather than five forms at once; when every step is done the gear's
+  attention dot goes out and the panel says so in one line. The one state that
+  cannot be left behind a gear -- a broker with no account at all -- still gets
+  a banner on the page itself, because an operator cannot be expected to go
+  looking for a drawer they have never opened.
 - **One credential per cluster.** A machine token may lease as its own name or
   as any worker id under it -- `phoenix` covers `phoenix-<job>-<task>`, the id
   every SLURM task runs as (`slurm/*.sbatch`). Without this the per-machine
@@ -318,6 +333,33 @@ finished case for Syncthing / a master-side pull to collect. See
   30 GB home.
 
 ### Fixed
+- **A revoked machine could never be given a new credential.** Revoke-then-
+  reissue is the documented recovery for a box that has lost its token --
+  `casebroker worker setup --rotate`, and Revoke then Issue in the dashboard --
+  and both answered `409`. `revoke_worker_token` MARKS the row rather than
+  deleting it, so that `last_seen_at` and who issued it survive a revocation,
+  and `UNIQUE(name)` then refused the re-issue as well. The 409 even read
+  "revoke it first", advice that could not succeed. It matters more since a
+  machine token may only lease as its own worker id: a box that lost its
+  credential could not get a working one back under the id it runs as. A
+  revoked row is now reclaimed in place, with `last_seen_at` cleared -- a fresh
+  credential has not been seen, and inheriting the old one's timestamp would
+  show a machine as alive on the strength of a token that no longer works. A
+  LIVE credential is still never replaced silently, which is the stranding
+  hazard the constraint exists for.
+- **A stale `DBSTRING` no longer fails the build it says nothing about.** The
+  production-database job turned `main` red whenever that secret drifted -- on
+  a branch that gates deploys, which is how people learn to ignore a red X. It
+  was also inconsistent: with the secret ABSENT the same job went green having
+  tested exactly as much, because the module's `skipif` fires, so the line sat
+  at "is a secret set" rather than at "did this coverage run". An unusable
+  credential now skips the module. What it must never be is silent, and the
+  first attempt was: pytest captures stdout inside a fixture and discards it
+  for a skip, so a printed `::warning::` reached nobody (measured, not
+  assumed). The reason now travels two ways that survive -- pytest's short
+  summary, for which the workflow passes `-rs`, and `$GITHUB_STEP_SUMMARY`,
+  which is a file and renders on the run's own page.
+  `CASEBROKER_TEST_PG_REQUIRED=1` turns it back into a hard failure.
 - The main-only Postgres CI job no longer amplifies a bad credential into a
   pooler outage. With the `DBSTRING` secret stale, sixteen tests each opened
   their own connection, psycopg tried three pooler addresses per attempt, and

@@ -166,14 +166,21 @@ def test_revoking_one_machine_takes_effect_immediately_and_spares_the_rest(fresh
     assert fresh.get("/v1/status", headers={"Authorization": f"Bearer {keep}"}).status_code == 200
 
 
-def test_reissuing_for_the_same_machine_is_refused(fresh):
+def test_reissuing_over_a_live_credential_is_refused(fresh):
     """Silently minting a second credential would strand whichever one the box
-    is actually using."""
+    is actually using.
+
+    Only a LIVE one is protected. A revoked name is reclaimed, which is what
+    makes the advice in this message work -- see
+    test_a_revoked_machine_name_can_be_issued_again, where it did not.
+    """
     fresh.post("/v1/auth/setup", json={"username": "ada", "password": PW})
     fresh.post("/v1/workers/tokens", json={"name": "lab-ws-02"})
     r = fresh.post("/v1/workers/tokens", json={"name": "lab-ws-02"})
     assert r.status_code == 409
-    assert "revoke it first" in r.json()["detail"]
+    detail = r.json()["detail"]
+    assert "lab-ws-02" in detail, "the message has to name the machine it refused"
+    assert "evoke it first" in detail, "and point at the recovery that works"
 
 
 def test_a_machine_token_cannot_mint_more_machine_tokens(fresh):
