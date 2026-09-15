@@ -28,6 +28,8 @@ import threading
 import time
 import pathlib
 import sys
+import weakref
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
@@ -1078,15 +1080,58 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
                 "db": _redact_db_target(db_path)}
 
 
+    # One building query per case at a time. The dashboard rebuilds its geometry
+    # panel on every refresh and a second viewer can open the same case, and each
+    # used to start its own read of the same remote bytes while the first was
+    # still under way. Now the rest wait for it, then answer from the cache it
+    # wrote. Weak values: a case's lock lives only while a request holds it.
+    footprints_locks: weakref.WeakValueDictionary = weakref.WeakValueDictionary()
+    footprints_locks_guard = threading.Lock()
+
+    def _building_query(lat: float, lon: float) -> dict[str, Any]:
+        """The buildings and the terrain for one site, read side by side.
+
+        In sequence a first look cost the SUM of two remote reads whose times
+        swing by site and by minute -- measured 2026-09-15, GBA 2.1-8.7 s and
+        GEDTM30 0.05-10.6 s -- which is most of why the dashboard's count
+        stopped somewhere different every time. Side by side it costs the
+        slower of the two.
+        """
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            # Whether this site has real bare-earth terrain or will be meshed
+            # flat. Cached with the footprints because it is the same question --
+            # "what will this case actually be made of" -- and because finding
+            # out after 66 core-hours is worse than finding out now.
+            terrain = pool.submit(footprints.terrain, lat, lon)
+            try:
+                # GBA is what the geometry builder now defaults to, so it is what
+                # gets meshed, so it is what this must draw. Overture stays as the
+                # fallback rather than being deleted: it is one HTTP dependency
+                # against another, and an inspector that 502s is useless exactly
+                # when someone is trying to find out why a case looks wrong.
+                try:
+                    fc = footprints.fetch_gba(lat, lon)
+                except Exception as gba_err:             # noqa: BLE001
+                    fc = footprints.fetch(lat, lon)
+                    fc["source"] = "overture"
+                    fc["fallback_from"] = f"gba unavailable: {str(gba_err)[:120]}"
+                fc["terrain"] = terrain.result()
+            except Exception as e:                       # noqa: BLE001
+                # 502, not 500: the failure is upstream at the building-data source,
+                # and saying so keeps it out of the broker's own error budget.
+                raise HTTPException(502, f"building query failed: {e}") from e
+        return fc
+
     @app.get("/v1/cases/{case_id}/footprints", dependencies=[ReadAuth])
     def case_footprints(case_id: str, refresh: bool = False) -> dict[str, Any]:
-        """Overture building footprints for this case, as GeoJSON.
+        """Building footprints for this case, as GeoJSON: GlobalBuildingAtlas, or
+        Overture when GBA cannot be read (`source` says which).
 
-        The dashboard cannot fetch these itself: Overture publishes GeoParquet on
-        S3 and a Python client, with no REST API and no published tile endpoint,
-        so a browser has nothing to call. The broker runs the query.
+        The dashboard cannot fetch these itself: both sources publish GeoParquet
+        for range reads, with no REST API and no published tile endpoint, so a
+        browser has nothing to call. The broker runs the query.
 
-        It is deliberately the SAME release and the same bbox derivation the
+        It is deliberately the SAME source and the same bbox derivation the
         runner uses, so the picture is the geometry that gets meshed. Drawing
         OSM footprints or a map tile instead would be worse than drawing
         nothing: it would look like a check while disagreeing with the mesh, and
@@ -1099,39 +1144,32 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         if row is None:
             raise HTTPException(404, "no such case")
         row = dict(row)
-        if not refresh:
+
+        def cached() -> dict[str, Any] | None:
+            if refresh:
+                return None
             hit = db.get_footprints(conn, case_id)
-            if hit:
-                return {**json.loads(hit["geojson"]), "cached": True,
-                        "fetched_at": hit["fetched_at"]}
+            if not hit:
+                return None
+            return {**json.loads(hit["geojson"]), "cached": True,
+                    "fetched_at": hit["fetched_at"]}
+
+        if (hit := cached()) is not None:
+            return hit
         spec = row.get("spec") or {}
         if isinstance(spec, str):
             spec = json.loads(spec)
         lat, lon = spec.get("lat"), spec.get("lon")
         if lat is None or lon is None:
             raise HTTPException(422, "case spec carries no lat/lon")
-        try:
-            # GBA is what the geometry builder now defaults to, so it is what
-            # gets meshed, so it is what this must draw. Overture stays as the
-            # fallback rather than being deleted: it is one HTTP dependency
-            # against another, and an inspector that 502s is useless exactly
-            # when someone is trying to find out why a case looks wrong.
-            try:
-                fc = footprints.fetch_gba(float(lat), float(lon))
-            except Exception as gba_err:             # noqa: BLE001
-                fc = footprints.fetch(float(lat), float(lon))
-                fc["source"] = "overture"
-                fc["fallback_from"] = f"gba unavailable: {str(gba_err)[:120]}"
-            # Whether this site has real bare-earth terrain or will be meshed
-            # flat. Cached with the footprints because it is the same question --
-            # "what will this case actually be made of" -- and because finding
-            # out after 66 core-hours is worse than finding out now.
-            fc["terrain"] = footprints.terrain(float(lat), float(lon))
-        except Exception as e:                       # noqa: BLE001
-            # 502, not 500: the failure is upstream at the building-data source,
-            # and saying so keeps it out of the broker's own error budget.
-            raise HTTPException(502, f"building query failed: {e}") from e
-        db.put_footprints(conn, case_id, json.dumps(fc), fc["n"])
+        with footprints_locks_guard:
+            lock = footprints_locks.setdefault(case_id, threading.Lock())
+        with lock:
+            # Whoever held the lock before us may have just answered this case.
+            if (hit := cached()) is not None:
+                return hit
+            fc = _building_query(float(lat), float(lon))
+            db.put_footprints(conn, case_id, json.dumps(fc), fc["n"])
         return {**fc, "cached": False}
 
     @app.get("/v1/cases/{case_id}", dependencies=[ReadAuth])

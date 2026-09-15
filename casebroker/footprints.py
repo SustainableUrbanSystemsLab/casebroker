@@ -1,21 +1,24 @@
-"""Building footprints for one case, from the same Overture release the runner uses.
+"""Building footprints for one case, from the source the geometry builder meshes.
 
 This exists so a case can be eyeballed before it finishes. The dashboard cannot
-fetch Overture itself: Overture publishes GeoParquet on S3 and a Python client,
-with no REST API and no published tile endpoints, so a browser has nothing to
+fetch the buildings itself: GlobalBuildingAtlas is GeoParquet read with HTTP
+range requests, and Overture publishes GeoParquet on S3 and a Python client --
+neither has a REST API or published tile endpoints, so a browser has nothing to
 call. The broker does the query and hands back GeoJSON.
 
-**It must be the same data the CFD actually meshes.** The release is pinned to the
-identical string ``overture_3d.RELEASE`` uses, and the bbox is derived the same
-way from the case's own coordinates. Rendering something merely similar -- OSM
+**It must be the same data the CFD actually meshes.** GBA is the geometry
+builder's default height source, so it is what :func:`fetch_gba` reads; the
+Overture path, :func:`fetch`, stays pinned to the identical release string
+``overture_3d.RELEASE`` uses. Either way the bbox is derived the same way from
+the case's own coordinates. Rendering something merely similar -- OSM
 footprints, a map tile -- would be worse than rendering nothing: it would look
 like a check while quietly disagreeing with the geometry, and the sites where it
 disagreed most would be exactly the ones worth checking (China and much of
 Africa, where Overture is empty but OSM is not).
 
-Cached in the database after the first fetch. The query takes a few seconds and
-the answer cannot change for a pinned release, so paying it once per case keeps
-a dashboard refresh from re-querying S3 on every inspector open.
+Cached in the database after the first fetch. The query takes seconds and the
+answer cannot change for a pinned release, so paying it once per case keeps a
+dashboard refresh from re-querying on every inspector open.
 """
 
 from __future__ import annotations
@@ -105,17 +108,33 @@ def fetch_gba(lat: float, lon: float, half_m: float = HALF_M,
     xmin, ymin, xmax, ymax = lon - dlon, lat - dlat, lon + dlon, lat + dlat
     url = f"{GBA_BASE}/{gba_tile_for(lat, lon)}.parquet"
 
+    # A fresh database per call, deliberately. One kept open across requests
+    # was measured against this on 2026-09-15 (duckdb 1.5.5; the same 12 sites
+    # in 12 tiles, both run at once so they saw the same network): 3.44 s
+    # against 3.45 s mean for a site not read before. That is every request
+    # reaching here -- a repeat is answered from the broker's own cache first --
+    # and the kept database's caches paid off only on exact repeats, while
+    # growing ~8 MB per new tile inside a long-running web process.
     con = duckdb.connect()
-    con.execute("INSTALL httpfs; LOAD httpfs; INSTALL spatial; LOAD spatial;")
-    con.execute(f"SET http_timeout={int(timeout) * 1000};")
-    rows = con.execute(
-        f"""
-        SELECT ST_AsGeoJSON(geometry) AS gj, height, var
-        FROM read_parquet('{url}')
-        WHERE bbox.xmin < {xmax} AND bbox.xmax > {xmin}
-          AND bbox.ymin < {ymax} AND bbox.ymax > {ymin}
-        """
-    ).fetchall()
+    try:
+        # The image installs both at build time (see Dockerfile), so INSTALL is
+        # a no-op there; anywhere else it fetches them once.
+        con.execute("INSTALL httpfs; LOAD httpfs; INSTALL spatial; LOAD spatial;")
+        # SECONDS: duckdb 1.5.5 describes http_timeout as "(in seconds)". This
+        # used to pass timeout * 1000, turning the 300 s meant here into
+        # 300,000 s, so a stalled read held its request for days instead of
+        # failing over to Overture.
+        con.execute(f"SET http_timeout={int(timeout)};")
+        rows = con.execute(
+            f"""
+            SELECT ST_AsGeoJSON(geometry) AS gj, height, var
+            FROM read_parquet('{url}')
+            WHERE bbox.xmin < {xmax} AND bbox.xmax > {xmin}
+              AND bbox.ymin < {ymax} AND bbox.ymax > {ymin}
+            """
+        ).fetchall()
+    finally:
+        con.close()
 
     feats = []
     for gj, height, var in rows:
@@ -215,9 +234,16 @@ def terrain(lat: float, lon: float, half_m: float = 1304.0, n: int = 48) -> dict
     dlat = half_m / 110_540.0
     dlon = half_m / (111_320.0 * _math.cos(_math.radians(lat)))
     try:
-        with rasterio.open(GEDTM30) as ds:
-            w = from_bounds(lon - dlon, lat - dlat, lon + dlon, lat + dlat, ds.transform)
-            a = ds.read(1, window=w, out_shape=(n, n), resampling=Resampling.bilinear)
+        # Left to its defaults, GDAL opened this COG with TEN HTTP requests: a
+        # listing of the bucket "directory" and HEADs for eight sidecar spellings
+        # (.aux, .AUX, .xml, .tif.aux.xml, ...) that do not exist, then the two it
+        # needed. Counted from curl's log on 2026-09-15, both variants opened side
+        # by side: 10 requests and 8.4 s with the defaults, 2 and 1.5 s with these.
+        with rasterio.Env(GDAL_DISABLE_READDIR_ON_OPEN="EMPTY_DIR",
+                          CPL_VSIL_CURL_ALLOWED_EXTENSIONS=".tif"):
+            with rasterio.open(GEDTM30) as ds:
+                w = from_bounds(lon - dlon, lat - dlat, lon + dlon, lat + dlat, ds.transform)
+                a = ds.read(1, window=w, out_shape=(n, n), resampling=Resampling.bilinear)
     except Exception as e:                               # noqa: BLE001
         return {"source": "unavailable", "detail": str(e)[:160]}
 

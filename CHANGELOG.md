@@ -8,6 +8,37 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+### Fixed
+- **The case inspector's geometry panel says what it draws.** The footprints
+  endpoint switched to GlobalBuildingAtlas in `c9d22fa`, but the panel kept
+  announcing "Overture, same release the runner meshes", counted "querying
+  Overture…", and labelled every GBA height *measured* -- the mislabelling
+  `DOMAIN.md` exists to prevent. It now names the source that answered, calls GBA
+  heights predicted with their variance (median, and how many exceed 25), and
+  says so when the picture is Overture instead: a fallback because GBA could not
+  be read, or a row cached before the switch.
+- **The panel's timer no longer jumps.** Every counter wrote through one
+  page-wide id, and the case list rebuilds the panel on each refresh and row
+  click, so two loads could alternate in one span -- while the rebuild also sent
+  a second request for an answer already on its way. A case now has one load,
+  shared by every panel showing it and counted from when it started, and a
+  refresh no longer puts the bare "Show building footprints" button back over a
+  drawing the page already had.
+- **A first look costs the slower of two reads, not their sum.** The GEDTM30
+  terrain check ran after the building query and now runs beside it; measured
+  2026-09-15, GBA took 2.1-8.7 s and terrain 0.05-10.6 s, by site and by minute.
+  Concurrent requests for one case share one query rather than each reading the
+  same remote bytes.
+- **Terrain opens with 2 HTTP requests, not 10.** GDAL listed the bucket and
+  probed for eight sidecar files that do not exist before reading the COG. Opened
+  side by side: 8.4 s with the defaults, 1.5 s without the probing.
+- **A stalled GBA read times out.** duckdb 1.5.5 takes `http_timeout` in seconds
+  and the broker passed `timeout * 1000`, so 300 s became 300,000 s and a hung
+  read never fell back to Overture.
+- **The first footprints request after a deploy no longer downloads ~72 MB.** The
+  image installs duckdb's httpfs and spatial extensions at build time, instead of
+  on first use into a container filesystem every Render deploy discards.
+
 ## [0.3.0] - 2026-09-15
 
 Hooking heterogeneous machines into the campaign: Windows workstations (Docker

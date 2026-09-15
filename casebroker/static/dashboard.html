@@ -1577,33 +1577,84 @@
   initTheme();
 
   // -- Site geometry ----------------------------------------------------------
-  // Drawn from the broker's /footprints endpoint, which runs the SAME Overture
-  // query, pinned to the same release, that the CFD runner does. The split
-  // below is the point of the whole panel: Overture returns every footprint it
-  // knows, but only those carrying a height can be extruded, so only those
-  // become geometry. A site can look busy here and still mesh almost empty --
-  // which is exactly the failure that quarantined sites earlier.
-  async function loadFootprints(caseId, wrap) {
-    const t0 = Date.now();
-    wrap.innerHTML = '<span id="geoTick" style="font-size:12px;color:var(--text-muted)">'
-      + 'querying Overture… <span style="font-family:var(--font-mono)">0.0s</span>'
-      + '<span style="display:block;margin-top:3px;font-size:11px">first look at a case queries S3 and is cached after; later opens are instant</span></span>';
-    // Silence for five seconds reads as a hang, and this is a genuine remote
-    // query -- so it counts up, and says why it is slow only the first time.
-    const tick = setInterval(() => {
-      const el = document.querySelector("#geoTick span");
-      if (el) el.textContent = ((Date.now() - t0) / 1000).toFixed(1) + "s";
-      else clearInterval(tick);
-    }, 100);
-    let d;
-    try {
-      d = await api(`/v1/cases/${encodeURIComponent(caseId)}/footprints`);
-    } catch (e) {
+  // Drawn from the broker's /footprints endpoint, which reads the SAME building
+  // source the geometry builder meshes: GlobalBuildingAtlas LoD1 by default, and
+  // Overture only when GBA cannot be read (the response's `source` says which).
+  // The split below is the point of the whole panel: only buildings carrying a
+  // height become extruded geometry, so a site can look busy here and still
+  // mesh almost empty -- which is exactly the failure that quarantined sites
+  // earlier. What a height IS depends on the source, and the legend must not
+  // blur it: an Overture height is a tagged measurement, a GBA height is a model
+  // prediction (DOMAIN.md: a prediction is never labelled measured).
+  //
+  // One load per case, shared by every panel that shows it. The case list
+  // re-renders on each refresh and each row click, rebuilding this panel, and
+  // each rebuild used to start its own request and its own counter -- with every
+  // counter writing into whichever element first carried a shared id. Two of
+  // them then alternated in one span, so the time visibly jumped back and forth,
+  // while the extra request went back to S3 for an answer already on its way.
+  const geoLoads = new Map();   // case_id -> { t0, promise, data, error }
+  const GEO_KEEP = 16;          // settled answers kept, so a re-render redraws instantly
+
+  function footprintsFor(caseId, retry) {
+    let g = geoLoads.get(caseId);
+    if (g && !(retry && g.error)) return g;
+    g = { t0: performance.now(), data: null, error: null };
+    // Settles either way and never rejects: the outcome lives on `g`, where a
+    // panel rebuilt after the fact can still read it.
+    g.promise = api(`/v1/cases/${encodeURIComponent(caseId)}/footprints`).then(
+      (d) => { g.data = d; },
+      (e) => { g.error = e; });
+    geoLoads.delete(caseId);
+    geoLoads.set(caseId, g);
+    // Map order is insertion order, so this drops the oldest settled answers. An
+    // in-flight load is never dropped: some panel is still counting against it.
+    for (const [id, old] of geoLoads) {
+      if (geoLoads.size <= GEO_KEEP) break;
+      if (old.data || old.error) geoLoads.delete(id);
+    }
+    return g;
+  }
+
+  async function loadFootprints(caseId, wrap, retry) {
+    const g = footprintsFor(caseId, retry);
+    if (!g.data && !g.error) {
+      const secs = () => ((performance.now() - g.t0) / 1000).toFixed(1) + "s";
+      wrap.innerHTML = '<span class="geo-tick" style="font-size:12px;color:var(--text-muted)">'
+        + `querying GlobalBuildingAtlas… <span style="font-family:var(--font-mono)">${secs()}</span>`
+        + '<span style="display:block;margin-top:3px;font-size:11px">the first look at a case range-reads GBA and the terrain model, then it is cached; later opens are instant</span></span>';
+      // Silence for five seconds reads as a hang, and this is a genuine remote
+      // query -- so it counts up. From when the LOAD started, not this panel: a
+      // panel rebuilt mid-query carries on from the count it replaced, and its
+      // own element, never a page-wide id another panel might also be using.
+      const el = wrap.querySelector(".geo-tick span");
+      const tick = setInterval(() => {
+        if (el.isConnected) el.textContent = secs();
+        else clearInterval(tick);
+      }, 100);
+      await g.promise;
       clearInterval(tick);
-      wrap.innerHTML = `<span style="font-size:12px;color:var(--bad)">could not load footprints: ${esc(e.message || e.status || e)}</span>`;
+      // Rebuilt while this was pending: the replacement panel is awaiting the
+      // same load and draws it, and this one is no longer on the page.
+      if (!wrap.isConnected) return;
+    }
+    if (g.error) {
+      // Not retried on the next refresh: a broken upstream would otherwise be
+      // queried again every minute for as long as the case stays open.
+      wrap.innerHTML = `<span style="font-size:12px;color:var(--bad)">could not load footprints: ${esc(g.error.message || g.error.status || g.error)}</span>`
+        + ` <button class="subtle geo-load" data-case="${esc(caseId)}" data-auto="1">retry</button>`;
       return;
     }
-    clearInterval(tick);
+    drawFootprints(g.data, wrap);
+  }
+
+  function drawFootprints(d, wrap) {
+    // Rows cached before the switch to GBA carry no `source`, and are Overture.
+    const gba = d.source === "globalbuildingatlas";
+    const hint = wrap.parentElement && wrap.parentElement.querySelector(".geo-src");
+    if (hint) hint.textContent = gba
+      ? "(GlobalBuildingAtlas, the source the runner meshes)"
+      : `(Overture ${d.release || ""}, not GlobalBuildingAtlas -- see below)`;
     // The drawing extends to the DOMAIN, not the footprint query. The query
     // covers 520 m; the mesh box is 1304 m a side (504 m core + 800 m buffer),
     // and the buffer is most of the domain -- so a picture scaled to the
@@ -1629,6 +1680,14 @@
       }
       if (h) modelled++; else flat++;
     }
+    // GBA's per-building variance, the honest half of a prediction: variance 3
+    // and variance 175 are not the same claim. 25 is DOMAIN.md's n_high_variance
+    // cut, so this reads the same as the geometry report does.
+    const vs = gba ? d.features.map((f) => f.properties && f.properties.v)
+      .filter((v) => v != null).sort((a, b) => a - b) : [];
+    const vMid = vs.length >> 1;
+    const vMed = !vs.length ? null : vs.length % 2 ? vs[vMid] : (vs[vMid - 1] + vs[vMid]) / 2;
+    const vHigh = vs.filter((v) => v > 25).length;
     const core = CORE_M * k, dom = DOM_M * k;
 
     // -- 45 degree isometric ------------------------------------------------
@@ -1698,12 +1757,12 @@
           <circle cx="${S/2}" cy="${S/2}" r="2.5" fill="var(--bad)"/>
         </svg>
         <svg viewBox="0 0 ${ISO} ${ISO}" width="${ISO}" height="${ISO}" role="img"
-             aria-label="Isometric view at 45 degrees; blue blocks have measured heights, grey blocks were inferred.">
+             aria-label="Isometric view at 45 degrees; blue blocks have ${gba ? "predicted" : "measured"} heights, grey blocks ${gba ? "have no height in GBA" : "were inferred"}.">
           ${isoGround}${iso}
         </svg>
         <div class="geo-legend">
-          <div><span class="geo-swatch" style="background:var(--primary)"></span><b>${modelled}</b> measured height</div>
-          <div><span class="geo-swatch" style="border:1px solid var(--text-muted)"></span><b>${flat}</b> height inferred</div>
+          <div><span class="geo-swatch" style="background:var(--primary)"></span><b>${modelled}</b> ${gba ? "predicted height" : "measured height"}</div>
+          <div><span class="geo-swatch" style="border:1px solid var(--text-muted)"></span><b>${flat}</b> ${gba ? "no height in GBA" : "height inferred"}</div>
           <div><span class="geo-swatch" style="border:1px dashed var(--bad)"></span>${2*CORE_M} m sampled core</div>
           <div><span class="geo-swatch" style="border:1px solid var(--warn)"></span>${2*DOM_M} m mesh domain</div>
           ${(() => {
@@ -1713,9 +1772,13 @@
             if (t.source === "unavailable") return `<div style="margin-top:6px;color:var(--text-muted)">terrain unknown — DTM host unreachable</div>`;
             return "";
           })()}
-          <div style="margin-top:6px;color:var(--text-muted)">release ${esc(d.release)}${d.cached ? " · cached" : ""}</div>
+          <div style="margin-top:6px;color:var(--text-muted)">${gba ? "GlobalBuildingAtlas LoD1" : `Overture ${esc(d.release)}`}${d.cached ? " · cached" : ""}</div>
+          ${d.fallback_from ? `<div class="geo-note" style="color:var(--warn)">GBA could not be read (${esc(d.fallback_from)}), so this is Overture's picture, which need not match a mesh built from GBA.</div>` : ""}
+          ${d.source ? "" : `<div class="geo-note">Cached before the switch to GBA, so this is Overture's picture; a case meshed after the switch was built from GBA.</div>`}
           <div class="geo-note" style="margin-top:4px">Right: 45° isometric over the sampled core. Heights are exaggerated ${HEX}× against plan distance and clamped at 150 m — at true scale a 40 m building is four pixels.</div>
-          <div class="geo-note">${modelled === 0
+          <div class="geo-note">${gba
+            ? `${modelled} of ${modelled + flat} carry a GBA height, and every one of them is a model prediction, not a measurement${vMed == null ? "" : ` — variance median ${vMed.toFixed(1)}, ${vHigh} above 25`}.`
+            : modelled === 0
             ? "Overture heights NONE of these. Every height is inferred from the LCZ class, so this tile's massing is entirely synthetic."
             : `All ${modelled + flat} are extruded. Only ${modelled} carry a measured height (${Math.round(100 * modelled / (modelled + flat))}%); the rest are filled from this tile's median, and that ratio is what to judge the case on.`}</div>
         </div>
@@ -1725,7 +1788,7 @@
   document.addEventListener("click", (e) => {
     const btn = e.target.closest(".geo-load");
     if (!btn) return;
-    loadFootprints(btn.dataset.case, btn.parentElement);
+    loadFootprints(btn.dataset.case, btn.parentElement, true);
   });
 
   // Expanding a case starts the fetch. It was behind a button because the query
@@ -2284,7 +2347,7 @@
 
         <div class="detail-card" style="margin-bottom:14px;">
           <h3>Site Geometry
-            <span class="label-hint" style="font-weight:400;">(Overture, same release the runner meshes)</span>
+            <span class="label-hint geo-src" style="font-weight:400;">(GlobalBuildingAtlas, the source the runner meshes)</span>
           </h3>
           <div id="geoWrap-${esc(c.case_id)}" class="geo-wrap">
             <button class="subtle geo-load" data-case="${esc(c.case_id)}"
@@ -2346,10 +2409,14 @@
       tr.addEventListener("click", () => {
         const id = tr.dataset.id;
         openDetailId = (openDetailId === id) ? null : id;
-        if (openDetailId) setTimeout(autoLoadGeometry, 0);
         renderCasesTable(cases);
       });
     });
+    // Every render rebuilds the open case's panel, so every render re-attaches
+    // it -- to that case's one shared load, which redraws instantly once it has
+    // landed. Only a row click used to, so each auto-refresh put the bare
+    // "Show building footprints" button back over a drawing the page already had.
+    if (openDetailId) autoLoadGeometry();
   }
 
   function renderPager() {
