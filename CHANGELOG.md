@@ -8,6 +8,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-15
+
 Hooking heterogeneous machines into the campaign: Windows workstations (Docker
 or native blueCFD-Core) alongside the PACE clusters, with progress visible on
 the dashboard, stopped solves resuming on the same machine, and one archive per
@@ -15,6 +17,16 @@ finished case for Syncthing / a master-side pull to collect. See
 `docs/fleet.md`. MINOR: every protocol change is an optional addition.
 
 ### Added
+- **One credential per cluster.** A machine token may lease as its own name or
+  as any worker id under it -- `phoenix` covers `phoenix-<job>-<task>`, the id
+  every SLURM task runs as (`slurm/*.sbatch`). Without this the per-machine
+  model stopped at the workstation door: a cluster's tasks are named by the
+  scheduler, one credential per task is impossible, and a token issued for
+  `phoenix` refused every lease with a `403` -- so clusters stayed on the
+  shared env token, precisely the un-revocable, un-attributed model the
+  feature exists to replace. Attribution holds at the granularity a cluster
+  credential can have: the lease records the per-task id and the credential
+  is its prefix. The dash is load-bearing; `lab` does not cover `laboratory`.
 - **A contract E3D can implement against** -- `docs/e3d-contract.md`. When
   `$E3D_TRACE_FILE` is set, the solver appends one JSON record per outer
   iteration; the runner tails the last line for the heartbeat and archives the
@@ -226,6 +238,15 @@ finished case for Syncthing / a master-side pull to collect. See
   pulls archives from PACE over SSH), `docs/fleet.md`.
 
 ### Changed
+- **The worker exits when its credential is refused.** A `401` or `403` on
+  `/v1/lease` was caught by the same handler as a network blip and retried
+  every `--idle-backoff` seconds -- forever. On a workstation that is a
+  warning scrolling past; on Phoenix it is a twenty-task array holding twenty
+  allocations for their whole walltime with nothing but `[warn] lease failed:
+  403` in the logs, because a credential problem does not fix itself by
+  waiting. The worker now prints the broker's reason and exits `2`, so the
+  scheduler frees the nodes and the sbatch log ends with the sentence that
+  explains it. Every other failure retries exactly as before.
 - **The dashboard wears the RhinoPackages design language.** Its neutrals
   replace the GitHub Primer ones wholesale -- Tailwind gray 50/100/200/500/600/
   900 on white in the light theme, and in the dark the four zinc values that
@@ -297,6 +318,18 @@ finished case for Syncthing / a master-side pull to collect. See
   30 GB home.
 
 ### Fixed
+- The main-only Postgres CI job no longer amplifies a bad credential into a
+  pooler outage. With the `DBSTRING` secret stale, sixteen tests each opened
+  their own connection, psycopg tried three pooler addresses per attempt, and
+  `fresh_conn`'s retry-on-`ECIRCUITBREAKER` backoff -- written for a transient
+  burst -- turned each later refusal into five more: close to five minutes of
+  failed logins per push to main. Supabase answers that by blocking NEW
+  connections project-wide, which is what the live broker and every
+  reconnecting worker need, and `deploy-smoke-test` triggers a Render deploy
+  inside that very window. One pre-flight connection now runs before any test;
+  if it is refused, the run stops there with the reason (a stale secret is
+  named as such) after a single failed login. The throwaway-container job is
+  unaffected: its connection succeeds and nothing else changes.
 - **`/healthz` and `/v1/whoami` no longer report a secured broker as OPEN.**
   Both judged the auth posture from the environment token buckets ALONE, never
   asking whether an account existed -- so a deployment secured entirely by
