@@ -387,8 +387,13 @@ something. In this order:
    redeploy, which is the restart the new credential needs.
 3. **GitHub** ▸ repo ▸ Settings ▸ Secrets ▸ Actions ▸ `DBSTRING`. The
    `postgres` job in `.github/workflows/test.yml` runs against the real
-   database on every push to `main`; a stale secret turns that job red on a
-   commit that is perfectly fine.
+   database on every push to `main`. A stale secret no longer turns that job
+   red on a commit that is perfectly fine — it **skips** the job with a
+   `Postgres coverage skipped` warning annotation naming the cause, because a
+   third party's credential says nothing about the commit. That warning is the
+   signal to come back here; until you do, the production-database coverage is
+   not running. `CASEBROKER_TEST_PG_REQUIRED=1` makes it a hard failure
+   instead.
 4. **Your workstation** — whichever file you keep it in. `casebroker doctor`
    finds every copy on the box and tells you which ones still authenticate, so
    run it rather than trying to remember.

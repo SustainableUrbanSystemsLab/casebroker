@@ -831,10 +831,14 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
             db.create_worker_token(conn, body.name, auth.hash_token(raw),
                                    created_by=user["username"])
         except Exception:
-            # UNIQUE(name): re-issuing for a machine that already has one would
-            # silently strand whichever credential the box is actually using.
-            raise HTTPException(409, f"a token for {body.name!r} already exists -- "
-                                     "revoke it first if the machine needs a new one")
+            # UNIQUE(name), and only for a LIVE credential: re-issuing over one
+            # would silently strand whichever token the box is actually using.
+            # A revoked one is reclaimed instead (see db.create_worker_token),
+            # so "revoke it first" is now advice that works rather than the
+            # dead end it used to be.
+            raise HTTPException(409, f"{body.name!r} already has a live credential. "
+                                     "Revoke it first, then issue a new one -- that "
+                                     "reclaims the name.")
         return {"name": body.name, "token": raw,
                 "hint": "copy it now -- only its hash is stored, so it cannot be shown again"}
 

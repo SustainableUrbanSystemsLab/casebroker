@@ -497,6 +497,108 @@
   }
   a.link:hover { text-decoration: underline; color: var(--primary-hover); }
 
+  /* -- Settings drawer -------------------------------------------------------
+     Everything an operator sets ONCE -- the connection, the machine
+     credentials, the preferences -- plus the first-run wizard. It used to be a
+     panel at the top of the page, which meant the first thing anyone saw was a
+     form they had already filled in, and the database host was printed in
+     plain sight on a page that needs no credential to load. */
+  .drawer-scrim {
+    position: fixed; inset: 0; z-index: 60;
+    background: rgba(0, 0, 0, 0.45);
+    opacity: 0; pointer-events: none;
+    transition: opacity 0.18s ease;
+  }
+  .drawer-scrim.open { opacity: 1; pointer-events: auto; }
+  .drawer {
+    position: fixed; z-index: 61; top: 0; right: 0; bottom: 0;
+    width: min(580px, 100%);
+    display: flex; flex-direction: column;
+    background: var(--surface);
+    border-left: 1px solid var(--border);
+    box-shadow: var(--shadow-md);
+    transform: translateX(101%);
+    transition: transform 0.2s ease;
+    /* The phone's own insets: otherwise the close button sits under a notch
+       and the last field under the home indicator. */
+    padding-top: env(safe-area-inset-top, 0px);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+  .drawer.open { transform: translateX(0); }
+  @media (prefers-reduced-motion: reduce) {
+    .drawer, .drawer-scrim { transition: none; }
+  }
+  .drawer-head {
+    display: flex; align-items: center; gap: 10px;
+    padding: 16px 20px; border-bottom: 1px solid var(--border);
+  }
+  .drawer-head h2 {
+    margin: 0; font-size: 13px; font-weight: 700;
+    letter-spacing: 0.06em; text-transform: uppercase;
+    color: var(--text-secondary);
+  }
+  .drawer-tabs {
+    display: flex; gap: 2px; padding: 10px 14px 0;
+    border-bottom: 1px solid var(--border); flex-wrap: wrap;
+  }
+  .drawer-tab {
+    appearance: none; border: 0; background: none; cursor: pointer;
+    font: inherit; font-size: 12.5px; font-weight: 600;
+    color: var(--text-muted);
+    padding: 8px 12px; border-radius: 6px 6px 0 0;
+    border-bottom: 2px solid transparent;
+  }
+  .drawer-tab:hover { color: var(--text-primary); background: var(--surface-hover); }
+  .drawer-tab[aria-selected="true"] { color: var(--brand); border-bottom-color: var(--brand); }
+  .drawer-body { overflow-y: auto; flex: 1; padding: 18px 20px 28px; }
+  /* The panels moved in here keep their ids and their scripts; what they lose
+     is the card chrome, which would be a box inside a box. */
+  .drawer-body .panel { background: none; border: 0; box-shadow: none; padding: 0; margin: 0; }
+  .drawer-body .panel:hover { box-shadow: none; }
+  /* A title and its subtitle sit side by side on the wide page; at drawer width
+     that leaves the heading wrapping in a narrow column with the sentence beside
+     it. The header itself stays flex, so "signed in as ..." keeps its
+     margin-left:auto. */
+  .drawer-body .panel-title-group { flex-direction: column; align-items: flex-start; gap: 3px; }
+  .drawer-section + .drawer-section { margin-top: 22px; padding-top: 18px; border-top: 1px solid var(--border-subtle); }
+
+  /* -- The first-run wizard ---------------------------------------------------
+     docs/operations.md's "First run", answered from live state rather than
+     from checkboxes an operator ticks. A finished step collapses to one line
+     and only the first unfinished one expands, so this shows the single thing
+     left to do rather than five forms at once. */
+  .wiz-step { display: flex; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--border-subtle); }
+  .wiz-step:last-child { border-bottom: 0; }
+  .wiz-mark {
+    flex: none; width: 22px; height: 22px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 11px; font-weight: 700; line-height: 1;
+    border: 1.5px solid var(--border);
+    color: var(--text-muted); background: var(--surface-elevated);
+  }
+  .wiz-step.done .wiz-mark { background: var(--accent); border-color: var(--accent); color: #ffffff; }
+  .wiz-step.current .wiz-mark { border-color: var(--brand); color: var(--brand); box-shadow: 0 0 0 3px var(--ring); }
+  .wiz-main { flex: 1; min-width: 0; }
+  .wiz-title { font-weight: 600; font-size: 13.5px; color: var(--text-primary); }
+  .wiz-step.pending .wiz-title { color: var(--text-muted); }
+  .wiz-note { font-size: 12.5px; color: var(--text-muted); margin-top: 3px; }
+  .wiz-db { font-family: var(--font-mono); font-size: 12px; color: var(--text-secondary); word-break: break-all; }
+  .wiz-act { margin-top: 10px; }
+  .wiz-all-done {
+    display: flex; align-items: center; gap: 10px;
+    padding: 12px 14px; border-radius: 8px; margin-bottom: 4px;
+    background: var(--accent-light); color: var(--accent);
+    font-weight: 600; font-size: 13px;
+  }
+  /* The gear wears a dot while a step is outstanding. Without it a drawer is
+     undiscoverable on exactly the run where it matters most. */
+  .gear-wrap { position: relative; display: inline-flex; }
+  .gear-dot {
+    position: absolute; top: 3px; right: 3px;
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--warn); border: 2px solid var(--surface);
+  }
+
   .connected-bar {
     display: flex; align-items: center; gap: 10px; margin-top: 4px;
     padding: 10px 14px; border-radius: 6px;
@@ -922,6 +1024,16 @@
       </span>
 
       <div class="header-actions">
+        <span class="gear-wrap">
+          <button id="settingsBtn" class="subtle icon-btn" title="Settings"
+                  aria-label="Settings" aria-haspopup="dialog" aria-expanded="false">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="12" cy="12" r="3"></circle>
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+            </svg>
+          </button>
+          <span id="settingsDot" class="gear-dot" hidden title="Setup is not finished"></span>
+        </span>
         <button id="themeToggle" class="subtle icon-btn" title="Toggle color theme" aria-label="Toggle theme">
           <svg id="themeIcon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <circle cx="12" cy="12" r="5"></circle>
@@ -967,168 +1079,21 @@
     <button class="subtle" id="focusTokenBtn" style="color:inherit;text-decoration:underline">Enter Token &rarr;</button>
   </div>
 
-  <!-- Connection Panel -->
-  <section class="panel">
-    <div class="panel-header">
-      <div class="panel-title-group">
-        <h2>
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-            <path d="M5 12.55a11 11 0 0 1 14.08 0"></path>
-            <path d="M1.42 9a16 16 0 0 1 21.16 0"></path>
-            <path d="M8.53 16.11a6 6 0 0 1 6.95 0"></path>
-            <line x1="12" y1="20" x2="12.01" y2="20"></line>
-          </svg>
-          Connection
-        </h2>
-      </div>
-      <div class="refresh-indicator">
-        <span id="nextRefreshCountdown">auto-refresh active</span>
-      </div>
+  <!-- First run, on the page rather than only behind the gear: a broker with
+       no account is the one state where the operator cannot be expected to go
+       looking for a drawer. Everything else about the connection lives in
+       Settings. -->
+  <div id="setupBanner" class="notice-banner" role="status"
+       style="display:none; background:var(--brand-light); color:var(--brand); border-color:var(--brand);">
+    <div style="display:flex;align-items:center;gap:8px">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
+      </svg>
+      <span><strong>This broker has no account yet.</strong> The first one created
+        becomes its admin, and the form then closes for good.</span>
     </div>
-
-    <!-- Identity. Which of the three states shows is decided by /v1/auth/state:
-         a deployment with no account at all offers SETUP, one with an account
-         offers LOGIN, and a signed-in operator gets the machine list. The
-         bearer-token form below stays for the transition, but a logged-in
-         human never needs to see it. -->
-    <div id="authPanel" class="panel" style="display:none; margin-bottom:18px;">
-      <div class="panel-header">
-        <div class="panel-title-group">
-          <h2 id="authTitle">Sign in</h2>
-          <div class="panel-subtitle" id="authSubtitle"></div>
-        </div>
-        <div id="authWho" style="margin-left:auto; display:none; align-items:center; gap:12px;">
-          <span id="authUser" style="font-weight:600;"></span>
-          <button id="logoutBtn" type="button">Log out</button>
-        </div>
-      </div>
-
-      <form id="authForm" class="row" style="margin-top:4px;" autocomplete="on">
-        <div class="field" style="flex:1; min-width:200px;">
-          <label for="authUsername">Username</label>
-          <input type="text" id="authUsername" name="username" autocomplete="username" />
-        </div>
-        <div class="field" style="flex:1; min-width:200px;">
-          <label for="authPassword">Password
-            <span class="label-hint" id="authPwHint"></span>
-          </label>
-          <input type="password" id="authPassword" name="password"
-                 autocomplete="current-password" />
-        </div>
-<!-- Shown when the broker already holds a credential -- CASEBROKER_SETUP_TOKEN
-     if set, otherwise a write token. That is what stops the first stranger to
-     find this form from becoming the permanent admin of a reachable broker. -->
-        <div class="field" id="authSetupTokenField"
-             style="flex:1; min-width:200px; display:none;">
-          <label for="authSetupToken">Setup token
-            <span class="label-hint">CASEBROKER_SETUP_TOKEN, or a write token</span>
-          </label>
-          <input type="password" id="authSetupToken" name="setup_token"
-                 autocomplete="off" />
-        </div>
-        <div>
-          <button class="primary" id="authSubmit" type="submit">Sign in</button>
-        </div>
-      </form>
-
-      <!-- Machines: one credential per box, issued here. The token is shown
-           ONCE, because only its hash is stored -- a credential the server can
-           redisplay is one an attacker can read out of the database. -->
-      <div id="machines" style="display:none; margin-top:18px;">
-        <div class="panel-header" style="padding:0; border:none;">
-          <div class="panel-title-group">
-            <h2 style="font-size:15px;">Machines</h2>
-            <div class="panel-subtitle">One credential per worker. Revoking one leaves the rest running.</div>
-          </div>
-        </div>
-        <div class="row" style="margin-top:8px;">
-          <div class="field" style="flex:1; min-width:220px;">
-            <label for="newMachine">Worker id
-              <span class="label-hint">(the box's CASEBROKER_WORKER_ID; a cluster name covers every id under it)</span>
-            </label>
-            <input type="text" id="newMachine" placeholder="lab-ws-02" />
-          </div>
-          <div><button id="issueBtn" type="button">Issue token</button></div>
-        </div>
-        <div id="issuedBox" style="display:none; margin-top:10px;"></div>
-        <div id="machineList" style="margin-top:12px;"></div>
-      </div>
-    </div>
-
-    <form id="connectForm" autocomplete="on">
-      <div class="row">
-        <div class="field" style="flex: 2; min-width: 280px;">
-          <label for="token">
-            Broker
-            <span class="label-hint">(this instance)</span>
-          </label>
-          <div class="broker-static">
-            <span id="brokerDisplay" title="This dashboard is served by the broker it talks to"></span>
-            <a class="link" id="changeBroker" role="button" tabindex="0">change</a>
-          </div>
-          <input type="text" id="broker" name="brokerUrl" autocomplete="url"
-                 placeholder="https://..." hidden />
-        </div>
-
-        <div class="field" style="flex: 2; min-width: 280px;">
-          <label for="token">
-            Bearer Token
-            <span class="label-hint">(Leave blank if broker runs without auth)</span>
-          </label>
-          <input type="password" id="token" name="token" autocomplete="current-password" placeholder="Enter bearer token..." />
-        </div>
-
-        <div>
-          <button class="primary" id="connect" type="submit">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-              <polyline points="20 6 9 17 4 12"></polyline>
-            </svg>
-            Connect
-          </button>
-        </div>
-      </div>
-
-      <div class="row" style="margin-top:14px; align-items: center;">
-        <a class="link" id="clearToken">Forget saved token</a>
-
-        <div style="margin-left:auto; display:flex; align-items: center; gap: 16px;">
-          <label style="margin:0; font-weight: 500; cursor: pointer;">
-            <input type="checkbox" id="autoRefresh" checked style="cursor: pointer; margin-right: 6px;" />
-            auto-refresh every 60s
-          </label>
-
-          <label id="notifyLabel" style="margin:0; font-weight: 500; cursor: pointer;"
-                 title="Desktop notification when a case finishes. Works while this tab stays open.">
-            <input type="checkbox" id="notifyDone" style="cursor: pointer; margin-right: 6px;" />
-            notify on finished cases
-          </label>
-
-          <button id="refresh" type="button">
-            <svg id="refreshIcon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
-              <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/>
-            </svg>
-            Refresh now
-          </button>
-        </div>
-      </div>
-    </form>
-
-    <!-- Collapsed connection summary shown when connected -->
-    <div id="connectedSummary" class="connected-bar" style="display:none;">
-      <span class="dot"></span>
-      <span class="lbl">Connected</span>
-      <span id="connectedDb" class="conn-db"></span>
-      <button id="copyRoLink" type="button" style="margin-left:auto; font-size:0.8rem; padding:4px 10px;">
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-          <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-        </svg>
-        Copy read-only link
-      </button>
-      <button id="editConnection" type="button" style="font-size:0.8rem; padding:4px 10px;">Edit connection</button>
-    </div>
-
-  </section>
+    <button class="subtle" id="openSetupBtn" style="color:inherit;text-decoration:underline">Set it up &rarr;</button>
+  </div>
 
   <!-- Campaign Status Panel -->
   <section class="panel">
@@ -1141,7 +1106,19 @@
           Campaign Status
         </h2>
       </div>
-      <div id="expiredBannerWrap"></div>
+      <!-- The refresh controls follow the data they refresh. They used to sit
+           in the connection panel, which is now a drawer -- and a countdown
+           nobody can see is not a countdown. -->
+      <div style="margin-left:auto; display:flex; align-items:center; gap:14px; flex-wrap:wrap;">
+        <div id="expiredBannerWrap"></div>
+        <span class="refresh-indicator" id="nextRefreshCountdown">auto-refresh active</span>
+        <button id="refresh" type="button">
+          <svg id="refreshIcon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+            <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/>
+          </svg>
+          Refresh now
+        </button>
+      </div>
     </div>
 
     <div id="statusEmpty" class="empty-state">
@@ -1355,6 +1332,193 @@
     </div>
   </section>
 </main>
+
+<!-- Settings: the connection, the machine credentials, the preferences, and
+     the first-run wizard. Everything here is set once and then wants to be out
+     of the way. -->
+<div id="settingsScrim" class="drawer-scrim"></div>
+<aside id="settingsDrawer" class="drawer" role="dialog" aria-modal="true"
+       aria-labelledby="settingsTitle" aria-hidden="true">
+  <div class="drawer-head">
+    <h2 id="settingsTitle">Settings</h2>
+    <button id="settingsClose" class="subtle icon-btn" style="margin-left:auto"
+            aria-label="Close settings" title="Close (Esc)">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+        <line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line>
+      </svg>
+    </button>
+  </div>
+
+  <div class="drawer-tabs" role="tablist" aria-label="Settings sections">
+    <button class="drawer-tab" role="tab" type="button" data-tab="setup" aria-selected="true">Setup</button>
+    <button class="drawer-tab" role="tab" type="button" data-tab="connection" aria-selected="false">Connection</button>
+    <button class="drawer-tab" role="tab" type="button" data-tab="machines" aria-selected="false">Machines</button>
+    <button class="drawer-tab" role="tab" type="button" data-tab="prefs" aria-selected="false">Preferences</button>
+  </div>
+
+  <div class="drawer-body">
+
+    <!-- ---------------------------------------------------------- Setup -->
+    <section id="tab-setup" class="drawer-pane" role="tabpanel">
+      <div id="wizard"></div>
+
+      <!-- Identity. Which of the three states shows is decided by
+           /v1/auth/state: a deployment with no account at all offers SETUP,
+           one with an account offers LOGIN, and a signed-in operator gets the
+           collapsed "signed in as" line. It sits under the wizard because
+           steps 2 and 3 are the two things it does. -->
+      <div id="authPanel" class="panel drawer-section" style="display:none;">
+        <div class="panel-header">
+          <div class="panel-title-group">
+            <h2 id="authTitle">Sign in</h2>
+            <div class="panel-subtitle" id="authSubtitle"></div>
+          </div>
+          <div id="authWho" style="margin-left:auto; display:none; align-items:center; gap:12px;">
+            <span id="authUser" style="font-weight:600;"></span>
+            <button id="logoutBtn" type="button">Log out</button>
+          </div>
+        </div>
+
+        <form id="authForm" class="row" style="margin-top:4px;" autocomplete="on">
+          <div class="field" style="flex:1; min-width:200px;">
+            <label for="authUsername">Username</label>
+            <input type="text" id="authUsername" name="username" autocomplete="username" />
+          </div>
+          <div class="field" style="flex:1; min-width:200px;">
+            <label for="authPassword">Password
+              <span class="label-hint" id="authPwHint"></span>
+            </label>
+            <input type="password" id="authPassword" name="password"
+                   autocomplete="current-password" />
+          </div>
+<!-- Shown when the broker already holds a credential -- CASEBROKER_SETUP_TOKEN
+     if set, otherwise a write token. That is what stops the first stranger to
+     find this form from becoming the permanent admin of a reachable broker. -->
+          <div class="field" id="authSetupTokenField"
+               style="flex:1; min-width:200px; display:none;">
+            <label for="authSetupToken">Setup token
+              <span class="label-hint">CASEBROKER_SETUP_TOKEN, or a write token</span>
+            </label>
+            <input type="password" id="authSetupToken" name="setup_token"
+                   autocomplete="off" />
+          </div>
+          <div>
+            <button class="primary" id="authSubmit" type="submit">Sign in</button>
+          </div>
+        </form>
+      </div>
+    </section>
+
+    <!-- ----------------------------------------------------- Connection -->
+    <section id="tab-connection" class="drawer-pane" role="tabpanel" hidden>
+      <div class="panel-title-group" style="margin-bottom:4px;"><h2>Connection</h2></div>
+      <div class="panel-subtitle" style="margin-bottom:14px;">
+        Which broker this page talks to, and which database is behind it.
+      </div>
+
+      <!-- Collapsed summary, shown once connected. The database target is the
+           question this answers: knowing you are pointed at the production
+           Supabase rather than a staging one matters most in the seconds
+           before publishing 5,000 cases into it. -->
+      <div id="connectedSummary" class="connected-bar" style="display:none;">
+        <span class="dot"></span>
+        <span class="lbl">Connected</span>
+        <span id="connectedDb" class="conn-db"></span>
+        <button id="copyRoLink" type="button" style="margin-left:auto; font-size:0.8rem; padding:4px 10px;">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+          </svg>
+          Copy read-only link
+        </button>
+        <button id="editConnection" type="button" style="font-size:0.8rem; padding:4px 10px;">Edit connection</button>
+      </div>
+
+      <form id="connectForm" autocomplete="on">
+        <div class="row">
+          <div class="field" style="flex: 2; min-width: 240px;">
+            <label for="broker">
+              Broker
+              <span class="label-hint">(this instance)</span>
+            </label>
+            <div class="broker-static">
+              <span id="brokerDisplay" title="This dashboard is served by the broker it talks to"></span>
+              <a class="link" id="changeBroker" role="button" tabindex="0">change</a>
+            </div>
+            <input type="text" id="broker" name="brokerUrl" autocomplete="url"
+                   placeholder="https://..." hidden />
+          </div>
+
+          <div class="field" style="flex: 2; min-width: 240px;">
+            <label for="token">
+              Bearer Token
+              <span class="label-hint">(Leave blank if broker runs without auth)</span>
+            </label>
+            <input type="password" id="token" name="token" autocomplete="current-password" placeholder="Enter bearer token..." />
+          </div>
+
+          <div>
+            <button class="primary" id="connect" type="submit">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                <polyline points="20 6 9 17 4 12"></polyline>
+              </svg>
+              Connect
+            </button>
+          </div>
+        </div>
+        <div class="row" style="margin-top:12px;">
+          <a class="link" id="clearToken">Forget saved token</a>
+        </div>
+      </form>
+    </section>
+
+    <!-- ------------------------------------------------------- Machines -->
+    <!-- One credential per box, issued here. The token is shown ONCE, because
+         only its hash is stored -- a credential the server can redisplay is one
+         an attacker can read out of the database. -->
+    <section id="tab-machines" class="drawer-pane" role="tabpanel" hidden>
+      <div id="machines" style="display:none;">
+        <div class="panel-title-group" style="margin-bottom:4px;"><h2>Machines</h2></div>
+        <div class="panel-subtitle">One credential per worker. Revoking one leaves the rest running.</div>
+        <div class="row" style="margin-top:12px;">
+          <div class="field" style="flex:1; min-width:220px;">
+            <label for="newMachine">Worker id
+              <span class="label-hint">(the box's CASEBROKER_WORKER_ID; a cluster name covers every id under it)</span>
+            </label>
+            <input type="text" id="newMachine" placeholder="lab-ws-02" />
+          </div>
+          <div><button id="issueBtn" type="button">Issue token</button></div>
+        </div>
+        <div id="issuedBox" style="display:none; margin-top:10px;"></div>
+        <div id="machineList" style="margin-top:12px;"></div>
+      </div>
+      <div id="machinesLocked" class="panel-subtitle">
+        Sign in as an admin to issue and revoke machine credentials.
+      </div>
+    </section>
+
+    <!-- ---------------------------------------------------- Preferences -->
+    <section id="tab-prefs" class="drawer-pane" role="tabpanel" hidden>
+      <div class="panel-title-group" style="margin-bottom:4px;"><h2>Preferences</h2></div>
+      <div class="panel-subtitle" style="margin-bottom:14px;">Kept in this browser only.</div>
+
+      <label style="display:flex; align-items:center; gap:8px; margin:0 0 12px; font-weight:500; cursor:pointer;">
+        <input type="checkbox" id="autoRefresh" checked style="cursor:pointer;" />
+        auto-refresh every 60s
+      </label>
+
+      <label id="notifyLabel" style="display:flex; align-items:center; gap:8px; margin:0; font-weight:500; cursor:pointer;"
+             title="Desktop notification when a case finishes. Works while this tab stays open.">
+        <input type="checkbox" id="notifyDone" style="cursor:pointer;" />
+        notify on finished cases
+      </label>
+      <div class="panel-subtitle" style="margin-top:6px;">
+        Announces only what finishes after you switch it on, and only while this tab is open.
+      </div>
+    </section>
+
+  </div>
+</aside>
 
 <div id="toast"></div>
 
@@ -2335,12 +2499,18 @@
   // with no accounts offers SETUP (that endpoint closes itself after the first
   // one), otherwise LOGIN, and a signed-in operator gets the machine list.
   let authState = null;
+  // What the wizard judges each step from. null means "not looked yet", which
+  // is a different thing from zero and is rendered differently.
+  let lastHealth = null;
+  let lastStatus = null;
+  let machineCount = null;
 
   async function loadAuthState() {
     try {
       authState = await api("/v1/auth/state");
     } catch (e) {
       $("authPanel").style.display = "none";
+      renderWizard();
       return;
     }
     const panel = $("authPanel");
@@ -2365,11 +2535,14 @@
     $("authUser").textContent = signedIn
       ? authState.user + (authState.role ? " (" + authState.role + ")" : "")
       : "";
-    $("machines").style.display = (signedIn && authState.role === "admin") ? "" : "none";
+    const isAdmin = signedIn && authState.role === "admin";
+    $("machines").style.display = isAdmin ? "" : "none";
+    $("machinesLocked").style.display = isAdmin ? "none" : "";
     // A signed-in human has no use for the bearer-token form; it stays in the
     // DOM because everything still reads $("token").value.
     $("connectForm").style.display = signedIn ? "none" : "";
-    if (signedIn && authState.role === "admin") loadMachines();
+    if (isAdmin) loadMachines(); else machineCount = null;
+    renderWizard();
   }
 
   async function submitAuth(e) {
@@ -2412,6 +2585,10 @@
     try {
       const data = await api("/v1/workers/tokens");
       const rows = data.tokens || [];
+      // A revoked credential cannot lease, so it is not a machine the wizard
+      // may count as done.
+      machineCount = rows.filter((t) => !t.revoked_at).length;
+      renderWizard();
       if (!rows.length) {
         $("machineList").innerHTML =
           '<div class="panel-subtitle">No machines yet. Issue a token above, then run ' +
@@ -2482,6 +2659,178 @@
     } catch (err) { showToast("revoke failed: " + err.message); }
   };
 
+  // -- Settings drawer ---------------------------------------------------------
+  // The connection, the machine credentials and the preferences are all set
+  // once and then want to be out of the way; the page behind them is the
+  // campaign. Closed, the drawer is inert as well as off-screen -- otherwise
+  // Tab walks into a panel nobody can see.
+  let returnFocusTo = null;
+
+  function showTab(name) {
+    document.querySelectorAll(".drawer-tab").forEach((t) => {
+      t.setAttribute("aria-selected", t.getAttribute("data-tab") === name ? "true" : "false");
+    });
+    document.querySelectorAll(".drawer-pane").forEach((p) => {
+      p.hidden = p.id !== "tab-" + name;
+    });
+  }
+
+  function settingsOpen() {
+    return $("settingsDrawer").classList.contains("open");
+  }
+
+  function openSettings(tab) {
+    if (!settingsOpen()) returnFocusTo = document.activeElement;
+    if (tab) showTab(tab);
+    $("settingsScrim").classList.add("open");
+    const d = $("settingsDrawer");
+    d.classList.add("open");
+    d.inert = false;
+    d.setAttribute("aria-hidden", "false");
+    $("settingsBtn").setAttribute("aria-expanded", "true");
+    $("settingsClose").focus();
+  }
+
+  function closeSettings() {
+    $("settingsScrim").classList.remove("open");
+    const d = $("settingsDrawer");
+    d.classList.remove("open");
+    d.inert = true;
+    d.setAttribute("aria-hidden", "true");
+    $("settingsBtn").setAttribute("aria-expanded", "false");
+    // Focus must come back out of a panel that is now unreachable, or the next
+    // Tab starts from nowhere.
+    if (returnFocusTo && returnFocusTo.focus) returnFocusTo.focus();
+    else $("settingsBtn").focus();
+  }
+
+  // -- The first-run wizard ----------------------------------------------------
+  // docs/operations.md's "First run", answered from live state rather than from
+  // checkboxes an operator ticks: a database, an admin account, a session, a
+  // machine credential, and a worker that has actually leased something.
+  //
+  // Every step reports from what the page already fetched, so none of this
+  // costs a request. A finished step collapses to one line and only the first
+  // unfinished one expands -- the alternative, five forms at once, is what the
+  // single connection panel used to be, and it was noise on every run after
+  // the first.
+  function wizardSteps() {
+    const h = lastHealth;
+    const signedIn = !!(authState && authState.user);
+    const isAdmin = signedIn && authState.role === "admin";
+    const target = dbTarget(lastStatus) || dbTarget(h);
+    const states = (lastStatus && lastStatus.by_state) || null;
+    const cases = states ? Object.values(states).reduce((a, b) => a + (b || 0), 0) : null;
+    const workers = lastStatus ? (lastStatus.workers || []).length : null;
+
+    return [
+      {
+        title: "Database",
+        done: !!(h && h.ok && h.db_ok !== false),
+        note: !h ? "Waiting for the broker to answer /healthz."
+            : h.db_ok === false
+              ? "The broker is running but cannot reach its database."
+              : target ? '<span class="wiz-db">' + esc(target) + "</span>"
+              : "Reachable. Which database is behind it needs a credential to see: "
+                + "/healthz deliberately tells an anonymous caller less than it "
+                + "tells an operator.",
+        hint: "Nothing to do here. Every table and index is created on the first "
+            + "connection, and a database from an earlier release is brought "
+            + "forward at the same moment.",
+      },
+      {
+        title: "Admin account",
+        done: !!(authState && !authState.needs_setup),
+        note: !authState ? "Could not read /v1/auth/state."
+            : authState.needs_setup
+              ? "None yet. The first account created below becomes the admin, and "
+                + "that form then closes for good."
+              : "This broker has an account, so the setup form is closed.",
+        hint: authState && authState.needs_setup && authState.setup_token_required
+          ? "This deployment already holds a credential, so setup demands it: "
+            + "CASEBROKER_SETUP_TOKEN if set, otherwise one of its write tokens. "
+            + "A read token is never enough."
+          : "",
+      },
+      {
+        title: "Sign in",
+        done: signedIn,
+        note: signedIn
+          ? "Signed in as " + esc(authState.user)
+            + (authState.role ? " (" + esc(authState.role) + ")" : "")
+          : "Your session authenticates this dashboard -- there is no token to paste.",
+      },
+      {
+        title: "A credential per machine",
+        done: machineCount !== null && machineCount > 0,
+        note: !isAdmin ? "Needs an admin session."
+            : machineCount === null ? "Checking\u2026"
+            : machineCount > 0
+              ? machineCount + (machineCount === 1 ? " machine has" : " machines have")
+                + " a credential of their own."
+              : "None yet. One per box \u2014 or one per CLUSTER, named after it: a "
+                + "credential called <code>phoenix</code> covers every "
+                + "<code>phoenix-&lt;job&gt;-&lt;task&gt;</code> id its SLURM tasks run as.",
+        action: isAdmin ? { label: "Open Machines", tab: "machines" } : null,
+        hint: "On the box itself, <code>casebroker worker setup</code> does the same "
+            + "thing without a browser, and leaves no session behind.",
+      },
+      {
+        title: "A worker has leased a case",
+        done: !!workers,
+        note: workers === null ? "Connect to see the campaign."
+            : workers > 0
+              ? workers + (workers === 1 ? " worker" : " workers") + " known, "
+                + (cases || 0).toLocaleString() + " cases in the campaign."
+              : cases
+                ? cases.toLocaleString() + " cases queued, but no worker has leased one yet."
+                : "No cases yet. Post them to <code>/v1/cases</code>; re-posting an "
+                  + "existing id is a no-op, which is how the dataset grows.",
+      },
+    ];
+  }
+
+  function renderWizard() {
+    const steps = wizardSteps();
+    const firstOpen = steps.findIndex((x) => !x.done);
+    const allDone = firstOpen === -1;
+    const doneCount = steps.filter((x) => x.done).length;
+
+    let html = allDone
+      ? '<div class="wiz-all-done"><span>\u2713</span><span>Everything is set up.</span></div>'
+      : '<div class="panel-subtitle" style="margin-bottom:8px;">Step ' + (firstOpen + 1)
+        + " of " + steps.length + " \u2014 " + doneCount + " done.</div>";
+
+    html += steps.map((x, i) => {
+      const state = x.done ? "done" : (i === firstOpen ? "current" : "pending");
+      const open = state === "current";
+      return '<div class="wiz-step ' + state + '">'
+        + '<span class="wiz-mark">' + (x.done ? "\u2713" : (i + 1)) + "</span>"
+        + '<div class="wiz-main">'
+        + '<div class="wiz-title">' + x.title + "</div>"
+        + ((open || x.done) && x.note ? '<div class="wiz-note">' + x.note + "</div>" : "")
+        + (open && x.hint ? '<div class="wiz-note">' + x.hint + "</div>" : "")
+        + (open && x.action
+            ? '<div class="wiz-act"><button type="button" data-goto-tab="'
+              + x.action.tab + '">' + x.action.label + "</button></div>"
+            : "")
+        + "</div></div>";
+    }).join("");
+
+    $("wizard").innerHTML = html;
+    $("wizard").querySelectorAll("[data-goto-tab]").forEach((b) => {
+      b.addEventListener("click", () => showTab(b.getAttribute("data-goto-tab")));
+    });
+
+    // The gear is the only route to any of this, so it says when something is
+    // still outstanding.
+    $("settingsDot").hidden = allDone;
+    // A broker with no account is the one state an operator cannot be expected
+    // to go looking behind a gear for, so it also gets a banner on the page.
+    $("setupBanner").style.display =
+      (authState && authState.needs_setup) ? "flex" : "none";
+  }
+
   // -- Main Refresh Loop -------------------------------------------------------
   async function refresh() {
     const refreshIcon = $("refreshIcon");
@@ -2491,6 +2840,7 @@
     try {
       // First, check unauthenticated healthz to see server state & DB
       const health = await checkHealth();
+      lastHealth = health;
       const token = $("token").value.trim();
 
       // If the server requires SOME credential and this visitor has none.
@@ -2512,11 +2862,13 @@
         $("focusTokenBtn").textContent = accounts ? "Sign in \u2192" : "Enter Token \u2192";
         $("statusEmpty").textContent = how + " to view live campaign data.";
         $("casesEmpty").textContent = how + " to browse cases.";
+        renderWizard();
         return;
       }
 
       $("authNotice").style.display = "none";
       const st = await api("/v1/status");
+      lastStatus = st;
       setConn("ok", "connected");
       showErr(null);
       // Collapse the connect form and show summary bar
@@ -2539,6 +2891,7 @@
       renderStatus(st);
       await loadCases();
       await checkFinished(st.by_state?.["done"] ?? null);
+      renderWizard();
       nextRefreshSeconds = 60;
     } catch (e) {
       // On error, re-show the connect form so the user can fix credentials
@@ -2627,9 +2980,29 @@
     }
   });
 
+  // Where the credential comes from decides where this goes: an
+  // account-secured broker wants the sign-in form in Setup, a token-secured one
+  // wants the token box in Connection.
   $("focusTokenBtn").addEventListener("click", () => {
-    $("token").focus();
+    const accounts = lastHealth && lastHealth.auth === "accounts";
+    openSettings(accounts ? "setup" : "connection");
+    if (!accounts) $("token").focus();
   });
+
+  $("openSetupBtn").addEventListener("click", () => openSettings("setup"));
+  $("settingsBtn").addEventListener("click", () => {
+    if (settingsOpen()) closeSettings(); else openSettings();
+  });
+  $("settingsClose").addEventListener("click", closeSettings);
+  $("settingsScrim").addEventListener("click", closeSettings);
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && settingsOpen()) closeSettings();
+  });
+  document.querySelectorAll(".drawer-tab").forEach((t) => {
+    t.addEventListener("click", () => showTab(t.getAttribute("data-tab")));
+  });
+  // Closed at load, and inert with it.
+  $("settingsDrawer").inert = true;
 
   const autoSaved = localStorage.getItem(LS_AUTO);
   const autoOn = autoSaved === null ? true : autoSaved === "1";

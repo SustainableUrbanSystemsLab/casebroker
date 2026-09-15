@@ -574,3 +574,44 @@ def test_worker_main_exits_2_on_a_refused_credential(monkeypatch):
     monkeypatch.setattr(wmod.Worker, "run_forever", refuse)
 
     assert wmod.main(["--broker", "http://broker.invalid", "--worker-id", "w"]) == 2
+
+
+def test_a_revoked_machine_name_can_be_issued_again(admin):
+    """The documented recovery for a box that has lost its credential --
+    `casebroker worker setup --rotate`, and Revoke then Issue in the dashboard
+    -- is revoke-then-reissue. It answered 409: revoke MARKS the row rather
+    than deleting it (so last_seen_at and who issued it survive), and
+    UNIQUE(name) then refused the re-issue too. The 409 even said "revoke it
+    first", advice that could not succeed. A machine could therefore never get
+    a working credential back under its own worker id -- and the worker id is
+    what /v1/lease now enforces."""
+    first = admin.post("/v1/workers/tokens", json={"name": "lab-ws-02"}).json()["token"]
+
+    # While it is live, re-issuing is still refused: replacing it silently would
+    # strand whichever token the box is actually running on.
+    clash = admin.post("/v1/workers/tokens", json={"name": "lab-ws-02"})
+    assert clash.status_code == 409
+    assert "live credential" in clash.json()["detail"]
+
+    assert admin.delete("/v1/workers/tokens/lab-ws-02").status_code == 200
+    again = admin.post("/v1/workers/tokens", json={"name": "lab-ws-02"})
+    assert again.status_code == 200, again.text
+    second = again.json()["token"]
+    assert second != first
+
+    # One row per machine still, and not reported as long-lost: inheriting the
+    # revoked token's last_seen_at would show a machine as alive on the strength
+    # of a credential that no longer works.
+    rows = [t for t in admin.get("/v1/workers/tokens").json()["tokens"]
+            if t["name"] == "lab-ws-02"]
+    assert len(rows) == 1 and rows[0]["revoked_at"] is None
+    assert rows[0]["last_seen_at"] is None
+
+    # Log out BEFORE judging the tokens: the session cookie this client still
+    # carries authenticates a request on its own, so a revoked bearer token
+    # would answer 200 here and prove nothing.
+    admin.post("/v1/auth/logout")
+    assert admin.post("/v1/lease", json={"worker_id": "lab-ws-02", "count": 1},
+                      headers={"Authorization": f"Bearer {second}"}).status_code == 200
+    assert admin.post("/v1/lease", json={"worker_id": "lab-ws-02", "count": 1},
+                      headers={"Authorization": f"Bearer {first}"}).status_code == 401

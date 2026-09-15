@@ -16,7 +16,12 @@ name: test
 #   real postgres       the ACTUAL production database via the DBSTRING secret,
 #                       pushes to main only -- where "this touched the real
 #                       database and cleaned up after itself" is worth
-#                       re-confirming on every change to db.py.
+#                       re-confirming on every change to db.py. A credential
+#                       that cannot connect SKIPS this job with a warning
+#                       annotation rather than failing it: that database is a
+#                       third party, and a stale secret says nothing about the
+#                       commit under test. CASEBROKER_TEST_PG_REQUIRED=1 makes
+#                       it a hard failure again.
 on:
   push:
     branches: [main]
@@ -63,7 +68,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v3
-      - run: uv run --with pytest python -m pytest tests/test_db_postgres.py -v
+      - run: uv run --with pytest python -m pytest tests/test_db_postgres.py -v -rs
         env:
           # test_db_postgres.py prefixes every row it creates with a per-run UUID
           # and deletes them all in a module-scoped teardown -- see that file's

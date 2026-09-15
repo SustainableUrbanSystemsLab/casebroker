@@ -1480,11 +1480,36 @@ def purge_expired_sessions(conn, now: int | None = None) -> int:
 def create_worker_token(conn, name: str, token_hash: str, created_by: str | None = None,
                         now: int | None = None) -> dict[str, Any]:
     """Issue a credential for ONE machine. `name` is the worker id, which is what
-    makes 'which box is this?' answerable on the dashboard."""
+    makes 'which box is this?' answerable on the dashboard.
+
+    Re-issuing for a machine whose credential was REVOKED is the documented
+    recovery path -- `casebroker worker setup --rotate`, and Revoke then Issue
+    in the dashboard -- and it did not work. revoke_worker_token marks the row
+    rather than deleting it (so `last_seen_at` and who issued it survive a
+    revocation), which left UNIQUE(name) refusing the re-issue as well. Both
+    paths answered 409 with "revoke it first", advice that could not succeed:
+    the box that had just lost its token could not be given another one under
+    its own worker id, and the id is what the lease check now enforces.
+
+    A LIVE credential is still never replaced silently -- that would strand
+    whichever token the machine is actually running on, which is the hazard the
+    constraint exists for. Only a revoked row is reclaimed, and reclaiming it
+    clears `last_seen_at` too: the new credential has not been seen, and
+    inheriting the old one's timestamp would show a machine as alive on the
+    strength of a token that no longer works.
+    """
     now = now or _now()
-    conn.execute(
-        "INSERT INTO worker_tokens (name, token_hash, created_by, created_at) "
-        "VALUES (?,?,?,?)", (name, token_hash, created_by, now))
+    cur = conn.execute(
+        "UPDATE worker_tokens SET token_hash = ?, created_by = ?, created_at = ?, "
+        "revoked_at = NULL, last_seen_at = NULL "
+        "WHERE name = ? AND revoked_at IS NOT NULL",
+        (token_hash, created_by, now, name))
+    if not cur.rowcount:
+        # No revoked row to reclaim: either the name is new, or it is live and
+        # the UNIQUE below is what refuses it.
+        conn.execute(
+            "INSERT INTO worker_tokens (name, token_hash, created_by, created_at) "
+            "VALUES (?,?,?,?)", (name, token_hash, created_by, now))
     return {"name": name, "created_by": created_by, "created_at": now}
 
 
