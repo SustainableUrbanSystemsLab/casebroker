@@ -1352,6 +1352,7 @@
   <div class="drawer-tabs" role="tablist" aria-label="Settings sections">
     <button class="drawer-tab" role="tab" type="button" data-tab="setup" aria-selected="true">Setup</button>
     <button class="drawer-tab" role="tab" type="button" data-tab="connection" aria-selected="false">Connection</button>
+    <button class="drawer-tab" role="tab" type="button" data-tab="users" aria-selected="false">Users</button>
     <button class="drawer-tab" role="tab" type="button" data-tab="machines" aria-selected="false">Machines</button>
     <button class="drawer-tab" role="tab" type="button" data-tab="prefs" aria-selected="false">Preferences</button>
   </div>
@@ -1470,6 +1471,37 @@
           <a class="link" id="clearToken">Forget saved token</a>
         </div>
       </form>
+    </section>
+
+    <!-- ---------------------------------------------------------- Users -->
+    <!-- People, as opposed to machines. Adding a colleague used to need shell
+         access to a box holding the DSN, which is why everyone was an admin. -->
+    <section id="tab-users" class="drawer-pane" role="tabpanel" hidden>
+      <div id="users" style="display:none;">
+        <div class="panel-title-group" style="margin-bottom:4px;"><h2>Users</h2></div>
+        <div class="panel-subtitle" id="rolesHint"></div>
+        <div class="row" style="margin-top:12px;">
+          <div class="field" style="flex:1; min-width:150px;">
+            <label for="newUsername">Username</label>
+            <input type="text" id="newUsername" autocomplete="off" placeholder="bob" />
+          </div>
+          <div class="field" style="flex:1; min-width:170px;">
+            <label for="newUserPassword">Initial password
+              <span class="label-hint">(12+ chars)</span>
+            </label>
+            <input type="password" id="newUserPassword" autocomplete="new-password" />
+          </div>
+          <div class="field" style="min-width:130px;">
+            <label for="newUserRole">Role</label>
+            <select id="newUserRole"></select>
+          </div>
+          <div><button id="addUserBtn" type="button">Add user</button></div>
+        </div>
+        <div id="userList" style="margin-top:12px;"></div>
+      </div>
+      <div id="usersLocked" class="panel-subtitle">
+        Sign in as an admin to manage accounts.
+      </div>
     </section>
 
     <!-- ------------------------------------------------------- Machines -->
@@ -2538,10 +2570,12 @@
     const isAdmin = signedIn && authState.role === "admin";
     $("machines").style.display = isAdmin ? "" : "none";
     $("machinesLocked").style.display = isAdmin ? "none" : "";
+    $("users").style.display = isAdmin ? "" : "none";
+    $("usersLocked").style.display = isAdmin ? "none" : "";
     // A signed-in human has no use for the bearer-token form; it stays in the
     // DOM because everything still reads $("token").value.
     $("connectForm").style.display = signedIn ? "none" : "";
-    if (isAdmin) loadMachines(); else machineCount = null;
+    if (isAdmin) { loadMachines(); loadUsers(); } else machineCount = null;
     renderWizard();
   }
 
@@ -2579,6 +2613,134 @@
     } catch (e) { /* logging out locally is still the right outcome */ }
     await loadAuthState();
     refresh();
+  }
+
+  // -- Users -------------------------------------------------------------------
+  // What a role means, so an admin picks one on purpose rather than defaulting
+  // everyone to admin -- which is what happened while `operator` did not exist
+  // and `admin` was the only role that could write.
+  const ROLE_BLURB = {
+    admin: "everything, including accounts, machine credentials and purging a campaign",
+    operator: "reads and writes the campaign; manages no accounts or credentials",
+    viewer: "reads the campaign and nothing else",
+  };
+
+  function roleOptions(selected) {
+    // From /v1/auth/state, so the picker offers exactly what this broker
+    // accepts rather than a list restated here that could drift from it.
+    const roles = (authState && authState.roles) || ["admin", "viewer"];
+    return roles.map((r) =>
+      '<option value="' + esc(r) + '"' + (r === selected ? " selected" : "") + ">"
+      + esc(r) + "</option>").join("");
+  }
+
+  async function loadUsers() {
+    $("newUserRole").innerHTML = roleOptions("viewer");
+    const roles = (authState && authState.roles) || [];
+    $("rolesHint").textContent = roles
+      .map((r) => ROLE_BLURB[r] ? r + " \u2014 " + ROLE_BLURB[r] : r).join(" \u00b7 ");
+    try {
+      const rows = (await api("/v1/users")).users || [];
+      $("userList").innerHTML =
+        '<table style="width:100%; border-collapse:collapse;">' +
+        '<thead><tr>' +
+        '<th style="text-align:left; padding:6px 8px;">Username</th>' +
+        '<th style="text-align:left; padding:6px 8px;">Role</th>' +
+        '<th style="text-align:left; padding:6px 8px;">Last login</th>' +
+        '<th style="padding:6px 8px;"></th></tr></thead><tbody>' +
+        rows.map((u) => {
+          const me = authState && u.username === authState.user;
+          return '<tr><td style="padding:6px 8px; font-weight:600;">' + esc(u.username) +
+            (me ? ' <span class="label-hint">(you)</span>' : "") + "</td>" +
+            '<td style="padding:6px 8px;"><select data-role-for="' + esc(u.username) + '">' +
+              roleOptions(u.role) + "</select></td>" +
+            '<td style="padding:6px 8px;">' +
+              (u.last_login_at ? relTime(u.last_login_at) : "never") + "</td>" +
+            '<td style="padding:6px 8px; text-align:right; white-space:nowrap;">' +
+              '<button type="button" data-pw-for="' + esc(u.username) + '">Reset password</button> ' +
+              '<button type="button" data-del-for="' + esc(u.username) + '">Delete</button>' +
+            "</td></tr>";
+        }).join("") + "</tbody></table>";
+
+      // Bound here rather than with inline onclick: a username is attacker-
+      // chosen text, and building a JS string literal out of it is how an
+      // apostrophe becomes a syntax error and a quote becomes something worse.
+      $("userList").querySelectorAll("[data-role-for]").forEach((sel) => {
+        sel.addEventListener("change", () => setUserRole(sel.getAttribute("data-role-for"), sel.value));
+      });
+      $("userList").querySelectorAll("[data-pw-for]").forEach((b) => {
+        b.addEventListener("click", () => resetUserPassword(b.getAttribute("data-pw-for")));
+      });
+      $("userList").querySelectorAll("[data-del-for]").forEach((b) => {
+        b.addEventListener("click", () => deleteUser(b.getAttribute("data-del-for")));
+      });
+    } catch (e) {
+      $("userList").innerHTML =
+        '<div class="panel-subtitle">Could not list accounts: ' + esc(e.message) + "</div>";
+    }
+  }
+
+  async function userCall(path, opts) {
+    const r = await fetch($("broker").value.trim() + path,
+                          Object.assign({ credentials: "include" }, opts));
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.detail || ("failed: " + r.status));
+    return data;
+  }
+
+  async function addUser() {
+    const username = $("newUsername").value.trim();
+    const password = $("newUserPassword").value;
+    if (!username || !password) { showToast("Username and password required"); return; }
+    if (password.length < 12) { showToast("Password must be at least 12 characters"); return; }
+    try {
+      const d = await userCall("/v1/users", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username, password, role: $("newUserRole").value }),
+      });
+      $("newUsername").value = "";
+      $("newUserPassword").value = "";
+      showToast("Added " + d.username + " (" + d.role + ")");
+      loadUsers();
+    } catch (e) { showToast(e.message); }
+  }
+
+  async function setUserRole(username, role) {
+    try {
+      await userCall("/v1/users/" + encodeURIComponent(username) + "/role", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ role }),
+      });
+      showToast(username + " is now " + role);
+    } catch (e) {
+      showToast(e.message);
+    }
+    // Reload either way: on failure the select is showing a role the server
+    // refused, and leaving it there would misreport who can do what.
+    loadUsers();
+  }
+
+  async function resetUserPassword(username) {
+    const pw = prompt("New password for " + username + " (at least 12 characters).\n"
+                      + "Every session this account holds is revoked.");
+    if (pw === null) return;
+    if (pw.length < 12) { showToast("Password must be at least 12 characters"); return; }
+    try {
+      await userCall("/v1/users/" + encodeURIComponent(username) + "/password", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ new_password: pw }),
+      });
+      showToast("Password reset for " + username + "; their sessions are revoked");
+    } catch (e) { showToast(e.message); }
+  }
+
+  async function deleteUser(username) {
+    if (!confirm("Delete " + username + "? Their sessions end immediately.")) return;
+    try {
+      await userCall("/v1/users/" + encodeURIComponent(username), { method: "DELETE" });
+      showToast(username + " deleted");
+      loadUsers();
+    } catch (e) { showToast(e.message); }
   }
 
   async function loadMachines() {
@@ -3012,6 +3174,7 @@
   $("authForm").addEventListener("submit", submitAuth);
   $("logoutBtn").addEventListener("click", doLogout);
   $("issueBtn").addEventListener("click", issueMachine);
+  $("addUserBtn").addEventListener("click", addUser);
   loadAuthState();
 
   $("autoRefresh").addEventListener("change", (e) => {

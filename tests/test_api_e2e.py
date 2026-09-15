@@ -674,6 +674,27 @@ def test_dashboard_offers_login_rather_than_only_a_token_box(broker):
     assert "/v1/workers/tokens" in html
 
 
+def test_dashboard_lets_an_admin_manage_accounts(broker):
+    """Adding a colleague used to need shell access to a box holding the DSN --
+    which is a large part of why every account ended up an admin."""
+    html = broker.get("/", headers={"Authorization": ""}).text
+    for needed in ('id="users"', 'id="newUsername"', 'id="newUserPassword"',
+                   'id="newUserRole"', 'id="addUserBtn"', 'id="userList"'):
+        assert needed in html, needed
+    assert "/v1/users" in html
+
+    # The role picker reads the server's list rather than a copy in the page; a
+    # copy would drift, and the drift would surface as a 400 at the moment
+    # someone is adding a colleague.
+    assert "authState.roles" in html
+
+    # Rows are wired by data-attribute, not by building a JS string literal out
+    # of the username: a username is attacker-chosen text, and an apostrophe in
+    # an inline onclick is a syntax error before it is anything worse.
+    assert "data-role-for" in html and "data-del-for" in html
+    assert "onclick=\"deleteUser" not in html
+
+
 def test_the_dashboard_sends_cookies_on_its_auth_calls(broker):
     """A session cookie that the fetch() calls do not carry is a login that
     appears to work and then does nothing."""
