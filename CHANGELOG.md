@@ -124,6 +124,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
   result line still survives, because it is always last.
 
 ### Changed
+- **Overture is an optional extra, not a base dependency.** Its client pulls
+  pyarrow — 122 MB of a 328 MB site-packages, 37% of the image — into every
+  install, for a fallback that is off unless `CASEBROKER_OVERTURE_FALLBACK` is
+  set and that runs in a *subprocess*, so the broker process never imports it
+  even when it is there. Install it deliberately with
+  `pip install casebroker[overture]`. Without it the fallback now says exactly
+  that, and names GlobalBuildingAtlas as what to use instead, rather than
+  surfacing a `No module named` fragment that reads like a broker bug.
 - **The request threadpool is bounded at 12, not anyio's default 40.** Every sync
   endpoint runs there, and 40 is sized for a machine rather than for a 512 MB
   instance with a ~280 MB resident floor. It bought nothing either: `db._LOCK`
