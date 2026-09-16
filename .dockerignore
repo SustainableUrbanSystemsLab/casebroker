@@ -1,0 +1,43 @@
+# The image COPYs exactly three things -- pyproject.toml, README.md and
+# casebroker/ -- but without this file the whole working tree is still packed up
+# and handed to the Docker daemon as build context first. That is 329 MB of
+# .venv plus the entire .git history, transferred on every build, for an image
+# that uses none of it.
+#
+# Excludes rather than a whitelist (`*` + `!keep`), so that adding a COPY later
+# does not silently find its source excluded.
+
+.venv/
+venv/
+.git/
+.github/
+.claude/
+.serena/
+.tokensave/
+.codex/
+.agents/
+.jules/
+
+tests/
+docs/
+slurm/
+scripts/
+
+__pycache__/
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+.env
+machine.env
+
+# Build artefacts and editor noise
+dist/
+build/
+*.egg-info/
+.DS_Store
