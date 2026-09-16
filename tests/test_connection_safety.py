@@ -190,3 +190,83 @@ def test_concurrent_readers_do_not_interleave_with_a_writer(tmp_path):
         for t in threads:
             t.join(timeout=5)
     assert not errors, f"reader blew up against the shared connection: {errors[0]!r}"
+
+
+def test_a_fleet_under_contention_never_double_leases(tmp_path):
+    """The invariant, at the HTTP layer, with the readers that used to break it.
+
+    The db-level test above covers the lock. This one covers the whole stack:
+    many workers leasing/heartbeating/completing while other threads hammer
+    /healthz, /v1/status and /v1/cases -- which are precisely the unlocked
+    readers that could land inside a lease() transaction, and /healthz is the one
+    the platform itself polls on a timer.
+
+    Kept small enough to stay in the normal suite. Run against a live uvicorn
+    with 400 cases, 24 workers and 8 readers it completes in about a second with
+    zero duplicates and flat memory.
+    """
+    import collections
+    import threading
+
+    from fastapi.testclient import TestClient
+
+    from casebroker.app import create_app
+
+    n_cases, n_workers, n_readers = 60, 8, 4
+    client = TestClient(create_app(db_path=str(tmp_path / "load.sqlite"),
+                                   tokens=["s"]))
+    client.headers.update({"Authorization": "Bearer s"})
+    added = client.post("/v1/cases", json=[
+        {"lat": 33.0 + i * 0.01, "lon": -84.0, "recipe": "r",
+         "city_cluster": f"c{i % 5}", "lcz": "LCZ6", "spec": {"dirs": [0]}}
+        for i in range(n_cases)]).json()
+    assert added["added"] == n_cases, added
+
+    seen: collections.Counter = collections.Counter()
+    errors: list = []
+    lock = threading.Lock()
+    stop = threading.Event()
+
+    def work(wid):
+        try:
+            while not stop.is_set():
+                got = client.post("/v1/lease",
+                                  json={"worker_id": f"w{wid}", "count": 2}).json()
+                if not got:
+                    return
+                for g in got:
+                    with lock:
+                        seen[g["case_id"]] += 1
+                for g in got:
+                    client.post("/v1/heartbeat", json={"lease_id": g["lease_id"]})
+                    client.post("/v1/complete", json={
+                        "lease_id": g["lease_id"], "case_id": g["case_id"],
+                        "result_uri": f"s3://b/{g['case_id']}", "metrics": {}})
+        except Exception as e:                           # noqa: BLE001
+            with lock:
+                errors.append(f"worker{wid}: {type(e).__name__}: {e}")
+
+    def read():
+        try:
+            while not stop.is_set():
+                client.get("/healthz")
+                client.get("/v1/status")
+                client.get("/v1/cases?limit=20")
+        except Exception as e:                           # noqa: BLE001
+            with lock:
+                errors.append(f"reader: {type(e).__name__}: {e}")
+
+    workers = [threading.Thread(target=work, args=(i,)) for i in range(n_workers)]
+    readers = [threading.Thread(target=read, daemon=True) for _ in range(n_readers)]
+    for t in workers + readers:
+        t.start()
+    for t in workers:
+        t.join(timeout=120)
+    stop.set()
+    for t in readers:
+        t.join(timeout=10)
+
+    dupes = {k: v for k, v in seen.items() if v > 1}
+    assert not dupes, f"the same case was leased more than once: {dupes}"
+    assert not errors, f"request failed under contention: {errors[0]}"
+    assert client.get("/v1/status").json()["by_state"].get("done") == n_cases

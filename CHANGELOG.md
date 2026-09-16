@@ -205,6 +205,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
   `db.ping()`, and `PgConnection` refuses to reconnect inside an open
   transaction — deferring the repair to the next call outside one, so a doomed
   transaction fails honestly instead of silently committing nothing.
+  Verified under contention as well as in unit tests: 400 cases, 24 concurrent
+  workers leasing/heartbeating/completing, and 8 threads hammering `/healthz`,
+  `/v1/status` and `/v1/cases` throughout — zero double-leases, zero errors, and
+  RSS flat at 70→73 MB. A smaller version of that runs in the normal suite.
+
   `tests/test_connection_safety.py` pins the structural rule (every public
   conn-taking function holds the lock, `app.py` never touches the raw
   connection) so it cannot regress quietly. The concurrent-reader test reproduced
