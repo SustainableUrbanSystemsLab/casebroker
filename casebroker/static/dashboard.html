@@ -1354,6 +1354,7 @@
     <button class="drawer-tab" role="tab" type="button" data-tab="connection" aria-selected="false">Connection</button>
     <button class="drawer-tab" role="tab" type="button" data-tab="users" aria-selected="false">Users</button>
     <button class="drawer-tab" role="tab" type="button" data-tab="machines" aria-selected="false">Machines</button>
+    <button class="drawer-tab" role="tab" type="button" data-tab="campaign" aria-selected="false">Campaign</button>
     <button class="drawer-tab" role="tab" type="button" data-tab="prefs" aria-selected="false">Preferences</button>
   </div>
 
@@ -1501,6 +1502,40 @@
       </div>
       <div id="usersLocked" class="panel-subtitle">
         Sign in as an admin to manage accounts.
+      </div>
+    </section>
+
+    <!-- ------------------------------------------------------- Campaign -->
+    <!-- Campaign hygiene that needs the database, so it runs on the broker and
+         is reached from here rather than from a psql session or a curl with a
+         bearer token pasted out of a password manager. -->
+    <section id="tab-campaign" class="drawer-pane" role="tabpanel" hidden>
+      <div id="campaign" style="display:none;">
+        <div class="panel-title-group" style="margin-bottom:4px;"><h2>Campaign</h2></div>
+        <div class="panel-subtitle">
+          Housekeeping over the whole case pool. Every action here reports before
+          it changes anything.
+        </div>
+
+        <div class="detail-card" style="margin-top:14px;">
+          <h3>Sites that are not on land</h3>
+          <div class="panel-subtitle" style="margin-bottom:10px;">
+            New cases are refused at <code class="inline">POST /v1/cases</code> if
+            the building atlas publishes no tile for them. Cases drawn
+            <em>before</em> that gate existed are still in the pool — the sampler's
+            LCZ raster reads snow, ice and open water as built classes, so the
+            draw placed sites in Antarctica and in the open ocean. Each one is 66
+            core-hours aimed at an empty flat plane.
+          </div>
+          <div class="row" style="gap:8px; align-items:center;">
+            <button id="landScanBtn" type="button" class="subtle">Scan the case pool</button>
+            <button id="landFixBtn" type="button" style="display:none;">Quarantine them</button>
+          </div>
+          <div id="landResult" style="margin-top:12px;"></div>
+        </div>
+      </div>
+      <div id="campaignLocked" class="panel-subtitle">
+        Sign in as an operator or an admin to run campaign housekeeping.
       </div>
     </section>
 
@@ -2930,10 +2965,16 @@
       ? authState.user + (authState.role ? " (" + authState.role + ")" : "")
       : "";
     const isAdmin = signedIn && authState.role === "admin";
+    // Campaign housekeeping is WRITE-scoped, not admin-only: the broker gates it
+    // with _may_write_as(("admin", "operator")), and an operator running the
+    // campaign is exactly who notices that the draw put cases in the ocean.
+    const canWrite = signedIn && ["admin", "operator"].includes(authState.role);
     $("machines").style.display = isAdmin ? "" : "none";
     $("machinesLocked").style.display = isAdmin ? "none" : "";
     $("users").style.display = isAdmin ? "" : "none";
     $("usersLocked").style.display = isAdmin ? "none" : "";
+    $("campaign").style.display = canWrite ? "" : "none";
+    $("campaignLocked").style.display = canWrite ? "none" : "";
     // A signed-in human has no use for the bearer-token form; it stays in the
     // DOM because everything still reads $("token").value.
     $("connectForm").style.display = signedIn ? "none" : "";
@@ -3522,6 +3563,101 @@
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape" && settingsOpen()) closeSettings();
   });
+  // -- Campaign: sites that are not on land -----------------------------------
+  // Two buttons on purpose. The scan is read-only and always runs first; the
+  // quarantine button does not exist until a scan has found something, and it
+  // names the number it is about to act on. `dry_run` defaults to true on the
+  // endpoint for the same reason -- finding out how bad it is must not be the
+  // same keystroke as changing production.
+  let landFound = 0;
+
+  // Both credentials, because either is legitimate here: the broker gates this
+  // with _may_write_as(("admin", "operator")), which accepts a logged-in human
+  // OR a write token. `api()` sends only the bearer and `userCall()` only the
+  // cookie, so an operator with a session and an operator with a token would
+  // each have hit a 401 through the other one.
+  async function campaignCall(path) {
+    const base = $("broker").value.trim().replace(/\/+$/, "");
+    const token = $("token").value.trim();
+    const headers = {};
+    if (token) headers["Authorization"] = "Bearer " + token;
+    const r = await fetch(base + path,
+                          { method: "POST", headers, credentials: "include" });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      const err = new Error(data.detail || ("failed: " + r.status));
+      err.status = r.status;
+      throw err;
+    }
+    return data;
+  }
+
+  function renderLandResult(d, changed) {
+    const n = changed ? d.quarantined : d.scanned_not_on_land;
+    if (!n) {
+      $("landResult").innerHTML = changed
+        ? `<div style="font-size:12px;color:var(--accent)">Done — nothing left to quarantine.</div>`
+        : `<div style="font-size:12px;color:var(--accent)">Every pending case is on land. Nothing to do.</div>`;
+      $("landFixBtn").style.display = "none";
+      return;
+    }
+    const rows = (d.examples || []).map((e) => `
+      <tr><td><code class="inline">${esc(e.case_id)}</code></td>
+          <td class="mono">${Number(e.lat).toFixed(3)}, ${Number(e.lon).toFixed(3)}</td>
+          <td>${esc(e.city_cluster || "—")}</td>
+          <td>${esc(e.lcz || "—")}</td>
+          <td>${badge(e.state)}</td></tr>`).join("");
+    const more = n > (d.examples || []).length
+      ? `<div class="geo-note">…and ${n - d.examples.length} more.</div>` : "";
+    $("landResult").innerHTML = changed
+      ? `<div style="font-size:12px;color:var(--accent);margin-bottom:8px;">
+           <b>${n}</b> case${n === 1 ? "" : "s"} quarantined. Nothing will lease them;
+           the rows and their history are intact, so this can be undone.</div>`
+        + `<div class="table-wrap"><table><thead><tr><th>Case</th><th>Lat, lon</th>
+           <th>Cluster</th><th>LCZ</th><th>Was</th></tr></thead><tbody>${rows}</tbody></table></div>${more}`
+      : `<div style="font-size:12px;color:var(--warn);margin-bottom:8px;">
+           <b>${n}</b> case${n === 1 ? "" : "s"} in the pool ${n === 1 ? "is" : "are"} not on land.
+           Nothing has been changed.</div>`
+        + `<div class="table-wrap"><table><thead><tr><th>Case</th><th>Lat, lon</th>
+           <th>Cluster</th><th>LCZ</th><th>State</th></tr></thead><tbody>${rows}</tbody></table></div>${more}`;
+  }
+
+  $("landScanBtn").addEventListener("click", async () => {
+    const b = $("landScanBtn");
+    b.disabled = true;
+    $("landResult").innerHTML = `<span style="font-size:12px;color:var(--text-muted)">scanning the case pool…</span>`;
+    $("landFixBtn").style.display = "none";
+    try {
+      const d = await campaignCall("/v1/cases/land-audit");
+      landFound = d.scanned_not_on_land;
+      renderLandResult(d, false);
+      if (landFound) {
+        $("landFixBtn").textContent = `Quarantine ${landFound} case${landFound === 1 ? "" : "s"}`;
+        $("landFixBtn").style.display = "";
+      }
+    } catch (e) {
+      $("landResult").innerHTML = `<span style="font-size:12px;color:var(--bad)">scan failed: ${esc(e.message || e.status || e)}</span>`;
+    } finally {
+      b.disabled = false;
+    }
+  });
+
+  $("landFixBtn").addEventListener("click", async () => {
+    const b = $("landFixBtn");
+    b.disabled = true;
+    try {
+      const d = await campaignCall("/v1/cases/land-audit?dry_run=false");
+      renderLandResult(d, true);
+      showToast(`${d.quarantined} case${d.quarantined === 1 ? "" : "s"} quarantined`);
+      loadCases();
+      refresh();
+    } catch (e) {
+      $("landResult").innerHTML = `<span style="font-size:12px;color:var(--bad)">quarantine failed: ${esc(e.message || e.status || e)}</span>`;
+    } finally {
+      b.disabled = false;
+    }
+  });
+
   document.querySelectorAll(".drawer-tab").forEach((t) => {
     t.addEventListener("click", () => showTab(t.getAttribute("data-tab")));
   });
