@@ -216,6 +216,19 @@ def _tokens_from_env(canonical: str, legacy: str) -> list[str]:
     return new or old
 
 
+# How many password verifications may run at once, process-wide.
+#
+# scrypt at RFC 7914's interactive parameters is ~16 MB per call, and that cost
+# is the point -- it is what makes a stolen hash expensive. But uvicorn's default
+# threadpool is 40 wide and /v1/auth/login needs no credential, so nothing
+# stopped 40 simultaneous attempts asking for ~640 MB on a 512 MB instance that
+# already sits at ~280 MB once DuckDB and GDAL are resident. Four at a time caps
+# it near 64 MB; the cost is that a burst of logins queues rather than the
+# platform killing the process mid-lease.
+PASSWORD_CONCURRENCY = int(os.environ.get("CASEBROKER_PASSWORD_CONCURRENCY", "4"))
+_password_slots = threading.Semaphore(PASSWORD_CONCURRENCY)
+
+
 def _may_lease_as(credential_name: str, worker_id: str) -> bool:
     """Whether a per-machine credential may claim work as ``worker_id``.
 
@@ -785,12 +798,19 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
     _login_lock = threading.Lock()
     LOGIN_FAIL_WINDOW = 300.0
     LOGIN_FAIL_LIMIT = 10
+    # Higher than the per-account limit because one address is legitimately many
+    # people behind a TLS-terminating proxy or a university NAT, but still a hard
+    # ceiling on how much scrypt an anonymous caller can buy.
+    LOGIN_FAIL_ADDR_LIMIT = 25
     # The username is attacker-chosen and need not exist, so without a cap an
     # anonymous caller can grow this map indefinitely. Well above any real
     # deployment's account count, and evicting the stalest entry is correct
     # behaviour rather than a mere safeguard: the stalest is also the one whose
     # window is most likely to have expired anyway.
     LOGIN_FAIL_MAX_KEYS = 4096
+
+    def _client_addr(request: Request) -> str:
+        return request.client.host if request.client else "?"
 
     def _throttle_key(request: Request, username: str) -> str:
         # The SOCKET address deliberately, not X-Forwarded-For -- unlike the
@@ -800,8 +820,7 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         # which is worse than the cost of not using it: behind a
         # TLS-terminating proxy every caller shares one apparent address, so
         # one attacker can throttle the others for that username.
-        client = request.client.host if request.client else "?"
-        return f"{username}|{client}"
+        return f"{username}|{_client_addr(request)}"
 
     @app.post("/v1/auth/login")
     def auth_login(body: LoginIn, request: Request, response: Response) -> dict[str, Any]:
@@ -813,28 +832,47 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         # so a whole wave of simultaneous attempts passes the check while the
         # count is still zero and only the NEXT wave sees the failures. Measured
         # at 15 attempts admitted against a limit of 10 before this.
+        # TWO buckets, and the address one is the load-bearing half. Keying only
+        # on `username|address` bounded nothing an attacker cares about: the
+        # username is attacker-chosen and need not exist, so every attempt with a
+        # fresh username opened a fresh bucket and the limit never applied. Each
+        # of those attempts is a full scrypt -- ~100 ms and ~16 MB by design --
+        # from an endpoint that needs no credential to reach.
+        addr_key = f"|addr|{_client_addr(request)}"
         with _login_lock:
-            recent = [t for t in _login_failures.get(key, [])
-                      if now - t < LOGIN_FAIL_WINDOW]
-            if len(recent) >= LOGIN_FAIL_LIMIT:
-                _login_failures[key] = recent
-                raise HTTPException(
-                    429, "too many failed logins for this account from this "
-                         "address; wait a few minutes")
-            _login_failures[key] = recent + [now]
+            for k, limit in ((key, LOGIN_FAIL_LIMIT),
+                             (addr_key, LOGIN_FAIL_ADDR_LIMIT)):
+                recent = [t for t in _login_failures.get(k, [])
+                          if now - t < LOGIN_FAIL_WINDOW]
+                if len(recent) >= limit:
+                    _login_failures[k] = recent
+                    raise HTTPException(
+                        429, "too many failed logins from this address; "
+                             "wait a few minutes")
+                _login_failures[k] = recent + [now]
             if len(_login_failures) > LOGIN_FAIL_MAX_KEYS:
                 stalest = min(_login_failures, key=lambda k: _login_failures[k][-1])
                 _login_failures.pop(stalest, None)
         user = db.get_user(conn, body.username)
-        # Verify even when the user does not exist, against a throwaway hash, so
-        # a wrong USERNAME and a wrong PASSWORD take the same time. Otherwise the
-        # response time enumerates accounts.
-        stored = user["password_hash"] if user else auth.hash_password("decoy")
-        if not auth.verify_password(body.password, stored) or not user:
+        # Verify even when the user does not exist, against a decoy hash, so a
+        # wrong USERNAME and a wrong PASSWORD take the same time. Otherwise the
+        # response time enumerates accounts. The decoy is precomputed at import
+        # (auth.DECOY_HASH) rather than built here: building it is itself a full
+        # scrypt, which made a miss cost exactly twice a hit.
+        stored = user["password_hash"] if user else auth.DECOY_HASH
+        # Bounded, because scrypt is ~16 MB a call and the threadpool is 40 wide:
+        # unbounded, 40 simultaneous logins ask for ~640 MB on a 512 MB instance
+        # that already sits at ~280 MB once the geo libraries are resident. The
+        # queue costs a slow login under load; the alternative is the platform
+        # killing the process, which is what actually happened to this service.
+        with _password_slots:
+            ok = auth.verify_password(body.password, stored)
+        if not ok or not user:
             # The reservation above stands as the failure record.
             raise HTTPException(401, "wrong username or password")
         with _login_lock:
             _login_failures.pop(key, None)      # success releases the whole run
+            _login_failures.pop(addr_key, None)
         # The one place a sweep costs nothing and cannot be forgotten: expiry is
         # already enforced at read time, so this only stops the table growing
         # without bound over a long-lived campaign.

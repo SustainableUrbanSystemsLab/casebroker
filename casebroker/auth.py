@@ -93,5 +93,20 @@ def hash_token(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
+# A hash no password verifies against, built ONCE at import.
+#
+# The login path must run the same work for a username that exists and one that
+# does not, or response time enumerates accounts. It did that by calling
+# `hash_password("decoy")` per request -- but that is itself a full scrypt, so a
+# miss ran scrypt TWICE and a hit ran it once. Measured at exactly 2.0x: the
+# defence against enumeration was the thing enumerating, with the sign flipped.
+# It also doubled the cost of the most expensive unauthenticated operation the
+# service has.
+#
+# Built from random bytes rather than a fixed string so that nothing an attacker
+# can send verifies against it even in principle.
+DECOY_HASH = hash_password(secrets.token_urlsafe(32))
+
+
 def session_expiry(now: int | None = None, ttl: int = SESSION_TTL_SECONDS) -> int:
     return int(now if now is not None else time.time()) + ttl
