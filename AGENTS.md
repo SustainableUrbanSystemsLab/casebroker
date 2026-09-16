@@ -155,7 +155,12 @@ so a broker that stops speaking the old protocol strands them.
   published GBA tile keys as a coarse land mask — a 5° grid, so it catches the
   open ocean and the ice sheets but not a point 2 km offshore. The exact
   question is still the site preview's, from three independent sources. The
-  underlying cause is upstream and unfixed: the sampler's LCZ raster reads snow,
-  ice and open water as built classes, and a uniformly misread surface is 100%
-  "pure", so the purity test cannot catch it.
-- **No land/water mask.** The polar gate catches poles, not oceans.
+  underlying cause is upstream — the sampler's LCZ raster reads snow, ice and
+  open water as built classes, and a uniformly misread surface is 100% "pure",
+  so the purity test cannot catch it — and is now gated there as well:
+  `site_sampler.py` applies the same published-tile mask to its candidate pool
+  before a draw, counting `rejected_not_on_land` separately from
+  `rejected_polar`. `SAMPLER_VERSION` moved to `sampler-v3` for that; the rank
+  salt stayed at `sampler-v1`, so a re-draw filters the old pool rather than
+  replacing it. The broker's check is now a backstop, which still matters: it
+  catches hand-added cases and anything drawn by an older sampler.
