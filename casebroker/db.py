@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import functools
 import json
+import os
 import re
 import sqlite3
 import sys
@@ -71,6 +72,11 @@ CREATE TABLE IF NOT EXISTS cases (
     lease_id       TEXT,
     lease_worker   TEXT,
     lease_expires  INTEGER,
+    -- When the CURRENT lease was handed out. Deliberately not touched by
+    -- heartbeat, which is what makes it an age rather than a liveness signal:
+    -- lease_expires only ever says "someone said they were alive recently", and
+    -- a worker wedged mid-solve says that forever.
+    leased_at      INTEGER,
     last_error     TEXT,
     result_uri     TEXT,
     result_sha256  TEXT,
@@ -216,6 +222,11 @@ CREATE TABLE IF NOT EXISTS cases (
     lease_id       TEXT,
     lease_worker   TEXT,
     lease_expires  INTEGER,
+    -- When the CURRENT lease was handed out. Deliberately not touched by
+    -- heartbeat, which is what makes it an age rather than a liveness signal:
+    -- lease_expires only ever says "someone said they were alive recently", and
+    -- a worker wedged mid-solve says that forever.
+    leased_at      INTEGER,
     last_error     TEXT,
     result_uri     TEXT,
     result_sha256  TEXT,
@@ -620,6 +631,19 @@ class Lease:
 # this in-process lock) but costs nothing to keep uniform across both engines.
 _LOCK = threading.RLock()
 
+# The longest ONE lease may live, however healthy its heartbeats look.
+#
+# lease_expires answers "did a worker speak recently", and heartbeat pushes it
+# forward every few minutes for as long as the process is alive. That catches a
+# worker that DIES -- preemption, walltime, a dropped node -- within the TTL.
+# It cannot catch a worker that is alive and reporting and simply never
+# finishes, because the heartbeat thread runs independently of the runner: a
+# solve that wedges keeps renewing its own lease and the case is never
+# reclaimed. Seven days is far beyond any real case (66 core-hours is roughly
+# three wall-hours on 24 cores) so this only ever fires on something genuinely
+# stuck.
+MAX_LEASE_AGE_SECONDS = int(os.environ.get("CASEBROKER_MAX_LEASE_AGE", str(7 * 86400)))
+
 
 def _is_connection_error(exc: BaseException) -> bool:
     """Is this the connection dying, rather than the query being wrong?
@@ -939,7 +963,8 @@ def lease(conn, worker_id: str, count: int = 1,
                 # cycle forever through every worker in the fleet.
                 conn.execute(
                     "UPDATE cases SET state='quarantined', lease_id=NULL,"
-                    " lease_worker=NULL, lease_expires=NULL, updated_at=?"
+                    " lease_worker=NULL, lease_expires=NULL, leased_at=NULL,"
+                    " updated_at=?"
                     " WHERE case_id=?", (now, row["case_id"]))
                 _event(conn, row["case_id"], worker_id, "quarantined",
                        "attempts exhausted (%d)" % row["max_attempts"], now)
@@ -948,8 +973,9 @@ def lease(conn, worker_id: str, count: int = 1,
             lease_id = uuid.uuid4().hex
             conn.execute(
                 "UPDATE cases SET state='leased', lease_id=?, lease_worker=?,"
-                " lease_expires=?, attempts=?, updated_at=? WHERE case_id=?",
-                (lease_id, worker_id, expires, attempt, now, row["case_id"]))
+                " lease_expires=?, leased_at=?, attempts=?, updated_at=?"
+                " WHERE case_id=?",
+                (lease_id, worker_id, expires, now, attempt, now, row["case_id"]))
             _event(conn, row["case_id"], worker_id, "resumed" if resumed else "leased",
                    "attempt %d" % attempt, now)
             out.append(Lease(case_id=row["case_id"], lease_id=lease_id,
@@ -965,15 +991,17 @@ def lease(conn, worker_id: str, count: int = 1,
                 "SELECT case_id, spec, attempts, max_attempts, state, lease_worker"
                 " FROM cases WHERE case_id IN (" + placeholders + ")"
                 " AND (state = 'pending'"
-                "      OR (state = 'leased' AND (lease_expires < ? OR lease_worker = ?)))"
+                "      OR (state = 'leased' AND (lease_expires < ?"
+                "          OR (leased_at IS NOT NULL AND leased_at < ?)"
+                "          OR lease_worker = ?)))"
                 " ORDER BY case_id ASC" + lock_clause,
-                [*ids, now, worker_id],
+                [*ids, now, now - MAX_LEASE_AGE_SECONDS, worker_id],
             ).fetchall()
             claim(rows, resumed=True)
 
         remaining = count - len(out)
         if remaining > 0:
-            params: list[Any] = [now]
+            params: list[Any] = [now, now - MAX_LEASE_AGE_SECONDS]
             split_sql = ""
             if splits:
                 placeholders = ",".join("?" for _ in splits)
@@ -982,7 +1010,14 @@ def lease(conn, worker_id: str, count: int = 1,
             params.append(remaining)
             rows = conn.execute(
                 "SELECT case_id, spec, attempts, max_attempts, state, lease_worker FROM cases"
-                " WHERE (state = 'pending' OR (state = 'leased' AND lease_expires < ?))"
+                # A lease is reclaimable when it has EXPIRED (the worker stopped
+                # speaking) or when it is simply too OLD (the worker is still
+                # speaking and has been for a week). The second is the only one
+                # that catches a wedged-but-alive solve, because its heartbeat
+                # keeps the first from ever firing.
+                " WHERE (state = 'pending'"
+                "        OR (state = 'leased' AND (lease_expires < ?"
+                "            OR (leased_at IS NOT NULL AND leased_at < ?))))"
                 + split_sql +
                 # Every worker targets the same "lowest" rows. That is contention by
                 # design, not by accident: under SKIP LOCKED a locked row is simply
@@ -1033,6 +1068,30 @@ def heartbeat(conn, lease_id: str, lease_seconds: int = 3600,
     now = now or _now()
     row = _by_lease(conn, lease_id)
     if row is None:
+        return False
+    # A heartbeat cannot extend a lease indefinitely. Past MAX_LEASE_AGE_SECONDS
+    # the case is released here rather than waiting for some other worker's
+    # lease() to notice, so the worker finds out on its very next heartbeat --
+    # it already treats a refused heartbeat as "stop, someone else owns this",
+    # which is exactly the right behaviour for a solve that has been running for
+    # a week. Returning False without releasing would leave it held by a worker
+    # that has been told to let go.
+    leased_at = row["leased_at"] if "leased_at" in row.keys() else None
+    if leased_at is None:
+        # A lease handed out before this column existed. Start its clock now
+        # rather than leaving it exempt forever: NULL means "unknown", and
+        # treating unknown as "not old" would let exactly the cases that predate
+        # the cap -- the ones most likely to be stuck -- escape it permanently.
+        conn.execute("UPDATE cases SET leased_at=? WHERE lease_id=?", (now, lease_id))
+        leased_at = now
+    if leased_at < now - MAX_LEASE_AGE_SECONDS:
+        conn.execute(
+            "UPDATE cases SET state='pending', lease_id=NULL, lease_worker=NULL,"
+            " lease_expires=NULL, leased_at=NULL, updated_at=? WHERE case_id=?",
+            (now, row["case_id"]))
+        _event(conn, row["case_id"], row["lease_worker"], "released",
+               "abandoned: held %d days without completing"
+               % (MAX_LEASE_AGE_SECONDS // 86400), now)
         return False
     conn.execute("UPDATE cases SET lease_expires=?, updated_at=? WHERE lease_id=?",
                  (now + lease_seconds, now, lease_id))
@@ -1093,7 +1152,8 @@ def complete(conn, lease_id: str, result_uri: str,
         conn.execute(
             "UPDATE cases SET state='done', result_uri=?, result_sha256=?,"
             " result_bytes=?, metrics=?, lease_id=NULL, lease_worker=NULL,"
-            " lease_expires=NULL, last_error=NULL, updated_at=? WHERE case_id=?",
+            " lease_expires=NULL, leased_at=NULL, last_error=NULL,"
+            " updated_at=? WHERE case_id=?",
             (result_uri, sha256, nbytes, json.dumps(metrics or {}, sort_keys=True),
              now, row["case_id"]))
         conn.execute(
@@ -1121,7 +1181,8 @@ def fail(conn, lease_id: str, error: str, retryable: bool = True,
         state = "pending" if (retryable and not exhausted) else "quarantined"
         conn.execute(
             "UPDATE cases SET state=?, lease_id=NULL, lease_worker=NULL,"
-            " lease_expires=NULL, last_error=?, updated_at=? WHERE case_id=?",
+            " lease_expires=NULL, leased_at=NULL, last_error=?,"
+            " updated_at=? WHERE case_id=?",
             (state, error[:4000], now, row["case_id"]))
         conn.execute(
             "UPDATE workers SET cases_failed = cases_failed + 1, last_seen=? WHERE worker_id=?",
@@ -1153,7 +1214,8 @@ def release(conn, lease_id: str, reason: str = "released",
             return False
         conn.execute(
             "UPDATE cases SET state='pending', lease_id=NULL, lease_worker=NULL,"
-            " lease_expires=NULL, attempts=MAX(attempts - 1, 0), updated_at=?"
+            " lease_expires=NULL, leased_at=NULL,"
+            " attempts=MAX(attempts - 1, 0), updated_at=?"
             " WHERE case_id=?", (now, row["case_id"]))
         _event(conn, row["case_id"], row["lease_worker"], "released", reason, now)
         conn.execute("COMMIT")
