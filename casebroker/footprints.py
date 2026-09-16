@@ -450,8 +450,13 @@ def terrain(lat: float, lon: float, half_m: float = DOMAIN_HALF_M,
     try:
         import numpy as np
         from rasterio.enums import Resampling
-    except Exception:                                    # noqa: BLE001
-        return {"source": "unknown", "detail": "rasterio not installed on the broker"}
+    except Exception as e:                               # noqa: BLE001
+        # The REAL error, not a guess. This used to say "rasterio not installed"
+        # for any failure at all, which sent a night of diagnosis in the wrong
+        # direction: a wheel that installs fine but cannot load a shared library
+        # in a slim container is not "not installed", and the message hid it.
+        return {"source": "unknown",
+                "detail": f"{type(e).__name__}: {str(e)[:140]}"}
 
     try:
         fine, covered = _read_window(GEDTM30, lat, lon, half_m, n * OVERSAMPLE,
@@ -537,8 +542,13 @@ def canopy(lat: float, lon: float, half_m: float = DOMAIN_HALF_M,
     try:
         import numpy as np
         from rasterio.enums import Resampling
-    except Exception:                                    # noqa: BLE001
-        return {"source": "unknown", "detail": "rasterio not installed on the broker"}
+    except Exception as e:                               # noqa: BLE001
+        # The REAL error, not a guess. This used to say "rasterio not installed"
+        # for any failure at all, which sent a night of diagnosis in the wrong
+        # direction: a wheel that installs fine but cannot load a shared library
+        # in a slim container is not "not installed", and the message hid it.
+        return {"source": "unknown",
+                "detail": f"{type(e).__name__}: {str(e)[:140]}"}
 
     tile = chm_tile_for(lat, lon)
     url = f"/vsicurl/{CHM_BASE}/{tile}.tif"

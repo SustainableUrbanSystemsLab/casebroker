@@ -120,6 +120,18 @@ jobs:
           import casebroker.app, casebroker.worker, casebroker.cli
           print('base install is complete')
           "
+      - name: Can rasterio even be imported in this image?
+        # Run BEFORE the read below, so a failure names the actual cause -- a
+        # missing shared library shows up here as the loader's own message,
+        # which is a very different fix from "the package is not installed".
+        run: |
+          docker exec cb python -c "
+          import importlib.util as u
+          print('rasterio spec :', u.find_spec('rasterio'))
+          print('numpy spec    :', u.find_spec('numpy'))
+          import rasterio, numpy
+          print('rasterio', rasterio.__version__, '| GDAL', rasterio.__gdal_version__, '| numpy', numpy.__version__)
+          " || { echo '::error::rasterio cannot be imported inside the image'; docker exec cb pip list 2>/dev/null | grep -iE 'rasterio|numpy|affine' || true; docker exec cb ldd "$(docker exec cb python -c 'import rasterio,os;print(os.path.dirname(rasterio.__file__))' 2>/dev/null)/_base*.so" 2>/dev/null | grep 'not found' || true; exit 1; }
       - name: rasterio must actually read a remote COG from inside the image
         # The step above only proves the modules import. Terrain and canopy are
         # /vsicurl reads over HTTPS through GDAL's bundled curl, and whether
