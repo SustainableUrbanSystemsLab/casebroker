@@ -54,6 +54,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
   than building and 227 of them are stalactites.
 
 ### Security
+- **The machine credential was briefly world-readable as it was written.**
+  `casebroker worker setup` writes a live bearer token into `machine.env`, and
+  `_write_env` created the file with `write_text()` — i.e. at whatever the umask
+  allows, 0644 on a default login shell — and narrowed it to 0600 only
+  afterwards. The token is on disk for the gap between those two calls, on
+  cluster nodes whose home directories are routinely group-readable. The file is
+  now created through `os.open` with mode 0600, and an existing permissive file
+  is narrowed *before* the new token is written into it.
 - **A worker credential could run script in an admin's dashboard.** The cluster
   name from `POST /v1/fleet` was interpolated into the campaign status card with
   `innerHTML` and no escaping, so any credential with write scope could store

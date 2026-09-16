@@ -643,10 +643,26 @@ def _write_env(path: pathlib.Path, values: dict) -> None:
     if remaining and out and out[-1].strip():
         out.append("")
     out.extend("%s=%s" % (k, v) for k, v in remaining.items())
-    path.write_text("\n".join(out).rstrip("\n") + "\n")
+    body = "\n".join(out).rstrip("\n") + "\n"
+    # Restricted BEFORE the credential is written, not after. Writing first and
+    # chmodding second lands the token at whatever the umask allows -- 0644 on a
+    # default login shell -- and leaves it world-readable for the gap between the
+    # two calls. On a shared cluster filesystem, where home directories are
+    # routinely group-readable, that gap is the whole exposure.
     try:
-        # The file now holds a live credential. Best effort: a no-op on Windows,
-        # where the parent directory's ACL is what actually governs access.
+        if path.exists():
+            path.chmod(0o600)
+            path.write_text(body)
+        else:
+            # O_CREAT with a mode means the file never exists at a wider one.
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as fh:
+                fh.write(body)
+    except OSError:
+        # Windows has no POSIX mode bits worth setting -- the parent directory's
+        # ACL governs there -- so fall back rather than failing the enrolment.
+        path.write_text(body)
+    try:
         path.chmod(0o600)
     except OSError:
         pass
