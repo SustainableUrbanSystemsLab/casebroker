@@ -104,6 +104,25 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
   `auth.DECOY_HASH`, computed once at import from random bytes. Measured after:
   0.95x.
 
+### Fixed
+- **A hung solve heartbeated forever and burned the allocation.** The runner ran
+  under `subprocess.run(capture_output=True)` with no timeout, and the heartbeat
+  thread is INDEPENDENT of it — so a solve that wedged kept getting its own lease
+  renewed. The broker never reclaimed the case, the worker never moved on, and
+  the job ran to walltime with nothing to show; it self-corrected only when SLURM
+  killed it. A case that outruns `CASEBROKER_CASE_TIMEOUT` (default 24 h, well
+  beyond a real 66-core-hour case) is now killed and reported as a *retryable*
+  failure — a hang says nothing about the case, so another machine may finish it.
+  The kill signals the whole process group, because a solve is `mpirun` and its
+  ranks, and killing only the direct child leaves those ranks holding the cores
+  this worker is about to ask for again.
+- **The worker held the entire OpenFOAM log in RAM.** `capture_output=True`
+  buffers both streams in full, while the code needs exactly two things from
+  them: the last stdout line, and a tail of stderr for the error message. Output
+  is now streamed into bounded deques (`CASEBROKER_CAPTURE_LINES`, default 2000),
+  so a chatty runner costs a fixed amount instead of its whole log — and the JSON
+  result line still survives, because it is always last.
+
 ### Changed
 - **The request threadpool is bounded at 12, not anyio's default 40.** Every sync
   endpoint runs there, and 40 is sized for a machine rather than for a 512 MB
