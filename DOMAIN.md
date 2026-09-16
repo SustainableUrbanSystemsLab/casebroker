@@ -107,12 +107,29 @@ mislead.
 
 ## Footprints
 
-Building geometry for a case, cached per case, from the **same source the runner
-meshes** — GlobalBuildingAtlas by default, Overture if GBA is unreachable (the
-response says which, via `source`). Rendering anything merely similar — OSM, a
-map tile, or the other building source — would look like a check while
-disagreeing with the mesh, and would disagree most exactly where checking
-matters.
+What a case is **made of**, cached per case, from the **same sources the runner
+meshes**. Three layers, one payload:
+
+- **Buildings** — GlobalBuildingAtlas by default, Overture only if GBA is
+  unreachable *and* `CASEBROKER_OVERTURE_FALLBACK` is set (the response says
+  which, via `source`). Queried over 520 m: the 504 m core plus a margin.
+- **`terrain`** — GEDTM30 relief over the whole 1304 m mesh domain, as a coarse
+  grid plus min/max/relief. `source` is `gedtm30`, `flat` (genuine nodata, so
+  the builder will mesh a flat plane — usually a site not on land), or
+  `unavailable` (the DTM host, not the site).
+- **`canopy`** — Meta/WRI 1 m canopy heights over the same domain, as a coarse
+  grid plus coverage and tallest tree. `source` is `meta-wri-chm-v1`, `none`
+  (the product publishes no tile here) or `unavailable`. A treeless site and an
+  uncovered one are different answers and are reported as such.
+
+Both rasters span 1304 m rather than 520 m because that is what
+`site_geometry.build_site` reads: `half_t = HALF_M + buffer_m`, 504 + 800. The
+buffer is most of the domain, and a preview cropped to the buildings would show
+a third of the ground the solve actually sits on.
+
+Rendering anything merely similar — OSM, a map tile, a 10 m canopy raster, or
+the other building source — would look like a check while disagreeing with the
+mesh, and would disagree most exactly where checking matters.
 
 Read from the Source Cooperative GeoParquet mirror, not TUM's own WFS: that
 endpoint now answers `GetFeature` with `PARAMETER_NOT_ALLOWED`, serving only
@@ -126,6 +143,23 @@ then (east, south) — so latitude descends while longitude ascends. A wrong key
 usually a 404, but it can also be a real tile for the wrong part of the world,
 which returns buildings and produces a case that meshes, solves, and is somewhere
 else. `tests/test_gba_tiles.py` pins it.
+
+The canopy tile key has the same shape of trap. The Meta/WRI tiles are named by
+**zoom-9 Bing quadkey** — 40,075,017 m / 512 / 65,536 = 1.194 m, which is the
+product's own resolution and fixes the zoom. A key one level out is still a
+valid quadkey naming a real object, so it fails by drawing someone else's trees.
+The broker computes the key rather than downloading the 15 MB `tiles.geojson`
+index `canopy.py` uses: same answer, 15 MB less resident memory in a capped web
+process. `tests/test_chm_tiles.py` pins it against the published objects on four
+continents.
+
+**Heights, relief and canopy are all predictions or samples, not surveys.** GBA
+publishes a per-building variance and the inspector draws it; GEDTM30 is a 30 m
+DTM resampled to an 80 m preview cell; the canopy grid is a mean over its cell,
+which is what a crown-volume drag term integrates. Statistics are taken at four
+times the drawing resolution before the grid is averaged down — computing them
+at drawing resolution reported Atlanta, a city of 25 m oaks, as having a tallest
+tree of 8 m.
 
 ---
 

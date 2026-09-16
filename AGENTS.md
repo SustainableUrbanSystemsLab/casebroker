@@ -140,7 +140,13 @@ so a broker that stops speaking the old protocol strands them.
   where GBA is thin). Only ~45% of sampled sites return buildings at all, and
   LCZ 1 — the scarcest and most valuable class — is ~25%. Coverage is thin across
   China and much of Africa. Sites that *do* pass may still have most heights
-  inferred rather than measured.
+  inferred rather than measured. The fallback is now behind
+  `CASEBROKER_OVERTURE_FALLBACK` because it shells out to a second interpreter,
+  which is the one thing in the footprints path the memory ceilings cannot reach.
+- **The broker's geo path has a ~280 MB floor.** DuckDB with httpfs and spatial,
+  plus GDAL and PROJ, are resident once `/footprints` has been called once, and
+  that is library code rather than anything a query holds. It sizes the instance;
+  see `docs/operations.md`.
 - **The published campaign predates the polar gate.** Production holds the
   ungated draw, including sites in Antarctica and one in the open Pacific.
 - **No land/water mask.** The polar gate catches poles, not oceans.

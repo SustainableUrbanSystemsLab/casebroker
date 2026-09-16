@@ -1609,21 +1609,42 @@
   initTheme();
 
   // -- Site geometry ----------------------------------------------------------
-  // Drawn from the broker's /footprints endpoint, which runs the SAME Overture
-  // query, pinned to the same release, that the CFD runner does. The split
-  // below is the point of the whole panel: Overture returns every footprint it
-  // knows, but only those carrying a height can be extruded, so only those
-  // become geometry. A site can look busy here and still mesh almost empty --
-  // which is exactly the failure that quarantined sites earlier.
+  // Everything the mesh is built from, drawn from the broker's /footprints
+  // endpoint: GlobalBuildingAtlas footprints and per-building PREDICTED heights,
+  // GEDTM30 relief, and the Meta/WRI canopy height model -- the same three
+  // sources, at the same bbox, that the CFD runner meshes. Drawing anything
+  // else would be worse than drawing nothing: it would look like a check while
+  // disagreeing with the geometry.
+  //
+  // The split this panel exists to show has changed with the sources. Under
+  // Overture it was "how many footprints carry a height at all", because most
+  // did not and the rest were extruded from an LCZ class constant. GBA predicts
+  // a height for EVERY building, so the question is now how much that
+  // prediction is worth -- which is why the per-building variance is drawn and
+  // not just the height.
+  //
+  // Cached per case for the life of the page. The case table re-renders on the
+  // 60 s auto-refresh and throws every rendered panel away; re-fetching there
+  // restarted the elapsed counter against a new t0 while the previous interval
+  // was still writing into the same element, which is why the query time
+  // appeared to jump around. The payload cannot change for pinned sources, so
+  // one fetch per case per page load is all it is worth.
+  const geoCache = new Map();
+
   async function loadFootprints(caseId, wrap) {
+    const hit = geoCache.get(caseId);
+    if (hit) { drawGeometry(hit, wrap); return; }
     const t0 = Date.now();
-    wrap.innerHTML = '<span id="geoTick" style="font-size:12px;color:var(--text-muted)">'
-      + 'querying Overture… <span style="font-family:var(--font-mono)">0.0s</span>'
-      + '<span style="display:block;margin-top:3px;font-size:11px">first look at a case queries S3 and is cached after; later opens are instant</span></span>';
-    // Silence for five seconds reads as a hang, and this is a genuine remote
-    // query -- so it counts up, and says why it is slow only the first time.
+    wrap.innerHTML = '<span style="font-size:12px;color:var(--text-muted)">'
+      + 'querying GlobalBuildingAtlas, GEDTM30 and the canopy model… '
+      + '<span class="geoTick" style="font-family:var(--font-mono)">0.0s</span>'
+      + '<span style="display:block;margin-top:3px;font-size:11px">first look at a case reads three remote datasets and is cached after; later opens are instant</span></span>';
+    // Silence for ten seconds reads as a hang, and these are three genuine
+    // remote queries -- so it counts up. Scoped to THIS panel: two cases open at
+    // once both contain a counter, and a document-wide lookup had them writing
+    // each other's elapsed time into one element.
     const tick = setInterval(() => {
-      const el = document.querySelector("#geoTick span");
+      const el = wrap.querySelector(".geoTick");
       if (el) el.textContent = ((Date.now() - t0) / 1000).toFixed(1) + "s";
       else clearInterval(tick);
     }, 100);
@@ -1632,15 +1653,21 @@
       d = await api(`/v1/cases/${encodeURIComponent(caseId)}/footprints`);
     } catch (e) {
       clearInterval(tick);
-      wrap.innerHTML = `<span style="font-size:12px;color:var(--bad)">could not load footprints: ${esc(e.message || e.status || e)}</span>`;
+      wrap.innerHTML = `<span style="font-size:12px;color:var(--bad)">could not load site geometry: ${esc(e.message || e.status || e)}</span>`;
       return;
     }
     clearInterval(tick);
-    // The drawing extends to the DOMAIN, not the footprint query. The query
-    // covers 520 m; the mesh box is 1304 m a side (504 m core + 800 m buffer),
-    // and the buffer is most of the domain -- so a picture scaled to the
-    // buildings alone hides the majority of what is actually meshed and makes
-    // the core look like the whole case.
+    geoCache.set(caseId, d);
+    drawGeometry(d, wrap);
+  }
+
+  function drawGeometry(d, wrap) {
+    // The drawing extends to the DOMAIN, not the footprint query. The buildings
+    // are queried over 520 m; the mesh box is 1304 m a side (504 m core + 800 m
+    // buffer), and the buffer is most of the domain -- so a picture scaled to
+    // the buildings alone hides the majority of what is actually meshed and
+    // makes the core look like the whole case. Terrain and canopy are read over
+    // the full domain for the same reason.
     const CORE_M = 504, BUFFER_M = 800, DOM_M = CORE_M + BUFFER_M;   // 1304
     const S = 300, k = S / (2 * DOM_M);               // metres -> px, centred
     const [lat0, lon0] = d.centre;
@@ -1651,77 +1678,223 @@
     ];
     const rings = (g) => g.type === "Polygon" ? [g.coordinates[0]]
                        : g.coordinates.map((poly) => poly[0]);
-    let modelled = 0, flat = 0, paths = "";
+    const terr = d.terrain || {}, can = d.canopy || {};
+    const hasTerr = terr.source === "gedtm30" && Array.isArray(terr.grid);
+    const hasCan = can.source === "meta-wri-chm-v1" && Array.isArray(can.grid);
+
+    // Both rasters arrive as a flat row-major grid over +-half_m, north-up. This
+    // reads one back in metres east/north of the case centre, which is the frame
+    // both drawings already work in.
+    const sampler = (g) => {
+      if (!g || !Array.isArray(g.grid) || !g.n) return () => 0;
+      const n = g.n, half = g.half_m || DOM_M, arr = g.grid;
+      return (x, y) => {
+        const c = Math.floor((x + half) / (2 * half) * n);
+        const r = Math.floor((half - y) / (2 * half) * n);
+        if (c < 0 || r < 0 || c >= n || r >= n) return 0;
+        return arr[r * n + c] || 0;
+      };
+    };
+    const zAt = sampler(hasTerr ? terr : null);       // metres above the low point
+    const canAt = sampler(hasCan ? can : null);       // canopy height, metres
+
+    // -- Plan view ----------------------------------------------------------
+    // Ground first, then canopy, then buildings: the order the site is built in,
+    // and the order that keeps each layer legible under the next.
+    const cellRects = (g, fill, opac) => {
+      const n = g.n, half = g.half_m || DOM_M, cell = 2 * half * k / n;
+      const x0 = S / 2 - half * k, y0 = S / 2 - half * k;
+      let out = "";
+      for (let r = 0; r < n; r++) {
+        for (let c = 0; c < n; c++) {
+          const o = opac(g.grid[r * n + c]);
+          if (o <= 0) continue;
+          out += `<rect x="${(x0 + c * cell).toFixed(1)}" y="${(y0 + r * cell).toFixed(1)}"`
+               + ` width="${(cell + 0.6).toFixed(1)}" height="${(cell + 0.6).toFixed(1)}"`
+               + ` fill="${fill}" fill-opacity="${o.toFixed(3)}"/>`;
+        }
+      }
+      return out;
+    };
+    const relief = Math.max(1, terr.relief_m || 1);
+    const canMax = Math.max(4, can.max_height_m || 4);
+    const groundLayer = hasTerr
+      ? cellRects(terr, "var(--warn)", (v) => 0.05 + 0.28 * (v / relief)) : "";
+    const canopyLayer = hasCan
+      ? cellRects(can, "var(--accent)", (v) => v < 2 ? 0 : 0.25 + 0.5 * Math.min(1, v / canMax)) : "";
+
+    let withH = 0, noH = 0, paths = "";
+    const sds = [];
     for (const f of d.features) {
-      const h = f.properties && f.properties.h;
+      const p = f.properties || {};
+      const h = p.h;
+      if (p.v != null && p.v >= 0) sds.push(Math.sqrt(p.v));
       for (const ring of rings(f.geometry)) {
         const pts = ring.map(toXY).map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(" ");
         if (h) paths += `<polygon points="${pts}" fill="var(--primary)" fill-opacity="0.85" stroke="none"/>`;
         else   paths += `<polygon points="${pts}" fill="none" stroke="var(--text-muted)" stroke-width="0.7"/>`;
       }
-      if (h) modelled++; else flat++;
+      if (h) withH++; else noH++;
     }
+    sds.sort((a, b) => a - b);
+    const medSd = sds.length ? sds[Math.floor(sds.length / 2)] : null;
     const core = CORE_M * k, dom = DOM_M * k;
 
     // -- 45 degree isometric ------------------------------------------------
-    // Same footprints, same heights, seen from a corner. A plan view cannot show
-    // height at all, and height is what the inference above invents: a tile of
-    // uniform median blocks and a tile of real towers look identical from
-    // directly overhead and completely different from here.
-    // The isometric frames the CORE, not the whole domain. At domain scale a
-    // 300 px box spans 2608 m, so 0.115 px per metre -- a 40 m building is four
-    // pixels and the buffer is empty sky. Framing the 1008 m core gives roughly
-    // three times the detail where the buildings actually are.
+    // Same site, seen from a corner. A plan view cannot show height at all, and
+    // height is the part GBA predicts rather than measures. It frames the CORE,
+    // not the whole domain: at domain scale a 300 px box spans 2608 m, so
+    // 0.115 px per metre -- a 40 m building is four pixels and the buffer is
+    // empty sky. Framing the core gives roughly three times the detail where
+    // the buildings actually are.
     const ISO = 300, ISO_K = ISO / (2 * CORE_M * 1.15);
     // Heights are exaggerated, and the caption says so. An earlier version
     // multiplied by 8 while claiming "to scale", which drew a single tagged
     // tower as a spike over a flat field and made the tile look like a
     // measurement error rather than a mostly-untagged tile.
     const HEX = 3;
+    // Terrain gets the same exaggeration as buildings -- a hill and a tower
+    // should be comparable in a picture whose whole point is what the flow will
+    // meet -- except where the relief is large enough to push the site out of
+    // frame, which a mountain site would. Then it is eased back, and the caption
+    // reports the factor actually used rather than the one asked for.
+    const TEX = Math.min(HEX, 62 / Math.max(1, relief * ISO_K));
     const isoPt = (x, y, z) => [
       ISO / 2 + (x - y) * 0.7071,
       ISO * 0.62 - (x + y) * 0.7071 * 0.5 - z,
     ];
-    // Painter's algorithm: far corner first, so nearer blocks overdraw.
+    const poly = (ps) => ps.map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(" ");
+    // metres east/north -> iso plan units, and the terrain height there in px
+    const zpx = (x, y) => zAt(x, y) * ISO_K * TEX;
+
+    // The ground is drawn as a displaced grid rather than a flat square, because
+    // the buildings are meshed ONTO it: a site with 50 m of relief across the
+    // core is not a flat tile with tall buildings, and the two look identical
+    // from directly overhead. Coarse (16 quads a side over the core) -- it is a
+    // 300 px picture, and the plan view carries the detail.
+    let isoGround = "";
+    const GN = 16, half = CORE_M, step = 2 * half / GN;
+    const gq = [];
+    for (let r = 0; r < GN; r++) {
+      for (let c = 0; c < GN; c++) {
+        const x = -half + c * step, y = half - r * step;
+        const cs = [[x, y], [x + step, y], [x + step, y - step], [x, y - step]];
+        const pts = cs.map(([mx, my]) => isoPt(mx * ISO_K, -my * ISO_K, zpx(mx, my)));
+        const mid = zAt(x + step / 2, y - step / 2);
+        gq.push({ pts, depth: (x - y), shade: hasTerr ? 0.06 + 0.26 * (mid / relief) : 0.10 });
+      }
+    }
+    gq.sort((a, b) => a.depth - b.depth);
+    for (const q of gq) {
+      isoGround += `<polygon points="${poly(q.pts)}" fill="var(--warn)" fill-opacity="${q.shade.toFixed(3)}"`
+                 + ` stroke="var(--border)" stroke-width="0.25" stroke-opacity="0.5"/>`;
+    }
+    // the sampled core outline, on the terrain
+    const edge = [];
+    for (let i = 0; i <= GN; i++) edge.push([-half + i * step, half]);
+    for (let i = 1; i <= GN; i++) edge.push([half, half - i * step]);
+    for (let i = 1; i <= GN; i++) edge.push([half - i * step, -half]);
+    for (let i = 1; i <= GN; i++) edge.push([-half, -half + i * step]);
+    isoGround += `<polygon points="${poly(edge.map(([mx, my]) => isoPt(mx * ISO_K, -my * ISO_K, zpx(mx, my))))}"`
+               + ` fill="none" stroke="var(--bad)" stroke-width="1.1" stroke-dasharray="4 3"/>`;
+
+    // Buildings and trees share one depth sort, because they interleave: a tree
+    // in front of a building has to overdraw it and a tree behind it must not.
     const solids = [];
     for (const f of d.features) {
-      const h = (f.properties && f.properties.h) || 0;
+      const p = f.properties || {};
+      const h = p.h || 0;
       for (const ring of rings(f.geometry)) {
         const pts = ring.map(([lon, lat]) => [
-          (lon - lon0) * mPerDegLon * ISO_K, (lat - lat0) * mPerDegLat * ISO_K,
+          (lon - lon0) * mPerDegLon, (lat - lat0) * mPerDegLat,
         ]);
         let cx = 0, cy = 0;
         for (const [x, y] of pts) { cx += x; cy += y; }
         cx /= pts.length; cy /= pts.length;
-        solids.push({ pts, h, depth: cx + cy, inferred: !(f.properties && f.properties.h) });
+        solids.push({
+          kind: "b", pts, base: zpx(cx, cy),
+          // clamped so one spire cannot own the frame
+          rise: Math.min(h, 150) * ISO_K * HEX,
+          depth: cx - cy, uncertain: p.v != null && Math.sqrt(p.v) > 8.9,
+        });
+      }
+    }
+    // Trees are the crown VOLUME, not the tree: the runner meshes the upper 59 %
+    // of the canopy as a porous cellZone carrying f = 2*Cd*LAD, and nothing at
+    // all below it. Drawing a trunk, or a solid block, would be drawing
+    // something the solve does not contain -- these are see-through for the same
+    // reason. Only the core is drawn; the buffer is off-frame here.
+    let crowns = 0;
+    if (hasCan) {
+      const cn = can.n, chalf = can.half_m || DOM_M, cstep = 2 * chalf / cn;
+      for (let r = 0; r < cn; r++) {
+        for (let c = 0; c < cn; c++) {
+          const hgt = can.grid[r * cn + c] || 0;
+          if (hgt < 2) continue;
+          const x = -chalf + (c + 0.5) * cstep, y = chalf - (r + 0.5) * cstep;
+          if (Math.abs(x) > CORE_M || Math.abs(y) > CORE_M) continue;
+          crowns++;
+          const s = cstep * 0.5;
+          solids.push({
+            kind: "t",
+            pts: [[x - s, y - s], [x + s, y - s], [x + s, y + s], [x - s, y + s], [x - s, y - s]],
+            base: zpx(x, y) + 0.41 * hgt * ISO_K * HEX,
+            rise: 0.59 * hgt * ISO_K * HEX,
+            depth: x - y,
+          });
+        }
       }
     }
     solids.sort((a, b) => a.depth - b.depth);
     let iso = "";
     for (const sd of solids) {
-      const hz = Math.min(sd.h, 150) * ISO_K * HEX;     // clamped so one spire cannot own the frame
-      const top = sd.pts.map(([x, y]) => isoPt(x, y, hz));
-      const base = sd.pts.map(([x, y]) => isoPt(x, y, 0));
-      const fill = sd.inferred ? "var(--text-muted)" : "var(--primary)";
-      // walls, then roof, so the roof reads on top
-      for (let i = 0; i < sd.pts.length - 1; i++) {
-        const q = [base[i], base[i + 1], top[i + 1], top[i]]
-          .map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(" ");
-        iso += `<polygon points="${q}" fill="${fill}" fill-opacity="0.35" stroke="${fill}" stroke-width="0.3" stroke-opacity="0.5"/>`;
+      const tree = sd.kind === "t";
+      const fill = tree ? "var(--accent)"
+                 : sd.uncertain ? "var(--text-muted)" : "var(--primary)";
+      // Crowns are see-through but not invisible: at the opacity a building
+      // wall uses they disappeared entirely behind the blue, which reads as a
+      // treeless site -- the exact answer this panel exists to distinguish.
+      const wallOp = tree ? 0.34 : 0.35, roofOp = tree ? 0.62 : 0.95;
+      const P = sd.pts.map(([x, y]) => [x * ISO_K, -y * ISO_K]);
+      const top = P.map(([x, y]) => isoPt(x, y, sd.base + sd.rise));
+      const bot = P.map(([x, y]) => isoPt(x, y, sd.base));
+      for (let i = 0; i < P.length - 1; i++) {
+        iso += `<polygon points="${poly([bot[i], bot[i + 1], top[i + 1], top[i]])}" fill="${fill}"`
+             + ` fill-opacity="${wallOp}" stroke="${fill}" stroke-width="0.3" stroke-opacity="0.5"/>`;
       }
-      iso += `<polygon points="${top.map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(" ")}" fill="${fill}" fill-opacity="0.95" stroke="none"/>`;
+      iso += `<polygon points="${poly(top)}" fill="${fill}" fill-opacity="${roofOp}" stroke="none"/>`;
     }
-    // ground plane: the domain square and the core, in the same projection
-    const gp = (c) => c.map(([x, y]) => isoPt(x, y, 0))
-      .map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(" ");
-    const sq = (r) => [[-r, -r], [r, -r], [r, r], [-r, r], [-r, -r]];
-    const isoGround =
-      `<polygon points="${gp(sq(CORE_M * ISO_K))}" fill="var(--surface)" fill-opacity="0.3" stroke="var(--bad)" stroke-width="1.1" stroke-dasharray="4 3"/>`;
+
+    // -- Legend --------------------------------------------------------------
+    const pct = (x) => Math.round(100 * x);
+    const terrLine = (() => {
+      if (hasTerr) return `<div><span class="geo-swatch" style="background:var(--warn);opacity:0.5"></span>terrain — <b>${terr.relief_m} m</b> relief over the domain (${terr.min_m}–${terr.max_m} m)</div>`;
+      if (terr.source === "flat") return `<div><span class="geo-swatch" style="background:var(--warn)"></span><b>no terrain</b> — meshed flat<div class="geo-note" style="margin-top:2px">GEDTM30 is a land DTM, so no data here usually means this site is not on land.</div></div>`;
+      if (terr.source === "unavailable") return `<div style="color:var(--text-muted)">terrain unknown — DTM host unreachable</div>`;
+      return "";
+    })();
+    const canLine = (() => {
+      if (hasCan && can.frac_canopy > 0) return `<div><span class="geo-swatch" style="background:var(--accent)"></span>trees — <b>${pct(can.frac_canopy)}%</b> under canopy, tallest <b>${can.max_height_m} m</b></div>`;
+      if (hasCan) return `<div><span class="geo-swatch" style="background:var(--accent);opacity:0.35"></span><b>no trees</b> — treeless site, no canopy zone</div>`;
+      if (can.source === "none") return `<div style="color:var(--text-muted)">trees unknown — the canopy model publishes no tile here</div>`;
+      if (can.source) return `<div style="color:var(--text-muted)">trees unknown — canopy host unreachable</div>`;
+      return "";
+    })();
+    const gba = d.source === "globalbuildingatlas";
+    const buildingLines = gba
+      ? `<div><span class="geo-swatch" style="background:var(--primary)"></span><b>${withH}</b> buildings, height predicted</div>`
+        + (medSd != null ? `<div><span class="geo-swatch" style="background:var(--text-muted)"></span>median uncertainty <b>±${medSd.toFixed(1)} m</b> (GBA σ; grey blocks exceed the published RMSE)</div>` : "")
+      : `<div><span class="geo-swatch" style="background:var(--primary)"></span><b>${withH}</b> measured height</div>`
+        + `<div><span class="geo-swatch" style="border:1px solid var(--text-muted)"></span><b>${noH}</b> height inferred</div>`;
+    const provenance = gba
+      ? `Buildings and heights from <b>GlobalBuildingAtlas LoD1</b> (TUM), terrain from <b>GEDTM30</b>, trees from the <b>Meta/WRI 1 m canopy height model</b> — the three sources the runner meshes. Every GBA height is a PREDICTION from lidar, optical and radar, not a survey: published RMSE 1.5–8.9 m by continent. That is the number to judge this case on, not the count.`
+      : `Drawn from <b>Overture ${esc(d.release || "")}</b>${d.fallback_from ? ` — ${esc(d.fallback_from)}` : ""}. Overture tags a height on only a few buildings; the rest are extruded from the LCZ class constant, so ${withH === 0 ? "this tile's massing is entirely synthetic" : `only ${pct(withH / Math.max(1, withH + noH))}% of this massing is real`}.`;
 
     wrap.innerHTML = `
       <div class="geo-fig">
         <svg viewBox="0 0 ${S} ${S}" width="${S}" height="${S}" role="img"
-             aria-label="Plan view: building footprints, the sampled core and the full mesh domain.">
+             aria-label="Plan view over the mesh domain: terrain relief shaded, tree canopy in green, building footprints in blue, with the sampled core and the domain edge.">
+          ${groundLayer}${canopyLayer}
           <rect x="${S/2-dom}" y="${S/2-dom}" width="${2*dom}" height="${2*dom}"
                 fill="none" stroke="var(--warn)" stroke-width="1.2"/>
           ${paths}
@@ -1730,30 +1903,22 @@
           <circle cx="${S/2}" cy="${S/2}" r="2.5" fill="var(--bad)"/>
         </svg>
         <svg viewBox="0 0 ${ISO} ${ISO}" width="${ISO}" height="${ISO}" role="img"
-             aria-label="Isometric view at 45 degrees; blue blocks have measured heights, grey blocks were inferred.">
+             aria-label="Isometric view at 45 degrees over the sampled core: buildings standing on the terrain surface, with see-through green crown volumes for trees.">
           ${isoGround}${iso}
         </svg>
         <div class="geo-legend">
-          <div><span class="geo-swatch" style="background:var(--primary)"></span><b>${modelled}</b> measured height</div>
-          <div><span class="geo-swatch" style="border:1px solid var(--text-muted)"></span><b>${flat}</b> height inferred</div>
+          ${buildingLines}
+          ${terrLine}
+          ${canLine}
           <div><span class="geo-swatch" style="border:1px dashed var(--bad)"></span>${2*CORE_M} m sampled core</div>
           <div><span class="geo-swatch" style="border:1px solid var(--warn)"></span>${2*DOM_M} m mesh domain</div>
-          ${(() => {
-            const t = d.terrain || {};
-            if (t.source === "gedtm30") return `<div style="margin-top:6px"><span class="geo-swatch" style="background:var(--accent)"></span>terrain found — <b>${t.relief_m} m</b> relief</div>`;
-            if (t.source === "flat") return `<div style="margin-top:6px"><span class="geo-swatch" style="background:var(--warn)"></span><b>no terrain</b> — meshed flat<div class="geo-note" style="margin-top:2px">GEDTM30 is a land DTM, so no data here usually means this site is not on land.</div></div>`;
-            if (t.source === "unavailable") return `<div style="margin-top:6px;color:var(--text-muted)">terrain unknown — DTM host unreachable</div>`;
-            return "";
-          })()}
-          <div style="margin-top:6px;color:var(--text-muted)">release ${esc(d.release)}${d.cached ? " · cached" : ""}</div>
-          <div class="geo-note" style="margin-top:4px">Right: 45° isometric over the sampled core. Heights are exaggerated ${HEX}× against plan distance and clamped at 150 m — at true scale a 40 m building is four pixels.</div>
-          <div class="geo-note">${modelled === 0
-            ? "Overture heights NONE of these. Every height is inferred from the LCZ class, so this tile's massing is entirely synthetic."
-            : `All ${modelled + flat} are extruded. Only ${modelled} carry a measured height (${Math.round(100 * modelled / (modelled + flat))}%); the rest are filled from this tile's median, and that ratio is what to judge the case on.`}</div>
+          <div style="margin-top:6px;color:var(--text-muted)">${esc(d.release || "")}${d.cached ? " · cached" : ""}${d.truncated ? ` · truncated at ${d.n}` : ""}</div>
+          <div class="geo-note" style="margin-top:4px">Right: 45° isometric over the core, buildings standing on the terrain. Heights exaggerated ${HEX}× against plan distance and clamped at 150 m; relief ${TEX === HEX ? `${HEX}×` : `${TEX.toFixed(1)}× (eased so the relief stays in frame)`}. At true scale a 40 m building is four pixels.</div>
+          ${crowns ? `<div class="geo-note">Crowns are drawn see-through because that is what they are in the solve: the upper 59% of each tree becomes a porous cellZone with f = 2·Cd·LAD, not a solid the flow goes around. ${crowns} crown cell${crowns === 1 ? "" : "s"} in the core.</div>` : ""}
+          <div class="geo-note">${provenance}</div>
         </div>
       </div>`;
   }
-
   document.addEventListener("click", (e) => {
     const btn = e.target.closest(".geo-load");
     if (!btn) return;
@@ -2316,7 +2481,7 @@
 
         <div class="detail-card" style="margin-bottom:14px;">
           <h3>Site Geometry
-            <span class="label-hint" style="font-weight:400;">(Overture, same release the runner meshes)</span>
+            <span class="label-hint" style="font-weight:400;">(buildings, terrain and trees — the same sources the runner meshes)</span>
           </h3>
           <div id="geoWrap-${esc(c.case_id)}" class="geo-wrap">
             <button class="subtle geo-load" data-case="${esc(c.case_id)}"
@@ -2373,6 +2538,13 @@
           </td>
         </tr>`;
     }).join("");
+
+    // An open case draws its geometry immediately, including after the 60 s
+    // auto-refresh has just replaced the whole table. Without this the panel
+    // silently reverted to its "Show building footprints" button once a minute,
+    // which looked like the fetch had failed; with the per-case cache in
+    // loadFootprints it costs no request.
+    autoLoadGeometry();
 
     $("casesBody").querySelectorAll("tr.caseRow").forEach((tr) => {
       tr.addEventListener("click", () => {
