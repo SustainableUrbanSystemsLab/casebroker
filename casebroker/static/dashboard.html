@@ -3638,14 +3638,18 @@
       $("landFixBtn").style.display = "none";
       return;
     }
-    const rows = (d.examples || []).map((e) => `
+    // Bound once, then used. The guard was on the condition and not on the
+    // branch, so a response without `examples` -- an older broker, a shape
+    // change -- threw inside the very panel meant to report a problem.
+    const examples = Array.isArray(d.examples) ? d.examples : [];
+    const rows = examples.map((e) => `
       <tr><td><code class="inline">${esc(e.case_id)}</code></td>
           <td class="mono">${Number(e.lat).toFixed(3)}, ${Number(e.lon).toFixed(3)}</td>
           <td>${esc(e.city_cluster || "—")}</td>
           <td>${esc(e.lcz || "—")}</td>
           <td>${badge(e.state)}</td></tr>`).join("");
-    const more = n > (d.examples || []).length
-      ? `<div class="geo-note">…and ${n - d.examples.length} more.</div>` : "";
+    const more = n > examples.length
+      ? `<div class="geo-note">…and ${n - examples.length} more.</div>` : "";
     $("landResult").innerHTML = changed
       ? `<div style="font-size:12px;color:var(--accent);margin-bottom:8px;">
            <b>${n}</b> case${n === 1 ? "" : "s"} quarantined. Nothing will lease them;
