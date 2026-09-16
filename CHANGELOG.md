@@ -54,6 +54,26 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
   than building and 227 of them are stalactites.
 
 ### Security
+- **A worker credential could run script in an admin's dashboard.** The cluster
+  name from `POST /v1/fleet` was interpolated into the campaign status card with
+  `innerHTML` and no escaping, so any credential with write scope could store
+  markup that executes in the browser of whoever next opened the dashboard.
+  Session cookies are `HttpOnly`, so the cookie itself is not readable — but
+  script running in that page can call the API *as the admin*, including creating
+  another admin, which makes this a path from write scope to full control. A
+  worker credential is the weakest link here by construction: it sits unattended
+  on cluster nodes and Windows workstations. Verified by rendering the payload
+  both ways in a real browser — the old interpolation produced a live
+  `<img onerror>` element, the new one renders it as text.
+
+  Four more sinks escaped alongside it: `result_sha256` (worker-supplied via
+  `POST /v1/complete`), `state` in `badge()` — which lands in a `class`
+  attribute as well as in text — and the two halves of the redacted database
+  summary. `tests/test_dashboard_escaping.py` now fails the build if any
+  server-supplied field reaches the DOM without `esc()`. The broker deliberately
+  still stores these strings verbatim: a cluster name is data, and sanitising on
+  the way in would corrupt legitimate names while still not making the dashboard
+  safe.
 - **Concurrent site previews multiplied the memory ceilings instead of sharing
   them.** `CASEBROKER_DUCKDB_MEMORY` and `CASEBROKER_GDAL_CACHE_MB` bound ONE
   call, and `/footprints` builds a fresh DuckDB and a fresh GDAL cache per
