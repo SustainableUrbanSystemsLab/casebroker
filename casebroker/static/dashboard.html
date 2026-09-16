@@ -2351,13 +2351,13 @@
     const raw = (h && h.db) || "";
     if (!raw) return "";
     if (!/^postgres/i.test(raw)) {
-      return `SQLite · ${raw.split(/[\\/]/).pop()}`;   // a path; show the file
+      return `SQLite · ${esc(raw.split(/[\\/]/).pop())}`;   // a path; show the file
     }
     try {
       const u = new URL(raw);
       const name = u.pathname.replace(/^\//, "") || "postgres";
       const vendor = /supabase/i.test(u.hostname) ? "Supabase" : "Postgres";
-      return `${vendor} · ${u.hostname}${u.port ? ":" + u.port : ""}/${name}`;
+      return `${vendor} · ${esc(u.hostname)}${u.port ? ":" + esc(u.port) : ""}/${esc(name)}`;
     } catch (e) {
       return "Postgres";
     }
@@ -2473,7 +2473,7 @@
         const stale = oldest === null || oldest > 900;
         const sub = !fl.length ? "no cluster is reporting"
                   : stale ? `last reported ${Math.round(oldest / 60)} min ago`
-                  : `${r} worker(s) running on ${fl.map((f) => f.cluster).join(", ")}`;
+                  : `${r} worker(s) running on ${esc(fl.map((f) => f.cluster).join(", "))}`;
         return `<div class="stat-card queued${stale ? " nonzero-stale" : ""}">
           <div class="label">Queued (SLURM)</div>
           <div class="value"${stale ? ' style="color:var(--text-muted)"' : ""}>${fl.length ? q.toLocaleString() : "—"}</div>
@@ -2638,7 +2638,12 @@
   let openDetailId = null;
 
   function badge(state) {
-    return `<span class="badge ${state}">${state}</span>`;
+    // Escaped in both positions. The broker writes `state` from a fixed set, so
+    // this is defence in depth rather than a live hole -- but the first slot is
+    // an ATTRIBUTE value, where a single quote character is enough to break out
+    // of the class and add another, and "it comes from an enum" is a property of
+    // today's callers rather than of this function.
+    return `<span class="badge ${esc(state)}">${esc(state)}</span>`;
   }
 
   function caseDetailHtml(c) {
@@ -2721,7 +2726,7 @@
               <dt>SHA-256</dt>
               <dd class="mono">
                 <span style="overflow:hidden; text-overflow:ellipsis; max-width:180px;" title="${esc(c.result_sha256 || "")}">
-                  ${c.result_sha256 ? c.result_sha256.slice(0, 14) + "…" : "—"}
+                  ${c.result_sha256 ? esc(String(c.result_sha256).slice(0, 14)) + "…" : "—"}
                 </span>
                 ${c.result_sha256 ? `<button class="copy-btn" onclick="copyText('${esc(c.result_sha256)}', 'SHA256 copied')" title="Copy SHA256"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></button>` : ""}
               </dd>
