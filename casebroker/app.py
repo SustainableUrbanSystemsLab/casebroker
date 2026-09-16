@@ -167,6 +167,12 @@ class HeartbeatIn(BaseModel):
 
 class CompleteIn(BaseModel):
     lease_id: str
+    # Optional, and additive on purpose: a worker built before this field still
+    # completes normally. It scopes the "was this already written?" check that
+    # makes a lost response safe to retry -- without it that check matches any
+    # done case carrying the same result_uri, which is only unique if the runner
+    # made it so.
+    case_id: str | None = None
     result_uri: str
     sha256: str | None = None
     bytes: int | None = None
@@ -1199,7 +1205,7 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
     @app.post("/v1/complete", dependencies=[WriteAuth])
     def complete(body: CompleteIn) -> dict[str, bool]:
         if not db.complete(conn, body.lease_id, body.result_uri, body.sha256,
-                           body.bytes, body.metrics):
+                           body.bytes, body.metrics, case_id=body.case_id):
             raise HTTPException(409, "lease expired or superseded; result rejected")
         return {"ok": True}
 

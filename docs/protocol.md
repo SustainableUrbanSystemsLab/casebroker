@@ -130,7 +130,7 @@ than silent. Creating the first account closes it.
 | `GET /v1/cases/{case_id}` | One case's full record by id |
 | `POST /v1/lease` | Claim up to N cases. Empty list = drained, not an error. Workers report their `host`/`cluster` here (optional) so "what machine produced this" stays answerable later |
 | `POST /v1/heartbeat` | Extend the lease. **409 means stop working on that case** |
-| `POST /v1/complete` | Report a result pointer + metrics |
+| `POST /v1/complete` | Report a result pointer + metrics. Send `case_id` alongside `lease_id`: it scopes the retry-safety check to this case, so a runner whose `result_uri` is not unique per case cannot have one case's retry confirmed by another's row. Optional, so older workers keep working |
 | `POST /v1/fail` | Report a failure; `retryable=false` quarantines immediately |
 | `POST /v1/release` | Graceful preemption — requeues and **refunds the attempt** |
 | `DELETE /v1/cases` | Purge a superseded campaign, with its events and footprints. **Admin session** (a write bearer token also passes, as it always has; an `operator` session does not). `dry_run` defaults to **true**, so a half-remembered curl reports what it would have deleted instead of deleting it; `expect` is the real interlock — state the row count you believe you are removing, and a mismatch refuses |

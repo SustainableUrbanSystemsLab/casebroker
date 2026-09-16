@@ -1044,7 +1044,8 @@ def heartbeat(conn, lease_id: str, lease_seconds: int = 3600,
 @_locked
 def complete(conn, lease_id: str, result_uri: str,
              sha256: str | None = None, nbytes: int | None = None,
-             metrics: dict[str, Any] | None = None, now: int | None = None) -> bool:
+             metrics: dict[str, Any] | None = None, now: int | None = None,
+             case_id: str | None = None) -> bool:
     now = now or _now()
     conn.execute("BEGIN IMMEDIATE")
     try:
@@ -1057,9 +1058,22 @@ def complete(conn, lease_id: str, result_uri: str,
             # failure for work that landed. If a done case carries this exact
             # result_uri the write is already there: report success. A DIFFERENT
             # result for a finished lease still falls through to the refusal.
-            dup = conn.execute(
-                "SELECT 1 FROM cases WHERE state = 'done' AND result_uri = ?",
-                (result_uri,)).fetchone()
+            # Scoped to the case the worker names, when it names one. Matching
+            # on result_uri ALONE meant any done case that happened to carry the
+            # same URI answered for this one -- so a runner that derives its URI
+            # from anything less unique than the case (a template, a constant, a
+            # date) would have retries on case B silently confirmed by case A's
+            # row, reporting work as landed that never ran. case_id is optional
+            # so a worker built before this still works; without it the old,
+            # looser check stands, which is still better than a false 409.
+            if case_id:
+                dup = conn.execute(
+                    "SELECT 1 FROM cases WHERE case_id = ? AND state = 'done'"
+                    " AND result_uri = ?", (case_id, result_uri)).fetchone()
+            else:
+                dup = conn.execute(
+                    "SELECT 1 FROM cases WHERE state = 'done' AND result_uri = ?",
+                    (result_uri,)).fetchone()
             conn.execute("ROLLBACK")
             return dup is not None
         conn.execute(
