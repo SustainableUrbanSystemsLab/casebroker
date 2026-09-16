@@ -185,7 +185,21 @@ jobs:
             echo "[$i] deploy $deploy_id status: $status"
             case "$status" in
               live) exit 0 ;;
-              build_failed|update_failed|canceled|deactivated)
+              canceled)
+                # Render cancels a deploy when a NEWER one supersedes it, which
+                # is what two pushes a few minutes apart look like. That says
+                # nothing about THIS commit, and failing on it puts a red X on a
+                # commit that is fine -- exactly the "trains people to ignore a
+                # red X" failure this job was rewritten to avoid.
+                #
+                # Superseded is not unverified: the push that superseded it has
+                # its own run of this workflow, against a commit that contains
+                # this one, and that run is what gates. So this reports and
+                # passes rather than crying wolf.
+                echo "::notice::deploy $deploy_id was superseded by a newer"\
+                     "deploy; the run for that newer commit is what verifies it"
+                exit 0 ;;
+              build_failed|update_failed|deactivated)
                 echo "::error::Render deploy $deploy_id ended in status '$status'"; exit 1 ;;
             esac
             sleep 15
