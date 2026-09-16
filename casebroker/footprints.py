@@ -205,10 +205,11 @@ MAX_BUILDINGS = 20_000
 # every case anyone had already opened keep answering with neither, which looks
 # exactly like a site with no trees rather than a stale cache. A hit stamped
 # with anything other than the current value is treated as a miss.
+# 4: the canopy payload gained `vegetation`, so cached ones lack it.
 # 3: any payload cached while a raster host was unreachable carries
 # "unavailable" for terrain and canopy, and until this version those were
 # cached like real answers. Bumping re-fetches every case exactly once.
-PAYLOAD_VERSION = 3
+PAYLOAD_VERSION = 4
 
 
 class TileNotPublished(Exception):
@@ -522,6 +523,44 @@ def chm_tile_for(lat: float, lon: float, z: int = 9) -> str:
     return "".join(out)
 
 
+# What the crowns are made of, as far as the runner is concerned.
+#
+# Mirrors canopy_zones.VEGETATION_BY_LATITUDE exactly. There is ONE class per
+# case and it is chosen by LATITUDE alone -- every crown in the domain gets the
+# same drag, whether it is a street tree, a park or a conifer stand -- so the
+# whole vegetation model for a site is this table plus its centre coordinate.
+# Worth drawing for that reason: it is a large assumption that is otherwise
+# invisible, and `f = 2*Cd*LAD` in the caption reads like a measurement.
+#
+# The band edges are hard cuts, and the one at 55 degrees is steep: Copenhagen
+# (55.68N) is Conifer at 1.25, Hamburg (53.55N) is Deciduous at 0.48 -- 2.6x the
+# drag across about 200 km of ordinary northern-European city.
+VEGETATION_BY_LATITUDE = (
+    (23.5, {"label": "Ficus (banyan)", "lad": 1.5, "cd": 0.25,
+            "note": "tropical evergreen broadleaf (latitude default)"}),
+    (55.0, {"label": "Deciduous tree", "lad": 1.2, "cd": 0.20,
+            "note": "temperate/subtropical broadleaf, in leaf (latitude default)"}),
+    (90.1, {"label": "Conifer", "lad": 2.5, "cd": 0.25,
+            "note": "boreal conifer (latitude default)"}),
+)
+
+
+def vegetation_class(lat: float) -> dict[str, Any]:
+    """The LAD/Cd the runner will apply to every crown on this site."""
+    for limit, cls in VEGETATION_BY_LATITUDE:
+        if abs(lat) < limit:
+            out = dict(cls)
+            break
+    else:
+        out = dict(VEGETATION_BY_LATITUDE[-1][1])
+    out["source"] = "eddy3d-vegetation-library"
+    out["provenance"] = "latitude-band default"
+    # f = 2*Cd*LAD, the porosityForce the canopy cellZone carries.
+    out["f_per_m"] = round(2 * out["cd"] * out["lad"], 4)
+    out["cd_lad_per_m"] = round(out["cd"] * out["lad"], 4)
+    return out
+
+
 def canopy(lat: float, lon: float, half_m: float = DOMAIN_HALF_M,
            n: int = 64) -> dict:
     """Where the trees are on this site, and how tall, over the mesh domain.
@@ -571,6 +610,7 @@ def canopy(lat: float, lon: float, half_m: float = DOMAIN_HALF_M,
     a = _blockmean(fine, n)
     under = fine >= CANOPY_MIN_M
     return {"source": "meta-wri-chm-v1", "licence": "CC BY 4.0",
+            "vegetation": vegetation_class(lat),
             "native_res_m": 1.2, "tile": tile, "min_canopy_m": CANOPY_MIN_M,
             "half_m": half_m, "n": n, "covered": round(covered, 3),
             "frac_canopy": round(float(under.mean()), 4),

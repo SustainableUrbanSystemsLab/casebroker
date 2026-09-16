@@ -75,3 +75,47 @@ def test_the_gba_mirror_is_the_source_cooperative_one():
 def test_the_canopy_threshold_matches_the_crown_builder():
     """canopy_zones.py reports coverage above 2 m; below that it is shrub noise."""
     assert footprints.CANOPY_MIN_M == 2.0
+
+
+def test_the_vegetation_table_matches_the_runners():
+    """canopy_zones.VEGETATION_BY_LATITUDE, mirrored.
+
+    One class per case, chosen by latitude alone -- so this table plus the site
+    centre IS the entire vegetation model. If it drifts from the runner's, the
+    preview states a drag coefficient the solve will not use.
+    """
+    from casebroker.footprints import VEGETATION_BY_LATITUDE as V
+
+    assert [lim for lim, _ in V] == [23.5, 55.0, 90.1]
+    assert [c["label"] for _, c in V] == [
+        "Ficus (banyan)", "Deciduous tree", "Conifer"]
+    assert [(c["lad"], c["cd"]) for _, c in V] == [
+        (1.5, 0.25), (1.2, 0.20), (2.5, 0.25)]
+
+
+def test_the_class_is_picked_by_latitude_and_nothing_else():
+    from casebroker.footprints import vegetation_class as v
+
+    assert v(1.35)["label"] == "Ficus (banyan)"       # Singapore
+    assert v(33.75)["label"] == "Deciduous tree"      # Atlanta
+    assert v(-33.87)["label"] == "Deciduous tree"     # Sydney: |lat|, so symmetric
+    assert v(55.68)["label"] == "Conifer"             # Copenhagen
+    assert v(89.0)["label"] == "Conifer"
+
+
+def test_the_band_edges_are_where_the_runner_puts_them():
+    """Hard cuts, and the 55-degree one is a 2.6x jump in drag."""
+    from casebroker.footprints import vegetation_class as v
+
+    assert v(54.99)["label"] == "Deciduous tree"
+    assert v(55.01)["label"] == "Conifer"
+    assert round(v(55.01)["f_per_m"] / v(54.99)["f_per_m"], 2) == 2.60
+
+
+def test_f_is_twice_cd_times_lad():
+    """The porosityForce the canopy cellZone actually carries."""
+    from casebroker.footprints import vegetation_class as v
+
+    for lat in (1.0, 33.0, 60.0):
+        g = v(lat)
+        assert g["f_per_m"] == round(2 * g["cd"] * g["lad"], 4)
