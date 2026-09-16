@@ -133,6 +133,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
   so a chatty runner costs a fixed amount instead of its whole log — and the JSON
   result line still survives, because it is always last.
 
+### Added
+- **CI builds the Docker image.** Nothing did. Render builds from that
+  Dockerfile, so the first thing that ever ran it was a deploy — meaning a
+  dependency change that broke the image was discovered with the break already
+  merged to main and production still on the previous version. The new job
+  builds it, boots it, waits for `/healthz`, and asserts the geo path works on
+  the BASE install (GBA tile keys, canopy quadkeys, the land mask, and importing
+  every module), which is exactly what dropping a dependency risks. It runs on
+  pull requests too, and `deploy-smoke-test` now depends on it, so a broken image
+  fails before the merge rather than after.
+- **A `.dockerignore`.** The image COPYs three paths, but the whole working tree
+  was packed up and handed to the Docker daemon as build context first — 329 MB
+  of `.venv` plus the entire `.git` history, on every build, for an image that
+  uses none of it.
+
 ### Changed
 - **Overture is an optional extra, not a base dependency.** Its client pulls
   pyarrow — 122 MB of a 328 MB site-packages, 37% of the image — into every

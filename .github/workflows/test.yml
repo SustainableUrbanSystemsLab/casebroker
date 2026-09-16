@@ -80,6 +80,50 @@ jobs:
           # be a worse outcome here than the coverage is worth.
           CASEBROKER_TEST_PG_DSN: ${{ secrets.DBSTRING }}
 
+  docker:
+    name: the image Render actually builds
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Nothing validated the Dockerfile. Render builds from it, so the first
+      # thing that ever ran it was a deploy -- which means a dependency change
+      # that broke the image was discovered with the break already merged to
+      # main and production still serving the previous version. This job runs on
+      # pull requests too, so it fails before the merge rather than after.
+      - name: Build
+        run: docker build -t casebroker:ci .
+      - name: Boot it and confirm it answers
+        run: |
+          docker run -d --name cb -p 8000:8000 \
+            -e CASEBROKER_DB=/tmp/ci.sqlite casebroker:ci
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8000/healthz > /tmp/h.json 2>/dev/null; then
+              echo "healthy after ${i}s"; cat /tmp/h.json; exit 0
+            fi
+            sleep 1
+          done
+          echo "never became healthy; container logs:" >&2
+          docker logs cb >&2
+          exit 1
+      - name: The geo path must work on the BASE install
+        # Overture is an optional extra now. GBA, GEDTM30, the canopy model and
+        # the land mask must all still work without it, since they are what
+        # actually gets meshed -- and an import error here is exactly what
+        # dropping a dependency risks.
+        run: |
+          docker exec cb python -c "
+          from casebroker import footprints as F
+          assert F.on_land(33.749, -84.388) is True
+          assert F.on_land(7.5, -37.5) is False
+          assert F.gba_tile_for(33.749, -84.388) == 'w085_n35_w080_n30'
+          assert F.chm_tile_for(33.749, -84.388) == '032002311'
+          import casebroker.app, casebroker.worker, casebroker.cli
+          print('base install is complete')
+          "
+      - name: Container logs (always)
+        if: always()
+        run: docker logs cb || true
+
   deploy-smoke-test:
     name: deploy this commit to Render and confirm it came up healthy
     # Render's GitHub App integration turned out NOT to include this repo in its
@@ -102,7 +146,7 @@ jobs:
     # dependency, and the step below verifies the deployed service's health
     # against the real database anyway -- so a genuinely broken database still
     # fails this job, just at the point where it is actually evidence.
-    needs: [sqlite]
+    needs: [sqlite, docker]
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     env:
