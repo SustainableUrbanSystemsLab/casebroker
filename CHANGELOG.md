@@ -53,6 +53,26 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
   of it, because at that exaggeration a prism on a hilltop trails more ghost
   than building and 227 of them are stalactites.
 
+### Security
+- **An anonymous caller could exhaust the instance's memory through
+  `/v1/auth/login`.** Two faults compounding. The throttle keyed on
+  `username|address`, and the username is attacker-chosen and need not exist, so
+  every attempt with a fresh username opened a fresh bucket and the limit never
+  applied. And nothing bounded concurrent password checks: scrypt is ~16 MB a
+  call by design, uvicorn's threadpool is 40 wide, so 40 simultaneous attempts
+  could ask for ~640 MB on a 512 MB instance already sitting at ~280 MB with the
+  geo libraries resident. There is now a second throttle bucket keyed on the
+  address alone, and a semaphore (`CASEBROKER_PASSWORD_CONCURRENCY`, default 4)
+  bounding how much scrypt is in flight at once.
+- **Response time enumerated accounts, via the code that existed to prevent
+  that.** The login path verified against a decoy hash when the username did not
+  exist, so a hit and a miss would cost the same — but it BUILT that decoy per
+  request with `hash_password("decoy")`, which is itself a full scrypt. A miss
+  therefore ran scrypt twice and a hit once: measured at exactly 2.0x, the same
+  signal the decoy was meant to remove, with the sign flipped. The decoy is now
+  `auth.DECOY_HASH`, computed once at import from random bytes. Measured after:
+  0.95x.
+
 ### Fixed
 - **A dropped connection could hand two workers the same case.** The broker opens
   ONE connection at startup and every route closes over it; FastAPI runs sync
