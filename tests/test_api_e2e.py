@@ -546,7 +546,12 @@ def test_healthz_reports_database_reachability_separately_from_liveness(tmp_path
             self._inner = inner
 
         def execute(self, sql, params=()):
-            if sql.strip() == "select 1":
+            # Matched case-insensitively: this stands in for "the liveness probe",
+            # not for one spelling of it. Pinning the literal meant that moving
+            # the probe into db.ping() (so /healthz stops touching the shared
+            # connection without the lock) silently stopped exercising the
+            # unreachable-database path, and the test passed by not testing.
+            if sql.strip().rstrip(";").upper() == "SELECT 1":
                 raise RuntimeError("server closed the connection unexpectedly")
             return self._inner.execute(sql, params)
 
