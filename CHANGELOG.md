@@ -103,6 +103,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
   geo libraries resident. There is now a second throttle bucket keyed on the
   address alone, and a semaphore (`CASEBROKER_PASSWORD_CONCURRENCY`, default 4)
   bounding how much scrypt is in flight at once.
+
+  That bound initially covered only the login path, which left four other
+  call sites unbounded — including the password *change* path, reachable by any
+  logged-in user and repeatable. Every scrypt call in `app.py` now goes through
+  `_hash_password` / `_verify_password`, and a test fails the build if one does
+  not: capping a single endpoint is not capping scrypt.
 - **Response time enumerated accounts, via the code that existed to prevent
   that.** The login path verified against a decoy hash when the username did not
   exist, so a hit and a miss would cost the same — but it BUILT that decoy per
