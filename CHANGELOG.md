@@ -54,6 +54,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
   than building and 227 of them are stalactites.
 
 ### Security
+- **Concurrent site previews multiplied the memory ceilings instead of sharing
+  them.** `CASEBROKER_DUCKDB_MEMORY` and `CASEBROKER_GDAL_CACHE_MB` bound ONE
+  call, and `/footprints` builds a fresh DuckDB and a fresh GDAL cache per
+  request while holding a threadpool slot for the 8-15 seconds the remote reads
+  take. Two simultaneous previews already ask for ~350 MB of geo on top of the
+  ~280 MB library floor, on a 512 MB instance — and two browser tabs is enough to
+  cause it. Previews now run one at a time
+  (`CASEBROKER_GEO_CONCURRENCY`), and a request that waits out
+  `CASEBROKER_GEO_QUEUE_SECONDS` gets `503` with `Retry-After` instead of
+  hanging. The work is cached per case, so serialising costs a queued viewer a
+  few seconds exactly once.
 - **An anonymous caller could exhaust the instance's memory through
   `/v1/auth/login`.** Two faults compounding. The throttle keyed on
   `username|address`, and the username is attacker-chosen and need not exist, so

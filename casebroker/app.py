@@ -1262,55 +1262,71 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         # useful one this endpoint can give: that case is in the ocean.
         lat, lon = float(lat), float(lon)
         transient = False
+        # ONE preview at a time, because the memory ceilings below are per call
+        # and not per process: every layer builds its own DuckDB with its own
+        # budget and its own GDAL cache, and this endpoint is sync, so it holds a
+        # threadpool slot for the 8-15 seconds the remote reads take while the
+        # next caller starts its own everything. Two at once already asks for
+        # more than the instance has. 503 with Retry-After is the honest answer
+        # when the queue is full; the alternative is the platform killing the
+        # process, which is how this branch started.
         try:
-            # GBA is what the geometry builder now defaults to, so it is what
-            # gets meshed, so it is what this must draw. Overture survives as a
-            # fallback rather than being deleted -- a case built before the
-            # switch was meshed from it -- but shelling out to its client means
-            # a second interpreter loading pyarrow inside a memory-capped web
-            # process, which is not a price to pay automatically. Opt in with
-            # CASEBROKER_OVERTURE_FALLBACK when the mirror is genuinely down.
-            fc = footprints.fetch_gba(lat, lon)
-        except footprints.TileNotPublished as gap:
-            # Not an error. GBA publishes 922 tiles of a possible 2,592; the
-            # rest are ocean and ice. An empty answer here is a fact about the
-            # site and is cached like any other.
-            fc = {"type": "FeatureCollection", "features": [], "n": 0,
-                  "release": "GBA.LoD1", "source": "globalbuildingatlas",
-                  "height_kind": "predicted", "centre": [lat, lon],
-                  "half_m": footprints.HALF_M, "tile_published": False,
-                  "tile": str(gap)}
-        except Exception as gba_err:                 # noqa: BLE001
-            if footprints.OVERTURE_FALLBACK:
+            with footprints.exclusive():
                 try:
-                    fc = footprints.fetch(lat, lon)
-                    fc["source"] = "overture"
-                    fc["fallback_from"] = f"gba unavailable: {str(gba_err)[:120]}"
-                except Exception as ov_err:          # noqa: BLE001
-                    gba_err = ov_err
-                    fc = None
-            else:
-                fc = None
-            if fc is None:
-                # A reachability failure, unlike a missing tile, says nothing
-                # about the site -- so it is reported and NOT cached, and the
-                # other two layers still get drawn. An inspector that 502s is
-                # useless exactly when someone is trying to work out why a case
-                # looks wrong.
-                transient = True
-                fc = {"type": "FeatureCollection", "features": [], "n": 0,
-                      "release": "GBA.LoD1", "source": "globalbuildingatlas",
-                      "height_kind": "predicted", "centre": [lat, lon],
-                      "half_m": footprints.HALF_M,
-                      "buildings_error": str(gba_err)[:200]}
+                    # GBA is what the geometry builder now defaults to, so it is
+                    # what gets meshed, so it is what this must draw. Overture
+                    # survives as a fallback rather than being deleted -- a case
+                    # built before the switch was meshed from it -- but shelling
+                    # out to its client means a second interpreter loading
+                    # pyarrow inside a memory-capped web process, which is not a
+                    # price to pay automatically. Opt in with
+                    # CASEBROKER_OVERTURE_FALLBACK when the mirror is really down.
+                    fc = footprints.fetch_gba(lat, lon)
+                except footprints.TileNotPublished as gap:
+                    # Not an error. GBA publishes 922 tiles of a possible 2,592;
+                    # the rest are ocean and ice. An empty answer here is a fact
+                    # about the site, and is cached like any other.
+                    fc = {"type": "FeatureCollection", "features": [], "n": 0,
+                          "release": "GBA.LoD1", "source": "globalbuildingatlas",
+                          "height_kind": "predicted", "centre": [lat, lon],
+                          "half_m": footprints.HALF_M, "tile_published": False,
+                          "tile": str(gap)}
+                except Exception as gba_err:             # noqa: BLE001
+                    if footprints.OVERTURE_FALLBACK:
+                        try:
+                            fc = footprints.fetch(lat, lon)
+                            fc["source"] = "overture"
+                            fc["fallback_from"] = (
+                                f"gba unavailable: {str(gba_err)[:120]}")
+                        except Exception as ov_err:      # noqa: BLE001
+                            gba_err = ov_err
+                            fc = None
+                    else:
+                        fc = None
+                    if fc is None:
+                        # A reachability failure, unlike a missing tile, says
+                        # nothing about the site -- so it is reported and NOT
+                        # cached, and the other two layers still get drawn. An
+                        # inspector that 502s is useless exactly when someone is
+                        # trying to work out why a case looks wrong.
+                        transient = True
+                        fc = {"type": "FeatureCollection", "features": [], "n": 0,
+                              "release": "GBA.LoD1",
+                              "source": "globalbuildingatlas",
+                              "height_kind": "predicted", "centre": [lat, lon],
+                              "half_m": footprints.HALF_M,
+                              "buildings_error": str(gba_err)[:200]}
 
-        # What the site is made of BESIDES buildings. Cached with the footprints
-        # because they answer the same question -- "what will this case actually
-        # be" -- and because finding out after 66 core-hours is worse than
-        # finding out now. Neither raises: a dead raster host is a fact about
-        # today, not about the site.
-        fc["terrain"] = footprints.terrain(lat, lon)
-        fc["canopy"] = footprints.canopy(lat, lon)
+                # What the site is made of BESIDES buildings. Cached with the
+                # footprints because they answer the same question -- "what will
+                # this case actually be" -- and because finding out after 66
+                # core-hours is worse than finding out now. Neither raises: a
+                # dead raster host is a fact about today, not about the site.
+                fc["terrain"] = footprints.terrain(lat, lon)
+                fc["canopy"] = footprints.canopy(lat, lon)
+        except footprints.GeoBusy as busy:
+            raise HTTPException(503, str(busy),
+                                headers={"Retry-After": "30"}) from busy
         fc["payload_v"] = footprints.PAYLOAD_VERSION
         if not transient:
             db.put_footprints(conn, case_id, json.dumps(fc), fc["n"])
