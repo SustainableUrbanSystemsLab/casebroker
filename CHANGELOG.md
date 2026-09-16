@@ -54,6 +54,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
   than building and 227 of them are stalactites.
 
 ### Fixed
+- **The side elevation drew no terrain.** A scatter/gather bug: the code walked
+  the 48-column terrain grid and binned each column into one of 90 elevation
+  columns, which leaves 42 of the 90 untouched, so the "band" was a comb of
+  disjoint slivers that vanished under the building mass. Each destination
+  column now asks the source what is under it, which is correct for any pair of
+  resolutions; the canopy profile had the same bug (64 into 90). The ground line
+  is also re-stroked over the buildings, because a thousand of them at any
+  visible opacity accumulate into something solid and the terrain was the first
+  thing they buried.
 - **Nobody saw any trees, anywhere.** The footprints cache is keyed on
   `case_id` alone and carries no schema column, so a payload written before
   terrain and canopy existed was served forever -- every case anyone had already
