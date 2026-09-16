@@ -1759,6 +1759,18 @@
     // frame, which a mountain site would. Then it is eased back, and the caption
     // reports the factor actually used rather than the one asked for.
     const TEX = Math.min(HEX, 62 / Math.max(1, relief * ISO_K));
+    // Buildings are NOT seated on the ground: watertight.py extrudes every
+    // prism from its roof down to a common slab about 20 m below the lowest
+    // terrain in the domain (`base_z = min(terr.min() - depth - 10, lowest)`),
+    // so the solid the mesher sees is closed where it meets the hill. Drawing
+    // them perched on the surface was wrong twice over -- it hid that, and on a
+    // slope it left a flat-bottomed box floating over the downhill side.
+    // The buried length is drawn as a ghost so the pierce is visible rather
+    // than merely asserted.
+    const SLAB_M = 20;
+    // How much of the buried length the ISOMETRIC shows. See the note where the
+    // prisms are built.
+    const ISO_PIERCE_M = 9;
     const isoPt = (x, y, z) => [
       ISO / 2 + (x - y) * 0.7071,
       ISO * 0.62 - (x + y) * 0.7071 * 0.5 - z,
@@ -1811,12 +1823,21 @@
         let cx = 0, cy = 0;
         for (const [x, y] of pts) { cx += x; cy += y; }
         cx /= pts.length; cy /= pts.length;
-        solids.push({
-          kind: "b", pts, base: zpx(cx, cy),
-          // clamped so one spire cannot own the frame
-          rise: Math.min(h, 150) * ISO_K * HEX,
-          depth: cx - cy, uncertain: p.v != null && Math.sqrt(p.v) > 8.9,
-        });
+        const ground = zpx(cx, cy);
+        const uncertain = p.v != null && Math.sqrt(p.v) > 8.9;
+        // clamped so one spire cannot own the frame
+        const roof = ground + Math.min(h, 150) * ISO_K * HEX;
+        // The prism really runs to the slab, but drawing all of it HERE draws
+        // the terrain height as well -- a building on a 57 m hill trails 77 m of
+        // ghost, longer than the building, and 227 of them turn the isometric
+        // into stalactites. A stub is enough to show the solid does not stop at
+        // the surface; the elevation below draws the full extrusion, where there
+        // is a real vertical axis to draw it against.
+        const stub = ISO_PIERCE_M * ISO_K * TEX;
+        solids.push({ kind: "b", pts, base: ground - stub, rise: stub,
+                      depth: cx - cy, uncertain, buried: true });
+        solids.push({ kind: "b", pts, base: ground, rise: roof - ground,
+                      depth: cx - cy, uncertain });
       }
     }
     // Trees are the crown VOLUME, not the tree: the runner meshes the upper 59 %
@@ -1854,7 +1875,10 @@
       // Crowns are see-through but not invisible: at the opacity a building
       // wall uses they disappeared entirely behind the blue, which reads as a
       // treeless site -- the exact answer this panel exists to distinguish.
-      const wallOp = tree ? 0.34 : 0.35, roofOp = tree ? 0.62 : 0.95;
+      // The buried length of a prism is fainter still and carries no roof: it
+      // is inside the ground, and a lid drawn across it would read as a floor.
+      const wallOp = sd.buried ? 0.13 : tree ? 0.34 : 0.35;
+      const roofOp = tree ? 0.62 : 0.95;
       const P = sd.pts.map(([x, y]) => [x * ISO_K, -y * ISO_K]);
       const top = P.map(([x, y]) => isoPt(x, y, sd.base + sd.rise));
       const bot = P.map(([x, y]) => isoPt(x, y, sd.base));
@@ -1862,7 +1886,151 @@
         iso += `<polygon points="${poly([bot[i], bot[i + 1], top[i + 1], top[i]])}" fill="${fill}"`
              + ` fill-opacity="${wallOp}" stroke="${fill}" stroke-width="0.3" stroke-opacity="0.5"/>`;
       }
-      iso += `<polygon points="${poly(top)}" fill="${fill}" fill-opacity="${roofOp}" stroke="none"/>`;
+      if (!sd.buried) {
+        iso += `<polygon points="${poly(top)}" fill="${fill}" fill-opacity="${roofOp}" stroke="none"/>`;
+      }
+    }
+
+
+    // -- Side elevation ------------------------------------------------------
+    // Looking north, across the whole mesh domain, everything projected onto
+    // one vertical plane. The other two views cannot answer the question this
+    // one is for: whether the terrain or the buildings dominate what the wind
+    // actually meets. In plan the relief is a wash of colour, and the isometric
+    // exaggerates height against plan distance so the comparison there is
+    // rigged by construction. Here both are the same axis at the same scale,
+    // and 57 m of hill under 20 m of houses looks like what it is.
+    const EW = S, EH = 168, EPAD = 16;
+    const NCOL = 90, colW = EW / NCOL;
+    // Terrain as a BAND, not a line: this is a projection of a 2608 m square
+    // onto one plane, so each column spans 2608 m of north-south ground. The
+    // lowest and highest of it are both true, and a single line through the
+    // middle would quietly claim a cross-section it never took.
+    const lo = new Array(NCOL).fill(null), hi = new Array(NCOL).fill(null);
+    const canTop = new Array(NCOL).fill(0);
+    if (hasTerr) {
+      const tn = terr.n;
+      for (let r = 0; r < tn; r++) {
+        for (let c = 0; c < tn; c++) {
+          const i = Math.min(NCOL - 1, Math.floor(c / tn * NCOL));
+          const v = terr.grid[r * tn + c];
+          if (lo[i] === null || v < lo[i]) lo[i] = v;
+          if (hi[i] === null || v > hi[i]) hi[i] = v;
+        }
+      }
+    }
+    if (hasCan) {
+      const cn = can.n, chalf = can.half_m || DOM_M, cstep = 2 * chalf / cn;
+      for (let r = 0; r < cn; r++) {
+        for (let c = 0; c < cn; c++) {
+          const hgt = can.grid[r * cn + c] || 0;
+          if (hgt < 2) continue;
+          const i = Math.min(NCOL - 1, Math.floor(c / cn * NCOL));
+          const x = -chalf + (c + 0.5) * cstep, y = chalf - (r + 0.5) * cstep;
+          canTop[i] = Math.max(canTop[i], zAt(x, y) + hgt);
+        }
+      }
+    }
+    // Buildings, projected: east extent and roof elevation above the datum.
+    const bars = [];
+    let tallestRoof = 0;
+    for (const f of d.features) {
+      const pr = f.properties || {};
+      const h = pr.h || 0;
+      for (const ring of rings(f.geometry)) {
+        let x0 = Infinity, x1 = -Infinity, cx = 0, cy = 0;
+        for (const [lonp, latp] of ring) {
+          const mx = (lonp - lon0) * mPerDegLon, my = (latp - lat0) * mPerDegLat;
+          if (mx < x0) x0 = mx;
+          if (mx > x1) x1 = mx;
+          cx += mx; cy += my;
+        }
+        cx /= ring.length; cy /= ring.length;
+        const roof = zAt(cx, cy) + h;
+        if (roof > tallestRoof) tallestRoof = roof;
+        bars.push({ x0, x1, roof, uncertain: pr.v != null && Math.sqrt(pr.v) > 8.9 });
+      }
+    }
+    // One scale for both axes' *content*: metres of elevation, vertical only.
+    const topM = Math.max(10, tallestRoof, relief, ...canTop) * 1.08;
+    const botM = -SLAB_M;
+    const eY = (m) => EPAD + (topM - m) / (topM - botM) * (EH - 2 * EPAD);
+    const eX = (mx) => EW / 2 + mx / (2 * DOM_M) * EW;
+    // How much taller the drawing is than it is wide, per metre. Stated rather
+    // than hidden: at true scale 2608 m of ground under 200 m of relief and
+    // buildings is a 1 px stripe.
+    const vExag = ((EH - 2 * EPAD) / (topM - botM)) / (EW / (2 * DOM_M));
+
+    let elev = "";
+    if (hasTerr) {
+      const up = [], down = [];
+      for (let i = 0; i < NCOL; i++) {
+        if (lo[i] === null) continue;
+        const x = i * colW;
+        up.push(`${x.toFixed(1)},${eY(hi[i]).toFixed(1)}`);
+        up.push(`${(x + colW).toFixed(1)},${eY(hi[i]).toFixed(1)}`);
+        down.unshift(`${(x + colW).toFixed(1)},${eY(lo[i]).toFixed(1)}`);
+        down.unshift(`${x.toFixed(1)},${eY(lo[i]).toFixed(1)}`);
+      }
+      if (up.length) {
+        elev += `<polygon points="${up.concat(down).join(" ")}" fill="var(--warn)" fill-opacity="0.3"`
+              + ` stroke="var(--warn)" stroke-width="0.8" stroke-opacity="0.8"/>`;
+        // and the slab the prisms are closed against
+        elev += `<polygon points="0,${eY(0).toFixed(1)} ${EW},${eY(0).toFixed(1)} ${EW},${eY(botM).toFixed(1)} 0,${eY(botM).toFixed(1)}"`
+              + ` fill="var(--warn)" fill-opacity="0.08"/>`;
+      }
+    }
+    elev += `<line x1="0" y1="${eY(botM).toFixed(1)}" x2="${EW}" y2="${eY(botM).toFixed(1)}"`
+          + ` stroke="var(--text-muted)" stroke-width="0.8" stroke-dasharray="3 3" stroke-opacity="0.7"/>`;
+    // canopy profile: the tallest crown in each column
+    if (hasCan) {
+      for (let i = 0; i < NCOL; i++) {
+        if (!canTop[i]) continue;
+        const base = Math.max(0, canTop[i] - (canTop[i] - (lo[i] ?? 0)) * 0.59);
+        elev += `<rect x="${(i * colW).toFixed(1)}" y="${eY(canTop[i]).toFixed(1)}"`
+              + ` width="${colW.toFixed(1)}" height="${Math.max(1, eY(base) - eY(canTop[i])).toFixed(1)}"`
+              + ` fill="var(--accent)" fill-opacity="0.45"/>`;
+      }
+    }
+    // Buildings, each pierced down to the slab. Faint, because a thousand of
+    // them overlap in a projection and at any readable opacity they merge into
+    // one blue wall that hides the terrain band they are standing on. The
+    // skyline -- the tallest roof in each column -- is drawn over the top as a
+    // hard line, so the envelope stays legible while the mass behind it still
+    // shows how much of the domain is built at all.
+    const skyline = new Array(NCOL).fill(null);
+    for (const b of bars) {
+      const x = eX(b.x0), w = Math.max(0.8, eX(b.x1) - eX(b.x0));
+      const fill = b.uncertain ? "var(--text-muted)" : "var(--primary)";
+      elev += `<rect x="${x.toFixed(1)}" y="${eY(b.roof).toFixed(1)}" width="${w.toFixed(1)}"`
+            + ` height="${Math.max(0.8, eY(botM) - eY(b.roof)).toFixed(1)}" fill="${fill}" fill-opacity="0.16"/>`;
+      const i0 = Math.max(0, Math.floor(x / colW));
+      const i1 = Math.min(NCOL - 1, Math.floor((x + w) / colW));
+      for (let i = i0; i <= i1; i++) {
+        if (skyline[i] === null || b.roof > skyline[i]) skyline[i] = b.roof;
+      }
+    }
+    let sky = "";
+    for (let i = 0; i < NCOL; i++) {
+      if (skyline[i] === null) continue;
+      const x = i * colW, y = eY(skyline[i]).toFixed(1);
+      sky += `${sky ? " " : ""}${x.toFixed(1)},${y} ${(x + colW).toFixed(1)},${y}`;
+    }
+    if (sky) {
+      elev += `<polyline points="${sky}" fill="none" stroke="var(--primary)"`
+            + ` stroke-width="1.3" stroke-opacity="0.95"/>`;
+    }
+    // the sampled core, and the centre
+    elev += `<line x1="${eX(-CORE_M).toFixed(1)}" y1="${EPAD * 0.4}" x2="${eX(-CORE_M).toFixed(1)}" y2="${EH - EPAD * 0.4}"`
+          + ` stroke="var(--bad)" stroke-width="1" stroke-dasharray="4 3"/>`
+          + `<line x1="${eX(CORE_M).toFixed(1)}" y1="${EPAD * 0.4}" x2="${eX(CORE_M).toFixed(1)}" y2="${EH - EPAD * 0.4}"`
+          + ` stroke="var(--bad)" stroke-width="1" stroke-dasharray="4 3"/>`;
+    // a metre scale, because this view is the one with a real vertical axis
+    const tick = topM > 120 ? 50 : topM > 50 ? 20 : 10;
+    for (let m = 0; m <= topM; m += tick) {
+      elev += `<line x1="0" y1="${eY(m).toFixed(1)}" x2="${EW}" y2="${eY(m).toFixed(1)}"`
+            + ` stroke="var(--border)" stroke-width="0.4" stroke-opacity="0.55"/>`
+            + `<text x="3" y="${(eY(m) - 1.5).toFixed(1)}" font-size="7" fill="var(--text-muted)">${m} m</text>`;
     }
 
     // -- Legend --------------------------------------------------------------
@@ -1918,8 +2086,12 @@
           <circle cx="${S/2}" cy="${S/2}" r="2.5" fill="var(--bad)"/>
         </svg>
         <svg viewBox="0 0 ${ISO} ${ISO}" width="${ISO}" height="${ISO}" role="img"
-             aria-label="Isometric view at 45 degrees over the sampled core: buildings standing on the terrain surface, with see-through green crown volumes for trees.">
+             aria-label="Isometric view at 45 degrees over the sampled core: buildings extruded from their roofs down through the terrain to a common slab, with see-through green crown volumes for trees.">
           ${isoGround}${iso}
+        </svg>
+        <svg viewBox="0 0 ${EW} ${EH}" width="${EW}" height="${EH}" role="img"
+             aria-label="Side elevation looking north across the mesh domain: the terrain relief band, building roofs and tree canopy on one shared vertical scale in metres.">
+          ${elev}
         </svg>
         <div class="geo-legend">
           ${buildingLines}
@@ -1928,7 +2100,9 @@
           <div><span class="geo-swatch" style="border:1px dashed var(--bad)"></span>${2*CORE_M} m sampled core</div>
           <div><span class="geo-swatch" style="border:1px solid var(--warn)"></span>${2*DOM_M} m mesh domain</div>
           <div style="margin-top:6px;color:var(--text-muted)">${esc(d.release || "")}${d.cached ? " · cached" : ""}${d.truncated ? ` · truncated at ${d.n}` : ""}</div>
-          <div class="geo-note" style="margin-top:4px">Right: 45° isometric over the core, buildings standing on the terrain. Heights exaggerated ${HEX}× against plan distance and clamped at 150 m; relief ${TEX === HEX ? `${HEX}×` : `${TEX.toFixed(1)}× (eased so the relief stays in frame)`}. At true scale a 40 m building is four pixels.</div>
+          <div class="geo-note" style="margin-top:4px">Middle: 45° isometric over the core. Heights exaggerated ${HEX}× against plan distance and clamped at 150 m; relief ${TEX === HEX ? `${HEX}×` : `${TEX.toFixed(1)}× (eased so the relief stays in frame)`}. At true scale a 40 m building is four pixels.</div>
+          <div class="geo-note">Bottom: side elevation looking north, everything projected onto one plane across the full domain. Vertical is a true metre scale, ${vExag.toFixed(0)}× the horizontal — the one view where relief and building height can be compared without the drawing tilting the answer. The terrain is drawn as a band because each column spans 2608 m of ground north to south, and both its lowest and highest points are true.</div>
+          <div class="geo-note">Buildings run from their roofs down to a slab ${SLAB_M} m below the lowest ground, piercing the terrain rather than sitting on it — that is what <code class="inline">watertight.py</code> extrudes, and it is what closes the solid where a footprint meets a hill. The elevation draws the full buried length; the isometric shows only the first ${ISO_PIERCE_M} m of it, because at this exaggeration a prism on a hilltop trails more ghost than building.</div>
           ${crowns ? `<div class="geo-note">Crowns are drawn see-through because that is what they are in the solve: the upper 59% of each tree becomes a porous cellZone with f = 2·Cd·LAD, not a solid the flow goes around. ${crowns} crown cell${crowns === 1 ? "" : "s"} in the core.</div>` : ""}
           ${atSea ? `<div class="geo-note" style="color:var(--bad)"><b>This case is not on land.</b> No building tile, no bare-earth terrain and no canopy tile, from three independent sources that disagree about almost everything else. The runner would mesh an empty flat plane here and solve it for 66 core-hours.</div>` : ""}
           <div class="geo-note">${provenance}</div>

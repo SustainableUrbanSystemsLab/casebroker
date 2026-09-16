@@ -8,6 +8,28 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+### Added
+- **A third view: the side elevation.** Looking north across the whole mesh
+  domain, everything projected onto one vertical plane, with a true metre scale.
+  Neither of the other two could answer whether the terrain or the buildings
+  dominate what the wind meets: in plan the relief is a wash of colour, and the
+  isometric exaggerates height against plan distance, so the comparison there is
+  rigged by construction. Here both are the same axis. The terrain is drawn as a
+  band rather than a line because each column spans 2608 m of ground north to
+  south and both its extremes are true; the building mass is faint with a hard
+  skyline over it, because a thousand roofs in a projection otherwise merge into
+  one blue wall that hides the ground they stand on.
+
+### Changed
+- **Buildings pierce the terrain instead of sitting on it.** `watertight.py`
+  extrudes every prism from its roof down to a common slab about 20 m below the
+  lowest ground in the domain, which is what closes the solid where a footprint
+  meets a hill -- the preview drew them perched on the surface, which hid that
+  and, on a slope, left flat-bottomed boxes floating over the downhill side. The
+  elevation draws the full buried length; the isometric shows only the first 9 m
+  of it, because at that exaggeration a prism on a hilltop trails more ghost
+  than building and 227 of them are stalactites.
+
 ### Fixed
 - **Nobody saw any trees, anywhere.** The footprints cache is keyed on
   `case_id` alone and carries no schema column, so a payload written before
