@@ -1941,28 +1941,44 @@
     // onto one plane, so each column spans 2608 m of north-south ground. The
     // lowest and highest of it are both true, and a single line through the
     // middle would quietly claim a cross-section it never took.
+    // GATHER, never scatter. Walking the source grid and binning each of its
+    // columns into a destination column leaves every destination the source
+    // never lands on empty -- 48 terrain columns into 90 here left 42 of them
+    // null, so the "band" was a comb of disjoint slivers that disappeared
+    // entirely under the building mass. Each destination column asks the source
+    // what is under it instead, which is correct for any pair of resolutions.
     const lo = new Array(NCOL).fill(null), hi = new Array(NCOL).fill(null);
     const canTop = new Array(NCOL).fill(0);
+    const srcSpan = (i, n) => [
+      Math.min(n - 1, Math.floor(i / NCOL * n)),
+      Math.min(n, Math.max(Math.floor(i / NCOL * n) + 1,
+                           Math.ceil((i + 1) / NCOL * n))),
+    ];
     if (hasTerr) {
       const tn = terr.n;
-      for (let r = 0; r < tn; r++) {
-        for (let c = 0; c < tn; c++) {
-          const i = Math.min(NCOL - 1, Math.floor(c / tn * NCOL));
-          const v = terr.grid[r * tn + c];
-          if (lo[i] === null || v < lo[i]) lo[i] = v;
-          if (hi[i] === null || v > hi[i]) hi[i] = v;
+      for (let i = 0; i < NCOL; i++) {
+        const [c0, c1] = srcSpan(i, tn);
+        for (let c = c0; c < c1; c++) {
+          for (let r = 0; r < tn; r++) {
+            const v = terr.grid[r * tn + c];
+            if (v === undefined) continue;
+            if (lo[i] === null || v < lo[i]) lo[i] = v;
+            if (hi[i] === null || v > hi[i]) hi[i] = v;
+          }
         }
       }
     }
     if (hasCan) {
       const cn = can.n, chalf = can.half_m || DOM_M, cstep = 2 * chalf / cn;
-      for (let r = 0; r < cn; r++) {
-        for (let c = 0; c < cn; c++) {
-          const hgt = can.grid[r * cn + c] || 0;
-          if (hgt < 2) continue;
-          const i = Math.min(NCOL - 1, Math.floor(c / cn * NCOL));
-          const x = -chalf + (c + 0.5) * cstep, y = chalf - (r + 0.5) * cstep;
-          canTop[i] = Math.max(canTop[i], zAt(x, y) + hgt);
+      for (let i = 0; i < NCOL; i++) {
+        const [c0, c1] = srcSpan(i, cn);
+        for (let c = c0; c < c1; c++) {
+          for (let r = 0; r < cn; r++) {
+            const hgt = can.grid[r * cn + c] || 0;
+            if (hgt < 2) continue;
+            const x = -chalf + (c + 0.5) * cstep, y = chalf - (r + 0.5) * cstep;
+            canTop[i] = Math.max(canTop[i], zAt(x, y) + hgt);
+          }
         }
       }
     }
@@ -2055,6 +2071,22 @@
       elev += `<polyline points="${sky}" fill="none" stroke="var(--primary)"`
             + ` stroke-width="1.3" stroke-opacity="0.95"/>`;
     }
+    // The ground line again, over the buildings. The band is drawn first because
+    // the buildings stand in front of it, but a thousand of them at any visible
+    // opacity accumulate into something solid, and the terrain -- the thing this
+    // view exists to compare against -- was the first casualty.
+    if (hasTerr) {
+      let ridge = "";
+      for (let i = 0; i < NCOL; i++) {
+        if (hi[i] === null) continue;
+        const x = i * colW, y = eY(hi[i]).toFixed(1);
+        ridge += `${ridge ? " " : ""}${x.toFixed(1)},${y} ${(x + colW).toFixed(1)},${y}`;
+      }
+      if (ridge) {
+        elev += `<polyline points="${ridge}" fill="none" stroke="var(--warn)"`
+              + ` stroke-width="1.2" stroke-opacity="0.95"/>`;
+      }
+    }
     // the sampled core, and the centre
     elev += `<line x1="${eX(-CORE_M).toFixed(1)}" y1="${EPAD * 0.4}" x2="${eX(-CORE_M).toFixed(1)}" y2="${EH - EPAD * 0.4}"`
           + ` stroke="var(--bad)" stroke-width="1" stroke-dasharray="4 3"/>`
@@ -2105,7 +2137,7 @@
     const atSea = d.tile_published === false && terr.source === "flat"
                   && (can.source === "none" || can.frac_canopy === 0);
     const provenance = gba
-      ? `Buildings and heights from <b>GlobalBuildingAtlas LoD1</b> (TUM), terrain from <b>GEDTM30</b>, trees from the <b>Meta/WRI 1 m canopy height model</b> — the three sources the runner meshes. Every GBA height is a PREDICTION from lidar, optical and radar, not a survey: published RMSE 1.5–8.9 m by continent. That is the number to judge this case on, not the count.`
+      ? `<b>GBA LoD1</b> (TUM) buildings and heights, <b>GEDTM30</b> terrain, <b>Meta/WRI</b> canopy — the sources the runner meshes. Every GBA height is a prediction, not a survey: RMSE 1.5–8.9 m by continent. Judge the case on that, not the count.`
       : `Drawn from <b>Overture ${esc(d.release || "")}</b>${d.fallback_from ? ` — ${esc(d.fallback_from)}` : ""}. Overture tags a height on only a few buildings; the rest are extruded from the LCZ class constant, so ${withH === 0 ? "this tile's massing is entirely synthetic" : `only ${pct(withH / Math.max(1, withH + noH))}% of this massing is real`}.`;
 
     wrap.innerHTML = `
@@ -2135,10 +2167,10 @@
           <div><span class="geo-swatch" style="border:1px dashed var(--bad)"></span>${2*CORE_M} m sampled core</div>
           <div><span class="geo-swatch" style="border:1px solid var(--warn)"></span>${2*DOM_M} m mesh domain</div>
           <div style="margin-top:6px;color:var(--text-muted)">${esc(d.release || "")}${d.cached ? " · cached" : ""}${d.truncated ? ` · truncated at ${d.n}` : ""}</div>
-          <div class="geo-note" style="margin-top:4px">Middle: 45° isometric over the core. Heights exaggerated ${HEX}× against plan distance and clamped at 150 m; relief ${TEX === HEX ? `${HEX}×` : `${TEX.toFixed(1)}× (eased so the relief stays in frame)`}. At true scale a 40 m building is four pixels.</div>
-          <div class="geo-note">Bottom: side elevation looking north, everything projected onto one plane across the full domain. Vertical is a true metre scale, ${vExag.toFixed(0)}× the horizontal — the one view where relief and building height can be compared without the drawing tilting the answer. The terrain is drawn as a band because each column spans 2608 m of ground north to south, and both its lowest and highest points are true.</div>
-          <div class="geo-note">Buildings run from their roofs down to a slab ${SLAB_M} m below the lowest ground, piercing the terrain rather than sitting on it — that is what <code class="inline">watertight.py</code> extrudes, and it is what closes the solid where a footprint meets a hill. The elevation draws the full buried length; the isometric shows only the first ${ISO_PIERCE_M} m of it, because at this exaggeration a prism on a hilltop trails more ghost than building.</div>
-          ${crowns ? `<div class="geo-note">Crowns are drawn see-through because that is what they are in the solve: the upper 59% of each tree becomes a porous cellZone with f = 2·Cd·LAD, not a solid the flow goes around. ${crowns} crown cell${crowns === 1 ? "" : "s"} in the core.</div>` : ""}
+          <div class="geo-note" style="margin-top:4px">Middle: isometric over the core. Heights ×${HEX}, relief ×${TEX === HEX ? HEX : TEX.toFixed(1)}, clamped at 150 m.</div>
+          <div class="geo-note">Bottom: elevation looking north across the domain, true metre scale, vertical ×${vExag.toFixed(0)}. Terrain is a band because each column spans ${2 * DOM_M} m north–south.</div>
+          <div class="geo-note">Buildings run from roof to a slab ${SLAB_M} m below the lowest ground, as <code class="inline">watertight.py</code> extrudes them. The elevation shows all of that; the isometric only the first ${ISO_PIERCE_M} m.</div>
+          ${crowns ? `<div class="geo-note">Crowns are see-through because that is what they are in the solve — the upper 59% of each tree is a porous cellZone, f = 2·Cd·LAD, not a solid. ${crowns} crown cell${crowns === 1 ? "" : "s"} in the core.</div>` : ""}
           ${atSea ? `<div class="geo-note" style="color:var(--bad)"><b>This case is not on land.</b> No building tile, no bare-earth terrain and no canopy tile, from three independent sources that disagree about almost everything else. The runner would mesh an empty flat plane here and solve it for 66 core-hours.</div>` : ""}
           <div class="geo-note">${provenance}</div>
         </div>
