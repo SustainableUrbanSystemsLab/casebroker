@@ -507,7 +507,7 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         if _db_probe["ok"] is not None and now - _db_probe["at"] < 30.0:
             return _db_probe["ok"], _db_probe["accounts"]
         try:
-            conn.execute("select 1")
+            db.ping(conn)
             ok: bool | None = True
         except Exception:                                    # noqa: BLE001
             # Deliberately not re-raised, and deliberately undetailed: this
@@ -1195,10 +1195,9 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
 
         Cached after the first fetch; `refresh=true` forces a re-query.
         """
-        row = conn.execute("SELECT * FROM cases WHERE case_id=?", (case_id,)).fetchone()
+        row = db.get_case(conn, case_id)
         if row is None:
             raise HTTPException(404, "no such case")
-        row = dict(row)
         if not refresh:
             hit = db.get_footprints(conn, case_id)
             if hit:

@@ -54,6 +54,29 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
   than building and 227 of them are stalactites.
 
 ### Fixed
+- **A dropped connection could hand two workers the same case.** The broker opens
+  ONE connection at startup and every route closes over it; FastAPI runs sync
+  endpoints in a threadpool, so `db._LOCK` is the only thing making that safe.
+  Four public readers (`status`, `get_case`, `get_footprints`, `fleet`) and two
+  raw `conn.execute` calls in `app.py` skipped it. `status` backs `/healthz`,
+  which is unauthenticated and polled by the platform every 30 seconds, so it ran
+  on a timer against the same connection a `lease()` might have a transaction
+  open on — and `PgConnection.execute` repairs a dead connection by swapping the
+  underlying one IN PLACE. A failure between `BEGIN` and `COMMIT` therefore left
+  the COMMIT running on a fresh connection with nothing in it: the lease UPDATEs
+  died with the old connection while `lease()` returned its Lease objects anyway,
+  so a worker held cases the database still listed as pending and the next worker
+  leased the same ones. That is the one invariant `db.py` says matters most.
+
+  All four readers now hold the lock, `/healthz` goes through a locked
+  `db.ping()`, and `PgConnection` refuses to reconnect inside an open
+  transaction — deferring the repair to the next call outside one, so a doomed
+  transaction fails honestly instead of silently committing nothing.
+  `tests/test_connection_safety.py` pins the structural rule (every public
+  conn-taking function holds the lock, `app.py` never touches the raw
+  connection) so it cannot regress quietly. The concurrent-reader test reproduced
+  real corruption on SQLite before the fix: `InterfaceError('bad parameter or
+  other API misuse')`.
 - **The side elevation drew no terrain.** A scatter/gather bug: the code walked
   the 48-column terrain grid and binned each column into one of 90 elevation
   columns, which leaves 42 of the 90 untouched, so the "band" was a comb of

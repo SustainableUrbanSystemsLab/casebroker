@@ -644,6 +644,17 @@ class PgConnection:
 
     def __init__(self, raw, dsn: str | None = None):
         self._raw = raw
+        # Whether an explicit BEGIN..COMMIT is currently open on this connection.
+        # Reconnecting inside one silently discards it: the replacement has no
+        # transaction, so the caller's COMMIT succeeds against nothing and every
+        # UPDATE between the BEGIN and the failure is gone -- while the caller,
+        # `lease()`, returns its Lease objects as though they had been written.
+        # The worker then holds cases the database still lists as pending, and
+        # the next worker leases the same ones.
+        self._in_tx = False
+        # Set when a repair was needed but had to be deferred out of a
+        # transaction, so the next call outside one performs it.
+        self._needs_reconnect = False
         # Kept so a dead connection can be replaced in place. The identity of
         # THIS object never changes, which is what makes the repair invisible:
         # create_app() opens one connection at startup and every route closes
@@ -679,10 +690,14 @@ class PgConnection:
             sql = "BEGIN"
         sql = sql.replace("?", "%s")
         params = tuple(params) if params else None
+        verb = sql.strip().upper()
         # Known-dead up front: reconnect before running anything. Safe because
-        # nothing has been sent yet, so there is no half-applied work to repeat.
-        if getattr(self._raw, "closed", False):
+        # nothing has been sent yet, so there is no half-applied work to repeat --
+        # but only OUTSIDE a transaction, for the reason in __init__.
+        if not self._in_tx and (getattr(self._raw, "closed", False)
+                                or self._needs_reconnect):
             self._reconnect()
+            self._needs_reconnect = False
         try:
             cur = self._raw.cursor()
             cur.execute(sql, params)
@@ -694,11 +709,21 @@ class PgConnection:
             # caller is already getting. So: repair the connection for whoever
             # comes next, and let THIS request fail honestly.
             if _is_connection_error(exc):
-                try:
-                    self._reconnect()
-                except Exception:
-                    pass              # next request tries again
+                if self._in_tx:
+                    # Doomed either way, so fail honestly and repair later. A
+                    # reconnect here would hand the caller's COMMIT a fresh
+                    # connection with nothing in it.
+                    self._needs_reconnect = True
+                else:
+                    try:
+                        self._reconnect()
+                    except Exception:
+                        pass          # next request tries again
             raise
+        if verb.startswith("BEGIN"):
+            self._in_tx = True
+        elif verb.startswith("COMMIT") or verb.startswith("ROLLBACK"):
+            self._in_tx = False
         return _PgCursor(cur)
 
     def executescript(self, sql: str) -> None:
@@ -1128,6 +1153,7 @@ def put_footprints(conn, case_id: str, geojson: str, n: int, now: int | None = N
         raise
 
 
+@_locked
 def get_footprints(conn, case_id: str):
     r = conn.execute("SELECT geojson, n, fetched_at FROM footprints WHERE case_id=?",
                      (case_id,)).fetchone()
@@ -1158,6 +1184,7 @@ def report_fleet(conn, cluster: str, queued: int, running: int,
         raise
 
 
+@_locked
 def fleet(conn, now: int | None = None) -> list[dict[str, Any]]:
     """Reported scheduler state, each row carrying how old it is.
 
@@ -1172,6 +1199,7 @@ def fleet(conn, now: int | None = None) -> list[dict[str, Any]]:
                 "SELECT * FROM fleet ORDER BY cluster")]
 
 
+@_locked
 def status(conn, now: int | None = None) -> dict[str, Any]:
     now = now or _now()
     by_state = {r["state"]: r["n"] for r in
@@ -1246,6 +1274,20 @@ _CASE_COLS = (
 )
 
 
+@_locked
+def ping(conn) -> None:
+    """Cheapest possible "is the database answering".
+
+    Exists so `/healthz` never reaches for the raw connection. It used to run
+    `conn.execute("select 1")` inline, which put an UNAUTHENTICATED endpoint --
+    polled by the platform's health check every 30 seconds -- on the shared
+    connection with no lock, alongside whatever transaction a `lease()` had open
+    at that moment.
+    """
+    conn.execute("SELECT 1").fetchone()
+
+
+@_locked
 def get_case(conn, case_id: str) -> dict[str, Any] | None:
     row = conn.execute("SELECT " + _CASE_COLS + " FROM cases WHERE case_id=?",
                        (case_id,)).fetchone()
