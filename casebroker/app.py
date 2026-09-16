@@ -1379,6 +1379,16 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
                 # dead raster host is a fact about today, not about the site.
                 fc["terrain"] = footprints.terrain(lat, lon)
                 fc["canopy"] = footprints.canopy(lat, lon)
+                # "unavailable" and "unknown" are facts about TODAY -- a raster
+                # host that did not answer, a library that is not there -- and
+                # caching them freezes one bad moment into "this site has no
+                # terrain and no trees" for the life of the case. Only the
+                # buildings failure used to set `transient`, so a canopy read
+                # that timed out once was served as a treeless site forever.
+                # "flat" and "none" are facts about the SITE and stay cacheable.
+                for layer in (fc["terrain"], fc["canopy"]):
+                    if layer.get("source") in ("unavailable", "unknown"):
+                        transient = True
         except footprints.GeoBusy as busy:
             raise HTTPException(503, str(busy),
                                 headers={"Retry-After": "30"}) from busy
