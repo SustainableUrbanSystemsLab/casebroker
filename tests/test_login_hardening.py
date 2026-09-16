@@ -104,3 +104,47 @@ def test_concurrent_password_checks_are_bounded(broker):
     from casebroker import app as appmod
     assert hasattr(appmod, "PASSWORD_CONCURRENCY"), "no bound on concurrent scrypt"
     assert 1 <= appmod.PASSWORD_CONCURRENCY <= 8
+
+
+def test_every_scrypt_call_in_app_goes_through_the_bound():
+    """Structural, because bounding one call site is not bounding scrypt.
+
+    Login was capped first, which left four other places running it unbounded --
+    including the password CHANGE path, reachable by any logged-in user and
+    repeatable. A cap on one endpoint is a cap on one endpoint.
+    """
+    import pathlib
+    import re
+
+    src = (pathlib.Path(__file__).resolve().parents[1]
+           / "casebroker" / "app.py").read_text()
+    lines = src.splitlines()
+    # The two wrappers are allowed to call auth.* -- they are the bound.
+    inside_wrapper = set()
+    for i, line in enumerate(lines):
+        if re.match(r"def _(hash|verify)_password\(", line):
+            for j in range(i, min(i + 8, len(lines))):
+                inside_wrapper.add(j)
+
+    bad = [f"app.py:{i + 1}" for i, line in enumerate(lines)
+           if re.search(r"\bauth\.(hash|verify)_password\(", line)
+           and i not in inside_wrapper]
+    assert not bad, (
+        "scrypt called outside _hash_password/_verify_password at: " + ", ".join(bad))
+
+
+def test_the_wrappers_actually_hold_the_semaphore():
+    import inspect
+
+    from casebroker import app as appmod
+
+    for fn in (appmod._hash_password, appmod._verify_password):
+        assert "_password_slots" in inspect.getsource(fn), fn.__name__
+
+
+def test_the_wrappers_still_compute_the_right_answer():
+    from casebroker import app as appmod
+
+    h = appmod._hash_password("a-long-enough-password")
+    assert appmod._verify_password("a-long-enough-password", h) is True
+    assert appmod._verify_password("wrong", h) is False

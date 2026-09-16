@@ -264,6 +264,18 @@ PASSWORD_CONCURRENCY = int(os.environ.get("CASEBROKER_PASSWORD_CONCURRENCY", "4"
 _password_slots = threading.Semaphore(PASSWORD_CONCURRENCY)
 
 
+def _hash_password(password: str) -> str:
+    """scrypt, under the concurrency bound. Every caller in this module goes through it."""
+    with _password_slots:
+        return auth.hash_password(password)
+
+
+def _verify_password(password: str, stored: str) -> bool:
+    """scrypt, under the concurrency bound."""
+    with _password_slots:
+        return auth.verify_password(password, stored)
+
+
 def _may_lease_as(credential_name: str, worker_id: str) -> bool:
     """Whether a per-machine credential may claim work as ``worker_id``.
 
@@ -796,7 +808,7 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         # Explicitly admin: this is the account that has to be able to create
         # every other one, and UserIn defaults the other direction.
         user = db.create_user(conn, body.username,
-                              auth.hash_password(body.password), role="admin")
+                              _hash_password(body.password), role="admin")
         _forget_db_probe()          # this deployment is no longer "OPEN"
         _issue_session(request, response, user["id"])
         return {"username": user["username"], "role": user["role"]}
@@ -909,8 +921,7 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         # that already sits at ~280 MB once the geo libraries are resident. The
         # queue costs a slow login under load; the alternative is the platform
         # killing the process, which is what actually happened to this service.
-        with _password_slots:
-            ok = auth.verify_password(body.password, stored)
+        ok = _verify_password(body.password, stored)
         if not ok or not user:
             # The reservation above stands as the failure record.
             raise HTTPException(401, "wrong username or password")
@@ -1000,7 +1011,7 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
             raise HTTPException(400, "role must be one of %s" % ", ".join(db.ROLES))
         try:
             created = db.create_user(conn, body.username,
-                                     auth.hash_password(body.password), role=body.role)
+                                     _hash_password(body.password), role=body.role)
         except Exception:
             # UNIQUE(username). Deliberately not "does this user exist?" as a
             # separate probe -- this endpoint is admin-only, so there is no
@@ -1045,12 +1056,12 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         if not target:
             raise HTTPException(404, f"no account named {username!r}")
         if caller["username"] == username:
-            if not body.current_password or not auth.verify_password(
+            if not body.current_password or not _verify_password(
                     body.current_password, target["password_hash"]):
                 raise HTTPException(403, "current password is wrong")
         elif caller["role"] != "admin":
             raise HTTPException(403, "only an admin can reset another account's password")
-        db.set_password(conn, username, auth.hash_password(body.new_password))
+        db.set_password(conn, username, _hash_password(body.new_password))
         if caller["username"] == username:
             # set_password revoked every session this account held, this one
             # included. Re-issue so changing your own password does not log you
