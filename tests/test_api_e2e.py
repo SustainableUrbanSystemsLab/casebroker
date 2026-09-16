@@ -70,10 +70,14 @@ def test_healthz_says_whether_auth_is_on(client):
 
 
 def test_add_lease_complete_roundtrip(client):
-    assert client.post("/v1/cases", json=_cases(5)).json() == {"added": 5, "skipped": 0}
+    first = client.post("/v1/cases", json=_cases(5)).json()
+    assert (first["added"], first["skipped"]) == (5, 0)
+    # Every one of them is on land, so the admission gate took nothing.
+    assert first["rejected_not_on_land"] == 0
     # Re-posting the identical list adds nothing: this is the "grow the dataset"
     # path, and it must be safe to run twice.
-    assert client.post("/v1/cases", json=_cases(5)).json() == {"added": 0, "skipped": 5}
+    again = client.post("/v1/cases", json=_cases(5)).json()
+    assert (again["added"], again["skipped"]) == (0, 5)
 
     got = client.post("/v1/lease", json={"worker_id": "w1", "count": 2}).json()
     assert len(got) == 2

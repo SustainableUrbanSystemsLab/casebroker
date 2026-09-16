@@ -9,6 +9,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 ## [Unreleased]
 
 ### Added
+- **Cases that are not on land are refused at the door.** `POST /v1/cases` drops
+  any site the building atlas does not cover and reports it as
+  `rejected_not_on_land`, with a sample of what went. The rest of the batch
+  still lands: a 5,000-case draw with twenty bad sites should not be blocked by
+  them, and the sampler's loader raises on a rejected batch. The mask is the 922
+  tile keys GBA actually publishes (a global 5° grid would be 2,592; the rest
+  are ocean and ice), vendored in `casebroker/_gba_tiles.py`, so the land test
+  and the building source are the same source. Coarse by design — it catches the
+  mid-Atlantic and the ice sheets, not a point 2 km offshore — and it keeps every
+  real Arctic city the sampler deliberately retains.
+- **`POST /v1/cases/land-audit`** sweeps the cases that predate that gate.
+  Dry-run by default; with `dry_run=false` it quarantines them rather than
+  deleting them, so nothing leases them while the rows, their history and the
+  campaign's own record of what the draw produced all survive. `done` cases are
+  left alone.
 - **A third view: the side elevation.** Looking north across the whole mesh
   domain, everything projected onto one vertical plane, with a true metre scale.
   Neither of the other two could answer whether the terrain or the buildings

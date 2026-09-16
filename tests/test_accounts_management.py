@@ -720,7 +720,7 @@ def test_a_viewer_is_unchanged_by_the_new_role(admin):
     assert v.post("/v1/auth/login", json={"username": "val", "password": PW2}).status_code == 200
 
     assert v.get("/v1/status").status_code == 200
-    r = v.post("/v1/cases", json=[{"lat": 1.0, "lon": 2.0, "recipe": "v2-wind",
+    r = v.post("/v1/cases", json=[{"lat": 34.0, "lon": -84.0, "recipe": "v2-wind",
                                    "city_cluster": "tokyo"}])
     assert r.status_code == 403 and "viewer" in r.json()["detail"]
     assert v.delete("/v1/cases").status_code == 403
@@ -775,7 +775,7 @@ def test_a_write_token_may_still_purge(tmp_path):
     app = create_app(db_path=str(tmp_path / "purge.sqlite"), tokens=["shared-secret"])
     c = TestClient(app)
     hdr = {"Authorization": "Bearer shared-secret"}
-    c.post("/v1/cases", json=[{"lat": 1.0, "lon": 2.0, "recipe": "v2-wind",
+    c.post("/v1/cases", json=[{"lat": 34.0, "lon": -84.0, "recipe": "v2-wind",
                                "city_cluster": "tokyo"}], headers=hdr)
     r = c.request("DELETE", "/v1/cases?dry_run=false&expect=1", headers=hdr)
     assert r.status_code == 200, r.text

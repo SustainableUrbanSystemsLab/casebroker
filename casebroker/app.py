@@ -979,13 +979,34 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
 
 
     @app.post("/v1/cases", dependencies=[WriteAuth])
-    def add_cases(cases: list[CaseIn]) -> dict[str, int]:
+    def add_cases(cases: list[CaseIn]) -> dict[str, Any]:
         """Append cases to the campaign. Safe to re-run: existing ids are skipped,
-        so growing 5k -> 15k is 'post the new list' and nothing else."""
+        so growing 5k -> 15k is 'post the new list' and nothing else.
+
+        **Sites that are not on land are dropped here**, and reported back rather
+        than refused. The sampler's LCZ raster reads snow, ice and open water as
+        built classes, and its purity test cannot catch that -- a uniformly
+        misread ice sheet is 100% "pure" -- so the draw has produced sites in
+        Antarctica and in the open ocean. Its polar gate handles the poles by
+        latitude, which by construction cannot catch 7.5N 37.5W in the middle of
+        the Atlantic.
+
+        Dropped rather than rejecting the batch, because a 5,000-case draw with
+        twenty bad sites in it should still land the other 4,980, and the caller
+        is told exactly what went and why. The check is coarse on purpose; see
+        :func:`footprints.on_land`.
+        """
         if len(cases) > 5000:
             raise HTTPException(413, "post at most 5000 cases per request")
-        rows = []
+        rows, rejected = [], []
         for c in cases:
+            if not footprints.on_land(c.lat, c.lon):
+                rejected.append({"lat": c.lat, "lon": c.lon,
+                                 "city_cluster": c.city_cluster, "lcz": c.lcz,
+                                 "tile": footprints.gba_tile_for(c.lat, c.lon)
+                                 if -90.0 <= c.lat <= 90.0 and -180.0 <= c.lon <= 180.0
+                                 else None})
+                continue
             rows.append({
                 "case_id": ids.case_id(c.lat, c.lon, c.recipe),
                 "spec": {**c.spec, "lat": c.lat, "lon": c.lon, "recipe": c.recipe},
@@ -996,8 +1017,37 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
                 "priority": c.priority,
                 "max_attempts": c.max_attempts,
             })
-        return db.add_cases(conn, rows)
+        out: dict[str, Any] = dict(db.add_cases(conn, rows))
+        # Always present, so a caller can read it without a version check, and
+        # a draw that produced none can say so rather than staying silent.
+        out["rejected_not_on_land"] = len(rejected)
+        if rejected:
+            # A sample, not the lot: twenty bad sites are a bug in the draw and
+            # five of them show it, while 5,000 would be the response body.
+            out["rejected_examples"] = rejected[:5]
+        return out
 
+
+    @app.post("/v1/cases/land-audit", dependencies=[WriteAuth])
+    def land_audit(dry_run: bool = True, limit: int = 50) -> dict[str, Any]:
+        """Find cases already in the campaign that are not on land, and park them.
+
+        The gate on `POST /v1/cases` protects only what was added after it
+        existed. The published campaign predates it -- AGENTS.md has carried
+        "production holds the ungated draw, including sites in Antarctica and one
+        in the open Pacific" as a known problem -- and each of those is 66
+        core-hours aimed at an empty flat plane.
+
+        They are quarantined, not deleted: nothing leases a quarantined case, the
+        row and its event trail stay auditable, and the decision is reversible.
+        Deleting them would also quietly shrink the campaign's own record of what
+        its sampler produced, which is the thing worth keeping.
+
+        `dry_run` defaults to TRUE, as it does for purge. Finding out how bad it
+        is must not be the same keystroke as changing production.
+        """
+        return db.quarantine_not_on_land(conn, footprints.on_land,
+                                         dry_run=dry_run, limit=limit)
 
     @app.delete("/v1/cases", dependencies=[PurgeAuth])
     def purge_cases(expect: int | None = None, recipe: str | None = None,

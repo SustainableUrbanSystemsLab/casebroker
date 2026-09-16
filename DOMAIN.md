@@ -105,6 +105,42 @@ Always read back with `age_seconds`. A snapshot nobody has refreshed describes a
 queue that has moved on, and presenting that as current is the one way this can
 mislead.
 
+## Cases that are not on land
+
+`POST /v1/cases` drops any site the building atlas does not cover, reports the
+count as `rejected_not_on_land` and names a sample. It does not refuse the
+batch: a 5,000-case draw with twenty bad sites in it should land the other
+4,980, and the sampler's loader raises on a rejected batch, so refusing would
+turn one ocean site into a blocked draw.
+
+The mask is the 922 tile keys GlobalBuildingAtlas actually publishes, vendored
+in `casebroker/_gba_tiles.py`. A global 5° grid would be 2,592 tiles; the 1,670
+GBA omits are ocean and ice. Using the building source as the land mask means
+"the atlas does not cover this point" and "this case has no buildings" are one
+statement rather than two that must be kept in agreement.
+
+**It is coarse, and that is the trade.** A tile is ~550 km at the equator, so
+the middle of the Atlantic fails and a point 2 km off a fjord passes. An
+admission check has to run on 5,000 cases in one request and must never cost
+the campaign a real Arctic city — Norilsk, Murmansk, Tromsø and Utqiagvik are
+genuine urban fabric the sampler keeps deliberately. The exact question is the
+preview's, per case, from three independent sources.
+
+Cases drawn before the gate existed are swept by `POST /v1/cases/land-audit`,
+dry-run by default. They are **quarantined, not deleted**: nothing leases a
+quarantined case, the row and its event trail stay auditable, the decision is
+reversible, and the campaign's record of what its sampler actually produced
+stays honest. `done` cases are left alone — they already cost their core-hours,
+and relabelling them rewrites history.
+
+The root cause is upstream. `site_sampler.py`'s LCZ raster reads snow, ice and
+open water as built classes, and its purity test cannot catch that because a
+uniformly misread surface is 100% pure. Its polar gate handles the poles by
+latitude (72°N, and all of Antarctica), which by construction says nothing
+about 7.5°N 37.5°W in the middle of the Atlantic.
+
+---
+
 ## Footprints
 
 What a case is **made of**, cached per case, from the **same sources the runner

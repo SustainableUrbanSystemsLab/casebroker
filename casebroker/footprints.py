@@ -523,3 +523,27 @@ def canopy(lat: float, lon: float, half_m: float = DOMAIN_HALF_M,
             "mean_height_where_canopy_m": (round(float(fine[under].mean()), 1)
                                            if under.any() else 0.0),
             "grid": [int(round(v)) for v in a.ravel().tolist()]}
+
+
+# -- Is this case even on land? ----------------------------------------------
+def on_land(lat: float, lon: float) -> bool:
+    """Whether the building atlas publishes a tile covering this point.
+
+    A coarse land mask, and deliberately the SAME source the buildings come
+    from: GBA publishes 922 of a possible 2,592 tiles, and the 1,670 it omits
+    are ocean and ice. So "no tile here" and "no buildings here" are one
+    statement rather than two that have to be kept in agreement.
+
+    It is a 5 degree grid, so it rejects the middle of the Atlantic and accepts
+    a point 2 km off a fjord. That is the right trade for an ADMISSION check,
+    which has to be cheap enough to run on 5,000 cases in one request and must
+    never reject a real coastal city: the expensive, exact question is the one
+    the site preview already answers per case, from three independent sources.
+
+    See :mod:`casebroker._gba_tiles` for the list and how to regenerate it.
+    """
+    from casebroker._gba_tiles import PUBLISHED
+
+    if not (-90.0 <= lat <= 90.0) or not (-180.0 <= lon <= 180.0):
+        return False
+    return gba_tile_for(lat, lon) in PUBLISHED

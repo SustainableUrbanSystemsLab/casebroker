@@ -129,7 +129,7 @@ def test_run_forever_maps_a_fatal_runner_error_to_a_non_retryable_failure(tmp_pa
 
     app = create_app(db_path=str(tmp_path / "w.sqlite"), tokens=None)
     client = TestClient(app)
-    client.post("/v1/cases", json=[{"lat": 1.0, "lon": 2.0, "recipe": "r",
+    client.post("/v1/cases", json=[{"lat": 34.0, "lon": -84.0, "recipe": "r",
                                     "city_cluster": "c", "spec": {}}])
 
     w = Worker("http://testserver", None, worker_id="w1", heartbeat_seconds=3600)

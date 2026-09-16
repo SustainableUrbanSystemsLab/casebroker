@@ -149,4 +149,13 @@ so a broker that stops speaking the old protocol strands them.
   see `docs/operations.md`.
 - **The published campaign predates the polar gate.** Production holds the
   ungated draw, including sites in Antarctica and one in the open Pacific.
+  `POST /v1/cases` now refuses to admit a site the building atlas does not
+  cover, and `POST /v1/cases/land-audit` sweeps the rows that predate that gate
+  (dry-run by default, quarantine with `dry_run=false`). Both use the 922
+  published GBA tile keys as a coarse land mask — a 5° grid, so it catches the
+  open ocean and the ice sheets but not a point 2 km offshore. The exact
+  question is still the site preview's, from three independent sources. The
+  underlying cause is upstream and unfixed: the sampler's LCZ raster reads snow,
+  ice and open water as built classes, and a uniformly misread surface is 100%
+  "pure", so the purity test cannot catch it.
 - **No land/water mask.** The polar gate catches poles, not oceans.
