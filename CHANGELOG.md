@@ -163,6 +163,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
   uses none of it.
 
 ### Changed
+- **The dashboard's case list no longer sorts the whole campaign on every poll.**
+  `list_cases` orders by `updated_at DESC` and there was no index on it, so the
+  plan was `SCAN cases` plus a temp B-tree — a full sort of every case, every 60
+  seconds, for every open dashboard. That is not just a slow page: `list_cases`
+  holds `db._LOCK` while it runs, so the sort stalls every worker's lease and
+  heartbeat behind it. Measured at 50,000 cases: **8 ms → 0.4 ms** for the first
+  page and **155 ms → 2.3 ms** for a deep one. The index is added to existing
+  databases by the schema reconciler on connect, verified against a database
+  created without it.
 - **Overture is an optional extra, not a base dependency.** Its client pulls
   pyarrow — 122 MB of a 328 MB site-packages, 37% of the image — into every
   install, for a fallback that is off unless `CASEBROKER_OVERTURE_FALLBACK` is

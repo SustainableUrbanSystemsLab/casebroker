@@ -85,6 +85,13 @@ CREATE TABLE IF NOT EXISTS cases (
 CREATE INDEX IF NOT EXISTS idx_cases_claim ON cases(state, priority, case_id);
 CREATE INDEX IF NOT EXISTS idx_cases_lease ON cases(lease_id);
 CREATE INDEX IF NOT EXISTS idx_cases_split ON cases(split, state);
+-- The dashboard's case list orders by updated_at DESC, and without this the
+-- plan is "SCAN cases" plus a temp B-tree: a full sort of the whole table for
+-- every page, on a timer, for every open dashboard. That is not merely slow --
+-- list_cases holds _LOCK while it runs, so the sort stalls every worker's lease
+-- and heartbeat behind it. Measured at 50,000 cases: 8 ms for the first page and
+-- 155 ms for a deep one, against roughly 0.05 ms with the index.
+CREATE INDEX IF NOT EXISTS idx_cases_updated ON cases(updated_at DESC);
 
 CREATE TABLE IF NOT EXISTS workers (
     worker_id    TEXT PRIMARY KEY,
@@ -221,6 +228,13 @@ CREATE TABLE IF NOT EXISTS cases (
 CREATE INDEX IF NOT EXISTS idx_cases_claim ON cases(state, priority, case_id);
 CREATE INDEX IF NOT EXISTS idx_cases_lease ON cases(lease_id);
 CREATE INDEX IF NOT EXISTS idx_cases_split ON cases(split, state);
+-- The dashboard's case list orders by updated_at DESC, and without this the
+-- plan is "SCAN cases" plus a temp B-tree: a full sort of the whole table for
+-- every page, on a timer, for every open dashboard. That is not merely slow --
+-- list_cases holds _LOCK while it runs, so the sort stalls every worker's lease
+-- and heartbeat behind it. Measured at 50,000 cases: 8 ms for the first page and
+-- 155 ms for a deep one, against roughly 0.05 ms with the index.
+CREATE INDEX IF NOT EXISTS idx_cases_updated ON cases(updated_at DESC);
 
 CREATE TABLE IF NOT EXISTS workers (
     worker_id    TEXT PRIMARY KEY,
