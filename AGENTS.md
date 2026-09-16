@@ -143,8 +143,13 @@ the exact "trains people to ignore a red X" failure the deploy job's own
 comments warn about.
 
 **A change that touches dependencies, the Dockerfile, or anything the container
-installs cannot be verified by the tests.** Either run preflight, or push to a
-branch and let CI run it before main. Do not use main's CI as a debugger.
+installs cannot be verified by the tests.** Either run preflight, or open a PR
+and let CI run it before main. Do not use main's CI as a debugger.
+
+Note that it has to be a **PR**, not just a branch: `test.yml` triggers on
+`push` to `main` and on `pull_request`, so pushing a branch on its own runs
+nothing at all. A branch you push and never open a PR for is unverified, and
+looks exactly like a branch that passed.
 
 `--fast` skips the image build for changes that plainly cannot affect it. If no
 container engine is reachable, preflight says so and skips rather than passing
