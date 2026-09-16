@@ -66,7 +66,6 @@ dependencies = [
     { name = "duckdb" },
     { name = "fastapi" },
     { name = "httpx" },
-    { name = "overturemaps" },
     { name = "psycopg", extra = ["binary"] },
     { name = "pydantic" },
     { name = "rasterio", version = "1.4.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
@@ -78,20 +77,23 @@ dependencies = [
 dev = [
     { name = "pytest" },
 ]
+overture = [
+    { name = "overturemaps" },
+]
 
 [package.metadata]
 requires-dist = [
     { name = "duckdb", specifier = ">=1.1" },
     { name = "fastapi", specifier = ">=0.115" },
     { name = "httpx", specifier = ">=0.27" },
-    { name = "overturemaps", specifier = ">=1.0.2" },
+    { name = "overturemaps", marker = "extra == 'overture'", specifier = ">=1.0.2" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.2" },
     { name = "pydantic", specifier = ">=2.9" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3" },
     { name = "rasterio", specifier = ">=1.4" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
 ]
-provides-extras = ["dev"]
+provides-extras = ["dev", "overture"]
 
 [[package]]
 name = "certifi"

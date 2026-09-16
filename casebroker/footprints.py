@@ -305,9 +305,18 @@ def fetch(lat: float, lon: float, timeout: int = 120) -> dict[str, Any]:
              "-t", "building", "-r", RELEASE, "-o", path],
             capture_output=True, text=True, timeout=timeout)
         if r.returncode != 0:
+            detail = (r.stderr or r.stdout or "").strip()
+            if "No module named" in detail and "overturemaps" in detail:
+                # Actionable rather than obscure: the client is an OPTIONAL
+                # extra now, because it pulls pyarrow (122 MB) for a path that
+                # is off by default.
+                raise RuntimeError(
+                    "the Overture client is not installed. It is an optional "
+                    "extra: reinstall with `pip install casebroker[overture]`, "
+                    "or leave CASEBROKER_OVERTURE_FALLBACK unset and use "
+                    "GlobalBuildingAtlas, which is what actually gets meshed.")
             raise RuntimeError(
-                f"overture download failed (rc={r.returncode}): "
-                f"{(r.stderr or r.stdout or '').strip()[-400:]}")
+                f"overture download failed (rc={r.returncode}): {detail[-400:]}")
         with open(path, encoding="utf-8") as fh:
             raw = json.load(fh)
     finally:
