@@ -1559,3 +1559,65 @@ def list_worker_tokens(conn) -> list[dict[str, Any]]:
     return [{"name": r["name"], "created_by": r["created_by"],
              "created_at": r["created_at"], "last_seen_at": r["last_seen_at"],
              "revoked_at": r["revoked_at"]} for r in rows]
+
+
+@_locked
+def quarantine_not_on_land(conn, is_land, dry_run: bool = True,
+                           limit: int = 50) -> dict[str, Any]:
+    """Find campaign cases whose coordinates are not on land, and park them.
+
+    The gate on ``POST /v1/cases`` only protects cases added AFTER it existed.
+    The published campaign predates it: the draw put sites in Antarctica and in
+    the open ocean, and each one is 66 core-hours aimed at an empty flat plane.
+
+    Quarantined rather than deleted. The state already means "this case is not
+    going to run, and here is the trail of why" -- so nothing leases them, the
+    rows and their history stay auditable, and the decision is reversible. The
+    counts the dashboard shows stay honest for the same reason: these cases WERE
+    drawn, and a campaign that silently shrank would misreport what its sampler
+    produced.
+
+    ``is_land`` is injected rather than imported so this stays a database
+    function and the test does not need the tile list to exercise the sweep.
+
+    ``dry_run`` defaults to TRUE. Answering "how bad is it" must not be the same
+    keystroke as changing production.
+    """
+    found, ids_hit = [], []
+    for r in conn.execute(
+            "SELECT case_id, spec, state, city_cluster, lcz FROM cases"
+            " WHERE state NOT IN ('done', 'quarantined')").fetchall():
+        row = dict(r)
+        spec = row["spec"]
+        if isinstance(spec, str):
+            spec = json.loads(spec)
+        lat, lon = spec.get("lat"), spec.get("lon")
+        if lat is None or lon is None or is_land(float(lat), float(lon)):
+            continue
+        ids_hit.append(row["case_id"])
+        if len(found) < limit:
+            found.append({"case_id": row["case_id"], "lat": lat, "lon": lon,
+                          "state": row["state"], "city_cluster": row["city_cluster"],
+                          "lcz": row["lcz"]})
+
+    out: dict[str, Any] = {"scanned_not_on_land": len(ids_hit),
+                           "examples": found, "dry_run": dry_run,
+                           "quarantined": 0}
+    if dry_run or not ids_hit:
+        return out
+
+    now = _now()
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        for cid in ids_hit:
+            conn.execute(
+                "UPDATE cases SET state='quarantined', lease_id=NULL, updated_at=?"
+                " WHERE case_id=? AND state NOT IN ('done', 'quarantined')", (now, cid))
+            _event(conn, cid, None, "quarantined",
+                   "not on land: the building atlas publishes no tile here", now)
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    out["quarantined"] = len(ids_hit)
+    return out

@@ -27,15 +27,23 @@ def broker(tmp_path):
 _seq = iter(range(1, 10_000))
 
 
-def _one_case(client, lat=7.5, lon=-37.5):
-    """Add one case and return its id.
+def _one_case(client, lat=33.75, lon=-84.39):
+    """Add one case on land and return its id.
 
     Tagged with a unique cluster and looked up by it rather than taking the
     first row of the list: the list is ordered by last-touched, two cases added
     in the same second tie, and a test that silently asserted against the wrong
     one would pass for the wrong reason.
+
+    The latitude is nudged per call because case_id is derived from the
+    coordinates -- two calls at the same point are the SAME case, and the second
+    add is an idempotent skip rather than a new row. It stays inside the Atlanta
+    tile, so every case here passes the admission gate, which is required: an
+    ocean case can no longer be added through the API at all.
     """
-    tag = f"c{next(_seq)}"
+    n = next(_seq)
+    tag = f"c{n}"
+    lat = round(lat + n * 0.013, 6)
     client.post("/v1/cases", json=[{"lat": lat, "lon": lon,
                                     "recipe": "fixed-cyl-500/of12",
                                     "city_cluster": tag, "lcz": "LCZ1",
@@ -77,6 +85,11 @@ def test_a_site_with_no_published_tile_is_an_answer_not_a_502(broker, monkeypatc
         raise footprints.TileNotPublished("w040_n10_w035_n05")
     monkeypatch.setattr(footprints, "fetch_gba", gap)
     _ocean(monkeypatch)
+    # Seeded on land and made to answer "no tile" by the patch above, because
+    # the admission gate now refuses to add an ocean case at all. The preview
+    # still has to handle one: the 5,000 cases drawn before the gate existed are
+    # in production, and a coastal point inside a published 5-degree tile can
+    # fail the exact question while passing the coarse one.
 
     r = broker.get(f"/v1/cases/{_one_case(broker)}/footprints")
     assert r.status_code == 200
