@@ -104,6 +104,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
   `auth.DECOY_HASH`, computed once at import from random bytes. Measured after:
   0.95x.
 
+### Changed
+- **The request threadpool is bounded at 12, not anyio's default 40.** Every sync
+  endpoint runs there, and 40 is sized for a machine rather than for a 512 MB
+  instance with a ~280 MB resident floor. It bought nothing either: `db._LOCK`
+  serialises the database work those handlers exist to do, so the extra slots
+  were only ever extra request bodies in flight and a queue that grows until the
+  platform intervenes. Applied through the app's lifespan rather than a uvicorn
+  flag, so it holds however the app is started
+  (`CASEBROKER_REQUEST_CONCURRENCY`). Replacing the deprecated `on_event`
+  startup hook with `lifespan` also took the suite from 337 warnings to 3.
+
 ### Fixed
 - **A dropped connection could hand two workers the same case.** The broker opens
   ONE connection at startup and every route closes over it; FastAPI runs sync

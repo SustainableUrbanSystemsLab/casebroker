@@ -102,3 +102,43 @@ def test_the_endpoint_answers_503_not_500_when_busy(tmp_path, monkeypatch):
     finally:
         release.set()
         t.join(timeout=5)
+
+
+def test_the_request_threadpool_is_bounded():
+    """anyio defaults to 40 sync handlers at once.
+
+    That is sized for a machine, not for a 512 MB instance with a ~280 MB
+    resident floor -- and it buys nothing here, because db._LOCK serialises the
+    database work those handlers do. What it buys is 40 request bodies in flight
+    and a queue that grows until the platform intervenes.
+
+    The limiter is per EVENT LOOP, so this runs the app's own startup helper
+    inside one loop and reads it back there. Reading it from a different loop
+    would see a fresh limiter and pass or fail for reasons unrelated to the code.
+    """
+    import anyio
+    import anyio.to_thread
+
+    from casebroker import app as appmod
+
+    assert 1 <= appmod.REQUEST_CONCURRENCY <= 40
+
+    async def scenario():
+        before = anyio.to_thread.current_default_thread_limiter().total_tokens
+        appmod._apply_thread_limit()
+        return before, anyio.to_thread.current_default_thread_limiter().total_tokens
+
+    before, after = anyio.run(scenario)
+    assert before == 40, "anyio's default moved; the rationale needs rechecking"
+    assert after == appmod.REQUEST_CONCURRENCY
+
+
+def test_the_app_wires_the_limit_into_its_lifespan():
+    """A helper nothing calls is not a bound."""
+    import inspect
+
+    from casebroker import app as appmod
+
+    src = inspect.getsource(appmod.create_app)
+    assert "_apply_thread_limit()" in src, "create_app never applies the limit"
+    assert "lifespan=" in src, "not wired through the lifespan"
