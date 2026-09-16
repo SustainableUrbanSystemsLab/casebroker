@@ -84,6 +84,10 @@ class Worker:
         self.http = httpx.Client(base_url=self.broker, headers=headers, timeout=timeout)
         self._stop = threading.Event()
         self._current_lease: str | None = None
+        # Carried alongside the lease id so `complete` can name the case it is
+        # reporting. The broker uses it to scope its "was this already written?"
+        # check to THIS case rather than to any case sharing a result_uri.
+        self._current_case: str | None = None
         self._lease_lost = threading.Event()
 
     # -- transport ------------------------------------------------------------
@@ -176,7 +180,8 @@ class Worker:
         # Retrying is safe: a lease that has genuinely gone answers 409, which
         # `_post` never retries.
         r = self._post("/v1/complete", {
-            "lease_id": self._current_lease, "result_uri": result_uri,
+            "lease_id": self._current_lease, "case_id": self._current_case,
+            "result_uri": result_uri,
             "sha256": sha256, "bytes": nbytes, "metrics": metrics or {}}, retries=9)
         if r.status_code == 409:
             raise LeaseLost(r.text[:200])
@@ -266,6 +271,7 @@ class Worker:
             idle = 0
             lease = got[0]
             self._current_lease = lease["lease_id"]
+            self._current_case = lease["case_id"]
             self._lease_lost.clear()
             t0 = time.time()
             # A stale line from the previous case must not be reported as this
@@ -308,6 +314,7 @@ class Worker:
                     print(f"[warn] could not report failure: {e2}", file=sys.stderr)
             finally:
                 self._current_lease = None
+                self._current_case = None
 
         self._stop.set()
         return done

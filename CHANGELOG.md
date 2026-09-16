@@ -105,6 +105,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
   0.95x.
 
 ### Fixed
+- **One case's completion retry could be confirmed by another case's result.**
+  `complete` nulls the lease on success, so a retry after a lost response finds
+  nothing and would be refused with 409 — which the worker reads as "another
+  worker took this" and logs as a failure for work that actually landed. The
+  guard against that matched on `result_uri` ALONE, so any done case carrying
+  the same URI answered for this one: a runner deriving its URI from anything
+  less unique than the case (a template, a constant, a date) would have retries
+  on case B silently confirmed by case A's row, reporting work as landed that
+  never ran. `POST /v1/complete` now takes an optional `case_id` that scopes the
+  check. Additive, so a worker built before it is unaffected.
 - **A hung solve heartbeated forever and burned the allocation.** The runner ran
   under `subprocess.run(capture_output=True)` with no timeout, and the heartbeat
   thread is INDEPENDENT of it — so a solve that wedged kept getting its own lease
