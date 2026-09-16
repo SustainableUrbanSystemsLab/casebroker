@@ -74,6 +74,39 @@ DOMAIN_HALF_M = 1304.0
 # it. What they buy is the tail: a pathological tile spills to disk and the
 # service stays up, instead of allocating past the container limit and being
 # killed. Raise them on a bigger instance if a dense site is slow.
+# The ceilings below are PER CALL, which is not the same as a ceiling. Each
+# request builds its own DuckDB with its own 128 MB budget and its own GDAL
+# cache, `/footprints` is a sync endpoint that holds its threadpool slot for the
+# 8-15 seconds the remote reads take, and uvicorn's pool is 40 wide -- so two
+# simultaneous fetches already ask for more than a 512 MB instance has once the
+# ~280 MB library floor is resident. Two tabs is enough.
+#
+# One at a time, therefore. The work is cached per case forever afterwards, so
+# serialising costs a queued viewer a few seconds exactly once, and the
+# alternative is the platform killing the process. A queue this deep with a wait
+# this long is backpressure; without the timeout it would be a hang.
+GEO_CONCURRENCY = int(os.environ.get("CASEBROKER_GEO_CONCURRENCY", "1"))
+GEO_QUEUE_SECONDS = float(os.environ.get("CASEBROKER_GEO_QUEUE_SECONDS", "90"))
+_geo_slots = __import__("threading").Semaphore(GEO_CONCURRENCY)
+
+
+class GeoBusy(RuntimeError):
+    """Too many site previews already in flight to start another safely."""
+
+
+@contextlib.contextmanager
+def exclusive():
+    """Hold a site-preview slot, or raise :class:`GeoBusy` rather than queue forever."""
+    if not _geo_slots.acquire(timeout=GEO_QUEUE_SECONDS):
+        raise GeoBusy(
+            f"{GEO_CONCURRENCY} site preview(s) already running and this one "
+            f"waited {GEO_QUEUE_SECONDS:.0f}s for a slot")
+    try:
+        yield
+    finally:
+        _geo_slots.release()
+
+
 DUCKDB_MEMORY = os.environ.get("CASEBROKER_DUCKDB_MEMORY", "128MB")
 DUCKDB_THREADS = int(os.environ.get("CASEBROKER_DUCKDB_THREADS", "2"))
 GDAL_CACHE_MB = int(os.environ.get("CASEBROKER_GDAL_CACHE_MB", "48"))
