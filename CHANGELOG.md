@@ -119,6 +119,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
   0.95x.
 
 ### Fixed
+- **A case held for 7 days is released, however healthy the heartbeats look.**
+  `lease_expires` answers "did a worker speak recently", and heartbeat pushed it
+  forward indefinitely — so a worker that *dies* was caught within the TTL, but
+  one that is alive, reporting, and simply never finishing held its case forever.
+  That is not hypothetical: `worker.py`'s heartbeat thread runs independently of
+  the runner subprocess, so a wedged solve renews its own lease while making no
+  progress. A new `leased_at` column records when the current lease started and
+  is deliberately *not* touched by heartbeat, which is what makes it an age
+  rather than a liveness signal. Past `CASEBROKER_MAX_LEASE_AGE` (default 7 days,
+  far beyond any real case) the next heartbeat is refused and the case returns to
+  the pool, spending an attempt like any other retry; another worker's `lease()`
+  will also reclaim it without waiting for the wedged one to call again. Leases
+  predating the column start their clock on first contact rather than being
+  exempt forever.
 - **One case's completion retry could be confirmed by another case's result.**
   `complete` nulls the lease on success, so a retry after a lost response finds
   nothing and would be refused with 409 — which the worker reads as "another
