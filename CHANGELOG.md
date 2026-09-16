@@ -19,6 +19,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
   and the building source are the same source. Coarse by design — it catches the
   mid-Atlantic and the ice sheets, not a point 2 km offshore — and it keeps every
   real Arctic city the sampler deliberately retains.
+- **A Campaign tab in the settings drawer**, with the land audit behind two
+  buttons: a read-only scan that reports what it found and changes nothing, and
+  a quarantine button that does not appear until a scan has found something and
+  names the number it is about to act on. It runs on the session you are already
+  signed in with, so campaign housekeeping no longer means finding a bearer
+  token. Write-scoped, not admin-only -- the broker gates it with
+  `_may_write_as(("admin", "operator"))`, and an operator running the campaign is
+  exactly who notices that the draw put cases in the ocean.
 - **`POST /v1/cases/land-audit`** sweeps the cases that predate that gate.
   Dry-run by default; with `dry_run=false` it quarantines them rather than
   deleting them, so nothing leases them while the rows, their history and the
