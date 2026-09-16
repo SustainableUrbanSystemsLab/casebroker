@@ -224,6 +224,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
   connection) so it cannot regress quietly. The concurrent-reader test reproduced
   real corruption on SQLite before the fix: `InterfaceError('bad parameter or
   other API misuse')`.
+- **The elevation's terrain was buried under the building mass.** Each building
+  was drawn as one bar from its roof all the way down to the slab 20 m below the
+  lowest ground — so a few hundred of them at 0.16 opacity accumulated to
+  effectively opaque, covering the ground they were standing on. The ridge line
+  drawn over the top was a single 1.2 px stroke against that, and on a low-relief
+  site it sat exactly where the blue was densest.
+
+  The mass now stops at the local ground and continues to the slab at a tenth of
+  the opacity — the buried length is real and still drawn, it just no longer
+  competes with the datum. And the ground is now a proper section rather than one
+  ridge line: solid amber for the highest ground in each column, dashed for the
+  lowest, drawn last over everything. On a 60 m-relief site it reads as what it
+  is — a city in a valley with wooded slopes either side.
 - **The side elevation drew no terrain.** A scatter/gather bug: the code walked
   the 48-column terrain grid and binned each column into one of 90 elevation
   columns, which leaves 42 of the 90 untouched, so the "band" was a comb of
