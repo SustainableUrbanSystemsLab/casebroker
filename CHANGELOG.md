@@ -237,6 +237,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
   generic "unreachable", and the Docker CI job now performs a real `/vsicurl`
   read of both rasters from inside the Linux image — importing rasterio is not
   the same as rasterio being able to fetch a COG over HTTPS from that container.
+
+  And that CI step found the actual reason there were never any trees in
+  production: **`libexpat.so.1: cannot open shared object file`**. The rasterio
+  wheel bundles GDAL, GDAL links against the system libexpat, and
+  `python:3.12-slim` does not ship it — so rasterio installed cleanly, failed at
+  import, and every case reported terrain and canopy as unavailable while the
+  unit suite (on a dev machine that has the library) stayed green. The import
+  guard compounded it by reporting any failure as "rasterio not installed". The
+  Dockerfile now installs `libexpat1`, and both guards report the real exception.
 - **The elevation's terrain was buried under the building mass.** Each building
   was drawn as one bar from its roof all the way down to the slab 20 m below the
   lowest ground — so a few hundred of them at 0.16 opacity accumulated to
