@@ -196,4 +196,5 @@ def test_json_payload_stays_serialisable(broker, monkeypatch):
                             footprints.TileNotPublished("w040_n10_w035_n05")))
     _ocean(monkeypatch)
     body = broker.get(f"/v1/cases/{_one_case(broker)}/footprints").json()
-    json.loads(json.dumps(body))
+    assert json.loads(json.dumps(body)) == body
+    assert body["terrain"]["source"] and body["canopy"]["source"]

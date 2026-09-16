@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import hmac
 import json
+import contextlib
 import os
 import threading
 import time
@@ -216,6 +217,34 @@ def _tokens_from_env(canonical: str, legacy: str) -> list[str]:
     return new or old
 
 
+# How many sync request handlers may run at once.
+#
+# FastAPI runs every sync endpoint in anyio's threadpool, which defaults to 40.
+# That number is sized for a machine, not for a 512 MB instance whose resident
+# floor is already ~280 MB once DuckDB and GDAL load -- and it buys nothing here,
+# because db._LOCK serialises the database work those handlers exist to do. What
+# it does buy is 40 simultaneous request bodies, 40 stack frames deep in scrypt
+# or a GeoJSON parse, and a queue that grows until the platform kills the
+# process. Lower is not slower for this workload; it is the same throughput with
+# a bound on the worst case.
+REQUEST_CONCURRENCY = int(os.environ.get("CASEBROKER_REQUEST_CONCURRENCY", "12"))
+
+
+def _apply_thread_limit() -> None:
+    """Bound the running event loop's threadpool. Never fatal.
+
+    anyio's limiter is per event loop, which is why this is a function called at
+    startup rather than a value set at import: at import time there is no loop to
+    set it on.
+    """
+    try:
+        import anyio.to_thread
+        anyio.to_thread.current_default_thread_limiter().total_tokens = (
+            REQUEST_CONCURRENCY)
+    except Exception as e:                               # noqa: BLE001
+        print(f"[warn] could not bound the threadpool: {e}", file=sys.stderr)
+
+
 # How many password verifications may run at once, process-wide.
 #
 # scrypt at RFC 7914's interactive parameters is ~16 MB per call, and that cost
@@ -293,7 +322,16 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
     if setup_token is None:
         setup_token = os.environ.get("CASEBROKER_SETUP_TOKEN", "").strip() or None
 
-    app = FastAPI(title="E3D Simulation Broker", version=__version__)
+    # Applied on startup rather than in the Dockerfile's CMD so it holds however
+    # the app is started -- uvicorn, gunicorn, or a test client -- instead of
+    # only in the one invocation someone remembered to pass a flag to.
+    @contextlib.asynccontextmanager
+    async def _lifespan(_app: FastAPI):
+        _apply_thread_limit()
+        yield
+
+    app = FastAPI(title="E3D Simulation Broker", version=__version__,
+                  lifespan=_lifespan)
     conn = db.connect(db_path)
     app.state.db_path = db_path
 
