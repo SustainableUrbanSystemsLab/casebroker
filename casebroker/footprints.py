@@ -166,6 +166,26 @@ GBA_RMSE_M = (1.5, 8.9)
 # the thing that takes the web process down.
 MAX_BUILDINGS = 20_000
 
+# Bumped whenever the SHAPE of a cached preview changes. The footprints cache is
+# keyed on case_id alone and has no schema column, so without this a payload
+# written by an older build is served forever: adding terrain and canopy made
+# every case anyone had already opened keep answering with neither, which looks
+# exactly like a site with no trees rather than a stale cache. A hit stamped
+# with anything other than the current value is treated as a miss.
+PAYLOAD_VERSION = 2
+
+
+class TileNotPublished(Exception):
+    """The source publishes no tile covering this point.
+
+    Distinct from every other failure on purpose, because it is not a failure.
+    GBA publishes 922 tiles of a possible 2,592 -- the rest are ocean and ice --
+    so a 404 on the tile URL is a statement about the SITE: there are no
+    buildings here, and there is nothing to retry. An unreachable mirror is the
+    opposite claim and must keep raising, or a transport blip becomes a cached
+    empty city.
+    """
+
 
 def gba_tile_for(lat: float, lon: float) -> str:
     """The 5x5 degree tile key covering this point.
@@ -198,15 +218,20 @@ def fetch_gba(lat: float, lon: float, half_m: float = HALF_M,
 
     with _duck() as con:
         con.execute(f"SET http_timeout={int(timeout) * 1000};")
-        rows = con.execute(
-            f"""
-            SELECT ST_AsGeoJSON(geometry) AS gj, height, var
-            FROM read_parquet('{url}')
-            WHERE bbox.xmin < {xmax} AND bbox.xmax > {xmin}
-              AND bbox.ymin < {ymax} AND bbox.ymax > {ymin}
-            LIMIT {MAX_BUILDINGS}
-            """
-        ).fetchall()
+        try:
+            rows = con.execute(
+                f"""
+                SELECT ST_AsGeoJSON(geometry) AS gj, height, var
+                FROM read_parquet('{url}')
+                WHERE bbox.xmin < {xmax} AND bbox.xmax > {xmin}
+                  AND bbox.ymin < {ymax} AND bbox.ymax > {ymin}
+                LIMIT {MAX_BUILDINGS}
+                """
+            ).fetchall()
+        except Exception as e:                       # noqa: BLE001
+            if "404" in str(e):
+                raise TileNotPublished(gba_tile_for(lat, lon)) from e
+            raise
 
     feats = []
     for gj, height, var in rows:
