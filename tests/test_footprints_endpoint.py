@@ -198,3 +198,75 @@ def test_json_payload_stays_serialisable(broker, monkeypatch):
     body = broker.get(f"/v1/cases/{_one_case(broker)}/footprints").json()
     assert json.loads(json.dumps(body)) == body
     assert body["terrain"]["source"] and body["canopy"]["source"]
+
+
+def test_a_raster_host_outage_is_not_frozen_into_the_cache(broker, monkeypatch):
+    """Why the trees never came back.
+
+    `transient` was set only when the BUILDINGS fetch failed. terrain() and
+    canopy() never raise -- they return {"source": "unavailable"} -- so a canopy
+    read that timed out once was cached at the current payload version and
+    served as a treeless site for the life of the case. "unavailable" and
+    "unknown" are facts about today; only "flat" and "none" are facts about the
+    site, and only those may be cached.
+    """
+    monkeypatch.setattr(footprints, "fetch_gba",
+                        lambda lat, lon, **k: {"type": "FeatureCollection",
+                                               "features": [], "n": 0,
+                                               "source": "globalbuildingatlas",
+                                               "release": "GBA.LoD1",
+                                               "centre": [lat, lon]})
+    calls = {"n": 0}
+
+    def flaky_canopy(*a, **k):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return {"source": "unavailable", "detail": "curl: timeout"}
+        return {"source": "meta-wri-chm-v1", "n": 2, "half_m": 1304.0,
+                "frac_canopy": 0.3, "max_height_m": 20.0, "grid": [0, 9, 9, 0]}
+
+    monkeypatch.setattr(footprints, "canopy", flaky_canopy)
+    monkeypatch.setattr(footprints, "terrain",
+                        lambda *a, **k: {"source": "gedtm30", "relief_m": 5.0,
+                                         "min_m": 0.0, "max_m": 5.0, "n": 2,
+                                         "half_m": 1304.0, "grid": [0, 1, 2, 3]})
+    cid = _one_case(broker, lat=33.75, lon=-84.39)
+
+    first = broker.get(f"/v1/cases/{cid}/footprints").json()
+    assert first["canopy"]["source"] == "unavailable"
+    assert first["cached"] is False
+
+    # Reopening must RETRY, not serve the outage back.
+    second = broker.get(f"/v1/cases/{cid}/footprints").json()
+    assert calls["n"] == 2, "the outage was served from cache instead of retried"
+    assert second["canopy"]["source"] == "meta-wri-chm-v1"
+    assert second["canopy"]["frac_canopy"] == 0.3
+
+    # And a real answer IS cached.
+    third = broker.get(f"/v1/cases/{cid}/footprints").json()
+    assert third["cached"] is True and calls["n"] == 2
+
+
+def test_a_genuine_gap_is_still_cached(broker, monkeypatch):
+    """'flat' and 'none' are facts about the site, and must not be re-fetched."""
+    monkeypatch.setattr(footprints, "fetch_gba",
+                        lambda lat, lon, **k: {"type": "FeatureCollection",
+                                               "features": [], "n": 0,
+                                               "source": "globalbuildingatlas",
+                                               "release": "GBA.LoD1",
+                                               "centre": [lat, lon]})
+    calls = {"n": 0}
+
+    def gap(*a, **k):
+        calls["n"] += 1
+        return {"source": "none", "half_m": 1304.0,
+                "detail": "the canopy model publishes no tile here"}
+
+    monkeypatch.setattr(footprints, "canopy", gap)
+    monkeypatch.setattr(footprints, "terrain",
+                        lambda *a, **k: {"source": "flat", "half_m": 1304.0,
+                                         "detail": "GEDTM30 has no data at this site"})
+    cid = _one_case(broker, lat=33.75, lon=-84.39)
+    broker.get(f"/v1/cases/{cid}/footprints")
+    assert broker.get(f"/v1/cases/{cid}/footprints").json()["cached"] is True
+    assert calls["n"] == 1

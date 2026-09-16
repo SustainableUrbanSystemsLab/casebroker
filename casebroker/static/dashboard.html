@@ -2128,14 +2128,14 @@
     const terrLine = (() => {
       if (hasTerr) return `<div><span class="geo-swatch" style="background:var(--warn);opacity:0.5"></span>terrain — <b>${terr.relief_m} m</b> relief over the domain (${terr.min_m}–${terr.max_m} m)</div>`;
       if (terr.source === "flat") return `<div><span class="geo-swatch" style="background:var(--warn)"></span><b>no terrain</b> — meshed flat<div class="geo-note" style="margin-top:2px">GEDTM30 is a land DTM, so no data here usually means this site is not on land.</div></div>`;
-      if (terr.source === "unavailable") return `<div style="color:var(--text-muted)">terrain unknown — DTM host unreachable</div>`;
+      if (terr.source === "unavailable" || terr.source === "unknown") return `<div style="color:var(--warn)">terrain unavailable — <span class="mono" style="font-size:11px">${esc(terr.detail || "no detail")}</span><div class="geo-note" style="margin-top:2px">A fact about the host, not the site. Not cached — reopening this case retries.</div></div>`;
       return "";
     })();
     const canLine = (() => {
       if (hasCan && can.frac_canopy > 0) return `<div><span class="geo-swatch" style="background:var(--accent)"></span>trees — <b>${pct(can.frac_canopy)}%</b> under canopy, tallest <b>${can.max_height_m} m</b></div>`;
       if (hasCan) return `<div><span class="geo-swatch" style="background:var(--accent);opacity:0.35"></span><b>no trees</b> — treeless site, no canopy zone</div>`;
       if (can.source === "none") return `<div style="color:var(--text-muted)">trees unknown — the canopy model publishes no tile here</div>`;
-      if (can.source) return `<div style="color:var(--text-muted)">trees unknown — canopy host unreachable</div>`;
+      if (can.source) return `<div style="color:var(--warn)">trees unavailable — <span class="mono" style="font-size:11px">${esc(can.detail || "no detail")}</span><div class="geo-note" style="margin-top:2px">A fact about the host, not the site. Not cached — reopening this case retries.</div></div>`;
       return "";
     })();
     const gba = d.source === "globalbuildingatlas";

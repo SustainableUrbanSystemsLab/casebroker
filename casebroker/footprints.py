@@ -205,7 +205,10 @@ MAX_BUILDINGS = 20_000
 # every case anyone had already opened keep answering with neither, which looks
 # exactly like a site with no trees rather than a stale cache. A hit stamped
 # with anything other than the current value is treated as a miss.
-PAYLOAD_VERSION = 2
+# 3: any payload cached while a raster host was unreachable carries
+# "unavailable" for terrain and canopy, and until this version those were
+# cached like real answers. Bumping re-fetches every case exactly once.
+PAYLOAD_VERSION = 3
 
 
 class TileNotPublished(Exception):

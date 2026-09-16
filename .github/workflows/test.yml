@@ -120,6 +120,25 @@ jobs:
           import casebroker.app, casebroker.worker, casebroker.cli
           print('base install is complete')
           "
+      - name: rasterio must actually read a remote COG from inside the image
+        # The step above only proves the modules import. Terrain and canopy are
+        # /vsicurl reads over HTTPS through GDAL's bundled curl, and whether
+        # THAT works in a python:3.12-slim container is not something a macOS
+        # dev machine can tell you. If it fails here, every case in production
+        # reports terrain and trees as unavailable while the unit suite stays
+        # green -- which is exactly what nobody would notice.
+        run: |
+          docker exec cb python -c "
+          from casebroker import footprints as F
+          t = F.terrain(33.749, -84.388)
+          c = F.canopy(33.749, -84.388)
+          print('terrain:', t.get('source'), t.get('relief_m'), t.get('detail', ''))
+          print('canopy :', c.get('source'), c.get('frac_canopy'), c.get('detail', ''))
+          assert t['source'] == 'gedtm30', t
+          assert c['source'] == 'meta-wri-chm-v1', c
+          assert c['frac_canopy'] > 0.05, c
+          print('rasterio reads remote COGs from inside the image')
+          "
       - name: Container logs (always)
         if: always()
         run: docker logs cb || true

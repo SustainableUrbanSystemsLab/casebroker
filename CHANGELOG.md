@@ -224,6 +224,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
   connection) so it cannot regress quietly. The concurrent-reader test reproduced
   real corruption on SQLite before the fix: `InterfaceError('bad parameter or
   other API misuse')`.
+- **A raster-host outage was frozen into the cache as "no trees".** `transient`
+  — the flag that stops a failed fetch being cached — was set only when the
+  *buildings* fetch failed. `terrain()` and `canopy()` never raise; they return
+  `{"source": "unavailable"}`, and that was cached at the current payload version
+  like a real answer. So a canopy read that timed out once was served as a
+  treeless site for the life of the case, and no amount of reopening it helped.
+  `unavailable` and `unknown` are facts about today and are no longer cached;
+  `flat` and `none` are facts about the site and still are. `PAYLOAD_VERSION`
+  goes to 3 so every case is re-fetched exactly once, flushing anything frozen.
+  The dashboard now shows the raster layer's actual error string instead of a
+  generic "unreachable", and the Docker CI job now performs a real `/vsicurl`
+  read of both rasters from inside the Linux image — importing rasterio is not
+  the same as rasterio being able to fetch a COG over HTTPS from that container.
 - **The elevation's terrain was buried under the building mass.** Each building
   was drawn as one bar from its roof all the way down to the slab 20 m below the
   lowest ground — so a few hundred of them at 0.16 opacity accumulated to
