@@ -142,6 +142,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
   `pip install casebroker[overture]`. Without it the fallback now says exactly
   that, and names GlobalBuildingAtlas as what to use instead, rather than
   surfacing a `No module named` fragment that reads like a broker bug.
+
+  Measured on a clean base install, which is what the Docker image builds:
+  **172 MB of site-packages, down from ~294 MB**. It boots, serves, and still
+  does every piece of geo work that matters — GBA footprints, GEDTM30 terrain,
+  Meta/WRI canopy and the land mask — none of which ever needed Overture.
 - **The request threadpool is bounded at 12, not anyio's default 40.** Every sync
   endpoint runs there, and 40 is sized for a machine rather than for a 512 MB
   instance with a ~280 MB resident floor. It bought nothing either: `db._LOCK`
