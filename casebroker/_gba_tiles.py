@@ -23,6 +23,13 @@ Regenerate against the bucket with:
 
 Vendored as source rather than a data file so it needs no packaging rule to
 survive a wheel build, and so a diff against that command is readable in review.
+
+**The sampler carries the identical list**, in
+``benchmark/real_cities/gba.py`` of the JP-Wind-ML-Comparision repo, where it
+gates the candidate POOL before a draw. The two must agree: this one decides
+what the broker will admit, that one decides what the sampler will offer, and a
+list that has drifted means the sampler draws sites the broker then refuses.
+Regenerate both from the command above in the same change.
 """
 
 from __future__ import annotations

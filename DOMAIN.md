@@ -133,11 +133,19 @@ reversible, and the campaign's record of what its sampler actually produced
 stays honest. `done` cases are left alone — they already cost their core-hours,
 and relabelling them rewrites history.
 
-The root cause is upstream. `site_sampler.py`'s LCZ raster reads snow, ice and
-open water as built classes, and its purity test cannot catch that because a
-uniformly misread surface is 100% pure. Its polar gate handles the poles by
-latitude (72°N, and all of Antarctica), which by construction says nothing
-about 7.5°N 37.5°W in the middle of the Atlantic.
+The root cause is upstream, and is now gated there too. `site_sampler.py`'s LCZ
+raster reads snow, ice and open water as built classes, and its purity test
+cannot catch that because a uniformly misread surface is 100% pure. Its polar
+gate handles the poles by latitude (72°N, and all of Antarctica), which by
+construction says nothing about 7.5°N 37.5°W in the middle of the Atlantic — so
+the sampler now applies the same published-tile mask to its candidate pool
+before a draw, counting `rejected_not_on_land` separately from `rejected_polar`
+because ice and water are different misreads with different remedies.
+
+That makes the broker's check a backstop rather than the only line: it still
+catches hand-added cases and anything drawn by an older sampler. `SAMPLER_VERSION`
+moved to `sampler-v3` for the gate change, while the rank salt stayed at
+`sampler-v1`, so a re-draw is a filter of the old pool rather than a new one.
 
 ---
 
