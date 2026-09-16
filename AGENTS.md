@@ -127,6 +127,34 @@ disagrees with `pyproject.toml`. **MAJOR** is a breaking change to the
 worker-facing protocol — workers are long-lived and can be mid-lease for an hour,
 so a broker that stops speaking the old protocol strands them.
 
+## Before pushing to main
+
+Run `scripts/preflight.sh`. It runs the test suite, builds the image Render
+deploys, and — the part that matters — imports rasterio and performs a real
+remote COG read *inside* that image.
+
+That last check exists because the suite structurally cannot do it. rasterio
+imports fine on a dev machine, which has libexpat, and fails at import inside
+`python:3.12-slim`, which does not; the wheel installs cleanly either way. So a
+green suite coexisted with production reporting terrain and trees as
+`unavailable` for every case. It was diagnosed by pushing probe commits to main
+and reading CI logs, which left two red marks on the branch that gates deploys —
+the exact "trains people to ignore a red X" failure the deploy job's own
+comments warn about.
+
+**A change that touches dependencies, the Dockerfile, or anything the container
+installs cannot be verified by the tests.** Either run preflight, or open a PR
+and let CI run it before main. Do not use main's CI as a debugger.
+
+Note that it has to be a **PR**, not just a branch: `test.yml` triggers on
+`push` to `main` and on `pull_request`, so pushing a branch on its own runs
+nothing at all. A branch you push and never open a PR for is unverified, and
+looks exactly like a branch that passed.
+
+`--fast` skips the image build for changes that plainly cannot affect it. If no
+container engine is reachable, preflight says so and skips rather than passing
+quietly — the skipped checks are precisely the ones the suite cannot replace.
+
 ## Open problems
 
 - **GBA is CC BY-NC 4.0.** The default height source is non-commercial, stricter
