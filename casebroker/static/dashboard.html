@@ -2132,7 +2132,11 @@
       return "";
     })();
     const canLine = (() => {
-      if (hasCan && can.frac_canopy > 0) return `<div><span class="geo-swatch" style="background:var(--accent)"></span>trees — <b>${pct(can.frac_canopy)}%</b> under canopy, tallest <b>${can.max_height_m} m</b></div>`;
+      if (hasCan && can.frac_canopy > 0) {
+        const v = can.vegetation;
+        return `<div><span class="geo-swatch" style="background:var(--accent)"></span>trees — <b>${pct(can.frac_canopy)}%</b> under canopy, tallest <b>${can.max_height_m} m</b></div>`
+          + (v ? `<div><span class="geo-swatch" style="background:var(--accent);opacity:0.45"></span>all crowns as <b>${esc(v.label)}</b> — f = 2·Cd·LAD = <b>${v.f_per_m}</b> m⁻¹<div class="geo-note" style="margin-top:2px">One class for the whole site, picked by latitude alone (${esc(v.provenance)}) — a street tree, a park and a conifer stand all get this. The 55° band edge is steep: Copenhagen is 1.25, Hamburg 0.48.</div></div>` : "");
+      }
       if (hasCan) return `<div><span class="geo-swatch" style="background:var(--accent);opacity:0.35"></span><b>no trees</b> — treeless site, no canopy zone</div>`;
       if (can.source === "none") return `<div style="color:var(--text-muted)">trees unknown — the canopy model publishes no tile here</div>`;
       if (can.source) return `<div style="color:var(--warn)">trees unavailable — <span class="mono" style="font-size:11px">${esc(can.detail || "no detail")}</span><div class="geo-note" style="margin-top:2px">A fact about the host, not the site. Not cached — reopening this case retries.</div></div>`;

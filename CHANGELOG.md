@@ -9,6 +9,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 ## [Unreleased]
 
 ### Added
+- **The preview names the vegetation class and its drag.** The canopy payload
+  now carries `vegetation` — label, LAD, Cd and `f = 2·Cd·LAD` — and the legend
+  shows it. There is exactly ONE class per case and it is chosen by **latitude
+  alone**, so a street tree, a park and a conifer stand all get the same drag;
+  that table plus the site centre is the entire vegetation model. It was
+  invisible before, while the caption's `f = 2·Cd·LAD` read like a measurement.
+  The band edges are hard cuts and the one at 55° is steep: Copenhagen (55.68°N)
+  gets Conifer at 1.25 m⁻¹, Hamburg (53.55°N) Deciduous at 0.48 — **2.6× the
+  drag** across ~200 km of comparable northern-European city. Mirrors
+  `canopy_zones.VEGETATION_BY_LATITUDE`, pinned by tests so it cannot drift from
+  what the solve applies.
 - **Cases that are not on land are refused at the door.** `POST /v1/cases` drops
   any site the building atlas does not cover and reports it as
   `rejected_not_on_land`, with a sample of what went. The rest of the batch
