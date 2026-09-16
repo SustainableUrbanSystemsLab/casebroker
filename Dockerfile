@@ -1,4 +1,15 @@
 FROM python:3.12-slim
+# libexpat1: the rasterio wheel bundles GDAL, and GDAL links against the
+# system libexpat, which the slim base image does not ship. Without it the
+# package installs cleanly and then fails at import with
+# "libexpat.so.1: cannot open shared object file" -- so terrain and canopy
+# came back "unavailable" for every case in production while the wheel sat
+# there installed, and the unit suite (run on a dev machine that has the
+# library) stayed green. The Docker CI job now imports rasterio and performs a
+# real /vsicurl read so this cannot regress silently.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends libexpat1 \
+ && rm -rf /var/lib/apt/lists/*
 RUN pip install --no-cache-dir uv
 WORKDIR /app
 COPY pyproject.toml README.md ./
