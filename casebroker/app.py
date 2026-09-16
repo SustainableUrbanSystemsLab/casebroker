@@ -1152,14 +1152,29 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         if not refresh:
             hit = db.get_footprints(conn, case_id)
             if hit:
-                return {**json.loads(hit["geojson"]), "cached": True,
-                        "fetched_at": hit["fetched_at"]}
+                cached = json.loads(hit["geojson"])
+                # A payload written by an older build is a miss, not a hit. The
+                # cache is keyed on case_id alone, so without this check the
+                # first version of this endpoint answers forever -- which is how
+                # adding terrain and canopy produced a fleet of cases that
+                # reported no trees anywhere rather than re-querying once.
+                if cached.get("payload_v") == footprints.PAYLOAD_VERSION:
+                    return {**cached, "cached": True,
+                            "fetched_at": hit["fetched_at"]}
         spec = row.get("spec") or {}
         if isinstance(spec, str):
             spec = json.loads(spec)
         lat, lon = spec.get("lat"), spec.get("lon")
         if lat is None or lon is None:
             raise HTTPException(422, "case spec carries no lat/lon")
+        # The three layers are fetched INDEPENDENTLY. They used to share one
+        # try/except that raised 502 on any failure, so a site the building
+        # atlas simply does not cover took the terrain and the canopy down with
+        # it and the panel showed an error instead of the answer -- when "no
+        # buildings, no land, no trees" was itself the answer, and the most
+        # useful one this endpoint can give: that case is in the ocean.
+        lat, lon = float(lat), float(lon)
+        transient = False
         try:
             # GBA is what the geometry builder now defaults to, so it is what
             # gets meshed, so it is what this must draw. Overture survives as a
@@ -1168,27 +1183,50 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
             # a second interpreter loading pyarrow inside a memory-capped web
             # process, which is not a price to pay automatically. Opt in with
             # CASEBROKER_OVERTURE_FALLBACK when the mirror is genuinely down.
-            try:
-                fc = footprints.fetch_gba(float(lat), float(lon))
-            except Exception as gba_err:             # noqa: BLE001
-                if not footprints.OVERTURE_FALLBACK:
-                    raise
-                fc = footprints.fetch(float(lat), float(lon))
-                fc["source"] = "overture"
-                fc["fallback_from"] = f"gba unavailable: {str(gba_err)[:120]}"
-            # What the site is made of BESIDES buildings. Both are cached with
-            # the footprints because they answer the same question -- "what will
-            # this case actually be" -- and because finding out after 66
-            # core-hours is worse than finding out now. Neither raises: a dead
-            # raster host is a fact about today, not about the site, and the
-            # panel must still draw the buildings it did get.
-            fc["terrain"] = footprints.terrain(float(lat), float(lon))
-            fc["canopy"] = footprints.canopy(float(lat), float(lon))
-        except Exception as e:                       # noqa: BLE001
-            # 502, not 500: the failure is upstream at the building-data source,
-            # and saying so keeps it out of the broker's own error budget.
-            raise HTTPException(502, f"building query failed: {e}") from e
-        db.put_footprints(conn, case_id, json.dumps(fc), fc["n"])
+            fc = footprints.fetch_gba(lat, lon)
+        except footprints.TileNotPublished as gap:
+            # Not an error. GBA publishes 922 tiles of a possible 2,592; the
+            # rest are ocean and ice. An empty answer here is a fact about the
+            # site and is cached like any other.
+            fc = {"type": "FeatureCollection", "features": [], "n": 0,
+                  "release": "GBA.LoD1", "source": "globalbuildingatlas",
+                  "height_kind": "predicted", "centre": [lat, lon],
+                  "half_m": footprints.HALF_M, "tile_published": False,
+                  "tile": str(gap)}
+        except Exception as gba_err:                 # noqa: BLE001
+            if footprints.OVERTURE_FALLBACK:
+                try:
+                    fc = footprints.fetch(lat, lon)
+                    fc["source"] = "overture"
+                    fc["fallback_from"] = f"gba unavailable: {str(gba_err)[:120]}"
+                except Exception as ov_err:          # noqa: BLE001
+                    gba_err = ov_err
+                    fc = None
+            else:
+                fc = None
+            if fc is None:
+                # A reachability failure, unlike a missing tile, says nothing
+                # about the site -- so it is reported and NOT cached, and the
+                # other two layers still get drawn. An inspector that 502s is
+                # useless exactly when someone is trying to work out why a case
+                # looks wrong.
+                transient = True
+                fc = {"type": "FeatureCollection", "features": [], "n": 0,
+                      "release": "GBA.LoD1", "source": "globalbuildingatlas",
+                      "height_kind": "predicted", "centre": [lat, lon],
+                      "half_m": footprints.HALF_M,
+                      "buildings_error": str(gba_err)[:200]}
+
+        # What the site is made of BESIDES buildings. Cached with the footprints
+        # because they answer the same question -- "what will this case actually
+        # be" -- and because finding out after 66 core-hours is worse than
+        # finding out now. Neither raises: a dead raster host is a fact about
+        # today, not about the site.
+        fc["terrain"] = footprints.terrain(lat, lon)
+        fc["canopy"] = footprints.canopy(lat, lon)
+        fc["payload_v"] = footprints.PAYLOAD_VERSION
+        if not transient:
+            db.put_footprints(conn, case_id, json.dumps(fc), fc["n"])
         return {**fc, "cached": False}
 
     @app.get("/v1/cases/{case_id}", dependencies=[ReadAuth])

@@ -8,6 +8,26 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+### Fixed
+- **Nobody saw any trees, anywhere.** The footprints cache is keyed on
+  `case_id` alone and carries no schema column, so a payload written before
+  terrain and canopy existed was served forever -- every case anyone had already
+  opened kept answering with neither, which is indistinguishable from a world
+  with no trees in it. Payloads are now stamped with `payload_v` and a hit
+  carrying anything else is treated as a miss, so the first open after a shape
+  change re-queries once and caches the new answer.
+- **A site the building atlas does not cover returned 502.** GlobalBuildingAtlas
+  publishes 922 tiles of a possible 2,592; the rest are ocean and ice. A 404 on
+  the tile URL propagated as `building query failed`, which took the terrain and
+  the canopy down with it -- so a case in the Atlantic showed a transport error
+  instead of the far more useful answer the other two sources were ready to
+  give. A missing tile is now `TileNotPublished`, distinct from a transport
+  failure, and comes back as an empty building list. The three layers are
+  fetched independently, and when all three report a gap the panel says so
+  outright: *this case is not on land*. A missing tile is cached (it is a fact
+  about the site); an unreachable mirror is reported but NOT cached, so
+  reopening the case retries instead of freezing a blip into an empty city.
+
 ### Added
 - **The site preview shows terrain and trees, not just buildings.**
   `GET /v1/cases/{id}/footprints` now returns `terrain` (a GEDTM30 relief grid)

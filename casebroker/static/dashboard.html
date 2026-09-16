@@ -1881,11 +1881,26 @@
       return "";
     })();
     const gba = d.source === "globalbuildingatlas";
-    const buildingLines = gba
+    // Three ways to have no buildings, and they mean completely different
+    // things. No published tile is a fact about the site -- GBA covers 922
+    // tiles of a possible 2,592, the rest ocean and ice -- and next to a flat
+    // terrain answer and no canopy tile it is this panel saying, correctly,
+    // that the case is at sea. A reachability failure says nothing about the
+    // site at all. An empty tile on land is a third answer again.
+    const buildingLines = d.buildings_error
+      ? `<div style="color:var(--bad)"><span class="geo-swatch" style="background:var(--bad)"></span>buildings unavailable — the atlas could not be reached<div class="geo-note" style="margin-top:2px;color:var(--bad)">${esc(d.buildings_error)}</div><div class="geo-note" style="margin-top:2px">Not cached, so reopening this case retries. Terrain and trees below were fetched independently and are real.</div></div>`
+      : d.tile_published === false
+      ? `<div><span class="geo-swatch" style="background:var(--text-muted)"></span><b>no buildings</b> — the atlas publishes no tile here<div class="geo-note" style="margin-top:2px">GlobalBuildingAtlas covers 922 tiles of a possible 2,592; the rest are ocean and ice. Tile <code class="inline">${esc(d.tile || "")}</code> is not one of them.</div></div>`
+      : gba
       ? `<div><span class="geo-swatch" style="background:var(--primary)"></span><b>${withH}</b> buildings, height predicted</div>`
         + (medSd != null ? `<div><span class="geo-swatch" style="background:var(--text-muted)"></span>median uncertainty <b>±${medSd.toFixed(1)} m</b> (GBA σ; grey blocks exceed the published RMSE)</div>` : "")
       : `<div><span class="geo-swatch" style="background:var(--primary)"></span><b>${withH}</b> measured height</div>`
         + `<div><span class="geo-swatch" style="border:1px solid var(--text-muted)"></span><b>${noH}</b> height inferred</div>`;
+    // All three sources agreeing on "nothing here" is the single most useful
+    // thing this panel can report, and it is worth saying in one sentence
+    // rather than leaving to be inferred from three separate grey lines.
+    const atSea = d.tile_published === false && terr.source === "flat"
+                  && (can.source === "none" || can.frac_canopy === 0);
     const provenance = gba
       ? `Buildings and heights from <b>GlobalBuildingAtlas LoD1</b> (TUM), terrain from <b>GEDTM30</b>, trees from the <b>Meta/WRI 1 m canopy height model</b> — the three sources the runner meshes. Every GBA height is a PREDICTION from lidar, optical and radar, not a survey: published RMSE 1.5–8.9 m by continent. That is the number to judge this case on, not the count.`
       : `Drawn from <b>Overture ${esc(d.release || "")}</b>${d.fallback_from ? ` — ${esc(d.fallback_from)}` : ""}. Overture tags a height on only a few buildings; the rest are extruded from the LCZ class constant, so ${withH === 0 ? "this tile's massing is entirely synthetic" : `only ${pct(withH / Math.max(1, withH + noH))}% of this massing is real`}.`;
@@ -1915,6 +1930,7 @@
           <div style="margin-top:6px;color:var(--text-muted)">${esc(d.release || "")}${d.cached ? " · cached" : ""}${d.truncated ? ` · truncated at ${d.n}` : ""}</div>
           <div class="geo-note" style="margin-top:4px">Right: 45° isometric over the core, buildings standing on the terrain. Heights exaggerated ${HEX}× against plan distance and clamped at 150 m; relief ${TEX === HEX ? `${HEX}×` : `${TEX.toFixed(1)}× (eased so the relief stays in frame)`}. At true scale a 40 m building is four pixels.</div>
           ${crowns ? `<div class="geo-note">Crowns are drawn see-through because that is what they are in the solve: the upper 59% of each tree becomes a porous cellZone with f = 2·Cd·LAD, not a solid the flow goes around. ${crowns} crown cell${crowns === 1 ? "" : "s"} in the core.</div>` : ""}
+          ${atSea ? `<div class="geo-note" style="color:var(--bad)"><b>This case is not on land.</b> No building tile, no bare-earth terrain and no canopy tile, from three independent sources that disagree about almost everything else. The runner would mesh an empty flat plane here and solve it for 66 core-hours.</div>` : ""}
           <div class="geo-note">${provenance}</div>
         </div>
       </div>`;
