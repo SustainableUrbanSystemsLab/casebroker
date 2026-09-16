@@ -140,9 +140,15 @@ Full endpoint table in [docs/protocol.md](docs/protocol.md).
 The v2 campaign runs on Supabase Postgres behind Render, with workers on PACE
 Phoenix and ICE. Two things are worth knowing before trusting a result:
 
-- **Overture building coverage is uneven.** Roughly 45% of sampled sites return
-  buildings at all, and LCZ 1 — the scarcest class — about 25%. Where a site does
-  have footprints, many carry no height and are extruded from the tile median;
-  the case inspector shows that ratio per case, and it is what to judge a case on.
+- **Every building height is a prediction.** GlobalBuildingAtlas covers >97% of
+  buildings, which retired Overture's coverage problem, but it did so by
+  predicting a height for each one from lidar, optical and radar rather than
+  measuring it — published RMSE 1.5–8.9 m by continent. The case inspector draws
+  the per-building variance, and that, not the building count, is what to judge
+  a case on.
 - **Terrain is effectively complete on land.** Gaps are ocean, not missing data —
   GEDTM30 is a land DTM.
+- **Trees are modelled where the canopy map reaches.** The Meta/WRI 1 m canopy
+  height model covers the inhabited world and has polar and open-ocean gaps; a
+  treeless site and an uncovered one are reported differently, because only one
+  of them means the case is wrong.

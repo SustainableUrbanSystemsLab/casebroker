@@ -389,6 +389,43 @@ Three things are **not** done and must be before this faces the internet:
    unset, or set to a file path, the service starts anyway and logs a warning:
    it will look healthy right up until a redeploy silently empties it.
 
+### Sizing the instance: the site-preview path is the memory floor
+
+`GET /v1/cases/{id}/footprints` is the only endpoint that is expensive in
+memory, and it sets the instance size for the whole service. Everything else the
+broker does is a SQL query and some JSON.
+
+Measured on a warmed process: **~55 MB at rest, ~280 MB once the preview path has
+run once**, and flat from there across repeated queries. The step is DuckDB with
+its `httpfs` and `spatial` extensions plus GDAL and PROJ becoming resident — it
+is library code, not anything a query holds, so it does not come back and
+lowering the ceilings below barely moves it. **Give the service at least 512 MB.**
+
+Two things used to make that number unbounded, and both are fixed:
+
+- **DuckDB sized itself from the host.** `memory_limit` and `threads` come from
+  `/proc/meminfo`, which inside a container reports the machine, not the cgroup
+  limit the platform actually kills at. It reported a 51.1 GiB limit and 12
+  threads while running in a web instance a fraction of that size, so it never
+  spilled — by its own accounting it had room to spare — and the platform
+  OOM-killed the process instead. Both are now set explicitly
+  (`CASEBROKER_DUCKDB_MEMORY`, `CASEBROKER_DUCKDB_THREADS`, and
+  `CASEBROKER_GDAL_CACHE_MB` for GDAL's equivalent).
+- **Every request leaked a connection.** A DuckDB connection holds its buffer
+  pool until it is closed, and the handler used a bare `duckdb.connect()` that
+  was never closed. That is what turned one heavy endpoint into a restart loop.
+  `footprints._duck()` is now a context manager, and
+  `tests/test_chm_tiles.py::test_duckdb_connection_is_bounded_and_closed` pins
+  both halves.
+
+If the service still restarts under memory pressure, in order: confirm the
+instance is at least 512 MB; check `/healthz` is not being hit with `refresh=true`
+by something in a loop; then lower `CASEBROKER_DUCKDB_MEMORY` — a query that no
+longer fits spills to disk and gets slower, which is the failure you want.
+
+Preview payloads are cached in the database per case, so the cost is paid once
+per case and never on a dashboard refresh.
+
 **`/healthz` is intentionally unauthenticated** (so infrastructure health checks
 work with no token) **and therefore must never return anything that could be a
 credential.** This was not a hypothetical: an early version of this service

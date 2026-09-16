@@ -139,7 +139,7 @@ than silent. Creating the first account closes it.
 | `GET /v1/whoami` | What the presented credential can do (`write` / `read` / `none`) **and which kind it is** — a session, a per-machine token, or a shared env token. **Unauthenticated** — it answers *about* a credential rather than gating on one |
 | `GET /v1/share-token` | The read-only token, so the dashboard can mint a shareable link. **Write auth** — not an escalation, since a write token already passes every read gate |
 | `POST /v1/fleet` | Report what a scheduler holds (`cluster`, `queued`, `running`). The broker cannot see SLURM; `casebroker fleet` pushes this from a login node |
-| `GET /v1/cases/{case_id}/footprints` | Overture building footprints for a case, as GeoJSON, cached. Same release and bbox the runner meshes, so the picture is the geometry |
+| `GET /v1/cases/{case_id}/footprints` | Everything a case is meshed from, cached: GlobalBuildingAtlas footprints with predicted heights (GeoJSON), plus `terrain` (GEDTM30 relief grid) and `canopy` (Meta/WRI tree heights) over the mesh domain. Same sources and bbox the runner meshes, so the picture is the geometry |
 
 State machine:
 

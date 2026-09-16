@@ -110,9 +110,10 @@ CREATE TABLE IF NOT EXISTS fleet (
     reported_at  INTEGER NOT NULL
 );
 
--- Overture footprints for a case, cached. The query costs seconds against S3 and
--- cannot change for a pinned release, so it is paid once per case rather than on
--- every dashboard open.
+-- What a case will be meshed from -- GlobalBuildingAtlas footprints and heights,
+-- GEDTM30 relief, Meta/WRI canopy -- cached as one GeoJSON blob. The three
+-- queries cost seconds against object storage and cannot change for pinned
+-- sources, so they are paid once per case rather than on every dashboard open.
 CREATE TABLE IF NOT EXISTS footprints (
     case_id     TEXT PRIMARY KEY,
     geojson     TEXT NOT NULL,
@@ -245,9 +246,10 @@ CREATE TABLE IF NOT EXISTS fleet (
     reported_at  INTEGER NOT NULL
 );
 
--- Overture footprints for a case, cached. The query costs seconds against S3 and
--- cannot change for a pinned release, so it is paid once per case rather than on
--- every dashboard open.
+-- What a case will be meshed from -- GlobalBuildingAtlas footprints and heights,
+-- GEDTM30 relief, Meta/WRI canopy -- cached as one GeoJSON blob. The three
+-- queries cost seconds against object storage and cannot change for pinned
+-- sources, so they are paid once per case rather than on every dashboard open.
 CREATE TABLE IF NOT EXISTS footprints (
     case_id     TEXT PRIMARY KEY,
     geojson     TEXT NOT NULL,

@@ -1128,18 +1128,20 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
 
     @app.get("/v1/cases/{case_id}/footprints", dependencies=[ReadAuth])
     def case_footprints(case_id: str, refresh: bool = False) -> dict[str, Any]:
-        """Overture building footprints for this case, as GeoJSON.
+        """Everything this case will be meshed from: buildings, terrain, trees.
 
-        The dashboard cannot fetch these itself: Overture publishes GeoParquet on
-        S3 and a Python client, with no REST API and no published tile endpoint,
-        so a browser has nothing to call. The broker runs the query.
+        GeoJSON footprints with GlobalBuildingAtlas predicted heights, plus a
+        GEDTM30 relief grid and a Meta/WRI canopy-height grid over the mesh
+        domain. The dashboard cannot fetch any of it itself -- all three are
+        GeoParquet or Cloud-Optimized GeoTIFF on object storage, with no REST
+        API and no tile endpoint a browser could call -- so the broker runs the
+        queries.
 
-        It is deliberately the SAME release and the same bbox derivation the
-        runner uses, so the picture is the geometry that gets meshed. Drawing
-        OSM footprints or a map tile instead would be worse than drawing
+        Deliberately the SAME sources and the same bbox derivation the runner
+        uses, so the picture is the geometry that gets meshed. Drawing OSM
+        footprints or a basemap tile instead would be worse than drawing
         nothing: it would look like a check while disagreeing with the mesh, and
-        it would disagree most exactly where checking matters -- the sites where
-        Overture is empty but OSM is not.
+        it would disagree most exactly where checking matters.
 
         Cached after the first fetch; `refresh=true` forces a re-query.
         """
@@ -1160,21 +1162,28 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
             raise HTTPException(422, "case spec carries no lat/lon")
         try:
             # GBA is what the geometry builder now defaults to, so it is what
-            # gets meshed, so it is what this must draw. Overture stays as the
-            # fallback rather than being deleted: it is one HTTP dependency
-            # against another, and an inspector that 502s is useless exactly
-            # when someone is trying to find out why a case looks wrong.
+            # gets meshed, so it is what this must draw. Overture survives as a
+            # fallback rather than being deleted -- a case built before the
+            # switch was meshed from it -- but shelling out to its client means
+            # a second interpreter loading pyarrow inside a memory-capped web
+            # process, which is not a price to pay automatically. Opt in with
+            # CASEBROKER_OVERTURE_FALLBACK when the mirror is genuinely down.
             try:
                 fc = footprints.fetch_gba(float(lat), float(lon))
             except Exception as gba_err:             # noqa: BLE001
+                if not footprints.OVERTURE_FALLBACK:
+                    raise
                 fc = footprints.fetch(float(lat), float(lon))
                 fc["source"] = "overture"
                 fc["fallback_from"] = f"gba unavailable: {str(gba_err)[:120]}"
-            # Whether this site has real bare-earth terrain or will be meshed
-            # flat. Cached with the footprints because it is the same question --
-            # "what will this case actually be made of" -- and because finding
-            # out after 66 core-hours is worse than finding out now.
+            # What the site is made of BESIDES buildings. Both are cached with
+            # the footprints because they answer the same question -- "what will
+            # this case actually be" -- and because finding out after 66
+            # core-hours is worse than finding out now. Neither raises: a dead
+            # raster host is a fact about today, not about the site, and the
+            # panel must still draw the buildings it did get.
             fc["terrain"] = footprints.terrain(float(lat), float(lon))
+            fc["canopy"] = footprints.canopy(float(lat), float(lon))
         except Exception as e:                       # noqa: BLE001
             # 502, not 500: the failure is upstream at the building-data source,
             # and saying so keeps it out of the broker's own error budget.

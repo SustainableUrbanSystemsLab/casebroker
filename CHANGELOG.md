@@ -8,6 +8,64 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+### Added
+- **The site preview shows terrain and trees, not just buildings.**
+  `GET /v1/cases/{id}/footprints` now returns `terrain` (a GEDTM30 relief grid)
+  and `canopy` (Meta/WRI 1 m tree heights) alongside the footprints, both over
+  the full 1304 m mesh domain rather than the 520 m building box -- which is
+  what `site_geometry.build_site` reads (`half_t = HALF_M + buffer_m`). The
+  inspector draws all three: relief shaded under the plan view, canopy in green,
+  and in the isometric the buildings now stand *on* the terrain with see-through
+  green crown volumes beside them. Crowns are drawn see-through because that is
+  what they are in the solve -- the upper 59% of each tree becomes a porous
+  cellZone carrying `f = 2*Cd*LAD`, not a solid the flow goes around.
+
+  A treeless site and a site the canopy model does not cover are reported
+  differently (`canopy.source` is `meta-wri-chm-v1` with `frac_canopy: 0` versus
+  `none`), because only one of them means something is wrong.
+
+  The canopy tile key is computed rather than looked up: the Meta/WRI tiles are
+  named by zoom-9 Bing quadkey, which the product's own 1.194 m resolution
+  fixes, so the broker skips the 15 MB `tiles.geojson` index `canopy.py`
+  downloads. Pinned against published objects on four continents in
+  `tests/test_chm_tiles.py`.
+
+### Fixed
+- **The web service exceeded its memory limit and was restarted.** Two causes,
+  both in the footprints path. DuckDB sizes `memory_limit` and `threads` from
+  `/proc/meminfo`, which inside a container reports the HOST rather than the
+  cgroup limit the platform enforces: it reported a 51.1 GiB limit and 12
+  threads while running in a far smaller instance, so it never spilled and was
+  OOM-killed instead. And the handler used a bare `duckdb.connect()` that was
+  never closed, so every request leaked a whole buffer pool. Ceilings are now
+  explicit (`CASEBROKER_DUCKDB_MEMORY`, `CASEBROKER_DUCKDB_THREADS`,
+  `CASEBROKER_GDAL_CACHE_MB`) and the connection is a context manager. Measured
+  after: ~55 MB at rest, ~280 MB once the geo libraries are resident, and flat
+  across repeated queries instead of climbing. See "Sizing the instance" in
+  `docs/operations.md`.
+- **The Overture fallback is off unless asked for.** It shells out to a second
+  Python interpreter that loads pyarrow and materialises a whole GeoJSON, which
+  is the one part of this path no ceiling above can reach -- so it ran
+  automatically on every GBA hiccup inside a memory-capped process. Set
+  `CASEBROKER_OVERTURE_FALLBACK=1` to restore it while the mirror is down.
+- **The preview's elapsed-time counter jumped around, and the drawing vanished
+  once a minute.** The 60 s auto-refresh replaces the whole case table, which
+  threw away any rendered panel and restarted its fetch against a new `t0` while
+  the previous interval was still writing into an element both now shared -- so
+  the count could run backwards. The counter is now scoped to its own panel and
+  the payload is cached per case for the life of the page, so a refresh redraws
+  instantly and issues no request.
+- **The panel said "Overture" while drawing GlobalBuildingAtlas.** Labels,
+  legend and captions now describe what is actually fetched, including that
+  every GBA height is a PREDICTION (published RMSE 1.5-8.9 m) and what its
+  per-building variance is -- the "measured vs inferred" split the panel used to
+  show was an Overture-era question that GBA does not have.
+- **Raster statistics were computed at drawing resolution.** Averaging a 65 m
+  preview cell over trees, roofs and road reported Atlanta, a city of 25 m oaks,
+  as having a tallest tree of 8 m. Both rasters are now read four times finer
+  than they are drawn and the statistics taken there; the read costs the same,
+  since what it fetches is fixed by the window and not by the shape asked back.
+
 ## [0.3.0] - 2026-09-15
 
 Hooking heterogeneous machines into the campaign: Windows workstations (Docker
