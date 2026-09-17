@@ -24,8 +24,12 @@ checking matters. So each of the three mirrors what ``real_cities`` does:
   canopy is and how tall -- which is exactly the field the crown volume is
   built from.
 
-Overture survives as a buildings fallback, off unless asked for: see
-:func:`fetch`.
+"The same data the CFD meshes" is per case, not per repository: the builder
+meshed Overture until 2026-09-08 and GBA after it, so drawing every case from
+today's source would redraw an older case's buildings as a different set of
+buildings. :func:`mesh_source` says which source a given case was meshed from
+and how confidently that is known; Overture survives as the way to draw those
+cases, and as a buildings fallback, off unless asked for -- see :func:`fetch`.
 
 Cached in the database after the first look. The three queries cost some
 seconds between them and cannot change for pinned sources, so paying that once
@@ -211,12 +215,15 @@ MAX_BUILDINGS = 20_000
 # every case anyone had already opened keep answering with neither, which looks
 # exactly like a site with no trees rather than a stale cache. A hit stamped
 # with anything other than the current value is treated as a miss.
+# 6: the payload names the source the case's MESH was built from
+# (`mesh_source`, `mesh_source_basis`); cached ones carry neither, and a panel
+# cannot label a picture it has no basis for.
 # 5: canopy spans the 504 m core now, not the 1304 m domain.
 # 4: the canopy payload gained `vegetation`, so cached ones lack it.
 # 3: any payload cached while a raster host was unreachable carries
 # "unavailable" for terrain and canopy, and until this version those were
 # cached like real answers. Bumping re-fetches every case exactly once.
-PAYLOAD_VERSION = 5
+PAYLOAD_VERSION = 6
 
 
 class TileNotPublished(Exception):
@@ -246,6 +253,56 @@ def gba_tile_for(lat: float, lon: float) -> str:
     return f"{lonf(west)}_{latf(north)}_{lonf(east)}_{latf(south)}"
 
 
+# The two building sources, as a response's `source` names them.
+GBA = "globalbuildingatlas"
+OVERTURE = "overture"
+
+# When the geometry builder began meshing GBA by default: parent repo commit
+# 27dfd3a, 2026-09-08T15:20:02-04:00 (this broker followed 17 s later, c9d22fa).
+# A case that FINISHED before this instant built its geometry before it, when
+# the builder had only Overture. That holds in one direction only: a case that
+# finished afterwards may still have been meshed from Overture -- a cluster on an
+# older checkout, or geometry cached by an earlier attempt -- which is why a
+# run's own report outranks the date.
+GBA_BUILDER_SINCE = 1788895202
+
+
+def mesh_source(state: str, metrics: dict[str, Any] | None,
+                updated_at: int | None) -> tuple[str, str]:
+    """The building source this case's mesh was built from, or will be, and how
+    that is known: ``(source, basis)``.
+
+    The basis matters as much as the answer, because the answers are not equally
+    certain and the inspector owes its reader the difference:
+
+    - ``reported``: the run said so -- ``height_source`` in its completion
+      metrics, from the geometry report beside the STLs it actually meshed.
+    - ``unrecognized``: the run named a source this broker cannot draw. GBA.
+    - ``before_gba``: finished before the builder could mesh GBA at all. Overture.
+    - ``unreported``: finished after the switch without saying. GBA, as the
+      builder's default -- an assumption, and labelled one.
+    - ``not_done``: not finished. GBA, what the builder meshes now.
+
+    ``updated_at`` is when a done case finished: ``db.complete`` sets it, and
+    nothing touches a done row afterwards without changing its state.
+    """
+    reported = (metrics or {}).get("height_source")
+    if isinstance(reported, str) and reported.strip():
+        spelled = reported.strip().lower()
+        # The builder tags GBA geometry "gba-lod1"; the runner reports "overture"
+        # for a report from the builder's Overture path (see run_case.sh).
+        if spelled.startswith("gba") or spelled == GBA:
+            return GBA, "reported"
+        if spelled.startswith("overture"):
+            return OVERTURE, "reported"
+        return GBA, "unrecognized"
+    if state != "done":
+        return GBA, "not_done"
+    if updated_at is not None and int(updated_at) < GBA_BUILDER_SINCE:
+        return OVERTURE, "before_gba"
+    return GBA, "unreported"
+
+
 def fetch_gba(lat: float, lon: float, half_m: float = HALF_M,
               timeout: int = 300) -> dict[str, Any]:
     """GBA footprints and predicted heights, as a compact FeatureCollection.
@@ -260,8 +317,19 @@ def fetch_gba(lat: float, lon: float, half_m: float = HALF_M,
     xmin, ymin, xmax, ymax = lon - dlon, lat - dlat, lon + dlon, lat + dlat
     url = f"{GBA_BASE}/{gba_tile_for(lat, lon)}.parquet"
 
+    # A fresh connection per call, deliberately -- see _duck, which bounds it.
+    # Keeping one open across requests was measured against this on 2026-09-15
+    # (duckdb 1.5.5; the same 12 sites in 12 tiles, both arms run at once so
+    # they saw the same network): 3.44 s against 3.45 s mean for a site not read
+    # before. That is every request reaching here, since a repeat is answered
+    # from the broker's own cache first, and the kept database's caches paid off
+    # only on exact repeats while growing ~8 MB per new tile.
     with _duck() as con:
-        con.execute(f"SET http_timeout={int(timeout) * 1000};")
+        # SECONDS: duckdb 1.5.5 describes http_timeout as "(in seconds)". This
+        # used to pass timeout * 1000, turning the 300 s meant here into
+        # 300,000 s, so a stalled read held its request for days instead of
+        # failing over.
+        con.execute(f"SET http_timeout={int(timeout)};")
         try:
             rows = con.execute(
                 f"""
@@ -300,8 +368,9 @@ def fetch(lat: float, lon: float, timeout: int = 120) -> dict[str, Any]:
     Superseded by :func:`fetch_gba`, and disabled unless
     ``CASEBROKER_OVERTURE_FALLBACK`` is set -- see :data:`OVERTURE_FALLBACK` for
     why a subprocess is the expensive option here. Kept because a case built
-    before the switch was meshed from THIS source, and redrawing it from GBA
-    would misrepresent what was actually solved.
+    before the switch was meshed from THIS source (:func:`mesh_source`), and
+    redrawing it from GBA would misrepresent what was actually solved. Also the
+    fallback when GBA cannot be read.
 
     Only the polygon rings and a height survive: the full Overture record carries
     sources, ids and classifications that would multiply the payload for a

@@ -63,7 +63,10 @@ Step by step:
    case was taken away — the worker abandons it rather than finishing work it no
    longer owns.
 5. **Report.** The runner's last stdout line carries `result_uri`; the worker
-   posts it with metrics, wall time and which machine produced it.
+   posts it with metrics, wall time and which machine produced it. Among the
+   metrics, `height_source` names the building source the mesh was built from
+   (`gba-lod1`, or `overture`), read from the geometry report beside the STLs —
+   the case inspector draws a finished case from it.
 6. **Repeat.**
 
 Defaults are the client's: `lease_seconds=900`, `heartbeat_seconds=300`.
@@ -143,7 +146,7 @@ than silent. Creating the first account closes it.
 | `GET /v1/pair/pending`, `POST /v1/pair/{code}/approve`, `…/deny` | The dashboard's side. **Admin session only** — a credential that could approve machines could mint credentials |
 | `POST /v1/cases/land-audit` | Find cases already in the campaign whose coordinates are not on land and quarantine them. `dry_run=true` by default — it reports and changes nothing. **Write auth** |
 | `POST /v1/fleet` | Report what a scheduler holds (`cluster`, `queued`, `running`). The broker cannot see SLURM; `casebroker fleet` pushes this from a login node |
-| `GET /v1/cases/{case_id}/footprints` | Everything a case is meshed from, cached: GlobalBuildingAtlas footprints with predicted heights (GeoJSON), plus `terrain` (GEDTM30 relief grid) and `canopy` (Meta/WRI tree heights) over the mesh domain. Same sources and bbox the runner meshes, so the picture is the geometry |
+| `GET /v1/cases/{case_id}/footprints` | Everything a case is meshed from, cached: building footprints with predicted heights (GeoJSON), plus `terrain` (GEDTM30 relief grid) and `canopy` (Meta/WRI tree heights) over the mesh domain. Same sources and bbox the runner meshes, so the picture is the geometry. The buildings come from the source the case's mesh was built from — its reported `height_source`, Overture if it finished before the switch to GBA, GBA otherwise — carried back as `mesh_source`, with `mesh_source_basis` saying how that is known. `source` is what actually answered, with `fallback_from` when the mesh's source could not be drawn; a cached row from a different source is queried again, and concurrent requests for one case share one query |
 
 State machine:
 
