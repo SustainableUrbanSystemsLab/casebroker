@@ -176,8 +176,11 @@ quietly — the skipped checks are precisely the ones the suite cannot replace.
   dataset built on it may be released. Unresolved.
 - **Sites drawn before the switch were meshed from Overture** with heights
   filled from a tile median or class constant, so the dataset now mixes two
-  height regimes. `height_source` in each geometry report says which; nothing
-  reconciles them yet.
+  height regimes. Only the GBA path tags its geometry report
+  (`height_source: "gba-lod1"`); an Overture report is recognisable by
+  `height_provenance`. The runner now reports `height_source` in its completion
+  metrics, but no case finished before that carries it, and nothing reconciles
+  the two regimes yet.
 - **Overture coverage** (still relevant to the fallback path, and to footprints
   where GBA is thin). Only ~45% of sampled sites return buildings at all, and
   LCZ 1 — the scarcest and most valuable class — is ~25%. Coverage is thin across

@@ -30,6 +30,7 @@ import threading
 import time
 import pathlib
 import sys
+import weakref
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
@@ -1420,133 +1421,225 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
                 "db": _redact_db_target(db_path)}
 
 
+    # One building query per case at a time. The dashboard rebuilds its geometry
+    # panel on every refresh and a second viewer can open the same case, and each
+    # used to start its own read of the same remote bytes while the first was
+    # still under way. Now the rest wait for it, then answer from the cache it
+    # wrote. Weak values: a case's lock lives only while a request holds it.
+    footprints_locks: weakref.WeakValueDictionary = weakref.WeakValueDictionary()
+    footprints_locks_guard = threading.Lock()
+
+    def _drawn_from(mesh: str) -> str:
+        """The source a case whose mesh is ``mesh`` is actually drawn from.
+
+        The mesh's own source, except that Overture is an optional extra: it
+        costs a second interpreter loading pyarrow inside a memory-capped web
+        process, so it runs only where CASEBROKER_OVERTURE_FALLBACK says it may.
+        A case meshed from Overture on an instance that will not read Overture is
+        drawn from GBA and labelled -- a substitution that says so, rather than a
+        silent one.
+
+        One function because the cache compares against it and the query follows
+        it. If those two ever disagreed, a case would miss its own cache and
+        re-query the atlas on every inspector open.
+        """
+        if mesh == footprints.OVERTURE and not footprints.OVERTURE_FALLBACK:
+            return footprints.GBA
+        return mesh
+
+    def _building_query(lat: float, lon: float,
+                        source: str) -> tuple[dict[str, Any], bool]:
+        """The three layers for one site, the buildings from the source this
+        case's mesh was built from.
+
+        Returns the payload and whether any of it is a fact about TODAY rather
+        than about the site, which is what decides whether it may be cached.
+
+        The layers are fetched INDEPENDENTLY. They used to share one try/except
+        that raised 502 on any failure, so a site the building atlas simply does
+        not cover took the terrain and the canopy down with it and the panel
+        showed an error instead of the answer -- when "no buildings, no land, no
+        trees" was itself the answer, and the most useful one this endpoint can
+        give: that case is in the ocean.
+
+        The layers run in sequence, not side by side. Together they are the
+        slower arm plus the other two rather than the slowest alone, which is
+        real -- GBA measured 2.1-8.7 s and GEDTM30 0.05-10.6 s on 2026-09-15 --
+        but the ceilings around them are per call and not per process, so two
+        layers in flight are two budgets live at once inside one capped web
+        process. That is the pressure the preview slot exists to hold down.
+        """
+        transient = False
+        empty = {"type": "FeatureCollection", "features": [], "n": 0,
+                 "release": "GBA.LoD1", "source": footprints.GBA,
+                 "height_kind": "predicted", "centre": [lat, lon],
+                 "half_m": footprints.HALF_M}
+
+        # Looked up on each call rather than bound once, so a test can replace
+        # them.
+        def gba() -> dict[str, Any]:
+            return {**footprints.fetch_gba(lat, lon), "source": footprints.GBA}
+
+        def overture() -> dict[str, Any]:
+            return {**footprints.fetch(lat, lon), "source": footprints.OVERTURE}
+
+        def attempt(fn):
+            """``(payload, error)``, where a missing tile is a payload.
+
+            GBA publishes 922 tiles of a possible 2,592 and the rest are ocean
+            and ice, so an empty answer there is a fact about the site, not a
+            failure, and is cached like any other.
+            """
+            try:
+                return fn(), None
+            except footprints.TileNotPublished as gap:
+                return {**empty, "tile_published": False, "tile": str(gap)}, None
+            except Exception as err:                     # noqa: BLE001
+                return None, err
+
+        # The mesh's own source first, because that is what this must draw. The
+        # other stays as a fallback rather than nothing: it is one HTTP
+        # dependency against another, and an inspector that 502s is useless
+        # exactly when someone is trying to find out why a case looks wrong.
+        # `fallback_from` then says the picture is not the mesh's, and why.
+        drawn = _drawn_from(source)
+        first, other = ((overture, gba) if drawn == footprints.OVERTURE
+                        else (gba, overture if footprints.OVERTURE_FALLBACK
+                              else None))
+        fc, err = attempt(first)
+        if fc is not None and drawn != source:
+            fc["fallback_from"] = (
+                "overture not enabled here: install casebroker[overture] and "
+                "set CASEBROKER_OVERTURE_FALLBACK to draw this case from the "
+                "source it was meshed from")
+        elif fc is None and other is not None:
+            fc, later = attempt(other)
+            if fc is None:
+                err = later
+            else:
+                fc["fallback_from"] = f"{drawn} unavailable: {str(err)[:120]}"
+        if fc is None:
+            # A reachability failure, unlike a missing tile, says nothing about
+            # the site -- so it is reported and NOT cached, and the other two
+            # layers still get drawn.
+            transient = True
+            fc = {**empty, "buildings_error": str(err)[:200]}
+
+        # What the site is made of BESIDES buildings. Cached with the footprints
+        # because they answer the same question -- "what will this case actually
+        # be" -- and because finding out after 66 core-hours is worse than
+        # finding out now. Neither raises: a dead raster host is a fact about
+        # today, not about the site.
+        fc["terrain"] = footprints.terrain(lat, lon)
+        fc["canopy"] = footprints.canopy(lat, lon)
+        # "unavailable" and "unknown" are facts about TODAY -- a raster host that
+        # did not answer, a library that is not there -- and caching them freezes
+        # one bad moment into "this site has no terrain and no trees" for the
+        # life of the case. Only the buildings failure used to set `transient`,
+        # so a canopy read that timed out once was served as a treeless site
+        # forever. "flat" and "none" are facts about the SITE and stay cacheable.
+        for layer in (fc["terrain"], fc["canopy"]):
+            if layer.get("source") in ("unavailable", "unknown"):
+                transient = True
+        return fc, transient
+
     @app.get("/v1/cases/{case_id}/footprints", dependencies=[ReadAuth])
     def case_footprints(case_id: str, refresh: bool = False) -> dict[str, Any]:
         """Everything this case will be meshed from: buildings, terrain, trees.
 
-        GeoJSON footprints with GlobalBuildingAtlas predicted heights, plus a
-        GEDTM30 relief grid and a Meta/WRI canopy-height grid over the mesh
-        domain. The dashboard cannot fetch any of it itself -- all three are
-        GeoParquet or Cloud-Optimized GeoTIFF on object storage, with no REST
-        API and no tile endpoint a browser could call -- so the broker runs the
-        queries.
+        GeoJSON footprints with predicted heights, plus a GEDTM30 relief grid
+        and a Meta/WRI canopy-height grid over the mesh domain. The dashboard
+        cannot fetch any of it itself -- all three are GeoParquet or
+        Cloud-Optimized GeoTIFF on object storage, with no REST API and no tile
+        endpoint a browser could call -- so the broker runs the queries.
 
-        Deliberately the SAME sources and the same bbox derivation the runner
-        uses, so the picture is the geometry that gets meshed. Drawing OSM
-        footprints or a basemap tile instead would be worse than drawing
-        nothing: it would look like a check while disagreeing with the mesh, and
-        it would disagree most exactly where checking matters.
+        The buildings come from the source THIS case's mesh was built from,
+        which :func:`footprints.mesh_source` decides: what the case's run
+        reported, Overture for a case that finished before the builder could
+        mesh GBA, and GBA otherwise. The response carries it as `mesh_source`,
+        with `mesh_source_basis` saying how it is known; `source` is what
+        actually answered, and `fallback_from` says why the two differ when
+        they do.
 
-        Cached after the first fetch; `refresh=true` forces a re-query.
+        It is deliberately the SAME sources and the same bbox derivation the
+        runner uses, so the picture is the geometry that gets meshed. Drawing
+        OSM footprints, a basemap tile, or the OTHER building source would be
+        worse than drawing nothing: it would look like a check while disagreeing
+        with the mesh, and it would disagree most exactly where checking matters.
+
+        Cached after the first fetch; `refresh=true` forces a re-query, and so
+        does a cached row written by an older build or drawn from a source this
+        case would not be drawn from now.
         """
         row = db.get_case(conn, case_id)
         if row is None:
             raise HTTPException(404, "no such case")
-        if not refresh:
+        row = dict(row)
+        metrics = row.get("metrics") or {}
+        if isinstance(metrics, str):
+            metrics = json.loads(metrics)
+        source, basis = footprints.mesh_source(row["state"], metrics,
+                                               row.get("updated_at"))
+        meshed = {"mesh_source": source, "mesh_source_basis": basis}
+
+        def cached() -> dict[str, Any] | None:
+            if refresh:
+                return None
             hit = db.get_footprints(conn, case_id)
-            if hit:
-                cached = json.loads(hit["geojson"])
-                # A payload written by an older build is a miss, not a hit. The
-                # cache is keyed on case_id alone, so without this check the
-                # first version of this endpoint answers forever -- which is how
-                # adding terrain and canopy produced a fleet of cases that
-                # reported no trees anywhere rather than re-querying once.
-                if cached.get("payload_v") == footprints.PAYLOAD_VERSION:
-                    return {**cached, "cached": True,
-                            "fetched_at": hit["fetched_at"]}
+            if not hit:
+                return None
+            fc = json.loads(hit["geojson"])
+            # A payload written by an older build is a miss, not a hit. The
+            # cache is keyed on case_id alone, so without this check the first
+            # version of this endpoint answers forever -- which is how adding
+            # terrain and canopy produced a fleet of cases that reported no
+            # trees anywhere rather than re-querying once.
+            if fc.get("payload_v") != footprints.PAYLOAD_VERSION:
+                return None
+            # Nor is a row drawn from a source this case would not be drawn from
+            # now a hit: the pre-switch Overture row of a case GBA will mesh, or
+            # a fallback taken while the real source was down. Served from the
+            # cache it would stay the wrong picture for good. Rows cached before
+            # the switch carry no `source` at all: Overture.
+            if (fc.get("source") or footprints.OVERTURE) != _drawn_from(source):
+                return None
+            return {**fc, **meshed, "cached": True,
+                    "fetched_at": hit["fetched_at"]}
+
+        if (hit := cached()) is not None:
+            return hit
         spec = row.get("spec") or {}
         if isinstance(spec, str):
             spec = json.loads(spec)
         lat, lon = spec.get("lat"), spec.get("lon")
         if lat is None or lon is None:
             raise HTTPException(422, "case spec carries no lat/lon")
-        # The three layers are fetched INDEPENDENTLY. They used to share one
-        # try/except that raised 502 on any failure, so a site the building
-        # atlas simply does not cover took the terrain and the canopy down with
-        # it and the panel showed an error instead of the answer -- when "no
-        # buildings, no land, no trees" was itself the answer, and the most
-        # useful one this endpoint can give: that case is in the ocean.
         lat, lon = float(lat), float(lon)
-        transient = False
-        # ONE preview at a time, because the memory ceilings below are per call
-        # and not per process: every layer builds its own DuckDB with its own
-        # budget and its own GDAL cache, and this endpoint is sync, so it holds a
-        # threadpool slot for the 8-15 seconds the remote reads take while the
-        # next caller starts its own everything. Two at once already asks for
-        # more than the instance has. 503 with Retry-After is the honest answer
-        # when the queue is full; the alternative is the platform killing the
-        # process, which is how this branch started.
-        try:
-            with footprints.exclusive():
-                try:
-                    # GBA is what the geometry builder now defaults to, so it is
-                    # what gets meshed, so it is what this must draw. Overture
-                    # survives as a fallback rather than being deleted -- a case
-                    # built before the switch was meshed from it -- but shelling
-                    # out to its client means a second interpreter loading
-                    # pyarrow inside a memory-capped web process, which is not a
-                    # price to pay automatically. Opt in with
-                    # CASEBROKER_OVERTURE_FALLBACK when the mirror is really down.
-                    fc = footprints.fetch_gba(lat, lon)
-                except footprints.TileNotPublished as gap:
-                    # Not an error. GBA publishes 922 tiles of a possible 2,592;
-                    # the rest are ocean and ice. An empty answer here is a fact
-                    # about the site, and is cached like any other.
-                    fc = {"type": "FeatureCollection", "features": [], "n": 0,
-                          "release": "GBA.LoD1", "source": "globalbuildingatlas",
-                          "height_kind": "predicted", "centre": [lat, lon],
-                          "half_m": footprints.HALF_M, "tile_published": False,
-                          "tile": str(gap)}
-                except Exception as gba_err:             # noqa: BLE001
-                    if footprints.OVERTURE_FALLBACK:
-                        try:
-                            fc = footprints.fetch(lat, lon)
-                            fc["source"] = "overture"
-                            fc["fallback_from"] = (
-                                f"gba unavailable: {str(gba_err)[:120]}")
-                        except Exception as ov_err:      # noqa: BLE001
-                            gba_err = ov_err
-                            fc = None
-                    else:
-                        fc = None
-                    if fc is None:
-                        # A reachability failure, unlike a missing tile, says
-                        # nothing about the site -- so it is reported and NOT
-                        # cached, and the other two layers still get drawn. An
-                        # inspector that 502s is useless exactly when someone is
-                        # trying to work out why a case looks wrong.
-                        transient = True
-                        fc = {"type": "FeatureCollection", "features": [], "n": 0,
-                              "release": "GBA.LoD1",
-                              "source": "globalbuildingatlas",
-                              "height_kind": "predicted", "centre": [lat, lon],
-                              "half_m": footprints.HALF_M,
-                              "buildings_error": str(gba_err)[:200]}
-
-                # What the site is made of BESIDES buildings. Cached with the
-                # footprints because they answer the same question -- "what will
-                # this case actually be" -- and because finding out after 66
-                # core-hours is worse than finding out now. Neither raises: a
-                # dead raster host is a fact about today, not about the site.
-                fc["terrain"] = footprints.terrain(lat, lon)
-                fc["canopy"] = footprints.canopy(lat, lon)
-                # "unavailable" and "unknown" are facts about TODAY -- a raster
-                # host that did not answer, a library that is not there -- and
-                # caching them freezes one bad moment into "this site has no
-                # terrain and no trees" for the life of the case. Only the
-                # buildings failure used to set `transient`, so a canopy read
-                # that timed out once was served as a treeless site forever.
-                # "flat" and "none" are facts about the SITE and stay cacheable.
-                for layer in (fc["terrain"], fc["canopy"]):
-                    if layer.get("source") in ("unavailable", "unknown"):
-                        transient = True
-        except footprints.GeoBusy as busy:
-            raise HTTPException(503, str(busy),
-                                headers={"Retry-After": "30"}) from busy
-        fc["payload_v"] = footprints.PAYLOAD_VERSION
-        if not transient:
-            db.put_footprints(conn, case_id, json.dumps(fc), fc["n"])
-        return {**fc, "cached": False}
+        with footprints_locks_guard:
+            lock = footprints_locks.setdefault(case_id, threading.Lock())
+        with lock:
+            # Whoever held the lock before us may have just answered this case.
+            if (hit := cached()) is not None:
+                return hit
+            # ONE preview at a time across the process, because the memory
+            # ceilings are per call and not per process: every layer builds its
+            # own DuckDB with its own budget and its own GDAL cache, and this
+            # endpoint is sync, so it holds a threadpool slot for the 8-15
+            # seconds the remote reads take while the next caller starts its own
+            # everything. Two at once already asks for more than the instance
+            # has. 503 with Retry-After is the honest answer when the queue is
+            # full; the alternative is the platform killing the process, which is
+            # how this branch started.
+            try:
+                with footprints.exclusive():
+                    fc, transient = _building_query(lat, lon, source)
+            except footprints.GeoBusy as busy:
+                raise HTTPException(503, str(busy),
+                                    headers={"Retry-After": "30"}) from busy
+            fc["payload_v"] = footprints.PAYLOAD_VERSION
+            if not transient:
+                db.put_footprints(conn, case_id, json.dumps(fc), fc["n"])
+        return {**fc, **meshed, "cached": False}
 
     @app.get("/v1/cases/{case_id}", dependencies=[ReadAuth])
     def get_case(case_id: str) -> dict[str, Any]:

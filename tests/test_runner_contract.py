@@ -179,3 +179,46 @@ def test_the_pedestrian_sample_follows_the_terrain_instead_of_one_flat_plane():
     # The old formulation, in either spelling, must not come back.
     assert "planeType       pointAndNormal" not in script
     assert "TERRAIN_ZMAX) + 1.5" not in script
+
+
+def test_the_runner_reports_which_building_source_it_meshed(tmp_path):
+    """The broker draws a finished case's inspector from the source its mesh was
+    built from, and only the runner can know that: it is in the geometry report
+    beside the STLs the run meshed. Without it, a case meshed from Overture was
+    drawn from GBA.
+
+    Runs the runner's own closing snippet -- the heredoc that prints the result
+    line -- against a report of each shape the builder writes, rather than
+    string-matching bash.
+    """
+    import json
+    import subprocess
+
+    script = (pathlib.Path(__file__).resolve().parents[1] / "runner" / "run_case.sh").read_text(
+        encoding="utf-8", errors="replace")
+    start = script.index('"$PY" - "$ARCHIVE"')
+    snippet = script[script.index("\n", start) + 1:script.index("\nPY", start)]
+    archive = tmp_path / "v2-abc.tar.gz"
+    archive.write_bytes(b"not really a tarball")
+
+    def metrics(report):
+        env = dict(os.environ, GEO_REPORT="")
+        if report is not None:
+            path = tmp_path / "v2-abc.json"
+            path.write_text(json.dumps(report), encoding="utf-8")
+            env["GEO_REPORT"] = str(path)
+        out = subprocess.run([sys.executable, "-", str(archive), "4", "321", "0", "case_000=500:1"],
+                             input=snippet, text=True, capture_output=True, env=env, check=True)
+        return json.loads(out.stdout.strip().splitlines()[-1])["metrics"]
+
+    # The builder's GBA path tags itself (benchmark/real_cities/watertight.py) ...
+    assert metrics({"height_source": "gba-lod1", "height_kind": "predicted"})["height_source"] == "gba-lod1"
+    # ... its Overture path does not, and carries tile_lod()'s provenance instead.
+    assert metrics({"height_provenance": {"tagged": 17}, "frac_measured_height": 0.015})["height_source"] == "overture"
+    # No report (STLs staged by the spec), or one showing neither: nothing, not a guess.
+    assert "height_source" not in metrics(None)
+    assert "height_source" not in metrics({"terrain_z_min": 3.5})
+    # And the rest of the result line is what it was.
+    m = metrics(None)
+    assert (m["stage"], m["ranks"], m["resumed"], m["converged"]) == ("archived", 4, False, True)
+    assert m["latest_time"] == {"case_000": "500"}

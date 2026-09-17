@@ -8,6 +8,41 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-17
+
+### Added
+- **The runner reports which building source it meshed.** `height_source` in the
+  completion metrics, read from the geometry report beside the STLs the run used:
+  the builder's `gba-lod1` tag, or `overture` for a report from its Overture path,
+  which carries `height_provenance` and no tag. A run with no report -- STLs
+  staged by the spec -- reports nothing rather than a guess.
+
+### Fixed
+- **A case is drawn from the source its mesh was built from.** The footprints
+  endpoint always tried GBA first, so a case meshed from Overture before the
+  switch was drawn from GBA the first time anyone opened it, and a row cached
+  before the switch -- Overture, with no `source` -- was served for good, pending
+  cases GBA will mesh included. It now takes the reported `height_source`,
+  Overture for a case that finished before the builder could mesh GBA
+  (2026-09-08 15:20 -04:00), and GBA otherwise; says which and how it knows
+  (`mesh_source`, `mesh_source_basis`); queries a cached row again when it came
+  from a source this case would not be drawn from now; and falls back in either
+  direction, saying so in `fallback_from`. Overture is an optional extra, so a
+  case meshed from it on an instance that will not read it is drawn from GBA and
+  labelled, rather than failing or quietly passing GBA off as the mesh's own.
+- **A rebuilt panel no longer starts a second query for an answer already on its
+  way.** Caching per case after the fetch fixed the refresh case; a panel rebuilt
+  WHILE the fetch was in flight still issued its own. A case now has one load,
+  shared by every panel showing it and counted from when it started, keyed by
+  case and state so a case that finishes while open is redrawn from its mesh's
+  source rather than from the answer taken while it was pending.
+- **A stalled GBA read times out.** duckdb 1.5.5 takes `http_timeout` in seconds
+  and the broker passed `timeout * 1000`, so 300 s became 300,000 s and a hung
+  read never fell back.
+- **The first footprints request after a deploy no longer downloads ~72 MB.** The
+  image installs duckdb's httpfs and spatial extensions at build time, instead of
+  on first use into a container filesystem every Render deploy discards.
+
 ## [0.4.0] - 2026-09-17
 
 ### Added

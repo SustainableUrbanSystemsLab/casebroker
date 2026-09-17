@@ -50,7 +50,7 @@ export WIND_WRITE_INTERVAL="${WIND_WRITE_INTERVAL:-200}"   # read by the config 
 # The geometry builder lives in the parent repo beside this submodule.
 REAL_CITIES="${REAL_CITIES:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../real_cities" 2>/dev/null && pwd)}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-GEO_REPORT=""   # set when this run builds its own geometry; empty means zGround falls back to 0
+GEO_REPORT=""   # set when this run builds its own geometry; empty means zGround falls back to 0 and no height_source is reported
 PSTORE=""       # podman's image store, only ever set on the podman path
 ENGINE_PID=""; PROGRESS_PID=""
 
@@ -973,10 +973,29 @@ with open(path, "rb") as f:
     for chunk in iter(lambda: f.read(1 << 20), b""):
         h.update(chunk)
 dirs = dict(kv.split("=", 1) for kv in times.split() if "=" in kv)
+metrics = {"stage": "archived", "runtime": runtime, "ranks": int(ranks),
+           "resumed": resumed == "1",
+           "latest_time": {d: v.rsplit(":", 1)[0] for d, v in dirs.items()},
+           "converged": all(v.endswith(":1") for v in dirs.values()) and bool(dirs)}
+# Which building source the mesh came from, read from the geometry report beside
+# the STLs this run actually meshed -- so a re-lease that reused an earlier
+# attempt's cached geometry reports THAT geometry's source. The broker draws the
+# case inspector from it; without it, a case meshed from Overture was drawn from
+# GBA. The builder tags only its GBA path ("gba-lod1", watertight.py); its
+# Overture path carries tile_lod()'s height_provenance instead. A report showing
+# neither, or no report at all (STLs staged by the spec), reports nothing rather
+# than a guess.
+try:
+    with open(os.environ.get("GEO_REPORT") or "", encoding="utf-8") as f:
+        report = json.load(f)
+except (OSError, ValueError):
+    report = {}
+if not isinstance(report, dict):
+    report = {}
+if report.get("height_source"):
+    metrics["height_source"] = report["height_source"]
+elif "height_provenance" in report:
+    metrics["height_source"] = "overture"
 print(json.dumps({"result_uri": "file://" + path, "sha256": h.hexdigest(),
-                  "bytes": os.path.getsize(path),
-                  "metrics": {"stage": "archived", "runtime": runtime, "ranks": int(ranks),
-                              "resumed": resumed == "1",
-                              "latest_time": {d: v.rsplit(":", 1)[0] for d, v in dirs.items()},
-                              "converged": all(v.endswith(":1") for v in dirs.values()) and bool(dirs)}}))
+                  "bytes": os.path.getsize(path), "metrics": metrics}))
 PY

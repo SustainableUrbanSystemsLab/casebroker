@@ -1649,11 +1649,20 @@
 
   // -- Site geometry ----------------------------------------------------------
   // Everything the mesh is built from, drawn from the broker's /footprints
-  // endpoint: GlobalBuildingAtlas footprints and per-building PREDICTED heights,
-  // GEDTM30 relief, and the Meta/WRI canopy height model -- the same three
-  // sources, at the same bbox, that the CFD runner meshes. Drawing anything
-  // else would be worse than drawing nothing: it would look like a check while
-  // disagreeing with the geometry.
+  // endpoint: building footprints and per-building heights, GEDTM30 relief, and
+  // the Meta/WRI canopy height model -- the same three sources, at the same
+  // bbox, that the CFD runner meshes. Drawing anything else would be worse than
+  // drawing nothing: it would look like a check while disagreeing with the
+  // geometry.
+  //
+  // WHICH buildings is per case, not per page. The builder meshed Overture
+  // until 2026-09-08 and GlobalBuildingAtlas after it, so the endpoint answers
+  // from the source THIS case's mesh was built from and says which
+  // (`mesh_source`, with `mesh_source_basis` for how confidently), what actually
+  // answered (`source`), and why the two differ when they do (`fallback_from`).
+  // What a height IS follows from that, and the legend must not blur it: an
+  // Overture height is a tagged measurement, a GBA height is a model prediction
+  // (DOMAIN.md: a prediction is never labelled measured).
   //
   // The split this panel exists to show has changed with the sources. Under
   // Overture it was "how many footprints carry a height at all", because most
@@ -1662,45 +1671,96 @@
   // prediction is worth -- which is why the per-building variance is drawn and
   // not just the height.
   //
-  // Cached per case for the life of the page. The case table re-renders on the
-  // 60 s auto-refresh and throws every rendered panel away; re-fetching there
-  // restarted the elapsed counter against a new t0 while the previous interval
-  // was still writing into the same element, which is why the query time
-  // appeared to jump around. The payload cannot change for pinned sources, so
-  // one fetch per case per page load is all it is worth.
-  const geoCache = new Map();
+  // One load per case, shared by every panel that shows it. The case table
+  // re-renders on the 60 s auto-refresh and on each row click, throwing every
+  // rendered panel away, and each rebuild used to start its own request and its
+  // own counter against a new t0 -- so the elapsed time visibly jumped backwards
+  // while the extra request went back to S3 for an answer already on its way.
+  //
+  // Keyed by case AND state: the source a case is drawn from follows its mesh,
+  // and a case that finishes while open may turn out to have been meshed from a
+  // different source than the one drawn while it was still pending.
+  const geoLoads = new Map();   // case_id@state -> { t0, promise, data, error }
+  const GEO_KEEP = 16;          // settled answers kept, so a re-render redraws instantly
 
-  async function loadFootprints(caseId, wrap) {
-    const hit = geoCache.get(caseId);
-    if (hit) { drawGeometry(hit, wrap); return; }
-    const t0 = Date.now();
-    wrap.innerHTML = '<span style="font-size:12px;color:var(--text-muted)">'
-      + 'querying GlobalBuildingAtlas, GEDTM30 and the canopy model… '
-      + '<span class="geoTick" style="font-family:var(--font-mono)">0.0s</span>'
-      + '<span style="display:block;margin-top:3px;font-size:11px">first look at a case reads three remote datasets and is cached after; later opens are instant</span></span>';
-    // Silence for ten seconds reads as a hang, and these are three genuine
-    // remote queries -- so it counts up. Scoped to THIS panel: two cases open at
-    // once both contain a counter, and a document-wide lookup had them writing
-    // each other's elapsed time into one element.
-    const tick = setInterval(() => {
-      const el = wrap.querySelector(".geoTick");
-      if (el) el.textContent = ((Date.now() - t0) / 1000).toFixed(1) + "s";
-      else clearInterval(tick);
-    }, 100);
-    let d;
-    try {
-      d = await api(`/v1/cases/${encodeURIComponent(caseId)}/footprints`);
-    } catch (e) {
-      clearInterval(tick);
-      wrap.innerHTML = `<span style="font-size:12px;color:var(--bad)">could not load site geometry: ${esc(e.message || e.status || e)}</span>`;
-      return;
+  function footprintsFor(caseId, state, retry) {
+    const key = `${caseId}@${state || ""}`;
+    let g = geoLoads.get(key);
+    if (g && !(retry && g.error)) return g;
+    g = { t0: performance.now(), data: null, error: null };
+    // Settles either way and never rejects: the outcome lives on `g`, where a
+    // panel rebuilt after the fact can still read it.
+    g.promise = api(`/v1/cases/${encodeURIComponent(caseId)}/footprints`).then(
+      (d) => { g.data = d; },
+      (e) => { g.error = e; });
+    geoLoads.delete(key);
+    geoLoads.set(key, g);
+    // Map order is insertion order, so this drops the oldest settled answers. An
+    // in-flight load is never dropped: some panel is still counting against it.
+    for (const [id, old] of geoLoads) {
+      if (geoLoads.size <= GEO_KEEP) break;
+      if (old.data || old.error) geoLoads.delete(id);
     }
-    clearInterval(tick);
-    geoCache.set(caseId, d);
-    drawGeometry(d, wrap);
+    return g;
   }
 
+  async function loadFootprints(caseId, state, wrap, retry) {
+    const g = footprintsFor(caseId, state, retry);
+    if (!g.data && !g.error) {
+      const secs = () => ((performance.now() - g.t0) / 1000).toFixed(1) + "s";
+      wrap.innerHTML = '<span class="geo-tick" style="font-size:12px;color:var(--text-muted)">'
+        + `querying the building atlas, GEDTM30 and the canopy model… <span style="font-family:var(--font-mono)">${secs()}</span>`
+        + '<span style="display:block;margin-top:3px;font-size:11px">the first look at a case reads three remote datasets, the buildings from the source its mesh was built from, then it is cached; later opens are instant</span></span>';
+      // Silence for ten seconds reads as a hang, and these are three genuine
+      // remote queries -- so it counts up. From when the LOAD started, not this
+      // panel: a panel rebuilt mid-query carries on from the count it replaced,
+      // and writes into its own element, never a page-wide id another panel
+      // might also be using.
+      const el = wrap.querySelector(".geo-tick span");
+      const tick = setInterval(() => {
+        if (el.isConnected) el.textContent = secs();
+        else clearInterval(tick);
+      }, 100);
+      await g.promise;
+      clearInterval(tick);
+      // Rebuilt while this was pending: the replacement panel is awaiting the
+      // same load and draws it, and this one is no longer on the page.
+      if (!wrap.isConnected) return;
+    }
+    if (g.error) {
+      // Not retried on the next refresh: a broken upstream would otherwise be
+      // queried again every minute for as long as the case stays open.
+      wrap.innerHTML = `<span style="font-size:12px;color:var(--bad)">could not load site geometry: ${esc(g.error.message || g.error.status || g.error)}</span>`
+        + ` <button class="subtle geo-load" data-case="${esc(caseId)}" data-state="${esc(state || "")}" data-auto="1">retry</button>`;
+      return;
+    }
+    drawGeometry(g.data, wrap);
+  }
+
+  // How the broker knows which source a case's mesh was built from (its
+  // mesh_source_basis): what the heading says, and the note that explains it.
+  const GEO_BASIS = {
+    reported: ["the source this case was meshed from", ""],
+    before_gba: ["the source this case was meshed from",
+      "Meshed from Overture: this case finished before the geometry builder switched to GBA on 2026-09-08."],
+    not_done: ["what the geometry builder meshes now", ""],
+    unreported: ["assumed: this case's run did not say",
+      "This case's run did not report which source it meshed, so this is GBA, the builder's default since 2026-09-08. A run on an older checkout, or one reusing an earlier attempt's geometry, would have meshed Overture instead."],
+    unrecognized: ["assumed: this case's run named a source this page cannot draw",
+      "This case's run reported a building source the broker does not recognise, so this is GBA, the builder's default."],
+  };
+
   function drawGeometry(d, wrap) {
+    const gba = d.source === "globalbuildingatlas";
+    const name = gba ? "GlobalBuildingAtlas" : "Overture";
+    // What the case's mesh was built from, and how the broker knows. A picture
+    // from the other source only happens as a fallback, and says so below.
+    const basis = GEO_BASIS[d.mesh_source_basis] || ["the source the runner meshes", ""];
+    const isMesh = !d.mesh_source || d.mesh_source === d.source;
+    const hint = wrap.parentElement && wrap.parentElement.querySelector(".geo-src");
+    if (hint) hint.textContent = isMesh
+      ? `(${name}, ${basis[0]}, with terrain and trees)`
+      : `(${name}, NOT the source this case's mesh was built from — see below)`;
     // The drawing extends to the DOMAIN, not the footprint query. The buildings
     // are queried over 520 m; the mesh box is 1304 m a side (504 m core + 800 m
     // buffer), and the buffer is most of the domain -- so a picture scaled to
@@ -1775,8 +1835,17 @@
       }
       if (h) withH++; else noH++;
     }
+    // GBA's per-building variance, the honest half of a prediction: variance 3
+    // and variance 175 are not the same claim. 25 is DOMAIN.md's n_high_variance
+    // cut, so this reads the same as the geometry report does. The standard
+    // deviation is the same number in the units the legend quotes.
     sds.sort((a, b) => a - b);
     const medSd = sds.length ? sds[Math.floor(sds.length / 2)] : null;
+    const vs = gba ? d.features.map((f) => f.properties && f.properties.v)
+      .filter((v) => v != null).sort((a, b) => a - b) : [];
+    const vMid = vs.length >> 1;
+    const vMed = !vs.length ? null : vs.length % 2 ? vs[vMid] : (vs[vMid - 1] + vs[vMid]) / 2;
+    const vHigh = vs.filter((v) => v > 25).length;
     const core = CORE_M * k, dom = DOM_M * k;
 
     // -- 45 degree isometric ------------------------------------------------
@@ -2156,7 +2225,6 @@
       if (can.source) return `<div style="color:var(--warn)">trees unavailable — <span class="mono" style="font-size:11px">${esc(can.detail || "no detail")}</span><div class="geo-note" style="margin-top:2px">A fact about the host, not the site. Not cached — reopening this case retries.</div></div>`;
       return "";
     })();
-    const gba = d.source === "globalbuildingatlas";
     // Three ways to have no buildings, and they mean completely different
     // things. No published tile is a fact about the site -- GBA covers 922
     // tiles of a possible 2,592, the rest ocean and ice -- and next to a flat
@@ -2194,7 +2262,7 @@
           <circle cx="${S/2}" cy="${S/2}" r="2.5" fill="var(--bad)"/>
         </svg>
         <svg viewBox="0 0 ${ISO} ${ISO}" width="${ISO}" height="${ISO}" role="img"
-             aria-label="Isometric view at 45 degrees over the sampled core: buildings extruded from their roofs down through the terrain to a common slab, with see-through green crown volumes for trees.">
+             aria-label="Isometric view at 45 degrees over the sampled core: buildings extruded from their roofs down through the terrain to a common slab, with see-through green crown volumes for trees. Blue blocks have ${gba ? "predicted" : "measured"} heights, grey blocks ${gba ? "have no height in GBA" : "were inferred"}.">
           ${isoGround}${iso}
         </svg>
         <svg viewBox="0 0 ${EW} ${EH}" width="${EW}" height="${EH}" role="img"
@@ -2207,12 +2275,15 @@
           ${canLine}
           <div><span class="geo-swatch" style="border:1px dashed var(--bad)"></span>${2*CORE_M} m sampled core</div>
           <div><span class="geo-swatch" style="border:1px solid var(--warn)"></span>${2*DOM_M} m mesh domain</div>
-          <div style="margin-top:6px;color:var(--text-muted)">${esc(d.release || "")}${d.cached ? " · cached" : ""}${d.truncated ? ` · truncated at ${d.n}` : ""}</div>
+          <div style="margin-top:6px;color:var(--text-muted)">${gba ? "GlobalBuildingAtlas LoD1" : `Overture ${esc(d.release || "")}`}${d.cached ? " · cached" : ""}${d.truncated ? ` · truncated at ${d.n}` : ""}</div>
+          ${d.fallback_from ? `<div class="geo-note" style="color:var(--warn)">${d.mesh_source === "overture" ? "Overture" : "GBA"} could not be drawn (${esc(d.fallback_from)}), so this is ${name}'s picture, which need not match this case's mesh.</div>` : ""}
+          ${isMesh && basis[1] ? `<div class="geo-note">${basis[1]}</div>` : ""}
           <div class="geo-note" style="margin-top:4px">Middle: isometric over the core. Heights ×${HEX}, relief ×${TEX === HEX ? HEX : TEX.toFixed(1)}, clamped at 150 m.</div>
           <div class="geo-note">Buildings and trees are both modelled over the ${2 * CORE_M} m core only; the buffer carries terrain and inlet roughness, no explicit obstacles.</div>
           <div class="geo-note">Bottom: elevation looking north across the domain, true metre scale, vertical ×${vExag.toFixed(0)}. The amber line is the ground section — solid for the highest ground in each column, dashed for the lowest, because each column spans ${2 * DOM_M} m north–south and a single line would claim a cross-section it never took.</div>
           <div class="geo-note">Buildings run from roof to a slab ${SLAB_M} m below the lowest ground, as <code class="inline">watertight.py</code> extrudes them. The elevation shows all of that; the isometric only the first ${ISO_PIERCE_M} m.</div>
           ${crowns ? `<div class="geo-note">Crowns are see-through because that is what they are in the solve — the upper 59% of each tree is a porous cellZone, f = 2·Cd·LAD, not a solid. ${crowns} crown cell${crowns === 1 ? "" : "s"} in the core.</div>` : ""}
+          ${gba && vMed != null ? `<div class="geo-note">Every one of those ${withH} heights is a model prediction, not a measurement — variance median ${vMed.toFixed(1)}, ${vHigh} above 25.</div>` : ""}
           ${atSea ? `<div class="geo-note" style="color:var(--bad)"><b>This case is not on land.</b> No building tile, no bare-earth terrain and no canopy tile, from three independent sources that disagree about almost everything else. The runner would mesh an empty flat plane here and solve it for 66 core-hours.</div>` : ""}
           <div class="geo-note">${provenance}</div>
         </div>
@@ -2221,7 +2292,7 @@
   document.addEventListener("click", (e) => {
     const btn = e.target.closest(".geo-load");
     if (!btn) return;
-    loadFootprints(btn.dataset.case, btn.parentElement);
+    loadFootprints(btn.dataset.case, btn.dataset.state, btn.parentElement, true);
   });
 
   // Expanding a case starts the fetch. It was behind a button because the query
@@ -2229,7 +2300,7 @@
   // one, and the answer is cached after the first look anyway.
   function autoLoadGeometry() {
     document.querySelectorAll(".geo-load").forEach((b) => {
-      if (!b.dataset.auto) { b.dataset.auto = "1"; loadFootprints(b.dataset.case, b.parentElement); }
+      if (!b.dataset.auto) { b.dataset.auto = "1"; loadFootprints(b.dataset.case, b.dataset.state, b.parentElement); }
     });
   }
 
@@ -2822,10 +2893,10 @@
 
         <div class="detail-card" style="margin-bottom:14px;">
           <h3>Site Geometry
-            <span class="label-hint" style="font-weight:400;">(buildings, terrain and trees — the same sources the runner meshes)</span>
+            <span class="label-hint geo-src" style="font-weight:400;">(buildings, terrain and trees — the same sources the runner meshes)</span>
           </h3>
           <div id="geoWrap-${esc(c.case_id)}" class="geo-wrap">
-            <button class="subtle geo-load" data-case="${esc(c.case_id)}"
+            <button class="subtle geo-load" data-case="${esc(c.case_id)}" data-state="${esc(c.state)}"
                     data-lat="${spec.lat ?? ""}" data-lon="${spec.lon ?? ""}">
               Show building footprints
             </button>
@@ -2891,10 +2962,14 @@
       tr.addEventListener("click", () => {
         const id = tr.dataset.id;
         openDetailId = (openDetailId === id) ? null : id;
-        if (openDetailId) setTimeout(autoLoadGeometry, 0);
         renderCasesTable(cases);
       });
     });
+    // Every render rebuilds the open case's panel, so every render re-attaches
+    // it -- to that case's one shared load, which redraws instantly once it has
+    // landed. Only a row click used to, so each auto-refresh put the bare
+    // "Show building footprints" button back over a drawing the page already had.
+    if (openDetailId) autoLoadGeometry();
   }
 
   function renderPager() {

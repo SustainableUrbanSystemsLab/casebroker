@@ -15,6 +15,12 @@ WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY casebroker ./casebroker
 RUN uv pip install --system --no-cache .
+# duckdb fetches its httpfs and spatial extensions on first use, into $HOME, and
+# on Render that is a container filesystem every deploy discards -- so the first
+# footprints request after each deploy downloaded ~72 MB before it could query
+# anything (2.3 s on a fast link). Installed here, they also match the duckdb
+# version the line above just installed.
+RUN python -c "import duckdb; duckdb.connect().execute('INSTALL httpfs; INSTALL spatial;')"
 # NO default CASEBROKER_DB, deliberately. This image previously shipped
 # `/data/campaign.sqlite` with a VOLUME, on the reasoning that a mounted volume
 # outlives a redeploy -- true on a VM, false on the platform this actually runs

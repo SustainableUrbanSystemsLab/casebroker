@@ -154,9 +154,10 @@ moved to `sampler-v3` for the gate change, while the rank salt stayed at
 What a case is **made of**, cached per case, from the **same sources the runner
 meshes**. Three layers, one payload:
 
-- **Buildings** — GlobalBuildingAtlas by default, Overture only if GBA is
-  unreachable *and* `CASEBROKER_OVERTURE_FALLBACK` is set (the response says
-  which, via `source`). Queried over 520 m: the 504 m core plus a margin.
+- **Buildings** — from the source this case's mesh was built from (below).
+  GlobalBuildingAtlas for everything the builder meshes now; Overture only for a
+  case meshed before the switch, and only where that path is available. Queried
+  over 520 m: the 504 m core plus a margin.
 - **`terrain`** — GEDTM30 relief over the whole 1304 m mesh domain, as a coarse
   grid plus min/max/relief. `source` is `gedtm30`, `flat` (genuine nodata, so
   the builder will mesh a flat plane — usually a site not on land), or
@@ -174,6 +175,32 @@ a third of the ground the solve actually sits on.
 Rendering anything merely similar — OSM, a map tile, a 10 m canopy raster, or
 the other building source — would look like a check while disagreeing with the
 mesh, and would disagree most exactly where checking matters.
+
+### Which buildings, for this case
+
+The response says all of it — `mesh_source` and `mesh_source_basis`
+(`reported`, `before_gba`, `not_done`, `unreported`, `unrecognized`) for the
+mesh, `source` for what actually answered, and `fallback_from` when the two
+differ. A cached row from a source other than the one that would be queried now
+is queried again, so a stale picture cannot outlive the reason it was drawn.
+
+**Only a finished run can say which source it meshed.** The date proves one
+direction only: a case that finished before the switch (2026-09-08 15:20 -04:00,
+parent `27dfd3a`) was meshed from Overture, but a cluster on an older checkout,
+or geometry cached by an earlier attempt, meshes Overture after it too. So the
+runner reads the geometry report beside the STLs it used — the builder tags its
+GBA path `height_source: "gba-lod1"`, and its Overture path carries
+`tile_lod()`'s `height_provenance` instead — and reports `height_source` in its
+completion metrics. A case finished after the switch without one is
+`unreported`: drawn from GBA, and labelled an assumption.
+
+**Overture is an optional extra, so its path is not always there.** It costs a
+second interpreter loading pyarrow and geopandas inside a memory-capped web
+process, which is why installing it is opt-in (`casebroker[overture]`) and
+using it needs `CASEBROKER_OVERTURE_FALLBACK`. When a case's mesh source is
+Overture and that path is unavailable, the panel draws GBA rather than nothing
+and `fallback_from` says why — a labelled substitution, which is honest, where
+an unlabelled one would be the mislabelling this document exists to prevent.
 
 Read from the Source Cooperative GeoParquet mirror, not TUM's own WFS: that
 endpoint now answers `GetFeature` with `PARAMETER_NOT_ALLOWED`, serving only
