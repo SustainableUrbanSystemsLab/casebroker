@@ -329,13 +329,46 @@ through `casebroker.__version__`. `tests/test_version.py` asserts they all agree
 and **fails if a version literal is ever pasted into a source file again**, which
 is how the three copies that used to exist got out of step in the first place.
 
-Cutting a release is therefore: bump `version` in `pyproject.toml`, move the
-`Unreleased` entries in `CHANGELOG.md` under the new number, and merge it.
+**Every change that lands on `main` moves the version.** Not "should" — CI
+fails a pull request that does not, so there is nothing to remember. One
+command does the whole bump:
+
+```bash
+python3 scripts/bump_version.py --level minor    # or --patch / --major
+```
+
+It edits the three files that have to agree — `pyproject.toml`, `uv.lock`, and
+a dated `## [x.y.z]` heading in `CHANGELOG.md` with the `Unreleased` entries
+now beneath it. Unsure which level? `--suggest` reads the conventional-commit
+subjects and tells you what they argue for:
+
+```bash
+python3 scripts/bump_version.py --suggest --since origin/main
+```
+
+That is a suggestion, not a verdict: **MAJOR** here means a break in the
+worker-facing protocol, and whether a change strands a long-lived worker is a
+judgement no commit prefix can make. Pass a higher `--level` whenever it is.
+
 **Merging the bump is the release** — `.github/workflows/release.yml` sees the
-version change on `main`, runs the suite, checks `CHANGELOG.md` actually has a
-`## [x.y.z]` heading for it, creates the tag and publishes the GitHub Release.
-A merge that does not move the version is a no-op there, which is nearly all of
-them.
+version change on `main`, runs the suite, re-checks the `CHANGELOG.md` heading,
+creates the tag and publishes the GitHub Release. Nothing else is needed.
+
+> **Why CI enforces this rather than a bot doing it after the merge.** The
+> version stalled twice. Four merges went by after `v0.2.0`; thirty-seven after
+> `v0.3.0`, seven of them features — both times with every test green, because
+> the tests compared the three *copies* of the number to each other and those
+> agreed perfectly. The first repair automated the tagging and left the bump a
+> step someone had to remember at the end of finished-feeling work, which is
+> why it failed again immediately. A step nobody is compelled to take is not a
+> process.
+>
+> And the bump has to be *in* the change rather than a commit CI pushes
+> afterwards: a commit pushed with `GITHUB_TOKEN` does not re-trigger
+> workflows, so the deploy job would never run for it — the tag would say the
+> new version while the deployed service still reported the old one, which is
+> the exact disagreement this exists to end. The version, the code and the
+> deployment land together or not at all.
 
 Tagging by hand still works and is unchanged:
 

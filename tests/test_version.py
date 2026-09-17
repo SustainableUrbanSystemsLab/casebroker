@@ -197,6 +197,153 @@ def test_nothing_is_published_without_tests_and_a_changelog_entry():
     assert "CHANGELOG.md" in wf and "no '## [$pkg]' heading" in wf
 
 
+# -- the version has to move with the work -----------------------------------
+#
+# It stalled twice. Four merges after v0.2.0; thirty-seven after v0.3.0,
+# including seven features. The first repair automated the TAGGING and left the
+# BUMP a step someone had to remember, so it stalled again straight away. These
+# pin the forcing function, because the lesson of both stalls is that a step
+# nobody is compelled to take does not get taken.
+
+import subprocess  # noqa: E402
+
+BUMP = ROOT / "scripts" / "bump_version.py"
+
+
+def _bump(*args, repo=None):
+    """Run the helper. With `repo`, run the COPY inside that scratch repo.
+
+    The script finds the project from its own __file__, so pointing only `cwd`
+    at the scratch repo would leave it editing and checking THIS one -- which is
+    exactly what the first draft of these tests did, and why they passed against
+    a working tree whose version had already moved.
+    """
+    script = (repo / "scripts" / "bump_version.py") if repo else BUMP
+    return subprocess.run([sys.executable, str(script), *args],
+                          cwd=str(repo or ROOT), capture_output=True, text=True)
+
+
+def test_the_bump_arithmetic_is_semver():
+    from importlib.util import module_from_spec, spec_from_file_location
+    spec = spec_from_file_location("bump_version", BUMP)
+    mod = module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    assert mod.bumped("0.3.0", "patch") == "0.3.1"
+    assert mod.bumped("0.3.0", "minor") == "0.4.0"
+    assert mod.bumped("0.3.0", "major") == "1.0.0"
+    # The lower components reset -- a minor bump off 1.2.9 is 1.3.0, not 1.3.9.
+    assert mod.bumped("1.2.9", "minor") == "1.3.0"
+    assert mod.bumped("1.2.9", "major") == "2.0.0"
+    # Ordering is numeric, not lexicographic: "0.10.0" > "0.9.0" only if the
+    # components are compared as integers, and that comparison is what --check
+    # uses to decide whether a branch raised the version.
+    assert mod.parts("0.10.0") > mod.parts("0.9.0")
+
+
+def test_the_suggested_level_comes_from_the_commit_subjects():
+    """This repo writes conventional commits on every change, so the level it
+    is arguing for is already written down -- nobody has to classify anything
+    a second time."""
+    from importlib.util import module_from_spec, spec_from_file_location
+    spec = spec_from_file_location("bump_version", BUMP)
+    mod = module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    assert mod.SUBJECT.match("feat(pair): a machine pairs itself").group("type") == "feat"
+    assert mod.SUBJECT.match("fix(db): a dropped connection").group("type") == "fix"
+    assert mod.SUBJECT.match("feat(lease)!: drop the old field").group("bang") == "!"
+    assert mod.SUBJECT.match("no conventional prefix here") is None
+
+    # Both comma forms this repo actually writes, and they mean different
+    # things: a comma in the SCOPE says nothing about the level, a comma in the
+    # TYPE lists several types and `feat` anywhere in it is a feature.
+    assert mod.SUBJECT.match("docs,slurm: the campaign runs from").group("type") == "docs,slurm"
+    assert mod.SUBJECT.match("fix(dashboard,healthz): the wizard").group("type") == "fix"
+    assert "feat" in mod.SUBJECT.match("feat,docs: both").group("type").split(",")
+
+
+def _scratch_repo(tmp_path, version="0.3.0", subject="feat(x): something new"):
+    """A throwaway repo whose version has NOT moved.
+
+    The script locates the project from its own path, so copying it into
+    tmp_path/scripts makes tmp_path the project -- which is the only way to
+    exercise the failure without a ref in this repo that is ahead of the
+    working tree.
+    """
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts" / "bump_version.py").write_text(
+        BUMP.read_text(encoding="utf-8"), encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        f'[project]\nname = "casebroker"\nversion = "{version}"\n', encoding="utf-8")
+    (tmp_path / "uv.lock").write_text(
+        f'[[package]]\nname = "casebroker"\nversion = "{version}"\n', encoding="utf-8")
+    (tmp_path / "CHANGELOG.md").write_text(
+        "# Changelog\n\n## [Unreleased]\n\n- something\n", encoding="utf-8")
+    run = lambda *a: subprocess.run(a, cwd=str(tmp_path), capture_output=True, text=True)
+    run("git", "init", "-q", "-b", "main")
+    run("git", "config", "user.email", "t@example.com")
+    run("git", "config", "user.name", "t")
+    run("git", "add", "-A")
+    run("git", "commit", "-q", "-m", subject)
+    return tmp_path
+
+
+def test_check_fails_when_a_branch_leaves_the_version_alone(tmp_path):
+    """The whole point: red until the version moves."""
+    repo = _scratch_repo(tmp_path)
+    r = _bump("--check", "--base", "HEAD", repo=repo)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "has to move it" in r.stdout
+    # And it says what to run, with a level, rather than only complaining.
+    assert "scripts/bump_version.py --level" in r.stdout
+
+
+def test_the_bump_makes_the_check_pass(tmp_path):
+    """End to end in a scratch repo: the command the failure recommends is the
+    command that satisfies it -- including the changelog heading, which is a
+    separate way to fail at release time."""
+    repo = _scratch_repo(tmp_path)
+    assert _bump("--check", "--base", "HEAD", repo=repo).returncode == 1
+
+    applied = _bump("--level", "minor", repo=repo)
+    assert applied.returncode == 0, applied.stdout + applied.stderr
+    assert "0.3.0 → 0.4.0" in applied.stdout
+
+    ok = _bump("--check", "--base", "HEAD", repo=repo)
+    assert ok.returncode == 0, ok.stdout + ok.stderr
+    text = (repo / "CHANGELOG.md").read_text(encoding="utf-8")
+    assert "## [0.4.0] - " in text
+    assert "## [Unreleased]" in text, "Unreleased stays, empty, for the next change"
+    assert '"0.4.0"' in (repo / "uv.lock").read_text(encoding="utf-8"), \
+        "uv.lock is a third copy of the number and has to move with the others"
+
+
+def test_check_passes_once_the_version_has_risen():
+    """Against the tag this release is built on, the working tree must already
+    satisfy the rule this commit introduces."""
+    r = _bump("--check", "--base", "v0.3.0")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "version rises" in r.stdout
+
+
+def test_check_also_demands_the_changelog_heading():
+    """Caught in the pull request, not at release time -- where the failure
+    would be a merged change that cannot be published."""
+    src = BUMP.read_text(encoding="utf-8")
+    assert 'f"## [{head}]" not in CHANGELOG' in src
+    assert "release.yml will refuse to publish" in src
+
+
+def test_ci_runs_the_check_on_every_pull_request():
+    """A gate that does not run is not a gate."""
+    wf = (ROOT / ".github" / "workflows" / "test.yml").read_text(encoding="utf-8")
+    assert "bump_version.py --check" in wf
+    job = wf.split("  version:", 1)[1].split("\n  sqlite:", 1)[0]
+    assert "pull_request" in job, "the check has to run on PRs, where it can block"
+    assert "fetch-depth: 0" in job, "comparing against the base needs its history"
+
+
 def test_status_identifies_the_broker_without_needing_healthz(client):
     """The dashboard must not need a second request to name what it connected to.
 

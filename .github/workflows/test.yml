@@ -29,6 +29,26 @@ on:
   workflow_dispatch:
 
 jobs:
+  # The version stalled twice: four merges after v0.2.0, then thirty-seven after
+  # v0.3.0 including seven features, both times with every test green. Tagging
+  # was automated after the first stall and the BUMP was left as a step someone
+  # had to remember -- which is why it stalled again immediately. A step nobody
+  # is forced to take is not a process. This is the forcing function.
+  version:
+    name: the version moves with the change
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # the base branch is read, so shallow will not do
+      - name: The version has to rise
+        env:
+          BASE: ${{ github.base_ref }}
+        run: |
+          git fetch --no-tags origin "$BASE:refs/remotes/origin/$BASE"
+          python3 scripts/bump_version.py --check --base "origin/$BASE"
+
   sqlite:
     name: sqlite (no external dependency)
     runs-on: ubuntu-latest
