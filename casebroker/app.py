@@ -634,6 +634,24 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         # that made `casebroker health` exit non-zero -- its documented use as a
         # deploy gate -- against a broker that was properly locked down.
         db_ok, has_accounts = _db_state()
+        # Every database touch on this endpoint has to fail SOFT -- the same rule
+        # _db_state() above states, and the same bug one line further out.
+        # _is_authenticated resolves a session cookie through db.session_user and
+        # ANY bearer token through db.worker_token_owner (the env token included,
+        # because revocation is checked against the database), so during an
+        # outage a CREDENTIALLED /healthz raised where an anonymous one answered
+        # db_ok: false. The dashboard's session cookie is scoped to "/", which
+        # made the operator signed in to diagnose the outage the one caller who
+        # could not see it: the wizard said "Waiting for the broker to answer
+        # /healthz." instead of "cannot reach its database". A container
+        # HEALTHCHECK carrying a credential would have restart-looped a broker
+        # that was itself fine, which is what db_ok exists to prevent.
+        try:
+            authed = _is_authenticated(request)
+        except Exception:                                    # noqa: BLE001
+            # Failing CLOSED: the only field this gates is the DSN summary, so a
+            # credential that cannot be resolved must hide it, never expose it.
+            authed = False
         if tokens or readonly_tokens:
             posture = "token"
         elif has_accounts:
@@ -672,7 +690,7 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
                 # is the part a health check actually needs, and it stays
                 # public; the key stays present-but-null so a client reading it
                 # by name does not break.
-                "db": _redact_db_target(db_path) if _is_authenticated(request) else None}
+                "db": _redact_db_target(db_path) if authed else None}
 
 
     @app.get("/v1/share-token", dependencies=[WriteAuth])

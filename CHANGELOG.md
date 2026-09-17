@@ -160,6 +160,42 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
   0.95x.
 
 ### Fixed
+- **The setup wizard blamed the database for a `/healthz` nobody was waiting
+  for.** Reported from a live dashboard reading "Step 1 of 5 — 2 done" with
+  Database stuck on "Waiting for the broker to answer /healthz." while the
+  broker was healthy and the connection pill said `connected`. `lastHealth` was
+  assigned in `refresh()` but the wizard was redrawn only at the very end of it,
+  after `/v1/status`, `loadCases()` and `checkFinished()` — and not at all from
+  the catch. So three different things all printed the same sentence: a probe
+  still in flight, a probe that had answered while a later request was slow, and
+  a `/healthz` that had failed outright. Two of the three never cleared, and with
+  auto-refresh off neither did the first.
+
+  `checkHealth()` now owns the state — it is the only writer of `lastHealth`,
+  it records `pending`/`ok`/`failed` separately (null meant both "not asked" and
+  "asked and failed"), it shares one in-flight promise so the page's two
+  load-time probes cost one request instead of two serialised ones, and it
+  redraws the wizard as soon as the answer lands. `refresh()` redraws from its
+  `finally`, so every exit including the error path leaves the wizard current.
+  A failed `/healthz` no longer undoes a finished step either: `/v1/status` is
+  the dashboard's data path (AGENTS.md) and is DB-backed, so a broker that
+  answered it has demonstrably reached its database, and the step says which
+  check failed instead of "Nothing to do here". `loadAuthState()` now gates the
+  first `refresh()`, which stops a signed-in operator landing on "auth required"
+  with an empty campaign until the next tick.
+- **A credentialled `/healthz` raised during a database outage instead of
+  answering `db_ok: false`.** `_db_state()` was already careful to fail soft, but
+  the DSN summary is gated on `_is_authenticated()`, which resolves a session
+  cookie through `db.session_user` and *any* bearer token through
+  `db.worker_token_owner` — both database reads, neither guarded. An anonymous
+  probe therefore reported the outage correctly while the dashboard's own
+  request (its session cookie is scoped to `/`) got a 500: the operator who had
+  signed in to diagnose the outage was the one caller who could not see it. A
+  container HEALTHCHECK carrying a token would have restart-looped a broker
+  whose only problem was its database, which is the confusion `db_ok` exists to
+  remove. It now fails closed — the credential is unreadable, so the DSN stays
+  hidden — and `test_healthz_survives_a_credential_it_cannot_resolve_during_an_outage`
+  covers the anonymous, bearer and cookie callers together.
 - **A case held for 7 days is released, however healthy the heartbeats look.**
   `lease_expires` answers "did a worker speak recently", and heartbeat pushed it
   forward indefinitely — so a worker that *dies* was caught within the TTL, but

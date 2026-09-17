@@ -576,6 +576,82 @@ def test_healthz_reports_database_reachability_separately_from_liveness(tmp_path
         assert body["ok"] is True
 
 
+def test_healthz_survives_a_credential_it_cannot_resolve_during_an_outage(tmp_path):
+    """A CREDENTIALLED /healthz must answer `db_ok: false` too, never raise.
+
+    `_db_state()` already fails soft, but the DSN summary is gated on
+    `_is_authenticated()`, which resolves a session cookie through
+    `db.session_user` and ANY bearer token through `db.worker_token_owner` --
+    both database reads. So an anonymous /healthz reported the outage correctly
+    while a credentialled one raised, and the dashboard sends its session cookie
+    on every request (it is scoped to "/"). The operator signed in to diagnose
+    the outage was the one caller who could not see it: their wizard said
+    "Waiting for the broker to answer /healthz." instead of naming the database.
+    A container HEALTHCHECK carrying a token would have restart-looped a broker
+    whose only problem was its database, which is what `db_ok` exists to prevent.
+    """
+    import casebroker.db as dbmod
+    from fastapi.testclient import TestClient
+
+    from casebroker.app import create_app
+
+    real_connect = dbmod.connect
+
+    class DiesAfterSetup:
+        """Real connection while the app starts, dead for every statement after.
+
+        Not keyed on one SQL string, unlike the liveness stub above: the point
+        here is an outage that takes the session and token lookups down as well,
+        which is what a dropped Postgres connection actually does.
+        """
+
+        def __init__(self, inner):
+            self._inner = inner
+            self.down = False
+
+        def execute(self, sql, params=()):
+            if self.down:
+                raise RuntimeError("server closed the connection unexpectedly")
+            return self._inner.execute(sql, params)
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+    opened: list = []
+
+    def _tracking_connect(target):
+        conn = DiesAfterSetup(real_connect(target))
+        opened.append(conn)
+        return conn
+
+    dbmod.connect = _tracking_connect
+    try:
+        app = create_app(str(tmp_path / "outage.sqlite"), ["w"], ["r"])
+    finally:
+        dbmod.connect = real_connect
+
+    with TestClient(app) as c:
+        for conn in opened:
+            conn.down = True
+        callers = {
+            "anonymous": {"Authorization": ""},
+            # The env write token still goes through _machine_principal first,
+            # because revocation of a per-machine token is checked against the
+            # database rather than against a cached list.
+            "bearer token": {"Authorization": "Bearer w"},
+            "session cookie": {"Cookie": "wsb_session=not-a-real-session"},
+        }
+        for label, headers in callers.items():
+            res = c.get("/healthz", headers=headers)
+            assert res.status_code == 200, f"{label} /healthz answered {res.status_code}"
+            body = res.json()
+            assert body["ok"] is True, label
+            assert body["db_ok"] is False, f"{label} could not see the outage"
+            assert body["db"] is None, (
+                "a credential the broker cannot resolve must not open the DSN summary"
+            )
+
+
 def test_healthz_never_discloses_why_the_database_is_unreachable(tmp_path):
     """The probe is unauthenticated, so the failure REASON must not leak.
 

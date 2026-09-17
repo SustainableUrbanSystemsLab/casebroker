@@ -2405,24 +2405,61 @@
     }
   }
 
+  // The last /healthz payload, or null. Declared beside the probe that fills
+  // it rather than with the other wizard inputs: everything below depends on it
+  // being assigned in exactly one place.
+  let lastHealth = null;
+  // null is TWO states -- "not asked yet" and "asked, and it failed" -- and the
+  // wizard printed "Waiting for the broker to answer /healthz." for both. A
+  // /healthz a proxy or an extension was blocking therefore read as one that was
+  // merely slow, and pointed an operator at their database while the rest of the
+  // page worked fine.
+  let healthProbe = "none";        // none | pending | ok | failed
+  let healthFailure = "";          // why the last probe failed, for the wizard
+  // One probe in flight at a time. Page load asks twice -- once for the badge,
+  // once from refresh() -- and the browser's HTTP cache serialises two identical
+  // GETs, so the second answered a full round trip late and the wizard waited on
+  // it. Sharing the promise makes the second caller free.
+  let healthInFlight = null;
+
   // Check health without throwing 401
   async function checkHealth() {
+    if (healthInFlight) return healthInFlight;
     const base = $("broker").value.replace(/\/+$/, "");
-    try {
-      const res = await fetch(base + "/healthz");
-      if (res.ok) {
-        const h = await res.json();
-        // The version is whatever the RUNNING service reports, never a
-        // constant baked into this page -- that is the whole point of the
-        // single source of truth in pyproject.toml. Older brokers predate the
-        // field, so it is shown only when present rather than as "undefined".
-        setBadge(h);
-        return h;
+    healthProbe = "pending";
+    healthFailure = "";
+    healthInFlight = (async () => {
+      try {
+        const res = await fetch(base + "/healthz");
+        if (res.ok) {
+          const h = await res.json();
+          // The version is whatever the RUNNING service reports, never a
+          // constant baked into this page -- that is the whole point of the
+          // single source of truth in pyproject.toml. Older brokers predate the
+          // field, so it is shown only when present rather than as "undefined".
+          setBadge(h);
+          lastHealth = h;
+          healthProbe = "ok";
+          return h;
+        }
+        healthFailure = "HTTP " + res.status;
+      } catch (e) {
+        // Server unreachable
+        healthFailure = (e && e.message) || "network error";
       }
-    } catch (e) {
-      // Server unreachable
+      lastHealth = null;
+      healthProbe = "failed";
+      return null;
+    })();
+    try {
+      return await healthInFlight;
+    } finally {
+      healthInFlight = null;
+      // The wizard judges its first step from this, and nothing else redraws it
+      // until refresh() has finished several more requests. Telling it here is
+      // what makes the answer land as soon as it is known.
+      renderWizard();
     }
-    return null;
   }
 
   // Fed by whichever payload arrived -- /healthz or the authenticated
@@ -3007,16 +3044,22 @@
   // with no accounts offers SETUP (that endpoint closes itself after the first
   // one), otherwise LOGIN, and a signed-in operator gets the machine list.
   let authState = null;
-  // What the wizard judges each step from. null means "not looked yet", which
-  // is a different thing from zero and is rendered differently.
-  let lastHealth = null;
+  // Same distinction as healthProbe above: a request still in flight is not a
+  // request that failed, and step 2 announced "Could not read /v1/auth/state."
+  // while it was merely pending.
+  let authProbe = "pending";       // pending | ok | failed
+  // What the wizard judges the rest of its steps from. null means "not looked
+  // yet", which is a different thing from zero and is rendered differently.
   let lastStatus = null;
   let machineCount = null;
 
   async function loadAuthState() {
+    authProbe = "pending";
     try {
       authState = await api("/v1/auth/state");
+      authProbe = "ok";
     } catch (e) {
+      authProbe = "failed";
       $("authPanel").style.display = "none";
       renderWizard();
       return;
@@ -3459,22 +3502,42 @@
     return [
       {
         title: "Database",
-        done: !!(h && h.ok && h.db_ok !== false),
-        note: !h ? "Waiting for the broker to answer /healthz."
-            : h.db_ok === false
-              ? "The broker is running but cannot reach its database."
-              : target ? '<span class="wiz-db">' + esc(target) + "</span>"
-              : "Reachable. Which database is behind it needs a credential to see: "
-                + "/healthz deliberately tells an anonymous caller less than it "
-                + "tells an operator.",
-        hint: "Nothing to do here. Every table and index is created on the first "
-            + "connection, and a database from an earlier release is brought "
-            + "forward at the same moment.",
+        // /v1/status is the dashboard's data path, not /healthz (AGENTS.md), and
+        // it is DB-backed: a broker that answered it HAS reached its database.
+        // So one failed /healthz no longer undoes a finished step -- that
+        // regression flipped this back to "waiting" while the connection pill
+        // still read "connected" and nothing on the page reported an error.
+        done: !!(h && h.ok && h.db_ok !== false) || (!h && !!lastStatus),
+        note: h
+            ? (h.db_ok === false
+                ? "The broker is running but cannot reach its database."
+                : target ? '<span class="wiz-db">' + esc(target) + "</span>"
+                : "Reachable. Which database is behind it needs a credential to see: "
+                  + "/healthz deliberately tells an anonymous caller less than it "
+                  + "tells an operator.")
+            : healthProbe !== "failed"
+              ? "Waiting for the broker to answer /healthz."
+              : lastStatus
+                ? "/healthz did not answer (" + esc(healthFailure) + "), but "
+                  + "/v1/status did \u2014 so the broker is reaching its database."
+                : "/healthz did not answer (" + esc(healthFailure) + ").",
+        // "Nothing to do here" is true about the SCHEMA and false about the
+        // situation whenever the step is open for a reason: a database the
+        // broker cannot reach, or a check that never came back.
+        hint: healthProbe === "failed"
+            ? "Look for /healthz in the browser's Network tab. One path blocked "
+              + "by a proxy or an extension leaves the rest of the page working."
+            : (h && h.db_ok === false)
+              ? ""
+              : "Nothing to do here. Every table and index is created on the first "
+                + "connection, and a database from an earlier release is brought "
+                + "forward at the same moment.",
       },
       {
         title: "Admin account",
         done: !!(authState && !authState.needs_setup),
-        note: !authState ? "Could not read /v1/auth/state."
+        note: !authState
+            ? (authProbe === "failed" ? "Could not read /v1/auth/state." : "Checking\u2026")
             : authState.needs_setup
               ? "None yet. The first account created below becomes the admin, and "
                 + "that form then closes for good."
@@ -3573,7 +3636,6 @@
     try {
       // First, check unauthenticated healthz to see server state & DB
       const health = await checkHealth();
-      lastHealth = health;
       const token = $("token").value.trim();
 
       // If the server requires SOME credential and this visitor has none.
@@ -3595,7 +3657,6 @@
         $("focusTokenBtn").textContent = accounts ? "Sign in \u2192" : "Enter Token \u2192";
         $("statusEmpty").textContent = how + " to view live campaign data.";
         $("casesEmpty").textContent = how + " to browse cases.";
-        renderWizard();
         return;
       }
 
@@ -3624,7 +3685,6 @@
       renderStatus(st);
       await loadCases();
       await checkFinished(st.by_state?.["done"] ?? null);
-      renderWizard();
       nextRefreshSeconds = 60;
     } catch (e) {
       // On error, re-show the connect form so the user can fix credentials
@@ -3640,6 +3700,12 @@
       }
     } finally {
       if (refreshIcon) refreshIcon.classList.remove("spin");
+      // Every exit renders, including the catch. The catch used to leave the
+      // wizard on whatever had been drawn before /healthz answered, so a 401
+      // from /v1/status left step 1 saying "Waiting for the broker to answer
+      // /healthz." beside a pill reading "unauthorized (401)" -- and with
+      // auto-refresh off it never cleared.
+      renderWizard();
     }
   }
 
@@ -3845,7 +3911,11 @@
   $("logoutBtn").addEventListener("click", doLogout);
   $("issueBtn").addEventListener("click", issueMachine);
   $("addUserBtn").addEventListener("click", addUser);
-  loadAuthState();
+  // refresh() needs authState to tell a signed-in operator from a visitor with
+  // no credential at all. Racing the two meant a /healthz that answered first
+  // sent a signed-in operator down the "auth required" branch and left the
+  // campaign empty until the next tick -- 60 s, or never with auto-refresh off.
+  const authReady = loadAuthState();
 
   $("autoRefresh").addEventListener("change", (e) => {
     localStorage.setItem(LS_AUTO, e.target.checked ? "1" : "0");
@@ -3959,7 +4029,7 @@
   // running version invisible, which is exactly what happened.
   checkHealth();
   if (localStorage.getItem(LS_TOK) !== null || $("broker").value) {
-    refresh();
+    authReady.catch(() => {}).then(refresh);
   }
 })();
 </script>
