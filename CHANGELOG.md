@@ -9,6 +9,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 ## [Unreleased]
 
 ### Added
+- **Trees are modelled over the core, matching the buildings.** Crowns were
+  built across the full 1300 m box while buildings stop at 504 m
+  (`watertight.build_pair` clips with `gba.massing(lat, lon, 504.0)`; the 520
+  elsewhere is only a download margin). `canopy_zones.DOMAIN_HALF_M` is now 504,
+  and the preview follows: `footprints.canopy()` spans the core, the elevation
+  maps canopy by world coordinate rather than index fraction (which would have
+  stretched the core's trees across the whole width), and the caption states
+  both extents. The buffer is terrain and inlet roughness only — `z0_by_direction`
+  already represents upwind surface as a roughness length, so buffer vegetation
+  was in spirit counted twice. `PAYLOAD_VERSION` → 5.
 - **The preview names the vegetation class and its drag.** The canopy payload
   now carries `vegetation` — label, LAD, Cd and `f = 2·Cd·LAD` — and the legend
   shows it. There is exactly ONE class per case and it is chosen by **latitude

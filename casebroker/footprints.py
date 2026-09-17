@@ -55,6 +55,12 @@ HALF_M = 520.0          # what the runner requests for BUILDINGS: 504 m core + m
 # building box, because the buffer is most of what gets meshed and a raster
 # cropped to the buildings would show a third of the ground the solve sees.
 DOMAIN_HALF_M = 1304.0
+# The sampled core. Buildings are clipped to this by watertight.build_pair
+# (gba.massing(lat, lon, 504.0) -- the 520 above is only a download margin), and
+# canopy_zones now builds crowns over the same extent rather than the whole box.
+# Terrain stays at DOMAIN_HALF_M: the buffer is still meshed ground, it just
+# carries no explicit obstacles.
+CORE_HALF_M = 504.0
 
 
 # -- Ceilings ---------------------------------------------------------------
@@ -205,11 +211,12 @@ MAX_BUILDINGS = 20_000
 # every case anyone had already opened keep answering with neither, which looks
 # exactly like a site with no trees rather than a stale cache. A hit stamped
 # with anything other than the current value is treated as a miss.
+# 5: canopy spans the 504 m core now, not the 1304 m domain.
 # 4: the canopy payload gained `vegetation`, so cached ones lack it.
 # 3: any payload cached while a raster host was unreachable carries
 # "unavailable" for terrain and canopy, and until this version those were
 # cached like real answers. Bumping re-fetches every case exactly once.
-PAYLOAD_VERSION = 4
+PAYLOAD_VERSION = 5
 
 
 class TileNotPublished(Exception):
@@ -561,12 +568,14 @@ def vegetation_class(lat: float) -> dict[str, Any]:
     return out
 
 
-def canopy(lat: float, lon: float, half_m: float = DOMAIN_HALF_M,
-           n: int = 64) -> dict:
+def canopy(lat: float, lon: float, half_m: float = CORE_HALF_M,
+           n: int = 48) -> dict:
     """Where the trees are on this site, and how tall, over the mesh domain.
 
     ``grid`` is ``n*n`` canopy heights in whole metres, row-major from the
-    north-west corner, 0 where there is none. The runner turns this field into
+    north-west corner, 0 where there is none, over the SAMPLED CORE -- the same
+    extent the buildings are clipped to, because that is where crowns are
+    actually meshed. The buffer is terrain and inlet roughness only. The runner turns this field into
     crown volumes (upper 59% of the tree, 4 m columns) and meshes them as a
     ``canopy`` cellZone carrying ``f = 2*Cd*LAD``; it is a POROUS obstacle, not
     an STL solid, which is why a preview shows a field and not blocks.
