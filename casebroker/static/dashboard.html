@@ -1888,6 +1888,9 @@
           const hgt = can.grid[r * cn + c] || 0;
           if (hgt < 2) continue;
           const x = -chalf + (c + 0.5) * cstep, y = chalf - (r + 0.5) * cstep;
+          // A no-op now that canopy spans exactly the core, and kept for that
+          // reason: it costs nothing and it is what stops a wider canopy grid
+          // from quietly drawing crowns into the buffer if the extent changes.
           if (Math.abs(x) > CORE_M || Math.abs(y) > CORE_M) continue;
           crowns++;
           const s = cstep * 0.5;
@@ -1969,16 +1972,23 @@
       }
     }
     if (hasCan) {
+      // Mapped by WORLD COORDINATE, not by index fraction. srcSpan divides one
+      // grid's indices across the elevation's columns, which is only correct
+      // when the two cover the same ground -- and canopy no longer does: crowns
+      // are built over the 1008 m core (matching the buildings) while this axis
+      // spans the full 2608 m domain. Index mapping would have stretched the
+      // core's trees across the whole width, putting a forest in the buffer
+      // that the mesh does not contain.
       const cn = can.n, chalf = can.half_m || DOM_M, cstep = 2 * chalf / cn;
-      for (let i = 0; i < NCOL; i++) {
-        const [c0, c1] = srcSpan(i, cn);
-        for (let c = c0; c < c1; c++) {
-          for (let r = 0; r < cn; r++) {
-            const hgt = can.grid[r * cn + c] || 0;
-            if (hgt < 2) continue;
-            const x = -chalf + (c + 0.5) * cstep, y = chalf - (r + 0.5) * cstep;
-            canTop[i] = Math.max(canTop[i], zAt(x, y) + hgt);
-          }
+      for (let c = 0; c < cn; c++) {
+        const x = -chalf + (c + 0.5) * cstep;
+        const i = Math.floor((x + DOM_M) / (2 * DOM_M) * NCOL);
+        if (i < 0 || i >= NCOL) continue;
+        for (let r = 0; r < cn; r++) {
+          const hgt = can.grid[r * cn + c] || 0;
+          if (hgt < 2) continue;
+          const y = chalf - (r + 0.5) * cstep;
+          canTop[i] = Math.max(canTop[i], zAt(x, y) + hgt);
         }
       }
     }
@@ -2195,6 +2205,7 @@
           <div><span class="geo-swatch" style="border:1px solid var(--warn)"></span>${2*DOM_M} m mesh domain</div>
           <div style="margin-top:6px;color:var(--text-muted)">${esc(d.release || "")}${d.cached ? " · cached" : ""}${d.truncated ? ` · truncated at ${d.n}` : ""}</div>
           <div class="geo-note" style="margin-top:4px">Middle: isometric over the core. Heights ×${HEX}, relief ×${TEX === HEX ? HEX : TEX.toFixed(1)}, clamped at 150 m.</div>
+          <div class="geo-note">Buildings and trees are both modelled over the ${2 * CORE_M} m core only; the buffer carries terrain and inlet roughness, no explicit obstacles.</div>
           <div class="geo-note">Bottom: elevation looking north across the domain, true metre scale, vertical ×${vExag.toFixed(0)}. The amber line is the ground section — solid for the highest ground in each column, dashed for the lowest, because each column spans ${2 * DOM_M} m north–south and a single line would claim a cross-section it never took.</div>
           <div class="geo-note">Buildings run from roof to a slab ${SLAB_M} m below the lowest ground, as <code class="inline">watertight.py</code> extrudes them. The elevation shows all of that; the isometric only the first ${ISO_PIERCE_M} m.</div>
           ${crowns ? `<div class="geo-note">Crowns are see-through because that is what they are in the solve — the upper 59% of each tree is a porous cellZone, f = 2·Cd·LAD, not a solid. ${crowns} crown cell${crowns === 1 ? "" : "s"} in the core.</div>` : ""}

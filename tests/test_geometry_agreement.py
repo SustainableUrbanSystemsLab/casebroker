@@ -119,3 +119,32 @@ def test_f_is_twice_cd_times_lad():
     for lat in (1.0, 33.0, 60.0):
         g = v(lat)
         assert g["f_per_m"] == round(2 * g["cd"] * g["lad"], 4)
+
+
+def test_trees_are_modelled_over_the_same_extent_as_buildings():
+    """canopy_zones.DOMAIN_HALF_M, which is now the core rather than the box.
+
+    watertight.build_pair clips buildings with gba.massing(lat, lon, 504.0) --
+    the 520 elsewhere is only a download margin -- and crowns are now built over
+    that same 504. The buffer is meshed ground carrying inlet roughness, and no
+    explicit obstacles.
+    """
+    assert footprints.CORE_HALF_M == 504.0
+
+
+def test_canopy_defaults_to_the_core_not_the_domain():
+    """A preview drawn over the wrong extent is the failure the panel exists to
+    prevent: it would show a forest in the buffer that the mesh does not have."""
+    import inspect
+
+    sig = inspect.signature(footprints.canopy)
+    assert sig.parameters["half_m"].default == footprints.CORE_HALF_M
+
+
+def test_terrain_still_spans_the_whole_domain():
+    """Only the OBSTACLES moved. The buffer is still ground the solve sits on."""
+    import inspect
+
+    sig = inspect.signature(footprints.terrain)
+    assert sig.parameters["half_m"].default == footprints.DOMAIN_HALF_M
+    assert footprints.DOMAIN_HALF_M > footprints.CORE_HALF_M
