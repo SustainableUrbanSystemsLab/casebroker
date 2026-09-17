@@ -25,6 +25,7 @@ import hmac
 import json
 import contextlib
 import os
+import secrets
 import threading
 import time
 import pathlib
@@ -85,6 +86,22 @@ class SetupIn(BaseModel):
 class LoginIn(BaseModel):
     username: str = Field(min_length=1, max_length=64)
     password: str = Field(min_length=1, max_length=256)
+
+
+class PairStartIn(BaseModel):
+    # Arrives from a machine nobody has authenticated yet, and ends up in an
+    # admin's browser -- so it is a strict charset, not "any 64 characters" like
+    # the admin-typed WorkerTokenIn below. It is also the worker id the machine
+    # will lease under, and ids are hostnames and cluster prefixes, never prose.
+    name: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+    # SHA-256 of a token the NODE generated. The raw token never comes here.
+    token_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    host: str | None = Field(default=None, max_length=128)
+    platform: str | None = Field(default=None, max_length=64)
+
+
+class PairPollIn(BaseModel):
+    user_code: str = Field(min_length=4, max_length=16)
 
 
 class WorkerTokenIn(BaseModel):
@@ -953,6 +970,122 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         box is this, and is it still alive?
         """
         return {"tokens": db.list_worker_tokens(conn)}
+
+    # -- pairing: a machine asks, an admin approves in the browser ---------------
+    #
+    # What `E3D --setup-simulation-node` talks to. The old enrolment needed an
+    # admin to type their PASSWORD on every simulation node, which is the wrong
+    # place for it: those are shared cluster logins and lab boxes. Here the node
+    # shows a short code and opens the dashboard; whoever is already signed in as
+    # an admin confirms the code matches and clicks Approve. Nothing secret is
+    # ever typed on the node.
+    #
+    # The node generates its own token and sends only the hash (see the pairings
+    # table in db.py), so approval is a row insert and there is no moment at
+    # which the broker holds a readable credential.
+    _PAIR_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"     # no 0/O, 1/I
+    _pair_starts: dict[str, list[float]] = {}
+    PAIR_START_WINDOW = 600.0
+    PAIR_START_LIMIT = 10
+
+    def _norm_code(code: str) -> str:
+        return "".join(ch for ch in code.upper() if ch.isalnum())
+
+    def _show_code(code: str) -> str:
+        return code[:4] + "-" + code[4:]
+
+    @app.post("/v1/pair/start")
+    def pair_start(body: PairStartIn, request: Request) -> dict[str, Any]:
+        """Ask to join. Unauthenticated by necessity -- the machine has nothing to
+        authenticate with yet -- so it is throttled per address and the queue is
+        bounded, and the only thing it can cause is a card in an admin's browser.
+        """
+        addr = _client_addr(request)
+        now_m = time.monotonic()
+        with _login_lock:
+            recent = [t for t in _pair_starts.get(addr, []) if now_m - t < PAIR_START_WINDOW]
+            if len(recent) >= PAIR_START_LIMIT:
+                _pair_starts[addr] = recent
+                raise HTTPException(429, "too many pairing requests from this address; "
+                                         "wait a few minutes")
+            _pair_starts[addr] = recent + [now_m]
+            if len(_pair_starts) > 4096:
+                _pair_starts.pop(min(_pair_starts, key=lambda k: _pair_starts[k][-1]), None)
+
+        last: Exception | None = None
+        for _ in range(5):                  # a user_code collision is a retry, not an error
+            code = "".join(secrets.choice(_PAIR_ALPHABET) for _ in range(8))
+            try:
+                made = db.create_pairing(conn, code, body.name, body.token_hash,
+                                         host=body.host, platform=body.platform,
+                                         requested_ip=addr)
+                break
+            except ValueError as e:
+                reason = str(e)
+                if reason == "name-in-use":
+                    raise HTTPException(
+                        409, f"{body.name!r} already has a live credential. Revoke it in "
+                             "the dashboard (Settings > Machines) first, or pick another "
+                             "name with --name.") from e
+                if reason == "token-in-use":
+                    raise HTTPException(409, "that token is already registered; "
+                                             "generate a new one") from e
+                raise HTTPException(429, "too many machines are waiting for approval; "
+                                         "ask an admin to clear the queue") from e
+            except Exception as e:          # noqa: BLE001 -- UNIQUE(user_code)
+                last = e
+        else:
+            raise HTTPException(503, "could not allocate a pairing code") from last
+
+        scheme = "https" if _is_https(request) else "http"
+        host = request.headers.get("host") or request.url.netloc
+        return {"user_code": _show_code(code),
+                "verification_url": f"{scheme}://{host}/?pair={_show_code(code)}",
+                "expires_in": made["expires_at"] - int(time.time()),
+                "interval": 3}
+
+    @app.post("/v1/pair/poll")
+    def pair_poll(body: PairPollIn, request: Request) -> dict[str, Any]:
+        """Has it been approved yet? Proven by presenting the token itself: only
+        the machine that started this pairing can produce a token with this hash.
+        An unknown code and a wrong token get the same 404, so the endpoint cannot
+        be used to find out which codes are live.
+        """
+        supplied = _supplied_token(request)
+        row = db.get_pairing(conn, _norm_code(body.user_code))
+        if (not supplied or row is None
+                or not _ct_eq(auth.hash_token(supplied), row["token_hash"])):
+            raise HTTPException(404, "no such pairing")
+        out: dict[str, Any] = {"status": row["status"], "name": row["name"]}
+        if row["status"] == "pending":
+            out["expires_in"] = max(0, row["expires_at"] - int(time.time()))
+        return out
+
+    @app.get("/v1/pair/pending")
+    def pair_pending(user=AdminAuth) -> dict[str, Any]:
+        rows = db.list_pending_pairings(conn)
+        for r in rows:
+            r["user_code"] = _show_code(r["user_code"])
+        return {"pending": rows}
+
+    def _resolve(user_code: str, approve: bool, user) -> dict[str, Any]:
+        status = db.resolve_pairing(conn, _norm_code(user_code), approve, user["username"])
+        if status == "missing":
+            raise HTTPException(404, "no such pairing request")
+        if status == "expired":
+            raise HTTPException(410, "that request expired; run the setup on the machine again")
+        if status == "conflict":
+            raise HTTPException(409, "that name or token was claimed by another credential "
+                                     "in the meantime; run the setup on the machine again")
+        return {"status": status}
+
+    @app.post("/v1/pair/{user_code}/approve")
+    def pair_approve(user_code: str, user=AdminAuth) -> dict[str, Any]:
+        return _resolve(user_code, True, user)
+
+    @app.post("/v1/pair/{user_code}/deny")
+    def pair_deny(user_code: str, user=AdminAuth) -> dict[str, Any]:
+        return _resolve(user_code, False, user)
 
     @app.post("/v1/workers/tokens")
     def issue_token(body: WorkerTokenIn, user=AdminAuth) -> dict[str, Any]:

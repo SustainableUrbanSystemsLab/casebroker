@@ -9,6 +9,26 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 ## [Unreleased]
 
 ### Added
+- **A machine pairs itself from the browser — no password on a simulation
+  node.** `POST /v1/pair/start` → a short code and a link; whoever is already
+  signed in as an admin sees the request under Settings → Machines (the link
+  `/?pair=CODE` opens straight to it), checks the code matches what the machine
+  is showing, and approves. This is what `E3D --setup-simulation-node` talks to,
+  and it replaces an enrolment that had an admin type their password on every
+  node — shared cluster logins and lab boxes, the wrong place for it.
+
+  It goes one step past the textbook device flow. There the *server* mints the
+  token, which means holding it readable between "approve" and the node's next
+  poll — the one place a live credential could be read back out of this
+  database. Here the **node** generates the token and sends only its SHA-256, so
+  approving promotes a hash into `worker_tokens` and the raw credential never
+  exists on the broker at all; a test scans the database file for it. Requests
+  expire in 10 minutes, are throttled per address, the queue is bounded, only an
+  admin *session* can approve (not an operator, not another machine's token), a
+  name with a live credential is refused at the node rather than discovered by
+  the admin, and re-running setup replaces the earlier request instead of
+  stacking a second card. The name is a strict charset: it arrives from a machine
+  nobody has authenticated and is rendered in an admin's browser.
 - **Trees are modelled over the core, matching the buildings.** Crowns were
   built across the full 1300 m box while buildings stop at 504 m
   (`watertight.build_pair` clips with `gba.massing(lat, lon, 504.0)`; the 520

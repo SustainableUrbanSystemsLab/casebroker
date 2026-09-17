@@ -192,6 +192,29 @@ CREATE TABLE IF NOT EXISTS worker_tokens (
 );
 CREATE INDEX IF NOT EXISTS idx_worker_tokens_hash ON worker_tokens(token_hash);
 
+-- A machine asking to join. The node generates its OWN token and sends only the
+-- SHA-256, so approving a request promotes a hash into worker_tokens and the raw
+-- credential never exists on the broker at all -- not in this table, not for the
+-- seconds between "approve" and the node's next poll. The textbook device flow
+-- has the server mint the token, which means holding it readable until it is
+-- collected; that would be the one place in this database a live credential
+-- could be read back out.
+CREATE TABLE IF NOT EXISTS pairings (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_code    TEXT UNIQUE NOT NULL,
+    name         TEXT NOT NULL,
+    token_hash   TEXT NOT NULL,
+    host         TEXT,
+    platform     TEXT,
+    requested_ip TEXT,
+    status       TEXT NOT NULL DEFAULT 'pending',
+    created_at   INTEGER NOT NULL,
+    expires_at   INTEGER NOT NULL,
+    resolved_by  TEXT,
+    resolved_at  INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_pairings_status ON pairings(status, expires_at);
+
 -- What schema revision this database is at. Written by apply_schema on every
 -- connect; read by `casebroker doctor`. Nothing branches on it -- the column
 -- reconciler makes the schema self-healing without a version to compare -- but
@@ -337,6 +360,29 @@ CREATE TABLE IF NOT EXISTS worker_tokens (
     revoked_at   INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_worker_tokens_hash ON worker_tokens(token_hash);
+
+-- A machine asking to join. The node generates its OWN token and sends only the
+-- SHA-256, so approving a request promotes a hash into worker_tokens and the raw
+-- credential never exists on the broker at all -- not in this table, not for the
+-- seconds between "approve" and the node's next poll. The textbook device flow
+-- has the server mint the token, which means holding it readable until it is
+-- collected; that would be the one place in this database a live credential
+-- could be read back out.
+CREATE TABLE IF NOT EXISTS pairings (
+    id           SERIAL PRIMARY KEY,
+    user_code    TEXT UNIQUE NOT NULL,
+    name         TEXT NOT NULL,
+    token_hash   TEXT NOT NULL,
+    host         TEXT,
+    platform     TEXT,
+    requested_ip TEXT,
+    status       TEXT NOT NULL DEFAULT 'pending',
+    created_at   INTEGER NOT NULL,
+    expires_at   INTEGER NOT NULL,
+    resolved_by  TEXT,
+    resolved_at  INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_pairings_status ON pairings(status, expires_at);
 
 -- What schema revision this database is at. Written by apply_schema on every
 -- connect; read by `casebroker doctor`. Nothing branches on it -- the column
@@ -1753,3 +1799,120 @@ def quarantine_not_on_land(conn, is_land, dry_run: bool = True,
         raise
     out["quarantined"] = len(ids_hit)
     return out
+
+
+
+# -- pairing: a machine asks, an admin approves ---------------------------------
+
+PAIRING_TTL_SECONDS = 600
+# Anyone who can reach the broker can ask to pair, so the queue is bounded: past
+# this an admin is looking at a flood rather than a fleet, and the honest answer
+# to one more request is "not now".
+MAX_PENDING_PAIRINGS = 50
+
+
+@_locked
+def purge_expired_pairings(conn, now: int | None = None) -> None:
+    """Expire what has timed out, and forget what expired more than a day ago.
+
+    Kept for a day rather than deleted at once, so "I approved it and nothing
+    happened" still has a row to explain it.
+    """
+    now = now or _now()
+    conn.execute("UPDATE pairings SET status='expired' WHERE status='pending' AND expires_at < ?",
+                 (now,))
+    conn.execute("DELETE FROM pairings WHERE expires_at < ?", (now - 86400,))
+
+
+@_locked
+def create_pairing(conn, user_code: str, name: str, token_hash: str,
+                   host: str | None = None, platform: str | None = None,
+                   requested_ip: str | None = None,
+                   ttl: int = PAIRING_TTL_SECONDS, now: int | None = None) -> dict[str, Any]:
+    """Record a request to join. Raises ValueError with a reason a caller can show.
+
+    Refused up front, rather than at approval, when it could never succeed: a
+    name that already has a LIVE credential (approving would strand the token
+    that box is actually running on) or a hash some credential already uses.
+    The person sitting at the node learns now, not after an admin has clicked.
+    """
+    now = now or _now()
+    purge_expired_pairings(conn, now)
+    live = conn.execute(
+        "SELECT 1 FROM worker_tokens WHERE name = ? AND revoked_at IS NULL", (name,)).fetchone()
+    if live:
+        raise ValueError("name-in-use")
+    if conn.execute("SELECT 1 FROM worker_tokens WHERE token_hash = ?", (token_hash,)).fetchone():
+        raise ValueError("token-in-use")
+    pending = conn.execute(
+        "SELECT COUNT(*) n FROM pairings WHERE status='pending'").fetchone()["n"]
+    if pending >= MAX_PENDING_PAIRINGS:
+        raise ValueError("too-many-pending")
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        # Re-running setup on the same box replaces its earlier request instead
+        # of stacking a second card for the admin to choose between.
+        conn.execute("UPDATE pairings SET status='superseded', resolved_at=?"
+                     " WHERE name = ? AND status='pending'", (now, name))
+        conn.execute(
+            "INSERT INTO pairings (user_code, name, token_hash, host, platform,"
+            " requested_ip, status, created_at, expires_at)"
+            " VALUES (?,?,?,?,?,?,'pending',?,?)",
+            (user_code, name, token_hash, host, platform, requested_ip, now, now + ttl))
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    return {"user_code": user_code, "name": name, "expires_at": now + ttl}
+
+
+@_locked
+def get_pairing(conn, user_code: str, now: int | None = None) -> dict[str, Any] | None:
+    purge_expired_pairings(conn, now)
+    row = conn.execute("SELECT * FROM pairings WHERE user_code = ?", (user_code,)).fetchone()
+    return dict(row) if row is not None else None
+
+
+@_locked
+def list_pending_pairings(conn, now: int | None = None) -> list[dict[str, Any]]:
+    purge_expired_pairings(conn, now)
+    rows = conn.execute(
+        "SELECT user_code, name, host, platform, requested_ip, created_at, expires_at"
+        " FROM pairings WHERE status='pending' ORDER BY created_at ASC").fetchall()
+    return [dict(r) for r in rows]
+
+
+@_locked
+def resolve_pairing(conn, user_code: str, approve: bool, by: str,
+                    now: int | None = None) -> str:
+    """Approve or deny. Returns the resulting status, or a reason it did not apply:
+    'missing', 'expired', 'conflict' (the name or hash was taken meanwhile), or the
+    status it already had if someone else resolved it first.
+    """
+    now = now or _now()
+    purge_expired_pairings(conn, now)
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        row = conn.execute("SELECT * FROM pairings WHERE user_code = ?", (user_code,)).fetchone()
+        if row is None:
+            conn.execute("ROLLBACK")
+            return "missing"
+        if row["status"] != "pending":
+            conn.execute("ROLLBACK")
+            return row["status"]
+        if approve:
+            try:
+                create_worker_token(conn, row["name"], row["token_hash"], created_by=by, now=now)
+            except Exception:
+                # UNIQUE(name) on a live credential, or UNIQUE(token_hash): it was
+                # free when the node asked and is not now.
+                conn.execute("ROLLBACK")
+                return "conflict"
+        status = "approved" if approve else "denied"
+        conn.execute("UPDATE pairings SET status=?, resolved_by=?, resolved_at=? WHERE user_code=?",
+                     (status, by, now, user_code))
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    return status

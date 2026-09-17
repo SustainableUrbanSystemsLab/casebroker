@@ -1547,6 +1547,10 @@
       <div id="machines" style="display:none;">
         <div class="panel-title-group" style="margin-bottom:4px;"><h2>Machines</h2></div>
         <div class="panel-subtitle">One credential per worker. Revoking one leaves the rest running.</div>
+        <!-- Machines that ran `E3D --setup-simulation-node` and are waiting. The
+             node prints the same code it sends here; matching the two is what
+             stops someone else's request being approved by mistake. -->
+        <div id="pairingList" style="margin-top:12px;"></div>
         <div class="row" style="margin-top:12px;">
           <div class="field" style="flex:1; min-width:220px;">
             <label for="newMachine">Worker id
@@ -3053,7 +3057,7 @@
     // A signed-in human has no use for the bearer-token form; it stays in the
     // DOM because everything still reads $("token").value.
     $("connectForm").style.display = signedIn ? "none" : "";
-    if (isAdmin) { loadMachines(); loadUsers(); } else machineCount = null;
+    if (isAdmin) { loadMachines(); loadPairings(); loadUsers(); } else machineCount = null;
     renderWizard();
   }
 
@@ -3221,6 +3225,94 @@
     } catch (e) { showToast(e.message); }
   }
 
+  // -- Pairing requests --------------------------------------------------------
+  // `?pair=CODE` is the link a node opens. It survives the sign-in detour (the
+  // hint is read once, at load) and is stripped from the address bar as soon as
+  // it has been used, so a refresh does not reopen the drawer forever.
+  let pairHint = (new URLSearchParams(window.location.search).get("pair") || "")
+    .toUpperCase().replace(/[^A-Z0-9]/g, "");
+  let pairTimer = null;
+  let pairShown = null;      // signature of what is on screen
+
+  async function loadPairings() {
+    const box = $("pairingList");
+    if (!box) return;
+    let rows = [];
+    try {
+      rows = (await api("/v1/pair/pending")).pending || [];
+    } catch (e) {
+      box.innerHTML = "";
+      return;
+    }
+    if (pairHint) {
+      openSettings("machines");
+      window.history.replaceState({}, "", window.location.pathname);
+    }
+    const hinted = pairHint; pairHint = "";
+    // Re-render only when the queue CHANGED. This runs on a 5 s timer, and
+    // replacing identical markup still destroys and recreates the buttons --
+    // under a cursor that is a flicker, and at the wrong instant it is a click
+    // on an element that no longer exists.
+    const nowS = Math.floor(Date.now() / 1000);
+    // minutes-left is part of it, so the countdown still ticks -- once a minute,
+    // not once every five seconds.
+    const sig = JSON.stringify(rows.map((r) =>
+      [r.user_code, r.name, Math.ceil(Math.max(0, r.expires_at - nowS) / 60)])) + "|" + hinted;
+    if (sig === pairShown) return;
+    pairShown = sig;
+    if (!rows.length) {
+      box.innerHTML = hinted
+        ? '<div class="panel-subtitle" style="color:var(--warn)">No request with code ' +
+          esc(hinted.slice(0, 4) + "-" + hinted.slice(4)) + ' is waiting \u2014 it may have ' +
+          'expired (they last 10 minutes). Run the setup on the machine again.</div>'
+        : "";
+    } else {
+      // data-* and one delegated listener, never an inline handler: `name` was
+      // typed on a machine nobody had authenticated yet.
+      box.innerHTML = rows.map((r) => {
+        const mine = hinted && r.user_code.replace("-", "") === hinted;
+        const left = Math.max(0, r.expires_at - Math.floor(Date.now() / 1000));
+        return '<div class="detail-card" style="margin-bottom:8px;' +
+            (mine ? "border-color:var(--brand);" : "") + '">' +
+          '<div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">' +
+            '<code class="inline" style="font-size:15px; letter-spacing:1px;">' + esc(r.user_code) + '</code>' +
+            '<div style="flex:1; min-width:160px;">' +
+              '<div style="font-weight:600;">' + esc(r.name) + '</div>' +
+              '<div class="panel-subtitle" style="margin:0;">' +
+                esc(r.host || "unknown host") + ' \u00b7 ' + esc(r.platform || "unknown platform") +
+                ' \u00b7 from ' + esc(r.requested_ip || "?") + ' \u00b7 ' + relTime(r.created_at) +
+                ' \u00b7 expires in ' + Math.ceil(left / 60) + ' min</div>' +
+            '</div>' +
+            '<button type="button" data-pair="approve" data-code="' + esc(r.user_code) + '">Approve</button>' +
+            '<button type="button" class="subtle" data-pair="deny" data-code="' + esc(r.user_code) + '">Deny</button>' +
+          '</div>' +
+          '<div class="panel-subtitle" style="margin:6px 0 0;">Approve only if this code matches ' +
+            'the one the machine is showing.</div>' +
+        '</div>';
+      }).join("");
+    }
+    // Keep looking while something is pending, so a second node shows up without
+    // a manual refresh; stop when the queue is empty.
+    if (rows.length && !pairTimer) pairTimer = setInterval(loadPairings, 5000);
+    if (!rows.length && pairTimer) { clearInterval(pairTimer); pairTimer = null; }
+  }
+
+  document.addEventListener("click", async (e) => {
+    const btn = e.target.closest("[data-pair]");
+    if (!btn) return;
+    btn.disabled = true;
+    const verb = btn.getAttribute("data-pair");
+    try {
+      await userCall("/v1/pair/" + encodeURIComponent(btn.getAttribute("data-code")) + "/" + verb,
+                     { method: "POST" });
+      showToast(verb === "approve" ? "Machine approved" : "Request denied");
+    } catch (err) {
+      showToast(err.message);
+    }
+    loadPairings();
+    loadMachines();
+  });
+
   async function loadMachines() {
     try {
       const data = await api("/v1/workers/tokens");
@@ -3231,8 +3323,9 @@
       renderWizard();
       if (!rows.length) {
         $("machineList").innerHTML =
-          '<div class="panel-subtitle">No machines yet. Issue a token above, then run ' +
-          '<code>bootstrap_worker.ps1</code> on that box with it.</div>';
+          '<div class="panel-subtitle">No machines yet. On a simulation node run ' +
+          '<code>E3D --setup-simulation-node</code> and give it this URL; its request ' +
+          'appears above for you to approve. Issuing a token by hand still works.</div>';
         return;
       }
       $("machineList").innerHTML =
