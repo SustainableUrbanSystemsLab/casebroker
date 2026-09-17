@@ -99,28 +99,45 @@ uv run casebroker health --broker https://broker.example.org
 
 ## Accounts
 
-Two roles, and the difference is real rather than cosmetic:
+Three roles, and the differences are real rather than cosmetic:
 
 | Role | Can |
 | --- | --- |
-| `admin` | everything: lease and complete cases, add and purge them, create accounts, issue and revoke machine credentials |
-| `viewer` | read the campaign — status, case list, one case. `403` from every mutating endpoint, from `/v1/workers/tokens`, and from every `/v1/users` route **except changing their own password** |
+| `admin` | everything: run the campaign, **purge** it, create and delete accounts, change roles, issue and revoke machine credentials |
+| `operator` | **run** the campaign — add cases, lease, heartbeat, complete, fail, release, report fleet — and read all of it. `403` from `DELETE /v1/cases`, from `/v1/workers/tokens`, and from every `/v1/users` route **except changing their own password** |
+| `viewer` | read the campaign — status, case list, one case. `403` from every mutating endpoint, and the same `/v1/users` rule |
+
+**`operator` is the one most accounts should have.** Until it existed `admin`
+was the only role that could write, so "let this person run the campaign" and
+"let this person delete every account including yours" were the same grant —
+which is how deployments end up with everyone an admin. An operator does the
+daily work and manages nothing.
+
+Two things stay with `admin` on purpose. **Purging** (`DELETE /v1/cases`) takes
+the cases, their events and their footprints, and is the one campaign operation
+with nothing behind it. **Machine credentials** can write the campaign and
+outlive the account that issued them, so an operator who could mint one would be
+an admin with extra steps: revoking the person would not revoke what they left
+behind.
 
 `viewer` is what "let someone watch the campaign" should have meant all along:
 a read-only *env token* did the same job with a shared secret that nobody could
 attribute to a person or revoke individually.
 
 ```bash
-uv run casebroker account list                                  # who exists, and last login
-uv run casebroker account create --username bob --role viewer
-uv run casebroker account passwd --username ada                 # forgot it -- no old password needed
+uv run casebroker account list                                    # who exists, and last login
+uv run casebroker account create --username bob --role operator
+uv run casebroker account passwd --username ada                   # forgot it -- no old password needed
 uv run casebroker account role   --username bob --role admin
 uv run casebroker account delete --username bob
 ```
 
 The same operations exist over HTTP for an admin session: `GET`/`POST /v1/users`,
 `POST /v1/users/{username}/role`, `POST /v1/users/{username}/password`,
-`DELETE /v1/users/{username}`.
+`DELETE /v1/users/{username}` — and in the dashboard under **Settings ▸ Users**,
+which is the route that does not need shell access to a box holding the DSN.
+`POST /v1/users` defaults to `viewer`, so a role is something you ask for rather
+than something you get by omission.
 
 Changing a password **revokes every session that account holds**. That is the
 point rather than a side effect: the reason to change one in a hurry is that
@@ -128,6 +145,12 @@ someone else may have it, and a fortnight-long session left alive would make the
 change cosmetic. Changing your *own* requires the current one — a session cookie
 lifted from a logged-in laptop should not be enough to lock the owner out — and
 the endpoint re-issues yours, so you stay signed in where you did it.
+
+A **write bearer token** — a machine credential, or `CASEBROKER_WRITE_TOKENS` —
+can still purge. That is deliberate rather than an oversight: it always could,
+the documented `curl` below depends on it, and narrowing it would not make
+anything safer, since whoever holds the token can simply use it. What changed is
+that an operator *session* is not enough.
 
 **You cannot delete or demote the last admin.** There is no password-reset email
 and no recovery endpoint, so that operation would leave the deployment
@@ -307,16 +330,32 @@ and **fails if a version literal is ever pasted into a source file again**, whic
 is how the three copies that used to exist got out of step in the first place.
 
 Cutting a release is therefore: bump `version` in `pyproject.toml`, move the
-`Unreleased` entries in `CHANGELOG.md` under the new number, commit, and tag it:
+`Unreleased` entries in `CHANGELOG.md` under the new number, and merge it.
+**Merging the bump is the release** — `.github/workflows/release.yml` sees the
+version change on `main`, runs the suite, checks `CHANGELOG.md` actually has a
+`## [x.y.z]` heading for it, creates the tag and publishes the GitHub Release.
+A merge that does not move the version is a no-op there, which is nearly all of
+them.
+
+Tagging by hand still works and is unchanged:
 
 ```bash
-git tag -a v0.2.0 -m "v0.2.0" && git push origin v0.2.0
+git tag -a v0.3.0 -m "v0.3.0" && git push origin v0.3.0
 ```
 
-Pushing that tag is what publishes the release: `.github/workflows/release.yml`
-fires on any `v*.*.*` tag, **refuses to publish if the tag disagrees with
-`pyproject.toml`**, and creates the GitHub Release. So the tag cannot drift from
-the declared version any more than the code can.
+That path still **refuses to publish if the tag disagrees with
+`pyproject.toml`**, so the tag cannot drift from the declared version any more
+than the code can.
+
+> **Why the merge cuts the tag rather than a human.** Between `v0.2.0` and
+> `v0.3.0`, four pull requests merged, the version moved once, and nobody
+> tagged it — so the README's version badge read `v0.2.0` while the running
+> service's `/healthz` read `0.3.0`. Every version test passed throughout,
+> because they all compare the three *copies* of the number to each other and
+> those agreed perfectly. The missing check was never "do the copies match" but
+> "did the release happen", and the reliable answer to that is not a step in a
+> runbook. `tests/test_version.py` now also pins that the newest `CHANGELOG.md`
+> release heading is the version the package declares.
 
 `/healthz` reporting `version` is what makes a deploy checkable from outside:
 
@@ -349,6 +388,43 @@ Three things are **not** done and must be before this faces the internet:
    — the cheapest compute tier a platform offers is enough. If this is left
    unset, or set to a file path, the service starts anyway and logs a warning:
    it will look healthy right up until a redeploy silently empties it.
+
+### Sizing the instance: the site-preview path is the memory floor
+
+`GET /v1/cases/{id}/footprints` is the only endpoint that is expensive in
+memory, and it sets the instance size for the whole service. Everything else the
+broker does is a SQL query and some JSON.
+
+Measured on a warmed process: **~55 MB at rest, ~280 MB once the preview path has
+run once**, and flat from there across repeated queries. The step is DuckDB with
+its `httpfs` and `spatial` extensions plus GDAL and PROJ becoming resident — it
+is library code, not anything a query holds, so it does not come back and
+lowering the ceilings below barely moves it. **Give the service at least 512 MB.**
+
+Two things used to make that number unbounded, and both are fixed:
+
+- **DuckDB sized itself from the host.** `memory_limit` and `threads` come from
+  `/proc/meminfo`, which inside a container reports the machine, not the cgroup
+  limit the platform actually kills at. It reported a 51.1 GiB limit and 12
+  threads while running in a web instance a fraction of that size, so it never
+  spilled — by its own accounting it had room to spare — and the platform
+  OOM-killed the process instead. Both are now set explicitly
+  (`CASEBROKER_DUCKDB_MEMORY`, `CASEBROKER_DUCKDB_THREADS`, and
+  `CASEBROKER_GDAL_CACHE_MB` for GDAL's equivalent).
+- **Every request leaked a connection.** A DuckDB connection holds its buffer
+  pool until it is closed, and the handler used a bare `duckdb.connect()` that
+  was never closed. That is what turned one heavy endpoint into a restart loop.
+  `footprints._duck()` is now a context manager, and
+  `tests/test_chm_tiles.py::test_duckdb_connection_is_bounded_and_closed` pins
+  both halves.
+
+If the service still restarts under memory pressure, in order: confirm the
+instance is at least 512 MB; check `/healthz` is not being hit with `refresh=true`
+by something in a loop; then lower `CASEBROKER_DUCKDB_MEMORY` — a query that no
+longer fits spills to disk and gets slower, which is the failure you want.
+
+Preview payloads are cached in the database per case, so the cost is paid once
+per case and never on a dashboard refresh.
 
 **`/healthz` is intentionally unauthenticated** (so infrastructure health checks
 work with no token) **and therefore must never return anything that could be a

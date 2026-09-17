@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import functools
 import json
+import os
 import re
 import sqlite3
 import sys
@@ -71,6 +72,11 @@ CREATE TABLE IF NOT EXISTS cases (
     lease_id       TEXT,
     lease_worker   TEXT,
     lease_expires  INTEGER,
+    -- When the CURRENT lease was handed out. Deliberately not touched by
+    -- heartbeat, which is what makes it an age rather than a liveness signal:
+    -- lease_expires only ever says "someone said they were alive recently", and
+    -- a worker wedged mid-solve says that forever.
+    leased_at      INTEGER,
     last_error     TEXT,
     result_uri     TEXT,
     result_sha256  TEXT,
@@ -85,6 +91,13 @@ CREATE TABLE IF NOT EXISTS cases (
 CREATE INDEX IF NOT EXISTS idx_cases_claim ON cases(state, priority, case_id);
 CREATE INDEX IF NOT EXISTS idx_cases_lease ON cases(lease_id);
 CREATE INDEX IF NOT EXISTS idx_cases_split ON cases(split, state);
+-- The dashboard's case list orders by updated_at DESC, and without this the
+-- plan is "SCAN cases" plus a temp B-tree: a full sort of the whole table for
+-- every page, on a timer, for every open dashboard. That is not merely slow --
+-- list_cases holds _LOCK while it runs, so the sort stalls every worker's lease
+-- and heartbeat behind it. Measured at 50,000 cases: 8 ms for the first page and
+-- 155 ms for a deep one, against roughly 0.05 ms with the index.
+CREATE INDEX IF NOT EXISTS idx_cases_updated ON cases(updated_at DESC);
 
 CREATE TABLE IF NOT EXISTS workers (
     worker_id    TEXT PRIMARY KEY,
@@ -110,9 +123,10 @@ CREATE TABLE IF NOT EXISTS fleet (
     reported_at  INTEGER NOT NULL
 );
 
--- Overture footprints for a case, cached. The query costs seconds against S3 and
--- cannot change for a pinned release, so it is paid once per case rather than on
--- every dashboard open.
+-- What a case will be meshed from -- GlobalBuildingAtlas footprints and heights,
+-- GEDTM30 relief, Meta/WRI canopy -- cached as one GeoJSON blob. The three
+-- queries cost seconds against object storage and cannot change for pinned
+-- sources, so they are paid once per case rather than on every dashboard open.
 CREATE TABLE IF NOT EXISTS footprints (
     case_id     TEXT PRIMARY KEY,
     geojson     TEXT NOT NULL,
@@ -178,6 +192,29 @@ CREATE TABLE IF NOT EXISTS worker_tokens (
 );
 CREATE INDEX IF NOT EXISTS idx_worker_tokens_hash ON worker_tokens(token_hash);
 
+-- A machine asking to join. The node generates its OWN token and sends only the
+-- SHA-256, so approving a request promotes a hash into worker_tokens and the raw
+-- credential never exists on the broker at all -- not in this table, not for the
+-- seconds between "approve" and the node's next poll. The textbook device flow
+-- has the server mint the token, which means holding it readable until it is
+-- collected; that would be the one place in this database a live credential
+-- could be read back out.
+CREATE TABLE IF NOT EXISTS pairings (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_code    TEXT UNIQUE NOT NULL,
+    name         TEXT NOT NULL,
+    token_hash   TEXT NOT NULL,
+    host         TEXT,
+    platform     TEXT,
+    requested_ip TEXT,
+    status       TEXT NOT NULL DEFAULT 'pending',
+    created_at   INTEGER NOT NULL,
+    expires_at   INTEGER NOT NULL,
+    resolved_by  TEXT,
+    resolved_at  INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_pairings_status ON pairings(status, expires_at);
+
 -- What schema revision this database is at. Written by apply_schema on every
 -- connect; read by `casebroker doctor`. Nothing branches on it -- the column
 -- reconciler makes the schema self-healing without a version to compare -- but
@@ -208,6 +245,11 @@ CREATE TABLE IF NOT EXISTS cases (
     lease_id       TEXT,
     lease_worker   TEXT,
     lease_expires  INTEGER,
+    -- When the CURRENT lease was handed out. Deliberately not touched by
+    -- heartbeat, which is what makes it an age rather than a liveness signal:
+    -- lease_expires only ever says "someone said they were alive recently", and
+    -- a worker wedged mid-solve says that forever.
+    leased_at      INTEGER,
     last_error     TEXT,
     result_uri     TEXT,
     result_sha256  TEXT,
@@ -220,6 +262,13 @@ CREATE TABLE IF NOT EXISTS cases (
 CREATE INDEX IF NOT EXISTS idx_cases_claim ON cases(state, priority, case_id);
 CREATE INDEX IF NOT EXISTS idx_cases_lease ON cases(lease_id);
 CREATE INDEX IF NOT EXISTS idx_cases_split ON cases(split, state);
+-- The dashboard's case list orders by updated_at DESC, and without this the
+-- plan is "SCAN cases" plus a temp B-tree: a full sort of the whole table for
+-- every page, on a timer, for every open dashboard. That is not merely slow --
+-- list_cases holds _LOCK while it runs, so the sort stalls every worker's lease
+-- and heartbeat behind it. Measured at 50,000 cases: 8 ms for the first page and
+-- 155 ms for a deep one, against roughly 0.05 ms with the index.
+CREATE INDEX IF NOT EXISTS idx_cases_updated ON cases(updated_at DESC);
 
 CREATE TABLE IF NOT EXISTS workers (
     worker_id    TEXT PRIMARY KEY,
@@ -245,9 +294,10 @@ CREATE TABLE IF NOT EXISTS fleet (
     reported_at  INTEGER NOT NULL
 );
 
--- Overture footprints for a case, cached. The query costs seconds against S3 and
--- cannot change for a pinned release, so it is paid once per case rather than on
--- every dashboard open.
+-- What a case will be meshed from -- GlobalBuildingAtlas footprints and heights,
+-- GEDTM30 relief, Meta/WRI canopy -- cached as one GeoJSON blob. The three
+-- queries cost seconds against object storage and cannot change for pinned
+-- sources, so they are paid once per case rather than on every dashboard open.
 CREATE TABLE IF NOT EXISTS footprints (
     case_id     TEXT PRIMARY KEY,
     geojson     TEXT NOT NULL,
@@ -310,6 +360,29 @@ CREATE TABLE IF NOT EXISTS worker_tokens (
     revoked_at   INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_worker_tokens_hash ON worker_tokens(token_hash);
+
+-- A machine asking to join. The node generates its OWN token and sends only the
+-- SHA-256, so approving a request promotes a hash into worker_tokens and the raw
+-- credential never exists on the broker at all -- not in this table, not for the
+-- seconds between "approve" and the node's next poll. The textbook device flow
+-- has the server mint the token, which means holding it readable until it is
+-- collected; that would be the one place in this database a live credential
+-- could be read back out.
+CREATE TABLE IF NOT EXISTS pairings (
+    id           SERIAL PRIMARY KEY,
+    user_code    TEXT UNIQUE NOT NULL,
+    name         TEXT NOT NULL,
+    token_hash   TEXT NOT NULL,
+    host         TEXT,
+    platform     TEXT,
+    requested_ip TEXT,
+    status       TEXT NOT NULL DEFAULT 'pending',
+    created_at   INTEGER NOT NULL,
+    expires_at   INTEGER NOT NULL,
+    resolved_by  TEXT,
+    resolved_at  INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_pairings_status ON pairings(status, expires_at);
 
 -- What schema revision this database is at. Written by apply_schema on every
 -- connect; read by `casebroker doctor`. Nothing branches on it -- the column
@@ -604,6 +677,19 @@ class Lease:
 # this in-process lock) but costs nothing to keep uniform across both engines.
 _LOCK = threading.RLock()
 
+# The longest ONE lease may live, however healthy its heartbeats look.
+#
+# lease_expires answers "did a worker speak recently", and heartbeat pushes it
+# forward every few minutes for as long as the process is alive. That catches a
+# worker that DIES -- preemption, walltime, a dropped node -- within the TTL.
+# It cannot catch a worker that is alive and reporting and simply never
+# finishes, because the heartbeat thread runs independently of the runner: a
+# solve that wedges keeps renewing its own lease and the case is never
+# reclaimed. Seven days is far beyond any real case (66 core-hours is roughly
+# three wall-hours on 24 cores) so this only ever fires on something genuinely
+# stuck.
+MAX_LEASE_AGE_SECONDS = int(os.environ.get("CASEBROKER_MAX_LEASE_AGE", str(7 * 86400)))
+
 
 def _is_connection_error(exc: BaseException) -> bool:
     """Is this the connection dying, rather than the query being wrong?
@@ -642,6 +728,17 @@ class PgConnection:
 
     def __init__(self, raw, dsn: str | None = None):
         self._raw = raw
+        # Whether an explicit BEGIN..COMMIT is currently open on this connection.
+        # Reconnecting inside one silently discards it: the replacement has no
+        # transaction, so the caller's COMMIT succeeds against nothing and every
+        # UPDATE between the BEGIN and the failure is gone -- while the caller,
+        # `lease()`, returns its Lease objects as though they had been written.
+        # The worker then holds cases the database still lists as pending, and
+        # the next worker leases the same ones.
+        self._in_tx = False
+        # Set when a repair was needed but had to be deferred out of a
+        # transaction, so the next call outside one performs it.
+        self._needs_reconnect = False
         # Kept so a dead connection can be replaced in place. The identity of
         # THIS object never changes, which is what makes the repair invisible:
         # create_app() opens one connection at startup and every route closes
@@ -677,10 +774,14 @@ class PgConnection:
             sql = "BEGIN"
         sql = sql.replace("?", "%s")
         params = tuple(params) if params else None
+        verb = sql.strip().upper()
         # Known-dead up front: reconnect before running anything. Safe because
-        # nothing has been sent yet, so there is no half-applied work to repeat.
-        if getattr(self._raw, "closed", False):
+        # nothing has been sent yet, so there is no half-applied work to repeat --
+        # but only OUTSIDE a transaction, for the reason in __init__.
+        if not self._in_tx and (getattr(self._raw, "closed", False)
+                                or self._needs_reconnect):
             self._reconnect()
+            self._needs_reconnect = False
         try:
             cur = self._raw.cursor()
             cur.execute(sql, params)
@@ -692,11 +793,21 @@ class PgConnection:
             # caller is already getting. So: repair the connection for whoever
             # comes next, and let THIS request fail honestly.
             if _is_connection_error(exc):
-                try:
-                    self._reconnect()
-                except Exception:
-                    pass              # next request tries again
+                if self._in_tx:
+                    # Doomed either way, so fail honestly and repair later. A
+                    # reconnect here would hand the caller's COMMIT a fresh
+                    # connection with nothing in it.
+                    self._needs_reconnect = True
+                else:
+                    try:
+                        self._reconnect()
+                    except Exception:
+                        pass          # next request tries again
             raise
+        if verb.startswith("BEGIN"):
+            self._in_tx = True
+        elif verb.startswith("COMMIT") or verb.startswith("ROLLBACK"):
+            self._in_tx = False
         return _PgCursor(cur)
 
     def executescript(self, sql: str) -> None:
@@ -898,7 +1009,8 @@ def lease(conn, worker_id: str, count: int = 1,
                 # cycle forever through every worker in the fleet.
                 conn.execute(
                     "UPDATE cases SET state='quarantined', lease_id=NULL,"
-                    " lease_worker=NULL, lease_expires=NULL, updated_at=?"
+                    " lease_worker=NULL, lease_expires=NULL, leased_at=NULL,"
+                    " updated_at=?"
                     " WHERE case_id=?", (now, row["case_id"]))
                 _event(conn, row["case_id"], worker_id, "quarantined",
                        "attempts exhausted (%d)" % row["max_attempts"], now)
@@ -907,8 +1019,9 @@ def lease(conn, worker_id: str, count: int = 1,
             lease_id = uuid.uuid4().hex
             conn.execute(
                 "UPDATE cases SET state='leased', lease_id=?, lease_worker=?,"
-                " lease_expires=?, attempts=?, updated_at=? WHERE case_id=?",
-                (lease_id, worker_id, expires, attempt, now, row["case_id"]))
+                " lease_expires=?, leased_at=?, attempts=?, updated_at=?"
+                " WHERE case_id=?",
+                (lease_id, worker_id, expires, now, attempt, now, row["case_id"]))
             _event(conn, row["case_id"], worker_id, "resumed" if resumed else "leased",
                    "attempt %d" % attempt, now)
             out.append(Lease(case_id=row["case_id"], lease_id=lease_id,
@@ -924,15 +1037,17 @@ def lease(conn, worker_id: str, count: int = 1,
                 "SELECT case_id, spec, attempts, max_attempts, state, lease_worker"
                 " FROM cases WHERE case_id IN (" + placeholders + ")"
                 " AND (state = 'pending'"
-                "      OR (state = 'leased' AND (lease_expires < ? OR lease_worker = ?)))"
+                "      OR (state = 'leased' AND (lease_expires < ?"
+                "          OR (leased_at IS NOT NULL AND leased_at < ?)"
+                "          OR lease_worker = ?)))"
                 " ORDER BY case_id ASC" + lock_clause,
-                [*ids, now, worker_id],
+                [*ids, now, now - MAX_LEASE_AGE_SECONDS, worker_id],
             ).fetchall()
             claim(rows, resumed=True)
 
         remaining = count - len(out)
         if remaining > 0:
-            params: list[Any] = [now]
+            params: list[Any] = [now, now - MAX_LEASE_AGE_SECONDS]
             split_sql = ""
             if splits:
                 placeholders = ",".join("?" for _ in splits)
@@ -941,7 +1056,14 @@ def lease(conn, worker_id: str, count: int = 1,
             params.append(remaining)
             rows = conn.execute(
                 "SELECT case_id, spec, attempts, max_attempts, state, lease_worker FROM cases"
-                " WHERE (state = 'pending' OR (state = 'leased' AND lease_expires < ?))"
+                # A lease is reclaimable when it has EXPIRED (the worker stopped
+                # speaking) or when it is simply too OLD (the worker is still
+                # speaking and has been for a week). The second is the only one
+                # that catches a wedged-but-alive solve, because its heartbeat
+                # keeps the first from ever firing.
+                " WHERE (state = 'pending'"
+                "        OR (state = 'leased' AND (lease_expires < ?"
+                "            OR (leased_at IS NOT NULL AND leased_at < ?))))"
                 + split_sql +
                 # Every worker targets the same "lowest" rows. That is contention by
                 # design, not by accident: under SKIP LOCKED a locked row is simply
@@ -993,6 +1115,30 @@ def heartbeat(conn, lease_id: str, lease_seconds: int = 3600,
     row = _by_lease(conn, lease_id)
     if row is None:
         return False
+    # A heartbeat cannot extend a lease indefinitely. Past MAX_LEASE_AGE_SECONDS
+    # the case is released here rather than waiting for some other worker's
+    # lease() to notice, so the worker finds out on its very next heartbeat --
+    # it already treats a refused heartbeat as "stop, someone else owns this",
+    # which is exactly the right behaviour for a solve that has been running for
+    # a week. Returning False without releasing would leave it held by a worker
+    # that has been told to let go.
+    leased_at = row["leased_at"] if "leased_at" in row.keys() else None
+    if leased_at is None:
+        # A lease handed out before this column existed. Start its clock now
+        # rather than leaving it exempt forever: NULL means "unknown", and
+        # treating unknown as "not old" would let exactly the cases that predate
+        # the cap -- the ones most likely to be stuck -- escape it permanently.
+        conn.execute("UPDATE cases SET leased_at=? WHERE lease_id=?", (now, lease_id))
+        leased_at = now
+    if leased_at < now - MAX_LEASE_AGE_SECONDS:
+        conn.execute(
+            "UPDATE cases SET state='pending', lease_id=NULL, lease_worker=NULL,"
+            " lease_expires=NULL, leased_at=NULL, updated_at=? WHERE case_id=?",
+            (now, row["case_id"]))
+        _event(conn, row["case_id"], row["lease_worker"], "released",
+               "abandoned: held %d days without completing"
+               % (MAX_LEASE_AGE_SECONDS // 86400), now)
+        return False
     conn.execute("UPDATE cases SET lease_expires=?, updated_at=? WHERE lease_id=?",
                  (now + lease_seconds, now, lease_id))
     if detail:
@@ -1017,7 +1163,8 @@ def heartbeat(conn, lease_id: str, lease_seconds: int = 3600,
 @_locked
 def complete(conn, lease_id: str, result_uri: str,
              sha256: str | None = None, nbytes: int | None = None,
-             metrics: dict[str, Any] | None = None, now: int | None = None) -> bool:
+             metrics: dict[str, Any] | None = None, now: int | None = None,
+             case_id: str | None = None) -> bool:
     now = now or _now()
     conn.execute("BEGIN IMMEDIATE")
     try:
@@ -1030,15 +1177,29 @@ def complete(conn, lease_id: str, result_uri: str,
             # failure for work that landed. If a done case carries this exact
             # result_uri the write is already there: report success. A DIFFERENT
             # result for a finished lease still falls through to the refusal.
-            dup = conn.execute(
-                "SELECT 1 FROM cases WHERE state = 'done' AND result_uri = ?",
-                (result_uri,)).fetchone()
+            # Scoped to the case the worker names, when it names one. Matching
+            # on result_uri ALONE meant any done case that happened to carry the
+            # same URI answered for this one -- so a runner that derives its URI
+            # from anything less unique than the case (a template, a constant, a
+            # date) would have retries on case B silently confirmed by case A's
+            # row, reporting work as landed that never ran. case_id is optional
+            # so a worker built before this still works; without it the old,
+            # looser check stands, which is still better than a false 409.
+            if case_id:
+                dup = conn.execute(
+                    "SELECT 1 FROM cases WHERE case_id = ? AND state = 'done'"
+                    " AND result_uri = ?", (case_id, result_uri)).fetchone()
+            else:
+                dup = conn.execute(
+                    "SELECT 1 FROM cases WHERE state = 'done' AND result_uri = ?",
+                    (result_uri,)).fetchone()
             conn.execute("ROLLBACK")
             return dup is not None
         conn.execute(
             "UPDATE cases SET state='done', result_uri=?, result_sha256=?,"
             " result_bytes=?, metrics=?, lease_id=NULL, lease_worker=NULL,"
-            " lease_expires=NULL, last_error=NULL, updated_at=? WHERE case_id=?",
+            " lease_expires=NULL, leased_at=NULL, last_error=NULL,"
+            " updated_at=? WHERE case_id=?",
             (result_uri, sha256, nbytes, json.dumps(metrics or {}, sort_keys=True),
              now, row["case_id"]))
         conn.execute(
@@ -1066,7 +1227,8 @@ def fail(conn, lease_id: str, error: str, retryable: bool = True,
         state = "pending" if (retryable and not exhausted) else "quarantined"
         conn.execute(
             "UPDATE cases SET state=?, lease_id=NULL, lease_worker=NULL,"
-            " lease_expires=NULL, last_error=?, updated_at=? WHERE case_id=?",
+            " lease_expires=NULL, leased_at=NULL, last_error=?,"
+            " updated_at=? WHERE case_id=?",
             (state, error[:4000], now, row["case_id"]))
         conn.execute(
             "UPDATE workers SET cases_failed = cases_failed + 1, last_seen=? WHERE worker_id=?",
@@ -1098,7 +1260,8 @@ def release(conn, lease_id: str, reason: str = "released",
             return False
         conn.execute(
             "UPDATE cases SET state='pending', lease_id=NULL, lease_worker=NULL,"
-            " lease_expires=NULL, attempts=MAX(attempts - 1, 0), updated_at=?"
+            " lease_expires=NULL, leased_at=NULL,"
+            " attempts=MAX(attempts - 1, 0), updated_at=?"
             " WHERE case_id=?", (now, row["case_id"]))
         _event(conn, row["case_id"], row["lease_worker"], "released", reason, now)
         conn.execute("COMMIT")
@@ -1126,6 +1289,7 @@ def put_footprints(conn, case_id: str, geojson: str, n: int, now: int | None = N
         raise
 
 
+@_locked
 def get_footprints(conn, case_id: str):
     r = conn.execute("SELECT geojson, n, fetched_at FROM footprints WHERE case_id=?",
                      (case_id,)).fetchone()
@@ -1156,6 +1320,7 @@ def report_fleet(conn, cluster: str, queued: int, running: int,
         raise
 
 
+@_locked
 def fleet(conn, now: int | None = None) -> list[dict[str, Any]]:
     """Reported scheduler state, each row carrying how old it is.
 
@@ -1170,6 +1335,7 @@ def fleet(conn, now: int | None = None) -> list[dict[str, Any]]:
                 "SELECT * FROM fleet ORDER BY cluster")]
 
 
+@_locked
 def status(conn, now: int | None = None) -> dict[str, Any]:
     now = now or _now()
     by_state = {r["state"]: r["n"] for r in
@@ -1244,6 +1410,20 @@ _CASE_COLS = (
 )
 
 
+@_locked
+def ping(conn) -> None:
+    """Cheapest possible "is the database answering".
+
+    Exists so `/healthz` never reaches for the raw connection. It used to run
+    `conn.execute("select 1")` inline, which put an UNAUTHENTICATED endpoint --
+    polled by the platform's health check every 30 seconds -- on the shared
+    connection with no lock, alongside whatever transaction a `lease()` had open
+    at that moment.
+    """
+    conn.execute("SELECT 1").fetchone()
+
+
+@_locked
 def get_case(conn, case_id: str) -> dict[str, Any] | None:
     row = conn.execute("SELECT " + _CASE_COLS + " FROM cases WHERE case_id=?",
                        (case_id,)).fetchone()
@@ -1355,7 +1535,14 @@ def get_user(conn, username: str):
 # and read the campaign and nothing else, which is what "let someone watch
 # progress" needed all along: the read-only env token did it with a shared
 # secret nobody could attribute or revoke individually.
-ROLES = ("admin", "viewer")
+# `operator` is the middle of the three, and the one most accounts should be:
+# it reads and writes the CAMPAIGN -- add cases, lease, heartbeat, complete,
+# fail, release, report fleet -- and manages NOTHING. It cannot create or delete
+# accounts, cannot change anyone's role, cannot issue or revoke machine
+# credentials, and cannot purge a campaign. Before it existed, "let this person
+# run the campaign" and "let this person delete every account including yours"
+# were the same grant, because `admin` was the only role that could write.
+ROLES = ("admin", "operator", "viewer")
 
 
 @_locked
@@ -1550,3 +1737,182 @@ def list_worker_tokens(conn) -> list[dict[str, Any]]:
     return [{"name": r["name"], "created_by": r["created_by"],
              "created_at": r["created_at"], "last_seen_at": r["last_seen_at"],
              "revoked_at": r["revoked_at"]} for r in rows]
+
+
+@_locked
+def quarantine_not_on_land(conn, is_land, dry_run: bool = True,
+                           limit: int = 50) -> dict[str, Any]:
+    """Find campaign cases whose coordinates are not on land, and park them.
+
+    The gate on ``POST /v1/cases`` only protects cases added AFTER it existed.
+    The published campaign predates it: the draw put sites in Antarctica and in
+    the open ocean, and each one is 66 core-hours aimed at an empty flat plane.
+
+    Quarantined rather than deleted. The state already means "this case is not
+    going to run, and here is the trail of why" -- so nothing leases them, the
+    rows and their history stay auditable, and the decision is reversible. The
+    counts the dashboard shows stay honest for the same reason: these cases WERE
+    drawn, and a campaign that silently shrank would misreport what its sampler
+    produced.
+
+    ``is_land`` is injected rather than imported so this stays a database
+    function and the test does not need the tile list to exercise the sweep.
+
+    ``dry_run`` defaults to TRUE. Answering "how bad is it" must not be the same
+    keystroke as changing production.
+    """
+    found, ids_hit = [], []
+    for r in conn.execute(
+            "SELECT case_id, spec, state, city_cluster, lcz FROM cases"
+            " WHERE state NOT IN ('done', 'quarantined')").fetchall():
+        row = dict(r)
+        spec = row["spec"]
+        if isinstance(spec, str):
+            spec = json.loads(spec)
+        lat, lon = spec.get("lat"), spec.get("lon")
+        if lat is None or lon is None or is_land(float(lat), float(lon)):
+            continue
+        ids_hit.append(row["case_id"])
+        if len(found) < limit:
+            found.append({"case_id": row["case_id"], "lat": lat, "lon": lon,
+                          "state": row["state"], "city_cluster": row["city_cluster"],
+                          "lcz": row["lcz"]})
+
+    out: dict[str, Any] = {"scanned_not_on_land": len(ids_hit),
+                           "examples": found, "dry_run": dry_run,
+                           "quarantined": 0}
+    if dry_run or not ids_hit:
+        return out
+
+    now = _now()
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        for cid in ids_hit:
+            conn.execute(
+                "UPDATE cases SET state='quarantined', lease_id=NULL, updated_at=?"
+                " WHERE case_id=? AND state NOT IN ('done', 'quarantined')", (now, cid))
+            _event(conn, cid, None, "quarantined",
+                   "not on land: the building atlas publishes no tile here", now)
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    out["quarantined"] = len(ids_hit)
+    return out
+
+
+
+# -- pairing: a machine asks, an admin approves ---------------------------------
+
+PAIRING_TTL_SECONDS = 600
+# Anyone who can reach the broker can ask to pair, so the queue is bounded: past
+# this an admin is looking at a flood rather than a fleet, and the honest answer
+# to one more request is "not now".
+MAX_PENDING_PAIRINGS = 50
+
+
+@_locked
+def purge_expired_pairings(conn, now: int | None = None) -> None:
+    """Expire what has timed out, and forget what expired more than a day ago.
+
+    Kept for a day rather than deleted at once, so "I approved it and nothing
+    happened" still has a row to explain it.
+    """
+    now = now or _now()
+    conn.execute("UPDATE pairings SET status='expired' WHERE status='pending' AND expires_at < ?",
+                 (now,))
+    conn.execute("DELETE FROM pairings WHERE expires_at < ?", (now - 86400,))
+
+
+@_locked
+def create_pairing(conn, user_code: str, name: str, token_hash: str,
+                   host: str | None = None, platform: str | None = None,
+                   requested_ip: str | None = None,
+                   ttl: int = PAIRING_TTL_SECONDS, now: int | None = None) -> dict[str, Any]:
+    """Record a request to join. Raises ValueError with a reason a caller can show.
+
+    Refused up front, rather than at approval, when it could never succeed: a
+    name that already has a LIVE credential (approving would strand the token
+    that box is actually running on) or a hash some credential already uses.
+    The person sitting at the node learns now, not after an admin has clicked.
+    """
+    now = now or _now()
+    purge_expired_pairings(conn, now)
+    live = conn.execute(
+        "SELECT 1 FROM worker_tokens WHERE name = ? AND revoked_at IS NULL", (name,)).fetchone()
+    if live:
+        raise ValueError("name-in-use")
+    if conn.execute("SELECT 1 FROM worker_tokens WHERE token_hash = ?", (token_hash,)).fetchone():
+        raise ValueError("token-in-use")
+    pending = conn.execute(
+        "SELECT COUNT(*) n FROM pairings WHERE status='pending'").fetchone()["n"]
+    if pending >= MAX_PENDING_PAIRINGS:
+        raise ValueError("too-many-pending")
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        # Re-running setup on the same box replaces its earlier request instead
+        # of stacking a second card for the admin to choose between.
+        conn.execute("UPDATE pairings SET status='superseded', resolved_at=?"
+                     " WHERE name = ? AND status='pending'", (now, name))
+        conn.execute(
+            "INSERT INTO pairings (user_code, name, token_hash, host, platform,"
+            " requested_ip, status, created_at, expires_at)"
+            " VALUES (?,?,?,?,?,?,'pending',?,?)",
+            (user_code, name, token_hash, host, platform, requested_ip, now, now + ttl))
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    return {"user_code": user_code, "name": name, "expires_at": now + ttl}
+
+
+@_locked
+def get_pairing(conn, user_code: str, now: int | None = None) -> dict[str, Any] | None:
+    purge_expired_pairings(conn, now)
+    row = conn.execute("SELECT * FROM pairings WHERE user_code = ?", (user_code,)).fetchone()
+    return dict(row) if row is not None else None
+
+
+@_locked
+def list_pending_pairings(conn, now: int | None = None) -> list[dict[str, Any]]:
+    purge_expired_pairings(conn, now)
+    rows = conn.execute(
+        "SELECT user_code, name, host, platform, requested_ip, created_at, expires_at"
+        " FROM pairings WHERE status='pending' ORDER BY created_at ASC").fetchall()
+    return [dict(r) for r in rows]
+
+
+@_locked
+def resolve_pairing(conn, user_code: str, approve: bool, by: str,
+                    now: int | None = None) -> str:
+    """Approve or deny. Returns the resulting status, or a reason it did not apply:
+    'missing', 'expired', 'conflict' (the name or hash was taken meanwhile), or the
+    status it already had if someone else resolved it first.
+    """
+    now = now or _now()
+    purge_expired_pairings(conn, now)
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        row = conn.execute("SELECT * FROM pairings WHERE user_code = ?", (user_code,)).fetchone()
+        if row is None:
+            conn.execute("ROLLBACK")
+            return "missing"
+        if row["status"] != "pending":
+            conn.execute("ROLLBACK")
+            return row["status"]
+        if approve:
+            try:
+                create_worker_token(conn, row["name"], row["token_hash"], created_by=by, now=now)
+            except Exception:
+                # UNIQUE(name) on a live credential, or UNIQUE(token_hash): it was
+                # free when the node asked and is not now.
+                conn.execute("ROLLBACK")
+                return "conflict"
+        status = "approved" if approve else "denied"
+        conn.execute("UPDATE pairings SET status=?, resolved_by=?, resolved_at=? WHERE user_code=?",
+                     (status, by, now, user_code))
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    return status

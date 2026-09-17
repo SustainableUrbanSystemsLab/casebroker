@@ -23,13 +23,14 @@ from __future__ import annotations
 
 import hmac
 import json
+import contextlib
 import os
+import secrets
 import threading
 import time
 import pathlib
 import sys
 import weakref
-from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
@@ -86,6 +87,22 @@ class SetupIn(BaseModel):
 class LoginIn(BaseModel):
     username: str = Field(min_length=1, max_length=64)
     password: str = Field(min_length=1, max_length=256)
+
+
+class PairStartIn(BaseModel):
+    # Arrives from a machine nobody has authenticated yet, and ends up in an
+    # admin's browser -- so it is a strict charset, not "any 64 characters" like
+    # the admin-typed WorkerTokenIn below. It is also the worker id the machine
+    # will lease under, and ids are hostnames and cluster prefixes, never prose.
+    name: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+    # SHA-256 of a token the NODE generated. The raw token never comes here.
+    token_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    host: str | None = Field(default=None, max_length=128)
+    platform: str | None = Field(default=None, max_length=64)
+
+
+class PairPollIn(BaseModel):
+    user_code: str = Field(min_length=4, max_length=16)
 
 
 class WorkerTokenIn(BaseModel):
@@ -168,6 +185,12 @@ class HeartbeatIn(BaseModel):
 
 class CompleteIn(BaseModel):
     lease_id: str
+    # Optional, and additive on purpose: a worker built before this field still
+    # completes normally. It scopes the "was this already written?" check that
+    # makes a lost response safe to retry -- without it that check matches any
+    # done case carrying the same result_uri, which is only unique if the runner
+    # made it so.
+    case_id: str | None = None
     result_uri: str
     sha256: str | None = None
     bytes: int | None = None
@@ -216,6 +239,59 @@ def _tokens_from_env(canonical: str, legacy: str) -> list[str]:
             f"{legacy} is the deprecated spelling of {canonical}; set only one."
         )
     return new or old
+
+
+# How many sync request handlers may run at once.
+#
+# FastAPI runs every sync endpoint in anyio's threadpool, which defaults to 40.
+# That number is sized for a machine, not for a 512 MB instance whose resident
+# floor is already ~280 MB once DuckDB and GDAL load -- and it buys nothing here,
+# because db._LOCK serialises the database work those handlers exist to do. What
+# it does buy is 40 simultaneous request bodies, 40 stack frames deep in scrypt
+# or a GeoJSON parse, and a queue that grows until the platform kills the
+# process. Lower is not slower for this workload; it is the same throughput with
+# a bound on the worst case.
+REQUEST_CONCURRENCY = int(os.environ.get("CASEBROKER_REQUEST_CONCURRENCY", "12"))
+
+
+def _apply_thread_limit() -> None:
+    """Bound the running event loop's threadpool. Never fatal.
+
+    anyio's limiter is per event loop, which is why this is a function called at
+    startup rather than a value set at import: at import time there is no loop to
+    set it on.
+    """
+    try:
+        import anyio.to_thread
+        anyio.to_thread.current_default_thread_limiter().total_tokens = (
+            REQUEST_CONCURRENCY)
+    except Exception as e:                               # noqa: BLE001
+        print(f"[warn] could not bound the threadpool: {e}", file=sys.stderr)
+
+
+# How many password verifications may run at once, process-wide.
+#
+# scrypt at RFC 7914's interactive parameters is ~16 MB per call, and that cost
+# is the point -- it is what makes a stolen hash expensive. But uvicorn's default
+# threadpool is 40 wide and /v1/auth/login needs no credential, so nothing
+# stopped 40 simultaneous attempts asking for ~640 MB on a 512 MB instance that
+# already sits at ~280 MB once DuckDB and GDAL are resident. Four at a time caps
+# it near 64 MB; the cost is that a burst of logins queues rather than the
+# platform killing the process mid-lease.
+PASSWORD_CONCURRENCY = int(os.environ.get("CASEBROKER_PASSWORD_CONCURRENCY", "4"))
+_password_slots = threading.Semaphore(PASSWORD_CONCURRENCY)
+
+
+def _hash_password(password: str) -> str:
+    """scrypt, under the concurrency bound. Every caller in this module goes through it."""
+    with _password_slots:
+        return auth.hash_password(password)
+
+
+def _verify_password(password: str, stored: str) -> bool:
+    """scrypt, under the concurrency bound."""
+    with _password_slots:
+        return auth.verify_password(password, stored)
 
 
 def _may_lease_as(credential_name: str, worker_id: str) -> bool:
@@ -282,7 +358,16 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
     if setup_token is None:
         setup_token = os.environ.get("CASEBROKER_SETUP_TOKEN", "").strip() or None
 
-    app = FastAPI(title="E3D Simulation Broker", version=__version__)
+    # Applied on startup rather than in the Dockerfile's CMD so it holds however
+    # the app is started -- uvicorn, gunicorn, or a test client -- instead of
+    # only in the one invocation someone remembered to pass a flag to.
+    @contextlib.asynccontextmanager
+    async def _lifespan(_app: FastAPI):
+        _apply_thread_limit()
+        yield
+
+    app = FastAPI(title="E3D Simulation Broker", version=__version__,
+                  lifespan=_lifespan)
     conn = db.connect(db_path)
     app.state.db_path = db_path
 
@@ -361,28 +446,62 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         # -- /healthz reports which mode it is in so a misconfigured deployment
         # is visible rather than silent. Once an account exists the service is
         # no longer open, even with no env tokens set.
-        if _auth_is_open():
+        if _may_write_as(request, ("admin", "operator")):
             return
         user = _session_principal(request)
-        if user and user["role"] == "admin":
-            return
-        if _machine_principal(request):
-            return
-        # Configuring ONLY readonly_tokens (no worker tokens at all) is a valid,
-        # if unusual, deployment -- it must lock writes out entirely rather than
-        # silently falling back to open, which is why this checks `tokens`
-        # alone and never falls through to readonly_tokens.
-        if _env_token_ok(_supplied_token(request), tokens):
-            return
         if user:
             # Checked LAST, not on sight: a viewer's cookie rides along on every
             # request from that browser, and rejecting immediately would refuse
             # a request that also carried a perfectly good write credential.
             raise HTTPException(
                 status_code=403,
-                detail="this account is a viewer; it can read the campaign "
-                       "but not change it")
+                detail=f"this account is a {user['role']}; it can read the "
+                       "campaign but not change it")
         raise HTTPException(status_code=401, detail="log in, or send a valid bearer token")
+
+    def require_purge(request: Request) -> None:
+        """For DELETE /v1/cases, which retires a whole campaign.
+
+        Identical to the write gate except that an `operator` session is not
+        enough: adding, leasing and completing cases is the daily work, while
+        deleting them and their events and footprints is the one campaign
+        operation with nothing behind it. An admin, or a bearer write token,
+        still passes -- a machine token could always call this, and narrowing
+        that here would strand the documented `curl` in operations.md without
+        making anything safer, since the token holder can simply use it.
+        """
+        if _may_write_as(request, ("admin",)):
+            return
+        user = _session_principal(request)
+        if user:
+            raise HTTPException(
+                status_code=403,
+                detail=f"this account is a {user['role']}; purging a campaign "
+                       "needs an admin")
+        raise HTTPException(status_code=401, detail="log in, or send a valid bearer token")
+
+    def _may_write_as(request: Request, roles: tuple[str, ...]) -> bool:
+        """Shared by the write and purge gates, which differ ONLY in which
+        logged-in roles they accept.
+
+        The order matters and is the same in both: a session of a sufficient
+        role, then a machine token, then an environment write token. A session
+        whose role is too weak falls THROUGH to the token checks rather than
+        refusing on sight, so a browser that is logged in as a viewer and also
+        carrying a real write token is not turned away by the cookie.
+        """
+        if _auth_is_open():
+            return True
+        user = _session_principal(request)
+        if user and user["role"] in roles:
+            return True
+        if _machine_principal(request):
+            return True
+        # Configuring ONLY readonly_tokens (no worker tokens at all) is a valid,
+        # if unusual, deployment -- it must lock writes out entirely rather than
+        # silently falling back to open, which is why this checks `tokens`
+        # alone and never falls through to readonly_tokens.
+        return _env_token_ok(_supplied_token(request), tokens)
 
     def require_read_token(request: Request) -> None:
         if _auth_is_open():
@@ -403,12 +522,14 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
             raise HTTPException(status_code=401, detail="admin session required")
         if user["role"] != "admin":
             # The `role` column existed from the start and nothing read it, so
-            # every account was an admin whatever its row said. A viewer that
-            # could mint machine credentials would make the role decorative.
+            # every account was an admin whatever its row said. An operator that
+            # could mint machine credentials or create accounts would make the
+            # role decorative -- and a credential it issued would outlive the
+            # account that issued it.
             raise HTTPException(
                 status_code=403,
-                detail="this account is a viewer; managing accounts and machine "
-                       "credentials needs an admin")
+                detail=f"this account is a {user['role']}; managing accounts and "
+                       "machine credentials needs an admin")
         return user
 
     def _is_authenticated(request: Request) -> bool:
@@ -431,6 +552,7 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         return user
 
     WriteAuth = Depends(require_write_token)
+    PurgeAuth = Depends(require_purge)
     ReadAuth = Depends(require_read_token)
     AdminAuth = Depends(require_admin)
     SessionAuth = Depends(require_session)
@@ -472,7 +594,7 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         if _db_probe["ok"] is not None and now - _db_probe["at"] < 30.0:
             return _db_probe["ok"], _db_probe["accounts"]
         try:
-            conn.execute("select 1")
+            db.ping(conn)
             ok: bool | None = True
         except Exception:                                    # noqa: BLE001
             # Deliberately not re-raised, and deliberately undetailed: this
@@ -513,6 +635,24 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         # that made `casebroker health` exit non-zero -- its documented use as a
         # deploy gate -- against a broker that was properly locked down.
         db_ok, has_accounts = _db_state()
+        # Every database touch on this endpoint has to fail SOFT -- the same rule
+        # _db_state() above states, and the same bug one line further out.
+        # _is_authenticated resolves a session cookie through db.session_user and
+        # ANY bearer token through db.worker_token_owner (the env token included,
+        # because revocation is checked against the database), so during an
+        # outage a CREDENTIALLED /healthz raised where an anonymous one answered
+        # db_ok: false. The dashboard's session cookie is scoped to "/", which
+        # made the operator signed in to diagnose the outage the one caller who
+        # could not see it: the wizard said "Waiting for the broker to answer
+        # /healthz." instead of "cannot reach its database". A container
+        # HEALTHCHECK carrying a credential would have restart-looped a broker
+        # that was itself fine, which is what db_ok exists to prevent.
+        try:
+            authed = _is_authenticated(request)
+        except Exception:                                    # noqa: BLE001
+            # Failing CLOSED: the only field this gates is the DSN summary, so a
+            # credential that cannot be resolved must hide it, never expose it.
+            authed = False
         if tokens or readonly_tokens:
             posture = "token"
         elif has_accounts:
@@ -551,7 +691,7 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
                 # is the part a health check actually needs, and it stays
                 # public; the key stays present-but-null so a client reading it
                 # by name does not break.
-                "db": _redact_db_target(db_path) if _is_authenticated(request) else None}
+                "db": _redact_db_target(db_path) if authed else None}
 
 
     @app.get("/v1/share-token", dependencies=[WriteAuth])
@@ -648,6 +788,12 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
             # An env token still works; the UI says so, so the transition is
             # visible rather than a mystery when a pasted token keeps working.
             "env_tokens": bool(tokens or readonly_tokens),
+            # So the dashboard's role pickers offer exactly what this broker
+            # accepts. Restating the list in the page would let the two drift,
+            # and the drift shows up as a 400 at the moment someone is trying to
+            # add a colleague. The names are public -- they are in the docs and
+            # in every auth response -- so this leaks nothing.
+            "roles": list(db.ROLES),
         }
 
     @app.post("/v1/auth/setup")
@@ -698,7 +844,7 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         # Explicitly admin: this is the account that has to be able to create
         # every other one, and UserIn defaults the other direction.
         user = db.create_user(conn, body.username,
-                              auth.hash_password(body.password), role="admin")
+                              _hash_password(body.password), role="admin")
         _forget_db_probe()          # this deployment is no longer "OPEN"
         _issue_session(request, response, user["id"])
         return {"username": user["username"], "role": user["role"]}
@@ -744,12 +890,19 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
     _login_lock = threading.Lock()
     LOGIN_FAIL_WINDOW = 300.0
     LOGIN_FAIL_LIMIT = 10
+    # Higher than the per-account limit because one address is legitimately many
+    # people behind a TLS-terminating proxy or a university NAT, but still a hard
+    # ceiling on how much scrypt an anonymous caller can buy.
+    LOGIN_FAIL_ADDR_LIMIT = 25
     # The username is attacker-chosen and need not exist, so without a cap an
     # anonymous caller can grow this map indefinitely. Well above any real
     # deployment's account count, and evicting the stalest entry is correct
     # behaviour rather than a mere safeguard: the stalest is also the one whose
     # window is most likely to have expired anyway.
     LOGIN_FAIL_MAX_KEYS = 4096
+
+    def _client_addr(request: Request) -> str:
+        return request.client.host if request.client else "?"
 
     def _throttle_key(request: Request, username: str) -> str:
         # The SOCKET address deliberately, not X-Forwarded-For -- unlike the
@@ -759,8 +912,7 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         # which is worse than the cost of not using it: behind a
         # TLS-terminating proxy every caller shares one apparent address, so
         # one attacker can throttle the others for that username.
-        client = request.client.host if request.client else "?"
-        return f"{username}|{client}"
+        return f"{username}|{_client_addr(request)}"
 
     @app.post("/v1/auth/login")
     def auth_login(body: LoginIn, request: Request, response: Response) -> dict[str, Any]:
@@ -772,28 +924,46 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         # so a whole wave of simultaneous attempts passes the check while the
         # count is still zero and only the NEXT wave sees the failures. Measured
         # at 15 attempts admitted against a limit of 10 before this.
+        # TWO buckets, and the address one is the load-bearing half. Keying only
+        # on `username|address` bounded nothing an attacker cares about: the
+        # username is attacker-chosen and need not exist, so every attempt with a
+        # fresh username opened a fresh bucket and the limit never applied. Each
+        # of those attempts is a full scrypt -- ~100 ms and ~16 MB by design --
+        # from an endpoint that needs no credential to reach.
+        addr_key = f"|addr|{_client_addr(request)}"
         with _login_lock:
-            recent = [t for t in _login_failures.get(key, [])
-                      if now - t < LOGIN_FAIL_WINDOW]
-            if len(recent) >= LOGIN_FAIL_LIMIT:
-                _login_failures[key] = recent
-                raise HTTPException(
-                    429, "too many failed logins for this account from this "
-                         "address; wait a few minutes")
-            _login_failures[key] = recent + [now]
+            for k, limit in ((key, LOGIN_FAIL_LIMIT),
+                             (addr_key, LOGIN_FAIL_ADDR_LIMIT)):
+                recent = [t for t in _login_failures.get(k, [])
+                          if now - t < LOGIN_FAIL_WINDOW]
+                if len(recent) >= limit:
+                    _login_failures[k] = recent
+                    raise HTTPException(
+                        429, "too many failed logins from this address; "
+                             "wait a few minutes")
+                _login_failures[k] = recent + [now]
             if len(_login_failures) > LOGIN_FAIL_MAX_KEYS:
                 stalest = min(_login_failures, key=lambda k: _login_failures[k][-1])
                 _login_failures.pop(stalest, None)
         user = db.get_user(conn, body.username)
-        # Verify even when the user does not exist, against a throwaway hash, so
-        # a wrong USERNAME and a wrong PASSWORD take the same time. Otherwise the
-        # response time enumerates accounts.
-        stored = user["password_hash"] if user else auth.hash_password("decoy")
-        if not auth.verify_password(body.password, stored) or not user:
+        # Verify even when the user does not exist, against a decoy hash, so a
+        # wrong USERNAME and a wrong PASSWORD take the same time. Otherwise the
+        # response time enumerates accounts. The decoy is precomputed at import
+        # (auth.DECOY_HASH) rather than built here: building it is itself a full
+        # scrypt, which made a miss cost exactly twice a hit.
+        stored = user["password_hash"] if user else auth.DECOY_HASH
+        # Bounded, because scrypt is ~16 MB a call and the threadpool is 40 wide:
+        # unbounded, 40 simultaneous logins ask for ~640 MB on a 512 MB instance
+        # that already sits at ~280 MB once the geo libraries are resident. The
+        # queue costs a slow login under load; the alternative is the platform
+        # killing the process, which is what actually happened to this service.
+        ok = _verify_password(body.password, stored)
+        if not ok or not user:
             # The reservation above stands as the failure record.
             raise HTTPException(401, "wrong username or password")
         with _login_lock:
             _login_failures.pop(key, None)      # success releases the whole run
+            _login_failures.pop(addr_key, None)
         # The one place a sweep costs nothing and cannot be forgotten: expiry is
         # already enforced at read time, so this only stops the table growing
         # without bound over a long-lived campaign.
@@ -819,6 +989,122 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         box is this, and is it still alive?
         """
         return {"tokens": db.list_worker_tokens(conn)}
+
+    # -- pairing: a machine asks, an admin approves in the browser ---------------
+    #
+    # What `E3D --setup-simulation-node` talks to. The old enrolment needed an
+    # admin to type their PASSWORD on every simulation node, which is the wrong
+    # place for it: those are shared cluster logins and lab boxes. Here the node
+    # shows a short code and opens the dashboard; whoever is already signed in as
+    # an admin confirms the code matches and clicks Approve. Nothing secret is
+    # ever typed on the node.
+    #
+    # The node generates its own token and sends only the hash (see the pairings
+    # table in db.py), so approval is a row insert and there is no moment at
+    # which the broker holds a readable credential.
+    _PAIR_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"     # no 0/O, 1/I
+    _pair_starts: dict[str, list[float]] = {}
+    PAIR_START_WINDOW = 600.0
+    PAIR_START_LIMIT = 10
+
+    def _norm_code(code: str) -> str:
+        return "".join(ch for ch in code.upper() if ch.isalnum())
+
+    def _show_code(code: str) -> str:
+        return code[:4] + "-" + code[4:]
+
+    @app.post("/v1/pair/start")
+    def pair_start(body: PairStartIn, request: Request) -> dict[str, Any]:
+        """Ask to join. Unauthenticated by necessity -- the machine has nothing to
+        authenticate with yet -- so it is throttled per address and the queue is
+        bounded, and the only thing it can cause is a card in an admin's browser.
+        """
+        addr = _client_addr(request)
+        now_m = time.monotonic()
+        with _login_lock:
+            recent = [t for t in _pair_starts.get(addr, []) if now_m - t < PAIR_START_WINDOW]
+            if len(recent) >= PAIR_START_LIMIT:
+                _pair_starts[addr] = recent
+                raise HTTPException(429, "too many pairing requests from this address; "
+                                         "wait a few minutes")
+            _pair_starts[addr] = recent + [now_m]
+            if len(_pair_starts) > 4096:
+                _pair_starts.pop(min(_pair_starts, key=lambda k: _pair_starts[k][-1]), None)
+
+        last: Exception | None = None
+        for _ in range(5):                  # a user_code collision is a retry, not an error
+            code = "".join(secrets.choice(_PAIR_ALPHABET) for _ in range(8))
+            try:
+                made = db.create_pairing(conn, code, body.name, body.token_hash,
+                                         host=body.host, platform=body.platform,
+                                         requested_ip=addr)
+                break
+            except ValueError as e:
+                reason = str(e)
+                if reason == "name-in-use":
+                    raise HTTPException(
+                        409, f"{body.name!r} already has a live credential. Revoke it in "
+                             "the dashboard (Settings > Machines) first, or pick another "
+                             "name with --name.") from e
+                if reason == "token-in-use":
+                    raise HTTPException(409, "that token is already registered; "
+                                             "generate a new one") from e
+                raise HTTPException(429, "too many machines are waiting for approval; "
+                                         "ask an admin to clear the queue") from e
+            except Exception as e:          # noqa: BLE001 -- UNIQUE(user_code)
+                last = e
+        else:
+            raise HTTPException(503, "could not allocate a pairing code") from last
+
+        scheme = "https" if _is_https(request) else "http"
+        host = request.headers.get("host") or request.url.netloc
+        return {"user_code": _show_code(code),
+                "verification_url": f"{scheme}://{host}/?pair={_show_code(code)}",
+                "expires_in": made["expires_at"] - int(time.time()),
+                "interval": 3}
+
+    @app.post("/v1/pair/poll")
+    def pair_poll(body: PairPollIn, request: Request) -> dict[str, Any]:
+        """Has it been approved yet? Proven by presenting the token itself: only
+        the machine that started this pairing can produce a token with this hash.
+        An unknown code and a wrong token get the same 404, so the endpoint cannot
+        be used to find out which codes are live.
+        """
+        supplied = _supplied_token(request)
+        row = db.get_pairing(conn, _norm_code(body.user_code))
+        if (not supplied or row is None
+                or not _ct_eq(auth.hash_token(supplied), row["token_hash"])):
+            raise HTTPException(404, "no such pairing")
+        out: dict[str, Any] = {"status": row["status"], "name": row["name"]}
+        if row["status"] == "pending":
+            out["expires_in"] = max(0, row["expires_at"] - int(time.time()))
+        return out
+
+    @app.get("/v1/pair/pending")
+    def pair_pending(user=AdminAuth) -> dict[str, Any]:
+        rows = db.list_pending_pairings(conn)
+        for r in rows:
+            r["user_code"] = _show_code(r["user_code"])
+        return {"pending": rows}
+
+    def _resolve(user_code: str, approve: bool, user) -> dict[str, Any]:
+        status = db.resolve_pairing(conn, _norm_code(user_code), approve, user["username"])
+        if status == "missing":
+            raise HTTPException(404, "no such pairing request")
+        if status == "expired":
+            raise HTTPException(410, "that request expired; run the setup on the machine again")
+        if status == "conflict":
+            raise HTTPException(409, "that name or token was claimed by another credential "
+                                     "in the meantime; run the setup on the machine again")
+        return {"status": status}
+
+    @app.post("/v1/pair/{user_code}/approve")
+    def pair_approve(user_code: str, user=AdminAuth) -> dict[str, Any]:
+        return _resolve(user_code, True, user)
+
+    @app.post("/v1/pair/{user_code}/deny")
+    def pair_deny(user_code: str, user=AdminAuth) -> dict[str, Any]:
+        return _resolve(user_code, False, user)
 
     @app.post("/v1/workers/tokens")
     def issue_token(body: WorkerTokenIn, user=AdminAuth) -> dict[str, Any]:
@@ -866,13 +1152,18 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
 
     @app.post("/v1/users")
     def create_account(body: UserIn, user=AdminAuth) -> dict[str, Any]:
-        """Add an operator. Admin-only, and never a way to escalate: the caller
-        is already an admin, so it grants nothing it does not itself hold."""
+        """Add an account. Admin-only, and never a way to escalate: the caller
+        is already an admin, so it grants nothing it does not itself hold.
+
+        Defaults to `viewer` rather than `operator`: the least privilege that is
+        still useful is the right default for the endpoint a script calls, and
+        the caller has to say `operator` or `admin` on purpose.
+        """
         if body.role not in db.ROLES:
             raise HTTPException(400, "role must be one of %s" % ", ".join(db.ROLES))
         try:
             created = db.create_user(conn, body.username,
-                                     auth.hash_password(body.password), role=body.role)
+                                     _hash_password(body.password), role=body.role)
         except Exception:
             # UNIQUE(username). Deliberately not "does this user exist?" as a
             # separate probe -- this endpoint is admin-only, so there is no
@@ -917,12 +1208,12 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         if not target:
             raise HTTPException(404, f"no account named {username!r}")
         if caller["username"] == username:
-            if not body.current_password or not auth.verify_password(
+            if not body.current_password or not _verify_password(
                     body.current_password, target["password_hash"]):
                 raise HTTPException(403, "current password is wrong")
         elif caller["role"] != "admin":
             raise HTTPException(403, "only an admin can reset another account's password")
-        db.set_password(conn, username, auth.hash_password(body.new_password))
+        db.set_password(conn, username, _hash_password(body.new_password))
         if caller["username"] == username:
             # set_password revoked every session this account held, this one
             # included. Re-issue so changing your own password does not log you
@@ -933,13 +1224,34 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
 
 
     @app.post("/v1/cases", dependencies=[WriteAuth])
-    def add_cases(cases: list[CaseIn]) -> dict[str, int]:
+    def add_cases(cases: list[CaseIn]) -> dict[str, Any]:
         """Append cases to the campaign. Safe to re-run: existing ids are skipped,
-        so growing 5k -> 15k is 'post the new list' and nothing else."""
+        so growing 5k -> 15k is 'post the new list' and nothing else.
+
+        **Sites that are not on land are dropped here**, and reported back rather
+        than refused. The sampler's LCZ raster reads snow, ice and open water as
+        built classes, and its purity test cannot catch that -- a uniformly
+        misread ice sheet is 100% "pure" -- so the draw has produced sites in
+        Antarctica and in the open ocean. Its polar gate handles the poles by
+        latitude, which by construction cannot catch 7.5N 37.5W in the middle of
+        the Atlantic.
+
+        Dropped rather than rejecting the batch, because a 5,000-case draw with
+        twenty bad sites in it should still land the other 4,980, and the caller
+        is told exactly what went and why. The check is coarse on purpose; see
+        :func:`footprints.on_land`.
+        """
         if len(cases) > 5000:
             raise HTTPException(413, "post at most 5000 cases per request")
-        rows = []
+        rows, rejected = [], []
         for c in cases:
+            if not footprints.on_land(c.lat, c.lon):
+                rejected.append({"lat": c.lat, "lon": c.lon,
+                                 "city_cluster": c.city_cluster, "lcz": c.lcz,
+                                 "tile": footprints.gba_tile_for(c.lat, c.lon)
+                                 if -90.0 <= c.lat <= 90.0 and -180.0 <= c.lon <= 180.0
+                                 else None})
+                continue
             rows.append({
                 "case_id": ids.case_id(c.lat, c.lon, c.recipe),
                 "spec": {**c.spec, "lat": c.lat, "lon": c.lon, "recipe": c.recipe},
@@ -950,10 +1262,39 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
                 "priority": c.priority,
                 "max_attempts": c.max_attempts,
             })
-        return db.add_cases(conn, rows)
+        out: dict[str, Any] = dict(db.add_cases(conn, rows))
+        # Always present, so a caller can read it without a version check, and
+        # a draw that produced none can say so rather than staying silent.
+        out["rejected_not_on_land"] = len(rejected)
+        if rejected:
+            # A sample, not the lot: twenty bad sites are a bug in the draw and
+            # five of them show it, while 5,000 would be the response body.
+            out["rejected_examples"] = rejected[:5]
+        return out
 
 
-    @app.delete("/v1/cases", dependencies=[WriteAuth])
+    @app.post("/v1/cases/land-audit", dependencies=[WriteAuth])
+    def land_audit(dry_run: bool = True, limit: int = 50) -> dict[str, Any]:
+        """Find cases already in the campaign that are not on land, and park them.
+
+        The gate on `POST /v1/cases` protects only what was added after it
+        existed. The published campaign predates it -- AGENTS.md has carried
+        "production holds the ungated draw, including sites in Antarctica and one
+        in the open Pacific" as a known problem -- and each of those is 66
+        core-hours aimed at an empty flat plane.
+
+        They are quarantined, not deleted: nothing leases a quarantined case, the
+        row and its event trail stay auditable, and the decision is reversible.
+        Deleting them would also quietly shrink the campaign's own record of what
+        its sampler produced, which is the thing worth keeping.
+
+        `dry_run` defaults to TRUE, as it does for purge. Finding out how bad it
+        is must not be the same keystroke as changing production.
+        """
+        return db.quarantine_not_on_land(conn, footprints.on_land,
+                                         dry_run=dry_run, limit=limit)
+
+    @app.delete("/v1/cases", dependencies=[PurgeAuth])
     def purge_cases(expect: int | None = None, recipe: str | None = None,
                     state: str | None = None, dry_run: bool = True) -> dict[str, Any]:
         """Delete cases from the campaign, with their events and footprints.
@@ -1027,7 +1368,7 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
     @app.post("/v1/complete", dependencies=[WriteAuth])
     def complete(body: CompleteIn) -> dict[str, bool]:
         if not db.complete(conn, body.lease_id, body.result_uri, body.sha256,
-                           body.bytes, body.metrics):
+                           body.bytes, body.metrics, case_id=body.case_id):
             raise HTTPException(409, "lease expired or superseded; result rejected")
         return {"ok": True}
 
@@ -1088,85 +1429,157 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
     footprints_locks: weakref.WeakValueDictionary = weakref.WeakValueDictionary()
     footprints_locks_guard = threading.Lock()
 
-    def _building_query(lat: float, lon: float, source: str) -> dict[str, Any]:
-        """The buildings and the terrain for one site, read side by side, the
-        buildings from ``source`` -- the one the case's mesh was built from.
+    def _drawn_from(mesh: str) -> str:
+        """The source a case whose mesh is ``mesh`` is actually drawn from.
 
-        In sequence a first look cost the SUM of two remote reads whose times
-        swing by site and by minute -- measured 2026-09-15, GBA 2.1-8.7 s and
-        GEDTM30 0.05-10.6 s -- which is most of why the dashboard's count
-        stopped somewhere different every time. Side by side it costs the
-        slower of the two.
+        The mesh's own source, except that Overture is an optional extra: it
+        costs a second interpreter loading pyarrow inside a memory-capped web
+        process, so it runs only where CASEBROKER_OVERTURE_FALLBACK says it may.
+        A case meshed from Overture on an instance that will not read Overture is
+        drawn from GBA and labelled -- a substitution that says so, rather than a
+        silent one.
+
+        One function because the cache compares against it and the query follows
+        it. If those two ever disagreed, a case would miss its own cache and
+        re-query the atlas on every inspector open.
         """
-        def buildings(src: str) -> dict[str, Any]:
-            # Looked up on each call rather than bound once, so a test can
-            # replace them.
-            fc = (footprints.fetch_gba(lat, lon) if src == footprints.GBA
-                  else footprints.fetch(lat, lon))
-            fc["source"] = src
-            return fc
+        if mesh == footprints.OVERTURE and not footprints.OVERTURE_FALLBACK:
+            return footprints.GBA
+        return mesh
 
-        with ThreadPoolExecutor(max_workers=1) as pool:
-            # Whether this site has real bare-earth terrain or will be meshed
-            # flat. Cached with the footprints because it is the same question --
-            # "what will this case actually be made of" -- and because finding
-            # out after 66 core-hours is worse than finding out now.
-            terrain = pool.submit(footprints.terrain, lat, lon)
+    def _building_query(lat: float, lon: float,
+                        source: str) -> tuple[dict[str, Any], bool]:
+        """The three layers for one site, the buildings from the source this
+        case's mesh was built from.
+
+        Returns the payload and whether any of it is a fact about TODAY rather
+        than about the site, which is what decides whether it may be cached.
+
+        The layers are fetched INDEPENDENTLY. They used to share one try/except
+        that raised 502 on any failure, so a site the building atlas simply does
+        not cover took the terrain and the canopy down with it and the panel
+        showed an error instead of the answer -- when "no buildings, no land, no
+        trees" was itself the answer, and the most useful one this endpoint can
+        give: that case is in the ocean.
+
+        The layers run in sequence, not side by side. Together they are the
+        slower arm plus the other two rather than the slowest alone, which is
+        real -- GBA measured 2.1-8.7 s and GEDTM30 0.05-10.6 s on 2026-09-15 --
+        but the ceilings around them are per call and not per process, so two
+        layers in flight are two budgets live at once inside one capped web
+        process. That is the pressure the preview slot exists to hold down.
+        """
+        transient = False
+        empty = {"type": "FeatureCollection", "features": [], "n": 0,
+                 "release": "GBA.LoD1", "source": footprints.GBA,
+                 "height_kind": "predicted", "centre": [lat, lon],
+                 "half_m": footprints.HALF_M}
+
+        # Looked up on each call rather than bound once, so a test can replace
+        # them.
+        def gba() -> dict[str, Any]:
+            return {**footprints.fetch_gba(lat, lon), "source": footprints.GBA}
+
+        def overture() -> dict[str, Any]:
+            return {**footprints.fetch(lat, lon), "source": footprints.OVERTURE}
+
+        def attempt(fn):
+            """``(payload, error)``, where a missing tile is a payload.
+
+            GBA publishes 922 tiles of a possible 2,592 and the rest are ocean
+            and ice, so an empty answer there is a fact about the site, not a
+            failure, and is cached like any other.
+            """
             try:
-                # The mesh's own source first, because that is what this must
-                # draw. The other stays as a fallback rather than nothing: it is
-                # one HTTP dependency against another, and an inspector that 502s
-                # is useless exactly when someone is trying to find out why a case
-                # looks wrong. `fallback_from` then says the picture is not the
-                # mesh's, and why.
-                other = (footprints.OVERTURE if source == footprints.GBA
-                         else footprints.GBA)
-                try:
-                    fc = buildings(source)
-                except Exception as err:                 # noqa: BLE001
-                    fc = buildings(other)
-                    name = "gba" if source == footprints.GBA else "overture"
-                    fc["fallback_from"] = f"{name} unavailable: {str(err)[:120]}"
-                fc["terrain"] = terrain.result()
-            except Exception as e:                       # noqa: BLE001
-                # 502, not 500: the failure is upstream at the building-data source,
-                # and saying so keeps it out of the broker's own error budget.
-                raise HTTPException(502, f"building query failed: {e}") from e
-        return fc
+                return fn(), None
+            except footprints.TileNotPublished as gap:
+                return {**empty, "tile_published": False, "tile": str(gap)}, None
+            except Exception as err:                     # noqa: BLE001
+                return None, err
+
+        # The mesh's own source first, because that is what this must draw. The
+        # other stays as a fallback rather than nothing: it is one HTTP
+        # dependency against another, and an inspector that 502s is useless
+        # exactly when someone is trying to find out why a case looks wrong.
+        # `fallback_from` then says the picture is not the mesh's, and why.
+        drawn = _drawn_from(source)
+        first, other = ((overture, gba) if drawn == footprints.OVERTURE
+                        else (gba, overture if footprints.OVERTURE_FALLBACK
+                              else None))
+        fc, err = attempt(first)
+        if fc is not None and drawn != source:
+            fc["fallback_from"] = (
+                "overture not enabled here: install casebroker[overture] and "
+                "set CASEBROKER_OVERTURE_FALLBACK to draw this case from the "
+                "source it was meshed from")
+        elif fc is None and other is not None:
+            fc, later = attempt(other)
+            if fc is None:
+                err = later
+            else:
+                fc["fallback_from"] = f"{drawn} unavailable: {str(err)[:120]}"
+        if fc is None:
+            # A reachability failure, unlike a missing tile, says nothing about
+            # the site -- so it is reported and NOT cached, and the other two
+            # layers still get drawn.
+            transient = True
+            fc = {**empty, "buildings_error": str(err)[:200]}
+
+        # What the site is made of BESIDES buildings. Cached with the footprints
+        # because they answer the same question -- "what will this case actually
+        # be" -- and because finding out after 66 core-hours is worse than
+        # finding out now. Neither raises: a dead raster host is a fact about
+        # today, not about the site.
+        fc["terrain"] = footprints.terrain(lat, lon)
+        fc["canopy"] = footprints.canopy(lat, lon)
+        # "unavailable" and "unknown" are facts about TODAY -- a raster host that
+        # did not answer, a library that is not there -- and caching them freezes
+        # one bad moment into "this site has no terrain and no trees" for the
+        # life of the case. Only the buildings failure used to set `transient`,
+        # so a canopy read that timed out once was served as a treeless site
+        # forever. "flat" and "none" are facts about the SITE and stay cacheable.
+        for layer in (fc["terrain"], fc["canopy"]):
+            if layer.get("source") in ("unavailable", "unknown"):
+                transient = True
+        return fc, transient
 
     @app.get("/v1/cases/{case_id}/footprints", dependencies=[ReadAuth])
     def case_footprints(case_id: str, refresh: bool = False) -> dict[str, Any]:
-        """Building footprints for this case, as GeoJSON, from the source its mesh
-        was built from.
+        """Everything this case will be meshed from: buildings, terrain, trees.
 
-        Which source that is comes from :func:`footprints.mesh_source`: what the
-        case's run reported, Overture for a case that finished before the builder
-        could mesh GBA, and GBA otherwise. The response carries it as
-        `mesh_source`, with `mesh_source_basis` saying how it is known; `source`
-        is what actually answered, and `fallback_from` says why the two differ
-        when they do.
+        GeoJSON footprints with predicted heights, plus a GEDTM30 relief grid
+        and a Meta/WRI canopy-height grid over the mesh domain. The dashboard
+        cannot fetch any of it itself -- all three are GeoParquet or
+        Cloud-Optimized GeoTIFF on object storage, with no REST API and no tile
+        endpoint a browser could call -- so the broker runs the queries.
 
-        The dashboard cannot fetch these itself: both sources publish GeoParquet
-        for range reads, with no REST API and no published tile endpoint, so a
-        browser has nothing to call. The broker runs the query.
+        The buildings come from the source THIS case's mesh was built from,
+        which :func:`footprints.mesh_source` decides: what the case's run
+        reported, Overture for a case that finished before the builder could
+        mesh GBA, and GBA otherwise. The response carries it as `mesh_source`,
+        with `mesh_source_basis` saying how it is known; `source` is what
+        actually answered, and `fallback_from` says why the two differ when
+        they do.
 
-        It is deliberately the SAME source and the same bbox derivation the
-        runner used, so the picture is the geometry that got meshed. Drawing OSM
-        footprints, a map tile, or the OTHER building source would be worse than
-        drawing nothing: it would look like a check while disagreeing with the
-        mesh, and it would disagree most exactly where checking matters.
+        It is deliberately the SAME sources and the same bbox derivation the
+        runner uses, so the picture is the geometry that gets meshed. Drawing
+        OSM footprints, a basemap tile, or the OTHER building source would be
+        worse than drawing nothing: it would look like a check while disagreeing
+        with the mesh, and it would disagree most exactly where checking matters.
 
         Cached after the first fetch; `refresh=true` forces a re-query, and so
-        does a cached row from a source other than the mesh's.
+        does a cached row written by an older build or drawn from a source this
+        case would not be drawn from now.
         """
-        row = conn.execute("SELECT * FROM cases WHERE case_id=?", (case_id,)).fetchone()
+        row = db.get_case(conn, case_id)
         if row is None:
             raise HTTPException(404, "no such case")
         row = dict(row)
         metrics = row.get("metrics") or {}
         if isinstance(metrics, str):
             metrics = json.loads(metrics)
-        source, basis = footprints.mesh_source(row["state"], metrics, row.get("updated_at"))
+        source, basis = footprints.mesh_source(row["state"], metrics,
+                                               row.get("updated_at"))
         meshed = {"mesh_source": source, "mesh_source_basis": basis}
 
         def cached() -> dict[str, Any] | None:
@@ -1176,15 +1589,22 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
             if not hit:
                 return None
             fc = json.loads(hit["geojson"])
-            # Rows cached before the switch to GBA carry no `source`: Overture.
-            fc["source"] = fc.get("source") or footprints.OVERTURE
-            # A row from the other source is not this case's picture: the
-            # pre-switch Overture row of a case GBA will mesh, the GBA row of a
-            # case whose run reported Overture, or a fallback answer. Served from
-            # the cache it would stay the wrong picture for good.
-            if fc["source"] != source:
+            # A payload written by an older build is a miss, not a hit. The
+            # cache is keyed on case_id alone, so without this check the first
+            # version of this endpoint answers forever -- which is how adding
+            # terrain and canopy produced a fleet of cases that reported no
+            # trees anywhere rather than re-querying once.
+            if fc.get("payload_v") != footprints.PAYLOAD_VERSION:
                 return None
-            return {**fc, **meshed, "cached": True, "fetched_at": hit["fetched_at"]}
+            # Nor is a row drawn from a source this case would not be drawn from
+            # now a hit: the pre-switch Overture row of a case GBA will mesh, or
+            # a fallback taken while the real source was down. Served from the
+            # cache it would stay the wrong picture for good. Rows cached before
+            # the switch carry no `source` at all: Overture.
+            if (fc.get("source") or footprints.OVERTURE) != _drawn_from(source):
+                return None
+            return {**fc, **meshed, "cached": True,
+                    "fetched_at": hit["fetched_at"]}
 
         if (hit := cached()) is not None:
             return hit
@@ -1194,14 +1614,31 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         lat, lon = spec.get("lat"), spec.get("lon")
         if lat is None or lon is None:
             raise HTTPException(422, "case spec carries no lat/lon")
+        lat, lon = float(lat), float(lon)
         with footprints_locks_guard:
             lock = footprints_locks.setdefault(case_id, threading.Lock())
         with lock:
             # Whoever held the lock before us may have just answered this case.
             if (hit := cached()) is not None:
                 return hit
-            fc = _building_query(float(lat), float(lon), source)
-            db.put_footprints(conn, case_id, json.dumps(fc), fc["n"])
+            # ONE preview at a time across the process, because the memory
+            # ceilings are per call and not per process: every layer builds its
+            # own DuckDB with its own budget and its own GDAL cache, and this
+            # endpoint is sync, so it holds a threadpool slot for the 8-15
+            # seconds the remote reads take while the next caller starts its own
+            # everything. Two at once already asks for more than the instance
+            # has. 503 with Retry-After is the honest answer when the queue is
+            # full; the alternative is the platform killing the process, which is
+            # how this branch started.
+            try:
+                with footprints.exclusive():
+                    fc, transient = _building_query(lat, lon, source)
+            except footprints.GeoBusy as busy:
+                raise HTTPException(503, str(busy),
+                                    headers={"Retry-After": "30"}) from busy
+            fc["payload_v"] = footprints.PAYLOAD_VERSION
+            if not transient:
+                db.put_footprints(conn, case_id, json.dumps(fc), fc["n"])
         return {**fc, **meshed, "cached": False}
 
     @app.get("/v1/cases/{case_id}", dependencies=[ReadAuth])

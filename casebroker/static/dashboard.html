@@ -1352,7 +1352,9 @@
   <div class="drawer-tabs" role="tablist" aria-label="Settings sections">
     <button class="drawer-tab" role="tab" type="button" data-tab="setup" aria-selected="true">Setup</button>
     <button class="drawer-tab" role="tab" type="button" data-tab="connection" aria-selected="false">Connection</button>
+    <button class="drawer-tab" role="tab" type="button" data-tab="users" aria-selected="false">Users</button>
     <button class="drawer-tab" role="tab" type="button" data-tab="machines" aria-selected="false">Machines</button>
+    <button class="drawer-tab" role="tab" type="button" data-tab="campaign" aria-selected="false">Campaign</button>
     <button class="drawer-tab" role="tab" type="button" data-tab="prefs" aria-selected="false">Preferences</button>
   </div>
 
@@ -1472,6 +1474,71 @@
       </form>
     </section>
 
+    <!-- ---------------------------------------------------------- Users -->
+    <!-- People, as opposed to machines. Adding a colleague used to need shell
+         access to a box holding the DSN, which is why everyone was an admin. -->
+    <section id="tab-users" class="drawer-pane" role="tabpanel" hidden>
+      <div id="users" style="display:none;">
+        <div class="panel-title-group" style="margin-bottom:4px;"><h2>Users</h2></div>
+        <div class="panel-subtitle" id="rolesHint"></div>
+        <div class="row" style="margin-top:12px;">
+          <div class="field" style="flex:1; min-width:150px;">
+            <label for="newUsername">Username</label>
+            <input type="text" id="newUsername" autocomplete="off" placeholder="bob" />
+          </div>
+          <div class="field" style="flex:1; min-width:170px;">
+            <label for="newUserPassword">Initial password
+              <span class="label-hint">(12+ chars)</span>
+            </label>
+            <input type="password" id="newUserPassword" autocomplete="new-password" />
+          </div>
+          <div class="field" style="min-width:130px;">
+            <label for="newUserRole">Role</label>
+            <select id="newUserRole"></select>
+          </div>
+          <div><button id="addUserBtn" type="button">Add user</button></div>
+        </div>
+        <div id="userList" style="margin-top:12px;"></div>
+      </div>
+      <div id="usersLocked" class="panel-subtitle">
+        Sign in as an admin to manage accounts.
+      </div>
+    </section>
+
+    <!-- ------------------------------------------------------- Campaign -->
+    <!-- Campaign hygiene that needs the database, so it runs on the broker and
+         is reached from here rather than from a psql session or a curl with a
+         bearer token pasted out of a password manager. -->
+    <section id="tab-campaign" class="drawer-pane" role="tabpanel" hidden>
+      <div id="campaign" style="display:none;">
+        <div class="panel-title-group" style="margin-bottom:4px;"><h2>Campaign</h2></div>
+        <div class="panel-subtitle">
+          Housekeeping over the whole case pool. Every action here reports before
+          it changes anything.
+        </div>
+
+        <div class="detail-card" style="margin-top:14px;">
+          <h3>Sites that are not on land</h3>
+          <div class="panel-subtitle" style="margin-bottom:10px;">
+            New cases are refused at <code class="inline">POST /v1/cases</code> if
+            the building atlas publishes no tile for them. Cases drawn
+            <em>before</em> that gate existed are still in the pool — the sampler's
+            LCZ raster reads snow, ice and open water as built classes, so the
+            draw placed sites in Antarctica and in the open ocean. Each one is 66
+            core-hours aimed at an empty flat plane.
+          </div>
+          <div class="row" style="gap:8px; align-items:center;">
+            <button id="landScanBtn" type="button" class="subtle">Scan the case pool</button>
+            <button id="landFixBtn" type="button" style="display:none;">Quarantine them</button>
+          </div>
+          <div id="landResult" style="margin-top:12px;"></div>
+        </div>
+      </div>
+      <div id="campaignLocked" class="panel-subtitle">
+        Sign in as an operator or an admin to run campaign housekeeping.
+      </div>
+    </section>
+
     <!-- ------------------------------------------------------- Machines -->
     <!-- One credential per box, issued here. The token is shown ONCE, because
          only its hash is stored -- a credential the server can redisplay is one
@@ -1480,6 +1547,10 @@
       <div id="machines" style="display:none;">
         <div class="panel-title-group" style="margin-bottom:4px;"><h2>Machines</h2></div>
         <div class="panel-subtitle">One credential per worker. Revoking one leaves the rest running.</div>
+        <!-- Machines that ran `E3D --setup-simulation-node` and are waiting. The
+             node prints the same code it sends here; matching the two is what
+             stops someone else's request being approved by mistake. -->
+        <div id="pairingList" style="margin-top:12px;"></div>
         <div class="row" style="margin-top:12px;">
           <div class="field" style="flex:1; min-width:220px;">
             <label for="newMachine">Worker id
@@ -1577,28 +1648,38 @@
   initTheme();
 
   // -- Site geometry ----------------------------------------------------------
-  // Drawn from the broker's /footprints endpoint, which reads the SAME building
-  // source the case's mesh was built from: GlobalBuildingAtlas LoD1 unless its run
-  // reported Overture or it finished before the switch, and the other source only
-  // when that one cannot be read (`source` says what answered, `mesh_source` what
-  // the mesh used).
-  // The split below is the point of the whole panel: only buildings carrying a
-  // height become extruded geometry, so a site can look busy here and still
-  // mesh almost empty -- which is exactly the failure that quarantined sites
-  // earlier. What a height IS depends on the source, and the legend must not
-  // blur it: an Overture height is a tagged measurement, a GBA height is a model
-  // prediction (DOMAIN.md: a prediction is never labelled measured).
+  // Everything the mesh is built from, drawn from the broker's /footprints
+  // endpoint: building footprints and per-building heights, GEDTM30 relief, and
+  // the Meta/WRI canopy height model -- the same three sources, at the same
+  // bbox, that the CFD runner meshes. Drawing anything else would be worse than
+  // drawing nothing: it would look like a check while disagreeing with the
+  // geometry.
   //
-  // One load per case, shared by every panel that shows it. The case list
-  // re-renders on each refresh and each row click, rebuilding this panel, and
-  // each rebuild used to start its own request and its own counter -- with every
-  // counter writing into whichever element first carried a shared id. Two of
-  // them then alternated in one span, so the time visibly jumped back and forth,
+  // WHICH buildings is per case, not per page. The builder meshed Overture
+  // until 2026-09-08 and GlobalBuildingAtlas after it, so the endpoint answers
+  // from the source THIS case's mesh was built from and says which
+  // (`mesh_source`, with `mesh_source_basis` for how confidently), what actually
+  // answered (`source`), and why the two differ when they do (`fallback_from`).
+  // What a height IS follows from that, and the legend must not blur it: an
+  // Overture height is a tagged measurement, a GBA height is a model prediction
+  // (DOMAIN.md: a prediction is never labelled measured).
+  //
+  // The split this panel exists to show has changed with the sources. Under
+  // Overture it was "how many footprints carry a height at all", because most
+  // did not and the rest were extruded from an LCZ class constant. GBA predicts
+  // a height for EVERY building, so the question is now how much that
+  // prediction is worth -- which is why the per-building variance is drawn and
+  // not just the height.
+  //
+  // One load per case, shared by every panel that shows it. The case table
+  // re-renders on the 60 s auto-refresh and on each row click, throwing every
+  // rendered panel away, and each rebuild used to start its own request and its
+  // own counter against a new t0 -- so the elapsed time visibly jumped backwards
   // while the extra request went back to S3 for an answer already on its way.
   //
-  // Keyed by case AND state: the source a case is drawn from follows its mesh, and
-  // a case that finishes while open may turn out to have been meshed from another
-  // source than the one drawn while it was still pending.
+  // Keyed by case AND state: the source a case is drawn from follows its mesh,
+  // and a case that finishes while open may turn out to have been meshed from a
+  // different source than the one drawn while it was still pending.
   const geoLoads = new Map();   // case_id@state -> { t0, promise, data, error }
   const GEO_KEEP = 16;          // settled answers kept, so a re-render redraws instantly
 
@@ -1628,12 +1709,13 @@
     if (!g.data && !g.error) {
       const secs = () => ((performance.now() - g.t0) / 1000).toFixed(1) + "s";
       wrap.innerHTML = '<span class="geo-tick" style="font-size:12px;color:var(--text-muted)">'
-        + `querying building footprints… <span style="font-family:var(--font-mono)">${secs()}</span>`
-        + '<span style="display:block;margin-top:3px;font-size:11px">the first look at a case reads the source its mesh was built from, and the terrain model, then it is cached; later opens are instant</span></span>';
-      // Silence for five seconds reads as a hang, and this is a genuine remote
-      // query -- so it counts up. From when the LOAD started, not this panel: a
-      // panel rebuilt mid-query carries on from the count it replaced, and its
-      // own element, never a page-wide id another panel might also be using.
+        + `querying the building atlas, GEDTM30 and the canopy model… <span style="font-family:var(--font-mono)">${secs()}</span>`
+        + '<span style="display:block;margin-top:3px;font-size:11px">the first look at a case reads three remote datasets, the buildings from the source its mesh was built from, then it is cached; later opens are instant</span></span>';
+      // Silence for ten seconds reads as a hang, and these are three genuine
+      // remote queries -- so it counts up. From when the LOAD started, not this
+      // panel: a panel rebuilt mid-query carries on from the count it replaced,
+      // and writes into its own element, never a page-wide id another panel
+      // might also be using.
       const el = wrap.querySelector(".geo-tick span");
       const tick = setInterval(() => {
         if (el.isConnected) el.textContent = secs();
@@ -1648,11 +1730,11 @@
     if (g.error) {
       // Not retried on the next refresh: a broken upstream would otherwise be
       // queried again every minute for as long as the case stays open.
-      wrap.innerHTML = `<span style="font-size:12px;color:var(--bad)">could not load footprints: ${esc(g.error.message || g.error.status || g.error)}</span>`
+      wrap.innerHTML = `<span style="font-size:12px;color:var(--bad)">could not load site geometry: ${esc(g.error.message || g.error.status || g.error)}</span>`
         + ` <button class="subtle geo-load" data-case="${esc(caseId)}" data-state="${esc(state || "")}" data-auto="1">retry</button>`;
       return;
     }
-    drawFootprints(g.data, wrap);
+    drawGeometry(g.data, wrap);
   }
 
   // How the broker knows which source a case's mesh was built from (its
@@ -1668,7 +1750,7 @@
       "This case's run reported a building source the broker does not recognise, so this is GBA, the builder's default."],
   };
 
-  function drawFootprints(d, wrap) {
+  function drawGeometry(d, wrap) {
     const gba = d.source === "globalbuildingatlas";
     const name = gba ? "GlobalBuildingAtlas" : "Overture";
     // What the case's mesh was built from, and how the broker knows. A picture
@@ -1677,13 +1759,14 @@
     const isMesh = !d.mesh_source || d.mesh_source === d.source;
     const hint = wrap.parentElement && wrap.parentElement.querySelector(".geo-src");
     if (hint) hint.textContent = isMesh
-      ? `(${name}, ${basis[0]})`
-      : `(${name}, NOT the source this case's mesh was built from -- see below)`;
-    // The drawing extends to the DOMAIN, not the footprint query. The query
-    // covers 520 m; the mesh box is 1304 m a side (504 m core + 800 m buffer),
-    // and the buffer is most of the domain -- so a picture scaled to the
-    // buildings alone hides the majority of what is actually meshed and makes
-    // the core look like the whole case.
+      ? `(${name}, ${basis[0]}, with terrain and trees)`
+      : `(${name}, NOT the source this case's mesh was built from — see below)`;
+    // The drawing extends to the DOMAIN, not the footprint query. The buildings
+    // are queried over 520 m; the mesh box is 1304 m a side (504 m core + 800 m
+    // buffer), and the buffer is most of the domain -- so a picture scaled to
+    // the buildings alone hides the majority of what is actually meshed and
+    // makes the core look like the whole case. Terrain and canopy are read over
+    // the full domain for the same reason.
     const CORE_M = 504, BUFFER_M = 800, DOM_M = CORE_M + BUFFER_M;   // 1304
     const S = 300, k = S / (2 * DOM_M);               // metres -> px, centred
     const [lat0, lon0] = d.centre;
@@ -1694,19 +1777,70 @@
     ];
     const rings = (g) => g.type === "Polygon" ? [g.coordinates[0]]
                        : g.coordinates.map((poly) => poly[0]);
-    let modelled = 0, flat = 0, paths = "";
+    const terr = d.terrain || {}, can = d.canopy || {};
+    const hasTerr = terr.source === "gedtm30" && Array.isArray(terr.grid);
+    const hasCan = can.source === "meta-wri-chm-v1" && Array.isArray(can.grid);
+
+    // Both rasters arrive as a flat row-major grid over +-half_m, north-up. This
+    // reads one back in metres east/north of the case centre, which is the frame
+    // both drawings already work in.
+    const sampler = (g) => {
+      if (!g || !Array.isArray(g.grid) || !g.n) return () => 0;
+      const n = g.n, half = g.half_m || DOM_M, arr = g.grid;
+      return (x, y) => {
+        const c = Math.floor((x + half) / (2 * half) * n);
+        const r = Math.floor((half - y) / (2 * half) * n);
+        if (c < 0 || r < 0 || c >= n || r >= n) return 0;
+        return arr[r * n + c] || 0;
+      };
+    };
+    const zAt = sampler(hasTerr ? terr : null);       // metres above the low point
+    const canAt = sampler(hasCan ? can : null);       // canopy height, metres
+
+    // -- Plan view ----------------------------------------------------------
+    // Ground first, then canopy, then buildings: the order the site is built in,
+    // and the order that keeps each layer legible under the next.
+    const cellRects = (g, fill, opac) => {
+      const n = g.n, half = g.half_m || DOM_M, cell = 2 * half * k / n;
+      const x0 = S / 2 - half * k, y0 = S / 2 - half * k;
+      let out = "";
+      for (let r = 0; r < n; r++) {
+        for (let c = 0; c < n; c++) {
+          const o = opac(g.grid[r * n + c]);
+          if (o <= 0) continue;
+          out += `<rect x="${(x0 + c * cell).toFixed(1)}" y="${(y0 + r * cell).toFixed(1)}"`
+               + ` width="${(cell + 0.6).toFixed(1)}" height="${(cell + 0.6).toFixed(1)}"`
+               + ` fill="${fill}" fill-opacity="${o.toFixed(3)}"/>`;
+        }
+      }
+      return out;
+    };
+    const relief = Math.max(1, terr.relief_m || 1);
+    const canMax = Math.max(4, can.max_height_m || 4);
+    const groundLayer = hasTerr
+      ? cellRects(terr, "var(--warn)", (v) => 0.05 + 0.28 * (v / relief)) : "";
+    const canopyLayer = hasCan
+      ? cellRects(can, "var(--accent)", (v) => v < 2 ? 0 : 0.25 + 0.5 * Math.min(1, v / canMax)) : "";
+
+    let withH = 0, noH = 0, paths = "";
+    const sds = [];
     for (const f of d.features) {
-      const h = f.properties && f.properties.h;
+      const p = f.properties || {};
+      const h = p.h;
+      if (p.v != null && p.v >= 0) sds.push(Math.sqrt(p.v));
       for (const ring of rings(f.geometry)) {
         const pts = ring.map(toXY).map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(" ");
         if (h) paths += `<polygon points="${pts}" fill="var(--primary)" fill-opacity="0.85" stroke="none"/>`;
         else   paths += `<polygon points="${pts}" fill="none" stroke="var(--text-muted)" stroke-width="0.7"/>`;
       }
-      if (h) modelled++; else flat++;
+      if (h) withH++; else noH++;
     }
     // GBA's per-building variance, the honest half of a prediction: variance 3
     // and variance 175 are not the same claim. 25 is DOMAIN.md's n_high_variance
-    // cut, so this reads the same as the geometry report does.
+    // cut, so this reads the same as the geometry report does. The standard
+    // deviation is the same number in the units the legend quotes.
+    sds.sort((a, b) => a - b);
+    const medSd = sds.length ? sds[Math.floor(sds.length / 2)] : null;
     const vs = gba ? d.features.map((f) => f.properties && f.properties.v)
       .filter((v) => v != null).sort((a, b) => a - b) : [];
     const vMid = vs.length >> 1;
@@ -1715,64 +1849,411 @@
     const core = CORE_M * k, dom = DOM_M * k;
 
     // -- 45 degree isometric ------------------------------------------------
-    // Same footprints, same heights, seen from a corner. A plan view cannot show
-    // height at all, and height is what the inference above invents: a tile of
-    // uniform median blocks and a tile of real towers look identical from
-    // directly overhead and completely different from here.
-    // The isometric frames the CORE, not the whole domain. At domain scale a
-    // 300 px box spans 2608 m, so 0.115 px per metre -- a 40 m building is four
-    // pixels and the buffer is empty sky. Framing the 1008 m core gives roughly
-    // three times the detail where the buildings actually are.
+    // Same site, seen from a corner. A plan view cannot show height at all, and
+    // height is the part GBA predicts rather than measures. It frames the CORE,
+    // not the whole domain: at domain scale a 300 px box spans 2608 m, so
+    // 0.115 px per metre -- a 40 m building is four pixels and the buffer is
+    // empty sky. Framing the core gives roughly three times the detail where
+    // the buildings actually are.
     const ISO = 300, ISO_K = ISO / (2 * CORE_M * 1.15);
     // Heights are exaggerated, and the caption says so. An earlier version
     // multiplied by 8 while claiming "to scale", which drew a single tagged
     // tower as a spike over a flat field and made the tile look like a
     // measurement error rather than a mostly-untagged tile.
     const HEX = 3;
+    // Terrain gets the same exaggeration as buildings -- a hill and a tower
+    // should be comparable in a picture whose whole point is what the flow will
+    // meet -- except where the relief is large enough to push the site out of
+    // frame, which a mountain site would. Then it is eased back, and the caption
+    // reports the factor actually used rather than the one asked for.
+    const TEX = Math.min(HEX, 62 / Math.max(1, relief * ISO_K));
+    // Buildings are NOT seated on the ground: watertight.py extrudes every
+    // prism from its roof down to a common slab about 20 m below the lowest
+    // terrain in the domain (`base_z = min(terr.min() - depth - 10, lowest)`),
+    // so the solid the mesher sees is closed where it meets the hill. Drawing
+    // them perched on the surface was wrong twice over -- it hid that, and on a
+    // slope it left a flat-bottomed box floating over the downhill side.
+    // The buried length is drawn as a ghost so the pierce is visible rather
+    // than merely asserted.
+    const SLAB_M = 20;
+    // How much of the buried length the ISOMETRIC shows. See the note where the
+    // prisms are built.
+    const ISO_PIERCE_M = 9;
     const isoPt = (x, y, z) => [
       ISO / 2 + (x - y) * 0.7071,
       ISO * 0.62 - (x + y) * 0.7071 * 0.5 - z,
     ];
-    // Painter's algorithm: far corner first, so nearer blocks overdraw.
+    const poly = (ps) => ps.map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(" ");
+    // metres east/north -> iso plan units, and the terrain height there in px
+    const zpx = (x, y) => zAt(x, y) * ISO_K * TEX;
+
+    // The ground is drawn as a displaced grid rather than a flat square, because
+    // the buildings are meshed ONTO it: a site with 50 m of relief across the
+    // core is not a flat tile with tall buildings, and the two look identical
+    // from directly overhead. Coarse (16 quads a side over the core) -- it is a
+    // 300 px picture, and the plan view carries the detail.
+    let isoGround = "";
+    const GN = 16, half = CORE_M, step = 2 * half / GN;
+    const gq = [];
+    for (let r = 0; r < GN; r++) {
+      for (let c = 0; c < GN; c++) {
+        const x = -half + c * step, y = half - r * step;
+        const cs = [[x, y], [x + step, y], [x + step, y - step], [x, y - step]];
+        const pts = cs.map(([mx, my]) => isoPt(mx * ISO_K, -my * ISO_K, zpx(mx, my)));
+        const mid = zAt(x + step / 2, y - step / 2);
+        gq.push({ pts, depth: (x - y), shade: hasTerr ? 0.06 + 0.26 * (mid / relief) : 0.10 });
+      }
+    }
+    gq.sort((a, b) => a.depth - b.depth);
+    for (const q of gq) {
+      isoGround += `<polygon points="${poly(q.pts)}" fill="var(--warn)" fill-opacity="${q.shade.toFixed(3)}"`
+                 + ` stroke="var(--border)" stroke-width="0.25" stroke-opacity="0.5"/>`;
+    }
+    // the sampled core outline, on the terrain
+    const edge = [];
+    for (let i = 0; i <= GN; i++) edge.push([-half + i * step, half]);
+    for (let i = 1; i <= GN; i++) edge.push([half, half - i * step]);
+    for (let i = 1; i <= GN; i++) edge.push([half - i * step, -half]);
+    for (let i = 1; i <= GN; i++) edge.push([-half, -half + i * step]);
+    isoGround += `<polygon points="${poly(edge.map(([mx, my]) => isoPt(mx * ISO_K, -my * ISO_K, zpx(mx, my))))}"`
+               + ` fill="none" stroke="var(--bad)" stroke-width="1.1" stroke-dasharray="4 3"/>`;
+
+    // Buildings and trees share one depth sort, because they interleave: a tree
+    // in front of a building has to overdraw it and a tree behind it must not.
     const solids = [];
     for (const f of d.features) {
-      const h = (f.properties && f.properties.h) || 0;
+      const p = f.properties || {};
+      const h = p.h || 0;
       for (const ring of rings(f.geometry)) {
         const pts = ring.map(([lon, lat]) => [
-          (lon - lon0) * mPerDegLon * ISO_K, (lat - lat0) * mPerDegLat * ISO_K,
+          (lon - lon0) * mPerDegLon, (lat - lat0) * mPerDegLat,
         ]);
         let cx = 0, cy = 0;
         for (const [x, y] of pts) { cx += x; cy += y; }
         cx /= pts.length; cy /= pts.length;
-        solids.push({ pts, h, depth: cx + cy, inferred: !(f.properties && f.properties.h) });
+        const ground = zpx(cx, cy);
+        const uncertain = p.v != null && Math.sqrt(p.v) > 8.9;
+        // clamped so one spire cannot own the frame
+        const roof = ground + Math.min(h, 150) * ISO_K * HEX;
+        // The prism really runs to the slab, but drawing all of it HERE draws
+        // the terrain height as well -- a building on a 57 m hill trails 77 m of
+        // ghost, longer than the building, and 227 of them turn the isometric
+        // into stalactites. A stub is enough to show the solid does not stop at
+        // the surface; the elevation below draws the full extrusion, where there
+        // is a real vertical axis to draw it against.
+        const stub = ISO_PIERCE_M * ISO_K * TEX;
+        solids.push({ kind: "b", pts, base: ground - stub, rise: stub,
+                      depth: cx - cy, uncertain, buried: true });
+        solids.push({ kind: "b", pts, base: ground, rise: roof - ground,
+                      depth: cx - cy, uncertain });
+      }
+    }
+    // Trees are the crown VOLUME, not the tree: the runner meshes the upper 59 %
+    // of the canopy as a porous cellZone carrying f = 2*Cd*LAD, and nothing at
+    // all below it. Drawing a trunk, or a solid block, would be drawing
+    // something the solve does not contain -- these are see-through for the same
+    // reason. Only the core is drawn; the buffer is off-frame here.
+    let crowns = 0;
+    if (hasCan) {
+      const cn = can.n, chalf = can.half_m || DOM_M, cstep = 2 * chalf / cn;
+      for (let r = 0; r < cn; r++) {
+        for (let c = 0; c < cn; c++) {
+          const hgt = can.grid[r * cn + c] || 0;
+          if (hgt < 2) continue;
+          const x = -chalf + (c + 0.5) * cstep, y = chalf - (r + 0.5) * cstep;
+          // A no-op now that canopy spans exactly the core, and kept for that
+          // reason: it costs nothing and it is what stops a wider canopy grid
+          // from quietly drawing crowns into the buffer if the extent changes.
+          if (Math.abs(x) > CORE_M || Math.abs(y) > CORE_M) continue;
+          crowns++;
+          const s = cstep * 0.5;
+          solids.push({
+            kind: "t",
+            pts: [[x - s, y - s], [x + s, y - s], [x + s, y + s], [x - s, y + s], [x - s, y - s]],
+            base: zpx(x, y) + 0.41 * hgt * ISO_K * HEX,
+            rise: 0.59 * hgt * ISO_K * HEX,
+            depth: x - y,
+          });
+        }
       }
     }
     solids.sort((a, b) => a.depth - b.depth);
     let iso = "";
     for (const sd of solids) {
-      const hz = Math.min(sd.h, 150) * ISO_K * HEX;     // clamped so one spire cannot own the frame
-      const top = sd.pts.map(([x, y]) => isoPt(x, y, hz));
-      const base = sd.pts.map(([x, y]) => isoPt(x, y, 0));
-      const fill = sd.inferred ? "var(--text-muted)" : "var(--primary)";
-      // walls, then roof, so the roof reads on top
-      for (let i = 0; i < sd.pts.length - 1; i++) {
-        const q = [base[i], base[i + 1], top[i + 1], top[i]]
-          .map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(" ");
-        iso += `<polygon points="${q}" fill="${fill}" fill-opacity="0.35" stroke="${fill}" stroke-width="0.3" stroke-opacity="0.5"/>`;
+      const tree = sd.kind === "t";
+      const fill = tree ? "var(--accent)"
+                 : sd.uncertain ? "var(--text-muted)" : "var(--primary)";
+      // Crowns are see-through but not invisible: at the opacity a building
+      // wall uses they disappeared entirely behind the blue, which reads as a
+      // treeless site -- the exact answer this panel exists to distinguish.
+      // The buried length of a prism is fainter still and carries no roof: it
+      // is inside the ground, and a lid drawn across it would read as a floor.
+      const wallOp = sd.buried ? 0.13 : tree ? 0.34 : 0.35;
+      const roofOp = tree ? 0.62 : 0.95;
+      const P = sd.pts.map(([x, y]) => [x * ISO_K, -y * ISO_K]);
+      const top = P.map(([x, y]) => isoPt(x, y, sd.base + sd.rise));
+      const bot = P.map(([x, y]) => isoPt(x, y, sd.base));
+      for (let i = 0; i < P.length - 1; i++) {
+        iso += `<polygon points="${poly([bot[i], bot[i + 1], top[i + 1], top[i]])}" fill="${fill}"`
+             + ` fill-opacity="${wallOp}" stroke="${fill}" stroke-width="0.3" stroke-opacity="0.5"/>`;
       }
-      iso += `<polygon points="${top.map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(" ")}" fill="${fill}" fill-opacity="0.95" stroke="none"/>`;
+      if (!sd.buried) {
+        iso += `<polygon points="${poly(top)}" fill="${fill}" fill-opacity="${roofOp}" stroke="none"/>`;
+      }
     }
-    // ground plane: the domain square and the core, in the same projection
-    const gp = (c) => c.map(([x, y]) => isoPt(x, y, 0))
-      .map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(" ");
-    const sq = (r) => [[-r, -r], [r, -r], [r, r], [-r, r], [-r, -r]];
-    const isoGround =
-      `<polygon points="${gp(sq(CORE_M * ISO_K))}" fill="var(--surface)" fill-opacity="0.3" stroke="var(--bad)" stroke-width="1.1" stroke-dasharray="4 3"/>`;
+
+
+    // -- Side elevation ------------------------------------------------------
+    // Looking north, across the whole mesh domain, everything projected onto
+    // one vertical plane. The other two views cannot answer the question this
+    // one is for: whether the terrain or the buildings dominate what the wind
+    // actually meets. In plan the relief is a wash of colour, and the isometric
+    // exaggerates height against plan distance so the comparison there is
+    // rigged by construction. Here both are the same axis at the same scale,
+    // and 57 m of hill under 20 m of houses looks like what it is.
+    const EW = S, EH = 168, EPAD = 16;
+    const NCOL = 90, colW = EW / NCOL;
+    // Terrain as a BAND, not a line: this is a projection of a 2608 m square
+    // onto one plane, so each column spans 2608 m of north-south ground. The
+    // lowest and highest of it are both true, and a single line through the
+    // middle would quietly claim a cross-section it never took.
+    // GATHER, never scatter. Walking the source grid and binning each of its
+    // columns into a destination column leaves every destination the source
+    // never lands on empty -- 48 terrain columns into 90 here left 42 of them
+    // null, so the "band" was a comb of disjoint slivers that disappeared
+    // entirely under the building mass. Each destination column asks the source
+    // what is under it instead, which is correct for any pair of resolutions.
+    const lo = new Array(NCOL).fill(null), hi = new Array(NCOL).fill(null);
+    const canTop = new Array(NCOL).fill(0);
+    const srcSpan = (i, n) => [
+      Math.min(n - 1, Math.floor(i / NCOL * n)),
+      Math.min(n, Math.max(Math.floor(i / NCOL * n) + 1,
+                           Math.ceil((i + 1) / NCOL * n))),
+    ];
+    if (hasTerr) {
+      const tn = terr.n;
+      for (let i = 0; i < NCOL; i++) {
+        const [c0, c1] = srcSpan(i, tn);
+        for (let c = c0; c < c1; c++) {
+          for (let r = 0; r < tn; r++) {
+            const v = terr.grid[r * tn + c];
+            if (v === undefined) continue;
+            if (lo[i] === null || v < lo[i]) lo[i] = v;
+            if (hi[i] === null || v > hi[i]) hi[i] = v;
+          }
+        }
+      }
+    }
+    if (hasCan) {
+      // Mapped by WORLD COORDINATE, not by index fraction. srcSpan divides one
+      // grid's indices across the elevation's columns, which is only correct
+      // when the two cover the same ground -- and canopy no longer does: crowns
+      // are built over the 1008 m core (matching the buildings) while this axis
+      // spans the full 2608 m domain. Index mapping would have stretched the
+      // core's trees across the whole width, putting a forest in the buffer
+      // that the mesh does not contain.
+      const cn = can.n, chalf = can.half_m || DOM_M, cstep = 2 * chalf / cn;
+      for (let c = 0; c < cn; c++) {
+        const x = -chalf + (c + 0.5) * cstep;
+        const i = Math.floor((x + DOM_M) / (2 * DOM_M) * NCOL);
+        if (i < 0 || i >= NCOL) continue;
+        for (let r = 0; r < cn; r++) {
+          const hgt = can.grid[r * cn + c] || 0;
+          if (hgt < 2) continue;
+          const y = chalf - (r + 0.5) * cstep;
+          canTop[i] = Math.max(canTop[i], zAt(x, y) + hgt);
+        }
+      }
+    }
+    // Buildings, projected: east extent and roof elevation above the datum.
+    const bars = [];
+    let tallestRoof = 0;
+    for (const f of d.features) {
+      const pr = f.properties || {};
+      const h = pr.h || 0;
+      for (const ring of rings(f.geometry)) {
+        let x0 = Infinity, x1 = -Infinity, cx = 0, cy = 0;
+        for (const [lonp, latp] of ring) {
+          const mx = (lonp - lon0) * mPerDegLon, my = (latp - lat0) * mPerDegLat;
+          if (mx < x0) x0 = mx;
+          if (mx > x1) x1 = mx;
+          cx += mx; cy += my;
+        }
+        cx /= ring.length; cy /= ring.length;
+        const ground = zAt(cx, cy);
+        const roof = ground + h;
+        if (roof > tallestRoof) tallestRoof = roof;
+        bars.push({ x0, x1, roof, ground,
+                    uncertain: pr.v != null && Math.sqrt(pr.v) > 8.9 });
+      }
+    }
+    // One scale for both axes' *content*: metres of elevation, vertical only.
+    const topM = Math.max(10, tallestRoof, relief, ...canTop) * 1.08;
+    const botM = -SLAB_M;
+    const eY = (m) => EPAD + (topM - m) / (topM - botM) * (EH - 2 * EPAD);
+    const eX = (mx) => EW / 2 + mx / (2 * DOM_M) * EW;
+    // How much taller the drawing is than it is wide, per metre. Stated rather
+    // than hidden: at true scale 2608 m of ground under 200 m of relief and
+    // buildings is a 1 px stripe.
+    const vExag = ((EH - 2 * EPAD) / (topM - botM)) / (EW / (2 * DOM_M));
+
+    let elev = "";
+    if (hasTerr) {
+      const up = [], down = [];
+      for (let i = 0; i < NCOL; i++) {
+        if (lo[i] === null) continue;
+        const x = i * colW;
+        up.push(`${x.toFixed(1)},${eY(hi[i]).toFixed(1)}`);
+        up.push(`${(x + colW).toFixed(1)},${eY(hi[i]).toFixed(1)}`);
+        down.unshift(`${(x + colW).toFixed(1)},${eY(lo[i]).toFixed(1)}`);
+        down.unshift(`${x.toFixed(1)},${eY(lo[i]).toFixed(1)}`);
+      }
+      if (up.length) {
+        elev += `<polygon points="${up.concat(down).join(" ")}" fill="var(--warn)" fill-opacity="0.3"`
+              + ` stroke="var(--warn)" stroke-width="0.8" stroke-opacity="0.8"/>`;
+        // and the slab the prisms are closed against
+        elev += `<polygon points="0,${eY(0).toFixed(1)} ${EW},${eY(0).toFixed(1)} ${EW},${eY(botM).toFixed(1)} 0,${eY(botM).toFixed(1)}"`
+              + ` fill="var(--warn)" fill-opacity="0.08"/>`;
+      }
+    }
+    elev += `<line x1="0" y1="${eY(botM).toFixed(1)}" x2="${EW}" y2="${eY(botM).toFixed(1)}"`
+          + ` stroke="var(--text-muted)" stroke-width="0.8" stroke-dasharray="3 3" stroke-opacity="0.7"/>`;
+    // canopy profile: the tallest crown in each column
+    if (hasCan) {
+      for (let i = 0; i < NCOL; i++) {
+        if (!canTop[i]) continue;
+        const base = Math.max(0, canTop[i] - (canTop[i] - (lo[i] ?? 0)) * 0.59);
+        elev += `<rect x="${(i * colW).toFixed(1)}" y="${eY(canTop[i]).toFixed(1)}"`
+              + ` width="${colW.toFixed(1)}" height="${Math.max(1, eY(base) - eY(canTop[i])).toFixed(1)}"`
+              + ` fill="var(--accent)" fill-opacity="0.45"/>`;
+      }
+    }
+    // Buildings, each pierced down to the slab. Faint, because a thousand of
+    // them overlap in a projection and at any readable opacity they merge into
+    // one blue wall that hides the terrain band they are standing on. The
+    // skyline -- the tallest roof in each column -- is drawn over the top as a
+    // hard line, so the envelope stays legible while the mass behind it still
+    // shows how much of the domain is built at all.
+    const skyline = new Array(NCOL).fill(null);
+    for (const b of bars) {
+      const x = eX(b.x0), w = Math.max(0.8, eX(b.x1) - eX(b.x0));
+      const fill = b.uncertain ? "var(--text-muted)" : "var(--primary)";
+      // ABOVE ground at readable opacity, BELOW it at a tenth of that. Drawing
+      // the whole prism from roof to slab at one opacity is what buried the
+      // terrain: a few hundred bars at 0.16 accumulate to opaque, and the ground
+      // they are standing on is underneath all of them. The buried length is
+      // still drawn -- it is real, and it is what closes the solid against the
+      // hill -- just not at a weight that competes with the section line.
+      elev += `<rect x="${x.toFixed(1)}" y="${eY(b.roof).toFixed(1)}" width="${w.toFixed(1)}"`
+            + ` height="${Math.max(0.8, eY(b.ground) - eY(b.roof)).toFixed(1)}"`
+            + ` fill="${fill}" fill-opacity="0.18"/>`;
+      elev += `<rect x="${x.toFixed(1)}" y="${eY(b.ground).toFixed(1)}" width="${w.toFixed(1)}"`
+            + ` height="${Math.max(0.5, eY(botM) - eY(b.ground)).toFixed(1)}"`
+            + ` fill="${fill}" fill-opacity="0.05"/>`;
+      const i0 = Math.max(0, Math.floor(x / colW));
+      const i1 = Math.min(NCOL - 1, Math.floor((x + w) / colW));
+      for (let i = i0; i <= i1; i++) {
+        if (skyline[i] === null || b.roof > skyline[i]) skyline[i] = b.roof;
+      }
+    }
+    let sky = "";
+    for (let i = 0; i < NCOL; i++) {
+      if (skyline[i] === null) continue;
+      const x = i * colW, y = eY(skyline[i]).toFixed(1);
+      sky += `${sky ? " " : ""}${x.toFixed(1)},${y} ${(x + colW).toFixed(1)},${y}`;
+    }
+    if (sky) {
+      elev += `<polyline points="${sky}" fill="none" stroke="var(--primary)"`
+            + ` stroke-width="1.3" stroke-opacity="0.95"/>`;
+    }
+    // THE TERRAIN SECTION LINE. Drawn last, over everything, because it is the
+    // datum the whole view exists to read heights against -- the ground the
+    // solve actually sits on. Two lines, not one: the band between them is the
+    // spread of ground elevation within each column, since this is a projection
+    // of a 2608 m square onto one plane and a single line would be claiming a
+    // cross-section it never took. The upper one is drawn solid and the lower
+    // dashed, so "the ground is somewhere in here" is legible at a glance.
+    if (hasTerr) {
+      const profile = (arr) => {
+        let d = "";
+        for (let i = 0; i < NCOL; i++) {
+          if (arr[i] === null) continue;
+          const x = i * colW, y = eY(arr[i]).toFixed(1);
+          d += `${d ? " " : ""}${x.toFixed(1)},${y} ${(x + colW).toFixed(1)},${y}`;
+        }
+        return d;
+      };
+      const top = profile(hi), bot = profile(lo);
+      if (bot) {
+        elev += `<polyline points="${bot}" fill="none" stroke="var(--warn)"`
+              + ` stroke-width="1" stroke-opacity="0.6" stroke-dasharray="3 2"/>`;
+      }
+      if (top) {
+        elev += `<polyline points="${top}" fill="none" stroke="var(--warn)"`
+              + ` stroke-width="1.8" stroke-opacity="1"/>`;
+      }
+    }
+    // the sampled core, and the centre
+    elev += `<line x1="${eX(-CORE_M).toFixed(1)}" y1="${EPAD * 0.4}" x2="${eX(-CORE_M).toFixed(1)}" y2="${EH - EPAD * 0.4}"`
+          + ` stroke="var(--bad)" stroke-width="1" stroke-dasharray="4 3"/>`
+          + `<line x1="${eX(CORE_M).toFixed(1)}" y1="${EPAD * 0.4}" x2="${eX(CORE_M).toFixed(1)}" y2="${EH - EPAD * 0.4}"`
+          + ` stroke="var(--bad)" stroke-width="1" stroke-dasharray="4 3"/>`;
+    // a metre scale, because this view is the one with a real vertical axis
+    const tick = topM > 120 ? 50 : topM > 50 ? 20 : 10;
+    for (let m = 0; m <= topM; m += tick) {
+      elev += `<line x1="0" y1="${eY(m).toFixed(1)}" x2="${EW}" y2="${eY(m).toFixed(1)}"`
+            + ` stroke="var(--border)" stroke-width="0.4" stroke-opacity="0.55"/>`
+            + `<text x="3" y="${(eY(m) - 1.5).toFixed(1)}" font-size="7" fill="var(--text-muted)">${m} m</text>`;
+    }
+
+    // -- Legend --------------------------------------------------------------
+    const pct = (x) => Math.round(100 * x);
+    const terrLine = (() => {
+      if (hasTerr) return `<div><span class="geo-swatch" style="background:var(--warn);opacity:0.5"></span>terrain — <b>${terr.relief_m} m</b> relief over the domain (${terr.min_m}–${terr.max_m} m)</div>`;
+      if (terr.source === "flat") return `<div><span class="geo-swatch" style="background:var(--warn)"></span><b>no terrain</b> — meshed flat<div class="geo-note" style="margin-top:2px">GEDTM30 is a land DTM, so no data here usually means this site is not on land.</div></div>`;
+      if (terr.source === "unavailable" || terr.source === "unknown") return `<div style="color:var(--warn)">terrain unavailable — <span class="mono" style="font-size:11px">${esc(terr.detail || "no detail")}</span><div class="geo-note" style="margin-top:2px">A fact about the host, not the site. Not cached — reopening this case retries.</div></div>`;
+      return "";
+    })();
+    const canLine = (() => {
+      if (hasCan && can.frac_canopy > 0) {
+        const v = can.vegetation;
+        return `<div><span class="geo-swatch" style="background:var(--accent)"></span>trees — <b>${pct(can.frac_canopy)}%</b> under canopy, tallest <b>${can.max_height_m} m</b></div>`
+          + (v ? `<div><span class="geo-swatch" style="background:var(--accent);opacity:0.45"></span>all crowns as <b>${esc(v.label)}</b> — f = 2·Cd·LAD = <b>${v.f_per_m}</b> m⁻¹<div class="geo-note" style="margin-top:2px">One class for the whole site, picked by latitude alone (${esc(v.provenance)}) — a street tree, a park and a conifer stand all get this. The 55° band edge is steep: Copenhagen is 1.25, Hamburg 0.48.</div></div>` : "");
+      }
+      if (hasCan) return `<div><span class="geo-swatch" style="background:var(--accent);opacity:0.35"></span><b>no trees</b> — treeless site, no canopy zone</div>`;
+      if (can.source === "none") return `<div style="color:var(--text-muted)">trees unknown — the canopy model publishes no tile here</div>`;
+      if (can.source) return `<div style="color:var(--warn)">trees unavailable — <span class="mono" style="font-size:11px">${esc(can.detail || "no detail")}</span><div class="geo-note" style="margin-top:2px">A fact about the host, not the site. Not cached — reopening this case retries.</div></div>`;
+      return "";
+    })();
+    // Three ways to have no buildings, and they mean completely different
+    // things. No published tile is a fact about the site -- GBA covers 922
+    // tiles of a possible 2,592, the rest ocean and ice -- and next to a flat
+    // terrain answer and no canopy tile it is this panel saying, correctly,
+    // that the case is at sea. A reachability failure says nothing about the
+    // site at all. An empty tile on land is a third answer again.
+    const buildingLines = d.buildings_error
+      ? `<div style="color:var(--bad)"><span class="geo-swatch" style="background:var(--bad)"></span>buildings unavailable — the atlas could not be reached<div class="geo-note" style="margin-top:2px;color:var(--bad)">${esc(d.buildings_error)}</div><div class="geo-note" style="margin-top:2px">Not cached, so reopening this case retries. Terrain and trees below were fetched independently and are real.</div></div>`
+      : d.tile_published === false
+      ? `<div><span class="geo-swatch" style="background:var(--text-muted)"></span><b>no buildings</b> — the atlas publishes no tile here<div class="geo-note" style="margin-top:2px">GlobalBuildingAtlas covers 922 tiles of a possible 2,592; the rest are ocean and ice. Tile <code class="inline">${esc(d.tile || "")}</code> is not one of them.</div></div>`
+      : gba
+      ? `<div><span class="geo-swatch" style="background:var(--primary)"></span><b>${withH}</b> buildings, height predicted</div>`
+        + (medSd != null ? `<div><span class="geo-swatch" style="background:var(--text-muted)"></span>median uncertainty <b>±${medSd.toFixed(1)} m</b> (GBA σ; grey blocks exceed the published RMSE)</div>` : "")
+      : `<div><span class="geo-swatch" style="background:var(--primary)"></span><b>${withH}</b> measured height</div>`
+        + `<div><span class="geo-swatch" style="border:1px solid var(--text-muted)"></span><b>${noH}</b> height inferred</div>`;
+    // All three sources agreeing on "nothing here" is the single most useful
+    // thing this panel can report, and it is worth saying in one sentence
+    // rather than leaving to be inferred from three separate grey lines.
+    const atSea = d.tile_published === false && terr.source === "flat"
+                  && (can.source === "none" || can.frac_canopy === 0);
+    const provenance = gba
+      ? `<b>GBA LoD1</b> (TUM) buildings and heights, <b>GEDTM30</b> terrain, <b>Meta/WRI</b> canopy — the sources the runner meshes. Every GBA height is a prediction, not a survey: RMSE 1.5–8.9 m by continent. Judge the case on that, not the count.`
+      : `Drawn from <b>Overture ${esc(d.release || "")}</b>${d.fallback_from ? ` — ${esc(d.fallback_from)}` : ""}. Overture tags a height on only a few buildings; the rest are extruded from the LCZ class constant, so ${withH === 0 ? "this tile's massing is entirely synthetic" : `only ${pct(withH / Math.max(1, withH + noH))}% of this massing is real`}.`;
 
     wrap.innerHTML = `
       <div class="geo-fig">
         <svg viewBox="0 0 ${S} ${S}" width="${S}" height="${S}" role="img"
-             aria-label="Plan view: building footprints, the sampled core and the full mesh domain.">
+             aria-label="Plan view over the mesh domain: terrain relief shaded, tree canopy in green, building footprints in blue, with the sampled core and the domain edge.">
+          ${groundLayer}${canopyLayer}
           <rect x="${S/2-dom}" y="${S/2-dom}" width="${2*dom}" height="${2*dom}"
                 fill="none" stroke="var(--warn)" stroke-width="1.2"/>
           ${paths}
@@ -1781,34 +2262,33 @@
           <circle cx="${S/2}" cy="${S/2}" r="2.5" fill="var(--bad)"/>
         </svg>
         <svg viewBox="0 0 ${ISO} ${ISO}" width="${ISO}" height="${ISO}" role="img"
-             aria-label="Isometric view at 45 degrees; blue blocks have ${gba ? "predicted" : "measured"} heights, grey blocks ${gba ? "have no height in GBA" : "were inferred"}.">
+             aria-label="Isometric view at 45 degrees over the sampled core: buildings extruded from their roofs down through the terrain to a common slab, with see-through green crown volumes for trees. Blue blocks have ${gba ? "predicted" : "measured"} heights, grey blocks ${gba ? "have no height in GBA" : "were inferred"}.">
           ${isoGround}${iso}
         </svg>
+        <svg viewBox="0 0 ${EW} ${EH}" width="${EW}" height="${EH}" role="img"
+             aria-label="Side elevation looking north across the mesh domain: the terrain relief band, building roofs and tree canopy on one shared vertical scale in metres.">
+          ${elev}
+        </svg>
         <div class="geo-legend">
-          <div><span class="geo-swatch" style="background:var(--primary)"></span><b>${modelled}</b> ${gba ? "predicted height" : "measured height"}</div>
-          <div><span class="geo-swatch" style="border:1px solid var(--text-muted)"></span><b>${flat}</b> ${gba ? "no height in GBA" : "height inferred"}</div>
+          ${buildingLines}
+          ${terrLine}
+          ${canLine}
           <div><span class="geo-swatch" style="border:1px dashed var(--bad)"></span>${2*CORE_M} m sampled core</div>
           <div><span class="geo-swatch" style="border:1px solid var(--warn)"></span>${2*DOM_M} m mesh domain</div>
-          ${(() => {
-            const t = d.terrain || {};
-            if (t.source === "gedtm30") return `<div style="margin-top:6px"><span class="geo-swatch" style="background:var(--accent)"></span>terrain found — <b>${t.relief_m} m</b> relief</div>`;
-            if (t.source === "flat") return `<div style="margin-top:6px"><span class="geo-swatch" style="background:var(--warn)"></span><b>no terrain</b> — meshed flat<div class="geo-note" style="margin-top:2px">GEDTM30 is a land DTM, so no data here usually means this site is not on land.</div></div>`;
-            if (t.source === "unavailable") return `<div style="margin-top:6px;color:var(--text-muted)">terrain unknown — DTM host unreachable</div>`;
-            return "";
-          })()}
-          <div style="margin-top:6px;color:var(--text-muted)">${gba ? "GlobalBuildingAtlas LoD1" : `Overture ${esc(d.release)}`}${d.cached ? " · cached" : ""}</div>
-          ${d.fallback_from ? `<div class="geo-note" style="color:var(--warn)">${d.mesh_source === "overture" ? "Overture" : "GBA"} could not be read (${esc(d.fallback_from)}), so this is ${name}'s picture, which need not match this case's mesh.</div>` : ""}
+          <div style="margin-top:6px;color:var(--text-muted)">${gba ? "GlobalBuildingAtlas LoD1" : `Overture ${esc(d.release || "")}`}${d.cached ? " · cached" : ""}${d.truncated ? ` · truncated at ${d.n}` : ""}</div>
+          ${d.fallback_from ? `<div class="geo-note" style="color:var(--warn)">${d.mesh_source === "overture" ? "Overture" : "GBA"} could not be drawn (${esc(d.fallback_from)}), so this is ${name}'s picture, which need not match this case's mesh.</div>` : ""}
           ${isMesh && basis[1] ? `<div class="geo-note">${basis[1]}</div>` : ""}
-          <div class="geo-note" style="margin-top:4px">Right: 45° isometric over the sampled core. Heights are exaggerated ${HEX}× against plan distance and clamped at 150 m — at true scale a 40 m building is four pixels.</div>
-          <div class="geo-note">${gba
-            ? `${modelled} of ${modelled + flat} carry a GBA height, and every one of them is a model prediction, not a measurement${vMed == null ? "" : ` — variance median ${vMed.toFixed(1)}, ${vHigh} above 25`}.`
-            : modelled === 0
-            ? "Overture heights NONE of these. Every height is inferred from the LCZ class, so this tile's massing is entirely synthetic."
-            : `All ${modelled + flat} are extruded. Only ${modelled} carry a measured height (${Math.round(100 * modelled / (modelled + flat))}%); the rest are filled from this tile's median, and that ratio is what to judge the case on.`}</div>
+          <div class="geo-note" style="margin-top:4px">Middle: isometric over the core. Heights ×${HEX}, relief ×${TEX === HEX ? HEX : TEX.toFixed(1)}, clamped at 150 m.</div>
+          <div class="geo-note">Buildings and trees are both modelled over the ${2 * CORE_M} m core only; the buffer carries terrain and inlet roughness, no explicit obstacles.</div>
+          <div class="geo-note">Bottom: elevation looking north across the domain, true metre scale, vertical ×${vExag.toFixed(0)}. The amber line is the ground section — solid for the highest ground in each column, dashed for the lowest, because each column spans ${2 * DOM_M} m north–south and a single line would claim a cross-section it never took.</div>
+          <div class="geo-note">Buildings run from roof to a slab ${SLAB_M} m below the lowest ground, as <code class="inline">watertight.py</code> extrudes them. The elevation shows all of that; the isometric only the first ${ISO_PIERCE_M} m.</div>
+          ${crowns ? `<div class="geo-note">Crowns are see-through because that is what they are in the solve — the upper 59% of each tree is a porous cellZone, f = 2·Cd·LAD, not a solid. ${crowns} crown cell${crowns === 1 ? "" : "s"} in the core.</div>` : ""}
+          ${gba && vMed != null ? `<div class="geo-note">Every one of those ${withH} heights is a model prediction, not a measurement — variance median ${vMed.toFixed(1)}, ${vHigh} above 25.</div>` : ""}
+          ${atSea ? `<div class="geo-note" style="color:var(--bad)"><b>This case is not on land.</b> No building tile, no bare-earth terrain and no canopy tile, from three independent sources that disagree about almost everything else. The runner would mesh an empty flat plane here and solve it for 66 core-hours.</div>` : ""}
+          <div class="geo-note">${provenance}</div>
         </div>
       </div>`;
   }
-
   document.addEventListener("click", (e) => {
     const btn = e.target.closest(".geo-load");
     if (!btn) return;
@@ -1984,36 +2464,73 @@
     const raw = (h && h.db) || "";
     if (!raw) return "";
     if (!/^postgres/i.test(raw)) {
-      return `SQLite · ${raw.split(/[\\/]/).pop()}`;   // a path; show the file
+      return `SQLite · ${esc(raw.split(/[\\/]/).pop())}`;   // a path; show the file
     }
     try {
       const u = new URL(raw);
       const name = u.pathname.replace(/^\//, "") || "postgres";
       const vendor = /supabase/i.test(u.hostname) ? "Supabase" : "Postgres";
-      return `${vendor} · ${u.hostname}${u.port ? ":" + u.port : ""}/${name}`;
+      return `${vendor} · ${esc(u.hostname)}${u.port ? ":" + esc(u.port) : ""}/${esc(name)}`;
     } catch (e) {
       return "Postgres";
     }
   }
 
+  // The last /healthz payload, or null. Declared beside the probe that fills
+  // it rather than with the other wizard inputs: everything below depends on it
+  // being assigned in exactly one place.
+  let lastHealth = null;
+  // null is TWO states -- "not asked yet" and "asked, and it failed" -- and the
+  // wizard printed "Waiting for the broker to answer /healthz." for both. A
+  // /healthz a proxy or an extension was blocking therefore read as one that was
+  // merely slow, and pointed an operator at their database while the rest of the
+  // page worked fine.
+  let healthProbe = "none";        // none | pending | ok | failed
+  let healthFailure = "";          // why the last probe failed, for the wizard
+  // One probe in flight at a time. Page load asks twice -- once for the badge,
+  // once from refresh() -- and the browser's HTTP cache serialises two identical
+  // GETs, so the second answered a full round trip late and the wizard waited on
+  // it. Sharing the promise makes the second caller free.
+  let healthInFlight = null;
+
   // Check health without throwing 401
   async function checkHealth() {
+    if (healthInFlight) return healthInFlight;
     const base = $("broker").value.replace(/\/+$/, "");
-    try {
-      const res = await fetch(base + "/healthz");
-      if (res.ok) {
-        const h = await res.json();
-        // The version is whatever the RUNNING service reports, never a
-        // constant baked into this page -- that is the whole point of the
-        // single source of truth in pyproject.toml. Older brokers predate the
-        // field, so it is shown only when present rather than as "undefined".
-        setBadge(h);
-        return h;
+    healthProbe = "pending";
+    healthFailure = "";
+    healthInFlight = (async () => {
+      try {
+        const res = await fetch(base + "/healthz");
+        if (res.ok) {
+          const h = await res.json();
+          // The version is whatever the RUNNING service reports, never a
+          // constant baked into this page -- that is the whole point of the
+          // single source of truth in pyproject.toml. Older brokers predate the
+          // field, so it is shown only when present rather than as "undefined".
+          setBadge(h);
+          lastHealth = h;
+          healthProbe = "ok";
+          return h;
+        }
+        healthFailure = "HTTP " + res.status;
+      } catch (e) {
+        // Server unreachable
+        healthFailure = (e && e.message) || "network error";
       }
-    } catch (e) {
-      // Server unreachable
+      lastHealth = null;
+      healthProbe = "failed";
+      return null;
+    })();
+    try {
+      return await healthInFlight;
+    } finally {
+      healthInFlight = null;
+      // The wizard judges its first step from this, and nothing else redraws it
+      // until refresh() has finished several more requests. Telling it here is
+      // what makes the answer land as soon as it is known.
+      renderWizard();
     }
-    return null;
   }
 
   // Fed by whichever payload arrived -- /healthz or the authenticated
@@ -2106,7 +2623,7 @@
         const stale = oldest === null || oldest > 900;
         const sub = !fl.length ? "no cluster is reporting"
                   : stale ? `last reported ${Math.round(oldest / 60)} min ago`
-                  : `${r} worker(s) running on ${fl.map((f) => f.cluster).join(", ")}`;
+                  : `${r} worker(s) running on ${esc(fl.map((f) => f.cluster).join(", "))}`;
         return `<div class="stat-card queued${stale ? " nonzero-stale" : ""}">
           <div class="label">Queued (SLURM)</div>
           <div class="value"${stale ? ' style="color:var(--text-muted)"' : ""}>${fl.length ? q.toLocaleString() : "—"}</div>
@@ -2271,7 +2788,12 @@
   let openDetailId = null;
 
   function badge(state) {
-    return `<span class="badge ${state}">${state}</span>`;
+    // Escaped in both positions. The broker writes `state` from a fixed set, so
+    // this is defence in depth rather than a live hole -- but the first slot is
+    // an ATTRIBUTE value, where a single quote character is enough to break out
+    // of the class and add another, and "it comes from an enum" is a property of
+    // today's callers rather than of this function.
+    return `<span class="badge ${esc(state)}">${esc(state)}</span>`;
   }
 
   function caseDetailHtml(c) {
@@ -2354,7 +2876,7 @@
               <dt>SHA-256</dt>
               <dd class="mono">
                 <span style="overflow:hidden; text-overflow:ellipsis; max-width:180px;" title="${esc(c.result_sha256 || "")}">
-                  ${c.result_sha256 ? c.result_sha256.slice(0, 14) + "…" : "—"}
+                  ${c.result_sha256 ? esc(String(c.result_sha256).slice(0, 14)) + "…" : "—"}
                 </span>
                 ${c.result_sha256 ? `<button class="copy-btn" onclick="copyText('${esc(c.result_sha256)}', 'SHA256 copied')" title="Copy SHA256"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></button>` : ""}
               </dd>
@@ -2371,7 +2893,7 @@
 
         <div class="detail-card" style="margin-bottom:14px;">
           <h3>Site Geometry
-            <span class="label-hint geo-src" style="font-weight:400;">(from the source this case's mesh was built from)</span>
+            <span class="label-hint geo-src" style="font-weight:400;">(buildings, terrain and trees — the same sources the runner meshes)</span>
           </h3>
           <div id="geoWrap-${esc(c.case_id)}" class="geo-wrap">
             <button class="subtle geo-load" data-case="${esc(c.case_id)}" data-state="${esc(c.state)}"
@@ -2428,6 +2950,13 @@
           </td>
         </tr>`;
     }).join("");
+
+    // An open case draws its geometry immediately, including after the 60 s
+    // auto-refresh has just replaced the whole table. Without this the panel
+    // silently reverted to its "Show building footprints" button once a minute,
+    // which looked like the fetch had failed; with the per-case cache in
+    // loadFootprints it costs no request.
+    autoLoadGeometry();
 
     $("casesBody").querySelectorAll("tr.caseRow").forEach((tr) => {
       tr.addEventListener("click", () => {
@@ -2590,16 +3119,22 @@
   // with no accounts offers SETUP (that endpoint closes itself after the first
   // one), otherwise LOGIN, and a signed-in operator gets the machine list.
   let authState = null;
-  // What the wizard judges each step from. null means "not looked yet", which
-  // is a different thing from zero and is rendered differently.
-  let lastHealth = null;
+  // Same distinction as healthProbe above: a request still in flight is not a
+  // request that failed, and step 2 announced "Could not read /v1/auth/state."
+  // while it was merely pending.
+  let authProbe = "pending";       // pending | ok | failed
+  // What the wizard judges the rest of its steps from. null means "not looked
+  // yet", which is a different thing from zero and is rendered differently.
   let lastStatus = null;
   let machineCount = null;
 
   async function loadAuthState() {
+    authProbe = "pending";
     try {
       authState = await api("/v1/auth/state");
+      authProbe = "ok";
     } catch (e) {
+      authProbe = "failed";
       $("authPanel").style.display = "none";
       renderWizard();
       return;
@@ -2627,12 +3162,20 @@
       ? authState.user + (authState.role ? " (" + authState.role + ")" : "")
       : "";
     const isAdmin = signedIn && authState.role === "admin";
+    // Campaign housekeeping is WRITE-scoped, not admin-only: the broker gates it
+    // with _may_write_as(("admin", "operator")), and an operator running the
+    // campaign is exactly who notices that the draw put cases in the ocean.
+    const canWrite = signedIn && ["admin", "operator"].includes(authState.role);
     $("machines").style.display = isAdmin ? "" : "none";
     $("machinesLocked").style.display = isAdmin ? "none" : "";
+    $("users").style.display = isAdmin ? "" : "none";
+    $("usersLocked").style.display = isAdmin ? "none" : "";
+    $("campaign").style.display = canWrite ? "" : "none";
+    $("campaignLocked").style.display = canWrite ? "none" : "";
     // A signed-in human has no use for the bearer-token form; it stays in the
     // DOM because everything still reads $("token").value.
     $("connectForm").style.display = signedIn ? "none" : "";
-    if (isAdmin) loadMachines(); else machineCount = null;
+    if (isAdmin) { loadMachines(); loadPairings(); loadUsers(); } else machineCount = null;
     renderWizard();
   }
 
@@ -2672,6 +3215,222 @@
     refresh();
   }
 
+  // -- Users -------------------------------------------------------------------
+  // What a role means, so an admin picks one on purpose rather than defaulting
+  // everyone to admin -- which is what happened while `operator` did not exist
+  // and `admin` was the only role that could write.
+  const ROLE_BLURB = {
+    admin: "everything, including accounts, machine credentials and purging a campaign",
+    operator: "reads and writes the campaign; manages no accounts or credentials",
+    viewer: "reads the campaign and nothing else",
+  };
+
+  function roleOptions(selected) {
+    // From /v1/auth/state, so the picker offers exactly what this broker
+    // accepts rather than a list restated here that could drift from it.
+    const roles = (authState && authState.roles) || ["admin", "viewer"];
+    return roles.map((r) =>
+      '<option value="' + esc(r) + '"' + (r === selected ? " selected" : "") + ">"
+      + esc(r) + "</option>").join("");
+  }
+
+  async function loadUsers() {
+    $("newUserRole").innerHTML = roleOptions("viewer");
+    const roles = (authState && authState.roles) || [];
+    $("rolesHint").textContent = roles
+      .map((r) => ROLE_BLURB[r] ? r + " \u2014 " + ROLE_BLURB[r] : r).join(" \u00b7 ");
+    try {
+      const rows = (await api("/v1/users")).users || [];
+      $("userList").innerHTML =
+        '<table style="width:100%; border-collapse:collapse;">' +
+        '<thead><tr>' +
+        '<th style="text-align:left; padding:6px 8px;">Username</th>' +
+        '<th style="text-align:left; padding:6px 8px;">Role</th>' +
+        '<th style="text-align:left; padding:6px 8px;">Last login</th>' +
+        '<th style="padding:6px 8px;"></th></tr></thead><tbody>' +
+        rows.map((u) => {
+          const me = authState && u.username === authState.user;
+          return '<tr><td style="padding:6px 8px; font-weight:600;">' + esc(u.username) +
+            (me ? ' <span class="label-hint">(you)</span>' : "") + "</td>" +
+            '<td style="padding:6px 8px;"><select data-role-for="' + esc(u.username) + '">' +
+              roleOptions(u.role) + "</select></td>" +
+            '<td style="padding:6px 8px;">' +
+              (u.last_login_at ? relTime(u.last_login_at) : "never") + "</td>" +
+            '<td style="padding:6px 8px; text-align:right; white-space:nowrap;">' +
+              '<button type="button" data-pw-for="' + esc(u.username) + '">Reset password</button> ' +
+              '<button type="button" data-del-for="' + esc(u.username) + '">Delete</button>' +
+            "</td></tr>";
+        }).join("") + "</tbody></table>";
+
+      // Bound here rather than with inline onclick: a username is attacker-
+      // chosen text, and building a JS string literal out of it is how an
+      // apostrophe becomes a syntax error and a quote becomes something worse.
+      $("userList").querySelectorAll("[data-role-for]").forEach((sel) => {
+        sel.addEventListener("change", () => setUserRole(sel.getAttribute("data-role-for"), sel.value));
+      });
+      $("userList").querySelectorAll("[data-pw-for]").forEach((b) => {
+        b.addEventListener("click", () => resetUserPassword(b.getAttribute("data-pw-for")));
+      });
+      $("userList").querySelectorAll("[data-del-for]").forEach((b) => {
+        b.addEventListener("click", () => deleteUser(b.getAttribute("data-del-for")));
+      });
+    } catch (e) {
+      $("userList").innerHTML =
+        '<div class="panel-subtitle">Could not list accounts: ' + esc(e.message) + "</div>";
+    }
+  }
+
+  async function userCall(path, opts) {
+    const r = await fetch($("broker").value.trim() + path,
+                          Object.assign({ credentials: "include" }, opts));
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.detail || ("failed: " + r.status));
+    return data;
+  }
+
+  async function addUser() {
+    const username = $("newUsername").value.trim();
+    const password = $("newUserPassword").value;
+    if (!username || !password) { showToast("Username and password required"); return; }
+    if (password.length < 12) { showToast("Password must be at least 12 characters"); return; }
+    try {
+      const d = await userCall("/v1/users", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username, password, role: $("newUserRole").value }),
+      });
+      $("newUsername").value = "";
+      $("newUserPassword").value = "";
+      showToast("Added " + d.username + " (" + d.role + ")");
+      loadUsers();
+    } catch (e) { showToast(e.message); }
+  }
+
+  async function setUserRole(username, role) {
+    try {
+      await userCall("/v1/users/" + encodeURIComponent(username) + "/role", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ role }),
+      });
+      showToast(username + " is now " + role);
+    } catch (e) {
+      showToast(e.message);
+    }
+    // Reload either way: on failure the select is showing a role the server
+    // refused, and leaving it there would misreport who can do what.
+    loadUsers();
+  }
+
+  async function resetUserPassword(username) {
+    const pw = prompt("New password for " + username + " (at least 12 characters).\n"
+                      + "Every session this account holds is revoked.");
+    if (pw === null) return;
+    if (pw.length < 12) { showToast("Password must be at least 12 characters"); return; }
+    try {
+      await userCall("/v1/users/" + encodeURIComponent(username) + "/password", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ new_password: pw }),
+      });
+      showToast("Password reset for " + username + "; their sessions are revoked");
+    } catch (e) { showToast(e.message); }
+  }
+
+  async function deleteUser(username) {
+    if (!confirm("Delete " + username + "? Their sessions end immediately.")) return;
+    try {
+      await userCall("/v1/users/" + encodeURIComponent(username), { method: "DELETE" });
+      showToast(username + " deleted");
+      loadUsers();
+    } catch (e) { showToast(e.message); }
+  }
+
+  // -- Pairing requests --------------------------------------------------------
+  // `?pair=CODE` is the link a node opens. It survives the sign-in detour (the
+  // hint is read once, at load) and is stripped from the address bar as soon as
+  // it has been used, so a refresh does not reopen the drawer forever.
+  let pairHint = (new URLSearchParams(window.location.search).get("pair") || "")
+    .toUpperCase().replace(/[^A-Z0-9]/g, "");
+  let pairTimer = null;
+  let pairShown = null;      // signature of what is on screen
+
+  async function loadPairings() {
+    const box = $("pairingList");
+    if (!box) return;
+    let rows = [];
+    try {
+      rows = (await api("/v1/pair/pending")).pending || [];
+    } catch (e) {
+      box.innerHTML = "";
+      return;
+    }
+    if (pairHint) {
+      openSettings("machines");
+      window.history.replaceState({}, "", window.location.pathname);
+    }
+    const hinted = pairHint; pairHint = "";
+    // Re-render only when the queue CHANGED. This runs on a 5 s timer, and
+    // replacing identical markup still destroys and recreates the buttons --
+    // under a cursor that is a flicker, and at the wrong instant it is a click
+    // on an element that no longer exists.
+    const nowS = Math.floor(Date.now() / 1000);
+    // minutes-left is part of it, so the countdown still ticks -- once a minute,
+    // not once every five seconds.
+    const sig = JSON.stringify(rows.map((r) =>
+      [r.user_code, r.name, Math.ceil(Math.max(0, r.expires_at - nowS) / 60)])) + "|" + hinted;
+    if (sig === pairShown) return;
+    pairShown = sig;
+    if (!rows.length) {
+      box.innerHTML = hinted
+        ? '<div class="panel-subtitle" style="color:var(--warn)">No request with code ' +
+          esc(hinted.slice(0, 4) + "-" + hinted.slice(4)) + ' is waiting \u2014 it may have ' +
+          'expired (they last 10 minutes). Run the setup on the machine again.</div>'
+        : "";
+    } else {
+      // data-* and one delegated listener, never an inline handler: `name` was
+      // typed on a machine nobody had authenticated yet.
+      box.innerHTML = rows.map((r) => {
+        const mine = hinted && r.user_code.replace("-", "") === hinted;
+        const left = Math.max(0, r.expires_at - Math.floor(Date.now() / 1000));
+        return '<div class="detail-card" style="margin-bottom:8px;' +
+            (mine ? "border-color:var(--brand);" : "") + '">' +
+          '<div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">' +
+            '<code class="inline" style="font-size:15px; letter-spacing:1px;">' + esc(r.user_code) + '</code>' +
+            '<div style="flex:1; min-width:160px;">' +
+              '<div style="font-weight:600;">' + esc(r.name) + '</div>' +
+              '<div class="panel-subtitle" style="margin:0;">' +
+                esc(r.host || "unknown host") + ' \u00b7 ' + esc(r.platform || "unknown platform") +
+                ' \u00b7 from ' + esc(r.requested_ip || "?") + ' \u00b7 ' + relTime(r.created_at) +
+                ' \u00b7 expires in ' + Math.ceil(left / 60) + ' min</div>' +
+            '</div>' +
+            '<button type="button" data-pair="approve" data-code="' + esc(r.user_code) + '">Approve</button>' +
+            '<button type="button" class="subtle" data-pair="deny" data-code="' + esc(r.user_code) + '">Deny</button>' +
+          '</div>' +
+          '<div class="panel-subtitle" style="margin:6px 0 0;">Approve only if this code matches ' +
+            'the one the machine is showing.</div>' +
+        '</div>';
+      }).join("");
+    }
+    // Keep looking while something is pending, so a second node shows up without
+    // a manual refresh; stop when the queue is empty.
+    if (rows.length && !pairTimer) pairTimer = setInterval(loadPairings, 5000);
+    if (!rows.length && pairTimer) { clearInterval(pairTimer); pairTimer = null; }
+  }
+
+  document.addEventListener("click", async (e) => {
+    const btn = e.target.closest("[data-pair]");
+    if (!btn) return;
+    btn.disabled = true;
+    const verb = btn.getAttribute("data-pair");
+    try {
+      await userCall("/v1/pair/" + encodeURIComponent(btn.getAttribute("data-code")) + "/" + verb,
+                     { method: "POST" });
+      showToast(verb === "approve" ? "Machine approved" : "Request denied");
+    } catch (err) {
+      showToast(err.message);
+    }
+    loadPairings();
+    loadMachines();
+  });
+
   async function loadMachines() {
     try {
       const data = await api("/v1/workers/tokens");
@@ -2682,8 +3441,9 @@
       renderWizard();
       if (!rows.length) {
         $("machineList").innerHTML =
-          '<div class="panel-subtitle">No machines yet. Issue a token above, then run ' +
-          '<code>bootstrap_worker.ps1</code> on that box with it.</div>';
+          '<div class="panel-subtitle">No machines yet. On a simulation node run ' +
+          '<code>E3D --setup-simulation-node</code> and give it this URL; its request ' +
+          'appears above for you to approve. Issuing a token by hand still works.</div>';
         return;
       }
       $("machineList").innerHTML =
@@ -2817,22 +3577,42 @@
     return [
       {
         title: "Database",
-        done: !!(h && h.ok && h.db_ok !== false),
-        note: !h ? "Waiting for the broker to answer /healthz."
-            : h.db_ok === false
-              ? "The broker is running but cannot reach its database."
-              : target ? '<span class="wiz-db">' + esc(target) + "</span>"
-              : "Reachable. Which database is behind it needs a credential to see: "
-                + "/healthz deliberately tells an anonymous caller less than it "
-                + "tells an operator.",
-        hint: "Nothing to do here. Every table and index is created on the first "
-            + "connection, and a database from an earlier release is brought "
-            + "forward at the same moment.",
+        // /v1/status is the dashboard's data path, not /healthz (AGENTS.md), and
+        // it is DB-backed: a broker that answered it HAS reached its database.
+        // So one failed /healthz no longer undoes a finished step -- that
+        // regression flipped this back to "waiting" while the connection pill
+        // still read "connected" and nothing on the page reported an error.
+        done: !!(h && h.ok && h.db_ok !== false) || (!h && !!lastStatus),
+        note: h
+            ? (h.db_ok === false
+                ? "The broker is running but cannot reach its database."
+                : target ? '<span class="wiz-db">' + esc(target) + "</span>"
+                : "Reachable. Which database is behind it needs a credential to see: "
+                  + "/healthz deliberately tells an anonymous caller less than it "
+                  + "tells an operator.")
+            : healthProbe !== "failed"
+              ? "Waiting for the broker to answer /healthz."
+              : lastStatus
+                ? "/healthz did not answer (" + esc(healthFailure) + "), but "
+                  + "/v1/status did \u2014 so the broker is reaching its database."
+                : "/healthz did not answer (" + esc(healthFailure) + ").",
+        // "Nothing to do here" is true about the SCHEMA and false about the
+        // situation whenever the step is open for a reason: a database the
+        // broker cannot reach, or a check that never came back.
+        hint: healthProbe === "failed"
+            ? "Look for /healthz in the browser's Network tab. One path blocked "
+              + "by a proxy or an extension leaves the rest of the page working."
+            : (h && h.db_ok === false)
+              ? ""
+              : "Nothing to do here. Every table and index is created on the first "
+                + "connection, and a database from an earlier release is brought "
+                + "forward at the same moment.",
       },
       {
         title: "Admin account",
         done: !!(authState && !authState.needs_setup),
-        note: !authState ? "Could not read /v1/auth/state."
+        note: !authState
+            ? (authProbe === "failed" ? "Could not read /v1/auth/state." : "Checking\u2026")
             : authState.needs_setup
               ? "None yet. The first account created below becomes the admin, and "
                 + "that form then closes for good."
@@ -2931,7 +3711,6 @@
     try {
       // First, check unauthenticated healthz to see server state & DB
       const health = await checkHealth();
-      lastHealth = health;
       const token = $("token").value.trim();
 
       // If the server requires SOME credential and this visitor has none.
@@ -2953,7 +3732,6 @@
         $("focusTokenBtn").textContent = accounts ? "Sign in \u2192" : "Enter Token \u2192";
         $("statusEmpty").textContent = how + " to view live campaign data.";
         $("casesEmpty").textContent = how + " to browse cases.";
-        renderWizard();
         return;
       }
 
@@ -2982,7 +3760,6 @@
       renderStatus(st);
       await loadCases();
       await checkFinished(st.by_state?.["done"] ?? null);
-      renderWizard();
       nextRefreshSeconds = 60;
     } catch (e) {
       // On error, re-show the connect form so the user can fix credentials
@@ -2998,6 +3775,12 @@
       }
     } finally {
       if (refreshIcon) refreshIcon.classList.remove("spin");
+      // Every exit renders, including the catch. The catch used to leave the
+      // wizard on whatever had been drawn before /healthz answered, so a 401
+      // from /v1/status left step 1 saying "Waiting for the broker to answer
+      // /healthz." beside a pill reading "unauthorized (401)" -- and with
+      // auto-refresh off it never cleared.
+      renderWizard();
     }
   }
 
@@ -3089,6 +3872,105 @@
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape" && settingsOpen()) closeSettings();
   });
+  // -- Campaign: sites that are not on land -----------------------------------
+  // Two buttons on purpose. The scan is read-only and always runs first; the
+  // quarantine button does not exist until a scan has found something, and it
+  // names the number it is about to act on. `dry_run` defaults to true on the
+  // endpoint for the same reason -- finding out how bad it is must not be the
+  // same keystroke as changing production.
+  let landFound = 0;
+
+  // Both credentials, because either is legitimate here: the broker gates this
+  // with _may_write_as(("admin", "operator")), which accepts a logged-in human
+  // OR a write token. `api()` sends only the bearer and `userCall()` only the
+  // cookie, so an operator with a session and an operator with a token would
+  // each have hit a 401 through the other one.
+  async function campaignCall(path) {
+    const base = $("broker").value.trim().replace(/\/+$/, "");
+    const token = $("token").value.trim();
+    const headers = {};
+    if (token) headers["Authorization"] = "Bearer " + token;
+    const r = await fetch(base + path,
+                          { method: "POST", headers, credentials: "include" });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      const err = new Error(data.detail || ("failed: " + r.status));
+      err.status = r.status;
+      throw err;
+    }
+    return data;
+  }
+
+  function renderLandResult(d, changed) {
+    const n = changed ? d.quarantined : d.scanned_not_on_land;
+    if (!n) {
+      $("landResult").innerHTML = changed
+        ? `<div style="font-size:12px;color:var(--accent)">Done — nothing left to quarantine.</div>`
+        : `<div style="font-size:12px;color:var(--accent)">Every pending case is on land. Nothing to do.</div>`;
+      $("landFixBtn").style.display = "none";
+      return;
+    }
+    // Bound once, then used. The guard was on the condition and not on the
+    // branch, so a response without `examples` -- an older broker, a shape
+    // change -- threw inside the very panel meant to report a problem.
+    const examples = Array.isArray(d.examples) ? d.examples : [];
+    const rows = examples.map((e) => `
+      <tr><td><code class="inline">${esc(e.case_id)}</code></td>
+          <td class="mono">${Number(e.lat).toFixed(3)}, ${Number(e.lon).toFixed(3)}</td>
+          <td>${esc(e.city_cluster || "—")}</td>
+          <td>${esc(e.lcz || "—")}</td>
+          <td>${badge(e.state)}</td></tr>`).join("");
+    const more = n > examples.length
+      ? `<div class="geo-note">…and ${n - examples.length} more.</div>` : "";
+    $("landResult").innerHTML = changed
+      ? `<div style="font-size:12px;color:var(--accent);margin-bottom:8px;">
+           <b>${n}</b> case${n === 1 ? "" : "s"} quarantined. Nothing will lease them;
+           the rows and their history are intact, so this can be undone.</div>`
+        + `<div class="table-wrap"><table><thead><tr><th>Case</th><th>Lat, lon</th>
+           <th>Cluster</th><th>LCZ</th><th>Was</th></tr></thead><tbody>${rows}</tbody></table></div>${more}`
+      : `<div style="font-size:12px;color:var(--warn);margin-bottom:8px;">
+           <b>${n}</b> case${n === 1 ? "" : "s"} in the pool ${n === 1 ? "is" : "are"} not on land.
+           Nothing has been changed.</div>`
+        + `<div class="table-wrap"><table><thead><tr><th>Case</th><th>Lat, lon</th>
+           <th>Cluster</th><th>LCZ</th><th>State</th></tr></thead><tbody>${rows}</tbody></table></div>${more}`;
+  }
+
+  $("landScanBtn").addEventListener("click", async () => {
+    const b = $("landScanBtn");
+    b.disabled = true;
+    $("landResult").innerHTML = `<span style="font-size:12px;color:var(--text-muted)">scanning the case pool…</span>`;
+    $("landFixBtn").style.display = "none";
+    try {
+      const d = await campaignCall("/v1/cases/land-audit");
+      landFound = d.scanned_not_on_land;
+      renderLandResult(d, false);
+      if (landFound) {
+        $("landFixBtn").textContent = `Quarantine ${landFound} case${landFound === 1 ? "" : "s"}`;
+        $("landFixBtn").style.display = "";
+      }
+    } catch (e) {
+      $("landResult").innerHTML = `<span style="font-size:12px;color:var(--bad)">scan failed: ${esc(e.message || e.status || e)}</span>`;
+    } finally {
+      b.disabled = false;
+    }
+  });
+
+  $("landFixBtn").addEventListener("click", async () => {
+    const b = $("landFixBtn");
+    b.disabled = true;
+    try {
+      const d = await campaignCall("/v1/cases/land-audit?dry_run=false");
+      renderLandResult(d, true);
+      showToast(`${d.quarantined} case${d.quarantined === 1 ? "" : "s"} quarantined`);
+      loadCases();
+      refresh();
+    } catch (e) {
+      $("landResult").innerHTML = `<span style="font-size:12px;color:var(--bad)">quarantine failed: ${esc(e.message || e.status || e)}</span>`;
+    } finally {
+      b.disabled = false;
+    }
+  });
+
   document.querySelectorAll(".drawer-tab").forEach((t) => {
     t.addEventListener("click", () => showTab(t.getAttribute("data-tab")));
   });
@@ -3103,7 +3985,12 @@
   $("authForm").addEventListener("submit", submitAuth);
   $("logoutBtn").addEventListener("click", doLogout);
   $("issueBtn").addEventListener("click", issueMachine);
-  loadAuthState();
+  $("addUserBtn").addEventListener("click", addUser);
+  // refresh() needs authState to tell a signed-in operator from a visitor with
+  // no credential at all. Racing the two meant a /healthz that answered first
+  // sent a signed-in operator down the "auth required" branch and left the
+  // campaign empty until the next tick -- 60 s, or never with auto-refresh off.
+  const authReady = loadAuthState();
 
   $("autoRefresh").addEventListener("change", (e) => {
     localStorage.setItem(LS_AUTO, e.target.checked ? "1" : "0");
@@ -3217,7 +4104,7 @@
   // running version invisible, which is exactly what happened.
   checkHealth();
   if (localStorage.getItem(LS_TOK) !== null || $("broker").value) {
-    refresh();
+    authReady.catch(() => {}).then(refresh);
   }
 })();
 </script>

@@ -84,6 +84,10 @@ class Worker:
         self.http = httpx.Client(base_url=self.broker, headers=headers, timeout=timeout)
         self._stop = threading.Event()
         self._current_lease: str | None = None
+        # Carried alongside the lease id so `complete` can name the case it is
+        # reporting. The broker uses it to scope its "was this already written?"
+        # check to THIS case rather than to any case sharing a result_uri.
+        self._current_case: str | None = None
         self._lease_lost = threading.Event()
 
     # -- transport ------------------------------------------------------------
@@ -176,7 +180,8 @@ class Worker:
         # Retrying is safe: a lease that has genuinely gone answers 409, which
         # `_post` never retries.
         r = self._post("/v1/complete", {
-            "lease_id": self._current_lease, "result_uri": result_uri,
+            "lease_id": self._current_lease, "case_id": self._current_case,
+            "result_uri": result_uri,
             "sha256": sha256, "bytes": nbytes, "metrics": metrics or {}}, retries=9)
         if r.status_code == 409:
             raise LeaseLost(r.text[:200])
@@ -266,6 +271,7 @@ class Worker:
             idle = 0
             lease = got[0]
             self._current_lease = lease["lease_id"]
+            self._current_case = lease["case_id"]
             self._lease_lost.clear()
             t0 = time.time()
             # A stale line from the previous case must not be reported as this
@@ -308,6 +314,7 @@ class Worker:
                     print(f"[warn] could not report failure: {e2}", file=sys.stderr)
             finally:
                 self._current_lease = None
+                self._current_case = None
 
         self._stop.set()
         return done
@@ -328,14 +335,82 @@ def echo_runner(lease: LeaseDict, worker: Worker) -> dict[str, Any]:
             "metrics": {"fake": True}}
 
 
-def script_runner(script: str) -> Runner:
+# How long one case may run before the worker gives up on it, and how much of
+# its output is kept.
+#
+# Neither had a bound. `subprocess.run(capture_output=True)` with no timeout
+# meant a hung solve ran forever -- and the heartbeat thread is INDEPENDENT of
+# the runner, so it kept renewing the lease the whole time. The case was
+# therefore never reclaimed, the worker never moved on, and the allocation
+# burned to walltime with nothing to show. It self-corrected only when SLURM
+# killed the job.
+#
+# And capture_output buffers everything in memory. An OpenFOAM solve is verbose
+# -- thousands of files per rank per step, and a run.log to match -- while the
+# code here needs exactly two things from it: the last stdout line, and a tail
+# of stderr for the error message. Keeping a bounded deque gives both for a
+# fixed cost instead of holding the whole log in the worker's RAM.
+CASE_TIMEOUT_SECONDS = int(os.environ.get("CASEBROKER_CASE_TIMEOUT", str(24 * 3600)))
+CAPTURE_LINES = int(os.environ.get("CASEBROKER_CAPTURE_LINES", "2000"))
+
+
+def _drain(stream, sink) -> None:
+    """Copy a pipe into a bounded deque, so a chatty runner cannot grow the heap."""
+    try:
+        for line in stream:
+            sink.append(line.rstrip("\n"))
+    except Exception:                                    # noqa: BLE001
+        pass                                             # the pipe closed under us
+    finally:
+        try:
+            stream.close()
+        except Exception:                                # noqa: BLE001
+            pass
+
+
+def _terminate_tree(proc) -> None:
+    """Kill the runner and everything it started.
+
+    A solve is `mpirun` and its ranks, not one process, so killing only the
+    direct child leaves the ranks running -- still holding the cores this worker
+    is about to ask for again. On POSIX the runner gets its own session
+    (`start_new_session`) so the whole group can be signalled at once.
+    """
+    try:
+        if os.name == "nt":
+            proc.kill()
+        else:
+            import signal as _signal
+            os.killpg(os.getpgid(proc.pid), _signal.SIGTERM)
+            try:
+                proc.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                os.killpg(os.getpgid(proc.pid), _signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        try:
+            proc.kill()
+        except Exception:                                # noqa: BLE001
+            pass
+
+
+def script_runner(script: str, timeout: int | None = None,
+                  capture_lines: int | None = None) -> Runner:
     """Run an external script per case.
 
     The case spec arrives as JSON on stdin and in ``$CASE_SPEC``; the script must
     print a JSON object with at least ``result_uri`` as its LAST line of stdout.
     This is the seam where ``eddy3d-cli build-case`` + mesh + solve + sample
     plugs in, so the broker never needs to know what OpenFOAM is.
+
+    Bounded in both directions: a case that outruns ``timeout`` is killed (with
+    its whole process group) and reported as a retryable failure, and only the
+    last ``capture_lines`` lines of each stream are kept.
     """
+    import collections
+
+    limit = CASE_TIMEOUT_SECONDS if timeout is None else timeout
+    keep = CAPTURE_LINES if capture_lines is None else capture_lines
+
     def run(lease: LeaseDict, worker: Worker) -> dict[str, Any]:
         env = dict(os.environ)
         env["CASE_ID"] = lease["case_id"]
@@ -357,15 +432,45 @@ def script_runner(script: str) -> Runner:
         # (and a bash on PATH there could not run a .cmd launcher anyway), so it
         # keeps exec'ing the script by path.
         argv = [script] if os.name == "nt" else ["bash", script]
-        proc = subprocess.run(argv, input=json.dumps(lease), text=True,
-                              capture_output=True, env=env, shell=False)
+        out: "collections.deque[str]" = collections.deque(maxlen=keep)
+        err_lines: "collections.deque[str]" = collections.deque(maxlen=keep)
+        proc = subprocess.Popen(
+            argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True, env=env, shell=False,
+            # Its own process group, so a timeout can signal the ranks too.
+            start_new_session=(os.name != "nt"))
+        pumps = [threading.Thread(target=_drain, args=(proc.stdout, out), daemon=True),
+                 threading.Thread(target=_drain, args=(proc.stderr, err_lines), daemon=True)]
+        for t in pumps:
+            t.start()
+        try:
+            proc.stdin.write(json.dumps(lease))
+        except (BrokenPipeError, OSError):
+            pass            # a runner is entitled to ignore stdin
+        finally:
+            try:
+                proc.stdin.close()
+            except Exception:                            # noqa: BLE001
+                pass
+        try:
+            proc.wait(timeout=limit if limit > 0 else None)
+        except subprocess.TimeoutExpired:
+            _terminate_tree(proc)
+            for t in pumps:
+                t.join(timeout=10)
+            raise RuntimeError(
+                f"runner exceeded {limit}s and was killed; last stderr: "
+                + " | ".join(list(err_lines)[-5:])[:1000])
+        for t in pumps:
+            t.join(timeout=30)
+
         if proc.returncode != 0:
-            tail = (proc.stderr or proc.stdout)[-2000:]
+            tail = "\n".join(err_lines or out)[-2000:]
             # 64 is the campaign's agreed "this case is broken, do not retry"
             # code, so a bad tile is quarantined on its first attempt.
             err = FatalCaseError if proc.returncode == 64 else RuntimeError
             raise err(f"runner exited {proc.returncode}: {tail}")
-        lines = [ln for ln in proc.stdout.strip().splitlines() if ln.strip()]
+        lines = [ln for ln in out if ln.strip()]
         if not lines:
             raise RuntimeError("runner produced no output; expected a JSON result line")
         try:
@@ -381,6 +486,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--token", default=os.environ.get("CASEBROKER_TOKEN"))
     p.add_argument("--worker-id", default=os.environ.get("CASEBROKER_WORKER_ID"))
     p.add_argument("--runner", help="path to a per-case script; omit for the echo test runner")
+    p.add_argument("--case-timeout", type=int, default=CASE_TIMEOUT_SECONDS,
+                   help="seconds before a case is killed and reported as a retryable "
+                        "failure; 0 disables. A hung solve otherwise heartbeats "
+                        "forever and burns the allocation to walltime.")
+    p.add_argument("--capture-lines", type=int, default=CAPTURE_LINES,
+                   help="how many lines of the runner's stdout/stderr to keep in memory")
     p.add_argument("--splits", nargs="*", default=None)
     p.add_argument("--max-cases", type=int, default=None)
     p.add_argument("--lease-seconds", type=int, default=900)
@@ -398,7 +509,9 @@ def main(argv: list[str] | None = None) -> int:
                cases_dir=a.cases_dir)
     w.progress_file = a.progress_file or os.path.join(
         tempfile.gettempdir(), f"casebroker-progress-{w.worker_id}.txt")
-    runner = script_runner(a.runner) if a.runner else echo_runner
+    runner = (script_runner(a.runner, timeout=a.case_timeout,
+                            capture_lines=a.capture_lines)
+              if a.runner else echo_runner)
     try:
         n = w.run_forever(runner, splits=a.splits, max_cases=a.max_cases,
                           idle_backoff=a.idle_backoff)

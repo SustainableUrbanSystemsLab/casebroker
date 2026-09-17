@@ -105,29 +105,102 @@ Always read back with `age_seconds`. A snapshot nobody has refreshed describes a
 queue that has moved on, and presenting that as current is the one way this can
 mislead.
 
+## Cases that are not on land
+
+`POST /v1/cases` drops any site the building atlas does not cover, reports the
+count as `rejected_not_on_land` and names a sample. It does not refuse the
+batch: a 5,000-case draw with twenty bad sites in it should land the other
+4,980, and the sampler's loader raises on a rejected batch, so refusing would
+turn one ocean site into a blocked draw.
+
+The mask is the 922 tile keys GlobalBuildingAtlas actually publishes, vendored
+in `casebroker/_gba_tiles.py`. A global 5° grid would be 2,592 tiles; the 1,670
+GBA omits are ocean and ice. Using the building source as the land mask means
+"the atlas does not cover this point" and "this case has no buildings" are one
+statement rather than two that must be kept in agreement.
+
+**It is coarse, and that is the trade.** A tile is ~550 km at the equator, so
+the middle of the Atlantic fails and a point 2 km off a fjord passes. An
+admission check has to run on 5,000 cases in one request and must never cost
+the campaign a real Arctic city — Norilsk, Murmansk, Tromsø and Utqiagvik are
+genuine urban fabric the sampler keeps deliberately. The exact question is the
+preview's, per case, from three independent sources.
+
+Cases drawn before the gate existed are swept by `POST /v1/cases/land-audit`,
+dry-run by default. They are **quarantined, not deleted**: nothing leases a
+quarantined case, the row and its event trail stay auditable, the decision is
+reversible, and the campaign's record of what its sampler actually produced
+stays honest. `done` cases are left alone — they already cost their core-hours,
+and relabelling them rewrites history.
+
+The root cause is upstream, and is now gated there too. `site_sampler.py`'s LCZ
+raster reads snow, ice and open water as built classes, and its purity test
+cannot catch that because a uniformly misread surface is 100% pure. Its polar
+gate handles the poles by latitude (72°N, and all of Antarctica), which by
+construction says nothing about 7.5°N 37.5°W in the middle of the Atlantic — so
+the sampler now applies the same published-tile mask to its candidate pool
+before a draw, counting `rejected_not_on_land` separately from `rejected_polar`
+because ice and water are different misreads with different remedies.
+
+That makes the broker's check a backstop rather than the only line: it still
+catches hand-added cases and anything drawn by an older sampler. `SAMPLER_VERSION`
+moved to `sampler-v3` for the gate change, while the rank salt stayed at
+`sampler-v1`, so a re-draw is a filter of the old pool rather than a new one.
+
+---
+
 ## Footprints
 
-Building geometry for a case, cached per case, from the **same source its mesh
-was built from**: the `height_source` its run reported on completion; Overture
-for a case that finished before the builder could mesh GBA (2026-09-08 15:20
--04:00, parent `27dfd3a`); GlobalBuildingAtlas otherwise, which is what the
-builder meshes now. The response says all of it — `mesh_source` and
-`mesh_source_basis` (`reported`, `before_gba`, `not_done`, `unreported`,
-`unrecognized`) for the mesh, `source` for what actually answered, and
-`fallback_from` when the mesh's source could not be read and the other one did.
-A cached row from a source other than the mesh's is queried again. Rendering
-anything merely similar — OSM, a map tile, or the other building source — would
-look like a check while disagreeing with the mesh, and would disagree most
-exactly where checking matters.
+What a case is **made of**, cached per case, from the **same sources the runner
+meshes**. Three layers, one payload:
+
+- **Buildings** — from the source this case's mesh was built from (below).
+  GlobalBuildingAtlas for everything the builder meshes now; Overture only for a
+  case meshed before the switch, and only where that path is available. Queried
+  over 520 m: the 504 m core plus a margin.
+- **`terrain`** — GEDTM30 relief over the whole 1304 m mesh domain, as a coarse
+  grid plus min/max/relief. `source` is `gedtm30`, `flat` (genuine nodata, so
+  the builder will mesh a flat plane — usually a site not on land), or
+  `unavailable` (the DTM host, not the site).
+- **`canopy`** — Meta/WRI 1 m canopy heights over the same domain, as a coarse
+  grid plus coverage and tallest tree. `source` is `meta-wri-chm-v1`, `none`
+  (the product publishes no tile here) or `unavailable`. A treeless site and an
+  uncovered one are different answers and are reported as such.
+
+Both rasters span 1304 m rather than 520 m because that is what
+`site_geometry.build_site` reads: `half_t = HALF_M + buffer_m`, 504 + 800. The
+buffer is most of the domain, and a preview cropped to the buildings would show
+a third of the ground the solve actually sits on.
+
+Rendering anything merely similar — OSM, a map tile, a 10 m canopy raster, or
+the other building source — would look like a check while disagreeing with the
+mesh, and would disagree most exactly where checking matters.
+
+### Which buildings, for this case
+
+The response says all of it — `mesh_source` and `mesh_source_basis`
+(`reported`, `before_gba`, `not_done`, `unreported`, `unrecognized`) for the
+mesh, `source` for what actually answered, and `fallback_from` when the two
+differ. A cached row from a source other than the one that would be queried now
+is queried again, so a stale picture cannot outlive the reason it was drawn.
 
 **Only a finished run can say which source it meshed.** The date proves one
-direction only: a case that finished before the switch was meshed from Overture,
-but a cluster on an older checkout, or geometry cached by an earlier attempt,
-meshes Overture after it too. So the runner reads the geometry report beside the
-STLs it used — the builder tags its GBA path `height_source: "gba-lod1"`, and its
-Overture path carries `tile_lod()`'s `height_provenance` instead — and reports
-`height_source` in its completion metrics. A case finished after the switch
-without one is `unreported`: drawn from GBA, and labelled an assumption.
+direction only: a case that finished before the switch (2026-09-08 15:20 -04:00,
+parent `27dfd3a`) was meshed from Overture, but a cluster on an older checkout,
+or geometry cached by an earlier attempt, meshes Overture after it too. So the
+runner reads the geometry report beside the STLs it used — the builder tags its
+GBA path `height_source: "gba-lod1"`, and its Overture path carries
+`tile_lod()`'s `height_provenance` instead — and reports `height_source` in its
+completion metrics. A case finished after the switch without one is
+`unreported`: drawn from GBA, and labelled an assumption.
+
+**Overture is an optional extra, so its path is not always there.** It costs a
+second interpreter loading pyarrow and geopandas inside a memory-capped web
+process, which is why installing it is opt-in (`casebroker[overture]`) and
+using it needs `CASEBROKER_OVERTURE_FALLBACK`. When a case's mesh source is
+Overture and that path is unavailable, the panel draws GBA rather than nothing
+and `fallback_from` says why — a labelled substitution, which is honest, where
+an unlabelled one would be the mislabelling this document exists to prevent.
 
 Read from the Source Cooperative GeoParquet mirror, not TUM's own WFS: that
 endpoint now answers `GetFeature` with `PARAMETER_NOT_ALLOWED`, serving only
@@ -141,6 +214,23 @@ then (east, south) — so latitude descends while longitude ascends. A wrong key
 usually a 404, but it can also be a real tile for the wrong part of the world,
 which returns buildings and produces a case that meshes, solves, and is somewhere
 else. `tests/test_gba_tiles.py` pins it.
+
+The canopy tile key has the same shape of trap. The Meta/WRI tiles are named by
+**zoom-9 Bing quadkey** — 40,075,017 m / 512 / 65,536 = 1.194 m, which is the
+product's own resolution and fixes the zoom. A key one level out is still a
+valid quadkey naming a real object, so it fails by drawing someone else's trees.
+The broker computes the key rather than downloading the 15 MB `tiles.geojson`
+index `canopy.py` uses: same answer, 15 MB less resident memory in a capped web
+process. `tests/test_chm_tiles.py` pins it against the published objects on four
+continents.
+
+**Heights, relief and canopy are all predictions or samples, not surveys.** GBA
+publishes a per-building variance and the inspector draws it; GEDTM30 is a 30 m
+DTM resampled to an 80 m preview cell; the canopy grid is a mean over its cell,
+which is what a crown-volume drag term integrates. Statistics are taken at four
+times the drawing resolution before the grid is averaged down — computing them
+at drawing resolution reported Atlanta, a city of 25 m oaks, as having a tallest
+tree of 8 m.
 
 ---
 

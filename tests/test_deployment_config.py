@@ -71,10 +71,15 @@ def test_the_documented_first_command_needs_nothing_uncommented():
 
 def test_env_example_names_only_variables_the_app_actually_reads():
     """A stale name in the shipped example is a credential an operator believes
-    they set and the service never sees."""
-    app_py = (ROOT / "casebroker" / "app.py").read_text()
+    they set and the service never sees.
+
+    Scanned across the whole package rather than `app.py` alone: the memory
+    ceilings the footprints path needs are read in `footprints.py`, and a check
+    that only knew about `app.py` would have called them stale.
+    """
+    pkg = "\n".join(f.read_text() for f in sorted((ROOT / "casebroker").glob("*.py")))
     for name in re.findall(r"^#?([A-Z_]*CASEBROKER\w+)=", ENV_EXAMPLE, re.M):
-        assert name in app_py or name in COMPOSE, name
+        assert name in pkg or name in COMPOSE, name
 
 
 # -- the production-database CI job: what an unusable credential must do -----

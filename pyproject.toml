@@ -7,7 +7,7 @@ name = "casebroker"
 # back from the installed distribution metadata and everything that reports a
 # version (the OpenAPI document, /healthz, the dashboard badge) goes through
 # there. Bumping it here and tagging v<version> is the whole release.
-version = "0.3.0"
+version = "0.5.0"
 description = "Central case broker for the v2 real-city CFD campaign: one database of cases, many workers leasing the next one to simulate."
 requires-python = ">=3.11"
 dependencies = [
@@ -19,11 +19,6 @@ dependencies = [
     # DSN); SQLite-only local dev never touches it. Kept as a base dependency
     # rather than an extra so `uv run` needs no special install step either way.
     "psycopg[binary]>=3.2",
-    # Only used by casebroker/footprints.py, to answer
-    # GET /v1/cases/{id}/footprints. The dashboard cannot query Overture itself
-    # -- there is no REST API and no published tile endpoint -- so the broker
-    # runs the same client, pinned to the same release, that the CFD runner uses.
-    "overturemaps>=1.0.2",
     # GlobalBuildingAtlas is GeoParquet behind an HTTP range-read; duckdb
     # (httpfs + spatial) is what turns a bbox predicate into a few MB of
     # range requests instead of a 1.7 GB tile download.
@@ -37,6 +32,18 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.3"]
+# The Overture fallback for building footprints, which GlobalBuildingAtlas
+# replaced as the default. Optional because it is the single largest thing in
+# this dependency set: overturemaps pulls pyarrow, which is 122 MB of a 328 MB
+# site-packages -- 37% of the image -- for a code path that is off unless
+# CASEBROKER_OVERTURE_FALLBACK is set and that runs in a SUBPROCESS, so the
+# broker process never imports it even when it is installed.
+#
+# Install with `pip install casebroker[overture]` on a deployment that wants the
+# fallback available. Without it, the fallback reports that it is not installed
+# rather than failing obscurely, and GBA -- the source that actually gets meshed
+# -- is unaffected.
+overture = ["overturemaps>=1.0.2"]
 
 # Removed earlier in this repo's history because it pointed at a casebroker.cli
 # that had never been written, so the installed command failed on every run.

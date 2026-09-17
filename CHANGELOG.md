@@ -8,14 +8,440 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-17
+
 ### Added
 - **The runner reports which building source it meshed.** `height_source` in the
   completion metrics, read from the geometry report beside the STLs the run used:
   the builder's `gba-lod1` tag, or `overture` for a report from its Overture path,
   which carries `height_provenance` and no tag. A run with no report -- STLs
   staged by the spec -- reports nothing rather than a guess.
+- **A machine pairs itself from the browser — no password on a simulation
+  node.** `POST /v1/pair/start` → a short code and a link; whoever is already
+  signed in as an admin sees the request under Settings → Machines (the link
+  `/?pair=CODE` opens straight to it), checks the code matches what the machine
+  is showing, and approves. This is what `E3D --setup-simulation-node` talks to,
+  and it replaces an enrolment that had an admin type their password on every
+  node — shared cluster logins and lab boxes, the wrong place for it.
+
+  It goes one step past the textbook device flow. There the *server* mints the
+  token, which means holding it readable between "approve" and the node's next
+  poll — the one place a live credential could be read back out of this
+  database. Here the **node** generates the token and sends only its SHA-256, so
+  approving promotes a hash into `worker_tokens` and the raw credential never
+  exists on the broker at all; a test scans the database file for it. Requests
+  expire in 10 minutes, are throttled per address, the queue is bounded, only an
+  admin *session* can approve (not an operator, not another machine's token), a
+  name with a live credential is refused at the node rather than discovered by
+  the admin, and re-running setup replaces the earlier request instead of
+  stacking a second card. The name is a strict charset: it arrives from a machine
+  nobody has authenticated and is rendered in an admin's browser.
+- **Trees are modelled over the core, matching the buildings.** Crowns were
+  built across the full 1300 m box while buildings stop at 504 m
+  (`watertight.build_pair` clips with `gba.massing(lat, lon, 504.0)`; the 520
+  elsewhere is only a download margin). `canopy_zones.DOMAIN_HALF_M` is now 504,
+  and the preview follows: `footprints.canopy()` spans the core, the elevation
+  maps canopy by world coordinate rather than index fraction (which would have
+  stretched the core's trees across the whole width), and the caption states
+  both extents. The buffer is terrain and inlet roughness only — `z0_by_direction`
+  already represents upwind surface as a roughness length, so buffer vegetation
+  was in spirit counted twice. `PAYLOAD_VERSION` → 5.
+- **The preview names the vegetation class and its drag.** The canopy payload
+  now carries `vegetation` — label, LAD, Cd and `f = 2·Cd·LAD` — and the legend
+  shows it. There is exactly ONE class per case and it is chosen by **latitude
+  alone**, so a street tree, a park and a conifer stand all get the same drag;
+  that table plus the site centre is the entire vegetation model. It was
+  invisible before, while the caption's `f = 2·Cd·LAD` read like a measurement.
+  The band edges are hard cuts and the one at 55° is steep: Copenhagen (55.68°N)
+  gets Conifer at 1.25 m⁻¹, Hamburg (53.55°N) Deciduous at 0.48 — **2.6× the
+  drag** across ~200 km of comparable northern-European city. Mirrors
+  `canopy_zones.VEGETATION_BY_LATITUDE`, pinned by tests so it cannot drift from
+  what the solve applies.
+- **Cases that are not on land are refused at the door.** `POST /v1/cases` drops
+  any site the building atlas does not cover and reports it as
+  `rejected_not_on_land`, with a sample of what went. The rest of the batch
+  still lands: a 5,000-case draw with twenty bad sites should not be blocked by
+  them, and the sampler's loader raises on a rejected batch. The mask is the 922
+  tile keys GBA actually publishes (a global 5° grid would be 2,592; the rest
+  are ocean and ice), vendored in `casebroker/_gba_tiles.py`, so the land test
+  and the building source are the same source. Coarse by design — it catches the
+  mid-Atlantic and the ice sheets, not a point 2 km offshore — and it keeps every
+  real Arctic city the sampler deliberately retains.
+- **A Campaign tab in the settings drawer**, with the land audit behind two
+  buttons: a read-only scan that reports what it found and changes nothing, and
+  a quarantine button that does not appear until a scan has found something and
+  names the number it is about to act on. It runs on the session you are already
+  signed in with, so campaign housekeeping no longer means finding a bearer
+  token. Write-scoped, not admin-only -- the broker gates it with
+  `_may_write_as(("admin", "operator"))`, and an operator running the campaign is
+  exactly who notices that the draw put cases in the ocean.
+- **`POST /v1/cases/land-audit`** sweeps the cases that predate that gate.
+  Dry-run by default; with `dry_run=false` it quarantines them rather than
+  deleting them, so nothing leases them while the rows, their history and the
+  campaign's own record of what the draw produced all survive. `done` cases are
+  left alone.
+- **A third view: the side elevation.** Looking north across the whole mesh
+  domain, everything projected onto one vertical plane, with a true metre scale.
+  Neither of the other two could answer whether the terrain or the buildings
+  dominate what the wind meets: in plan the relief is a wash of colour, and the
+  isometric exaggerates height against plan distance, so the comparison there is
+  rigged by construction. Here both are the same axis. The terrain is drawn as a
+  band rather than a line because each column spans 2608 m of ground north to
+  south and both its extremes are true; the building mass is faint with a hard
+  skyline over it, because a thousand roofs in a projection otherwise merge into
+  one blue wall that hides the ground they stand on.
+
+### Changed
+- **Buildings pierce the terrain instead of sitting on it.** `watertight.py`
+  extrudes every prism from its roof down to a common slab about 20 m below the
+  lowest ground in the domain, which is what closes the solid where a footprint
+  meets a hill -- the preview drew them perched on the surface, which hid that
+  and, on a slope, left flat-bottomed boxes floating over the downhill side. The
+  elevation draws the full buried length; the isometric shows only the first 9 m
+  of it, because at that exaggeration a prism on a hilltop trails more ghost
+  than building and 227 of them are stalactites.
+
+### Security
+- **The machine credential was briefly world-readable as it was written.**
+  `casebroker worker setup` writes a live bearer token into `machine.env`, and
+  `_write_env` created the file with `write_text()` — i.e. at whatever the umask
+  allows, 0644 on a default login shell — and narrowed it to 0600 only
+  afterwards. The token is on disk for the gap between those two calls, on
+  cluster nodes whose home directories are routinely group-readable. The file is
+  now created through `os.open` with mode 0600, and an existing permissive file
+  is narrowed *before* the new token is written into it.
+- **A worker credential could run script in an admin's dashboard.** The cluster
+  name from `POST /v1/fleet` was interpolated into the campaign status card with
+  `innerHTML` and no escaping, so any credential with write scope could store
+  markup that executes in the browser of whoever next opened the dashboard.
+  Session cookies are `HttpOnly`, so the cookie itself is not readable — but
+  script running in that page can call the API *as the admin*, including creating
+  another admin, which makes this a path from write scope to full control. A
+  worker credential is the weakest link here by construction: it sits unattended
+  on cluster nodes and Windows workstations. Verified by rendering the payload
+  both ways in a real browser — the old interpolation produced a live
+  `<img onerror>` element, the new one renders it as text.
+
+  Four more sinks escaped alongside it: `result_sha256` (worker-supplied via
+  `POST /v1/complete`), `state` in `badge()` — which lands in a `class`
+  attribute as well as in text — and the two halves of the redacted database
+  summary. `tests/test_dashboard_escaping.py` now fails the build if any
+  server-supplied field reaches the DOM without `esc()`. The broker deliberately
+  still stores these strings verbatim: a cluster name is data, and sanitising on
+  the way in would corrupt legitimate names while still not making the dashboard
+  safe.
+- **Concurrent site previews multiplied the memory ceilings instead of sharing
+  them.** `CASEBROKER_DUCKDB_MEMORY` and `CASEBROKER_GDAL_CACHE_MB` bound ONE
+  call, and `/footprints` builds a fresh DuckDB and a fresh GDAL cache per
+  request while holding a threadpool slot for the 8-15 seconds the remote reads
+  take. Two simultaneous previews already ask for ~350 MB of geo on top of the
+  ~280 MB library floor, on a 512 MB instance — and two browser tabs is enough to
+  cause it. Previews now run one at a time
+  (`CASEBROKER_GEO_CONCURRENCY`), and a request that waits out
+  `CASEBROKER_GEO_QUEUE_SECONDS` gets `503` with `Retry-After` instead of
+  hanging. The work is cached per case, so serialising costs a queued viewer a
+  few seconds exactly once.
+- **An anonymous caller could exhaust the instance's memory through
+  `/v1/auth/login`.** Two faults compounding. The throttle keyed on
+  `username|address`, and the username is attacker-chosen and need not exist, so
+  every attempt with a fresh username opened a fresh bucket and the limit never
+  applied. And nothing bounded concurrent password checks: scrypt is ~16 MB a
+  call by design, uvicorn's threadpool is 40 wide, so 40 simultaneous attempts
+  could ask for ~640 MB on a 512 MB instance already sitting at ~280 MB with the
+  geo libraries resident. There is now a second throttle bucket keyed on the
+  address alone, and a semaphore (`CASEBROKER_PASSWORD_CONCURRENCY`, default 4)
+  bounding how much scrypt is in flight at once.
+
+  That bound initially covered only the login path, which left four other
+  call sites unbounded — including the password *change* path, reachable by any
+  logged-in user and repeatable. Every scrypt call in `app.py` now goes through
+  `_hash_password` / `_verify_password`, and a test fails the build if one does
+  not: capping a single endpoint is not capping scrypt.
+- **Response time enumerated accounts, via the code that existed to prevent
+  that.** The login path verified against a decoy hash when the username did not
+  exist, so a hit and a miss would cost the same — but it BUILT that decoy per
+  request with `hash_password("decoy")`, which is itself a full scrypt. A miss
+  therefore ran scrypt twice and a hit once: measured at exactly 2.0x, the same
+  signal the decoy was meant to remove, with the sign flipped. The decoy is now
+  `auth.DECOY_HASH`, computed once at import from random bytes. Measured after:
+  0.95x.
 
 ### Fixed
+- **The setup wizard blamed the database for a `/healthz` nobody was waiting
+  for.** Reported from a live dashboard reading "Step 1 of 5 — 2 done" with
+  Database stuck on "Waiting for the broker to answer /healthz." while the
+  broker was healthy and the connection pill said `connected`. `lastHealth` was
+  assigned in `refresh()` but the wizard was redrawn only at the very end of it,
+  after `/v1/status`, `loadCases()` and `checkFinished()` — and not at all from
+  the catch. So three different things all printed the same sentence: a probe
+  still in flight, a probe that had answered while a later request was slow, and
+  a `/healthz` that had failed outright. Two of the three never cleared, and with
+  auto-refresh off neither did the first.
+
+  `checkHealth()` now owns the state — it is the only writer of `lastHealth`,
+  it records `pending`/`ok`/`failed` separately (null meant both "not asked" and
+  "asked and failed"), it shares one in-flight promise so the page's two
+  load-time probes cost one request instead of two serialised ones, and it
+  redraws the wizard as soon as the answer lands. `refresh()` redraws from its
+  `finally`, so every exit including the error path leaves the wizard current.
+  A failed `/healthz` no longer undoes a finished step either: `/v1/status` is
+  the dashboard's data path (AGENTS.md) and is DB-backed, so a broker that
+  answered it has demonstrably reached its database, and the step says which
+  check failed instead of "Nothing to do here". `loadAuthState()` now gates the
+  first `refresh()`, which stops a signed-in operator landing on "auth required"
+  with an empty campaign until the next tick.
+- **A credentialled `/healthz` raised during a database outage instead of
+  answering `db_ok: false`.** `_db_state()` was already careful to fail soft, but
+  the DSN summary is gated on `_is_authenticated()`, which resolves a session
+  cookie through `db.session_user` and *any* bearer token through
+  `db.worker_token_owner` — both database reads, neither guarded. An anonymous
+  probe therefore reported the outage correctly while the dashboard's own
+  request (its session cookie is scoped to `/`) got a 500: the operator who had
+  signed in to diagnose the outage was the one caller who could not see it. A
+  container HEALTHCHECK carrying a token would have restart-looped a broker
+  whose only problem was its database, which is the confusion `db_ok` exists to
+  remove. It now fails closed — the credential is unreadable, so the DSN stays
+  hidden — and `test_healthz_survives_a_credential_it_cannot_resolve_during_an_outage`
+  covers the anonymous, bearer and cookie callers together.
+- **A case held for 7 days is released, however healthy the heartbeats look.**
+  `lease_expires` answers "did a worker speak recently", and heartbeat pushed it
+  forward indefinitely — so a worker that *dies* was caught within the TTL, but
+  one that is alive, reporting, and simply never finishing held its case forever.
+  That is not hypothetical: `worker.py`'s heartbeat thread runs independently of
+  the runner subprocess, so a wedged solve renews its own lease while making no
+  progress. A new `leased_at` column records when the current lease started and
+  is deliberately *not* touched by heartbeat, which is what makes it an age
+  rather than a liveness signal. Past `CASEBROKER_MAX_LEASE_AGE` (default 7 days,
+  far beyond any real case) the next heartbeat is refused and the case returns to
+  the pool, spending an attempt like any other retry; another worker's `lease()`
+  will also reclaim it without waiting for the wedged one to call again. Leases
+  predating the column start their clock on first contact rather than being
+  exempt forever.
+- **One case's completion retry could be confirmed by another case's result.**
+  `complete` nulls the lease on success, so a retry after a lost response finds
+  nothing and would be refused with 409 — which the worker reads as "another
+  worker took this" and logs as a failure for work that actually landed. The
+  guard against that matched on `result_uri` ALONE, so any done case carrying
+  the same URI answered for this one: a runner deriving its URI from anything
+  less unique than the case (a template, a constant, a date) would have retries
+  on case B silently confirmed by case A's row, reporting work as landed that
+  never ran. `POST /v1/complete` now takes an optional `case_id` that scopes the
+  check. Additive, so a worker built before it is unaffected.
+- **A hung solve heartbeated forever and burned the allocation.** The runner ran
+  under `subprocess.run(capture_output=True)` with no timeout, and the heartbeat
+  thread is INDEPENDENT of it — so a solve that wedged kept getting its own lease
+  renewed. The broker never reclaimed the case, the worker never moved on, and
+  the job ran to walltime with nothing to show; it self-corrected only when SLURM
+  killed it. A case that outruns `CASEBROKER_CASE_TIMEOUT` (default 24 h, well
+  beyond a real 66-core-hour case) is now killed and reported as a *retryable*
+  failure — a hang says nothing about the case, so another machine may finish it.
+  The kill signals the whole process group, because a solve is `mpirun` and its
+  ranks, and killing only the direct child leaves those ranks holding the cores
+  this worker is about to ask for again.
+- **The worker held the entire OpenFOAM log in RAM.** `capture_output=True`
+  buffers both streams in full, while the code needs exactly two things from
+  them: the last stdout line, and a tail of stderr for the error message. Output
+  is now streamed into bounded deques (`CASEBROKER_CAPTURE_LINES`, default 2000),
+  so a chatty runner costs a fixed amount instead of its whole log — and the JSON
+  result line still survives, because it is always last.
+
+### Added
+- **CI builds the Docker image.** Nothing did. Render builds from that
+  Dockerfile, so the first thing that ever ran it was a deploy — meaning a
+  dependency change that broke the image was discovered with the break already
+  merged to main and production still on the previous version. The new job
+  builds it, boots it, waits for `/healthz`, and asserts the geo path works on
+  the BASE install (GBA tile keys, canopy quadkeys, the land mask, and importing
+  every module), which is exactly what dropping a dependency risks. It runs on
+  pull requests too, and `deploy-smoke-test` now depends on it, so a broken image
+  fails before the merge rather than after.
+- **A `.dockerignore`.** The image COPYs three paths, but the whole working tree
+  was packed up and handed to the Docker daemon as build context first — 329 MB
+  of `.venv` plus the entire `.git` history, on every build, for an image that
+  uses none of it.
+
+### Changed
+- **The dashboard's case list no longer sorts the whole campaign on every poll.**
+  `list_cases` orders by `updated_at DESC` and there was no index on it, so the
+  plan was `SCAN cases` plus a temp B-tree — a full sort of every case, every 60
+  seconds, for every open dashboard. That is not just a slow page: `list_cases`
+  holds `db._LOCK` while it runs, so the sort stalls every worker's lease and
+  heartbeat behind it. Measured at 50,000 cases: **8 ms → 0.4 ms** for the first
+  page and **155 ms → 2.3 ms** for a deep one. The index is added to existing
+  databases by the schema reconciler on connect, verified against a database
+  created without it.
+- **Overture is an optional extra, not a base dependency.** Its client pulls
+  pyarrow — 122 MB of a 328 MB site-packages, 37% of the image — into every
+  install, for a fallback that is off unless `CASEBROKER_OVERTURE_FALLBACK` is
+  set and that runs in a *subprocess*, so the broker process never imports it
+  even when it is there. Install it deliberately with
+  `pip install casebroker[overture]`. Without it the fallback now says exactly
+  that, and names GlobalBuildingAtlas as what to use instead, rather than
+  surfacing a `No module named` fragment that reads like a broker bug.
+
+  Measured on a clean base install, which is what the Docker image builds:
+  **172 MB of site-packages, down from ~294 MB**. It boots, serves, and still
+  does every piece of geo work that matters — GBA footprints, GEDTM30 terrain,
+  Meta/WRI canopy and the land mask — none of which ever needed Overture.
+- **The request threadpool is bounded at 12, not anyio's default 40.** Every sync
+  endpoint runs there, and 40 is sized for a machine rather than for a 512 MB
+  instance with a ~280 MB resident floor. It bought nothing either: `db._LOCK`
+  serialises the database work those handlers exist to do, so the extra slots
+  were only ever extra request bodies in flight and a queue that grows until the
+  platform intervenes. Applied through the app's lifespan rather than a uvicorn
+  flag, so it holds however the app is started
+  (`CASEBROKER_REQUEST_CONCURRENCY`). Replacing the deprecated `on_event`
+  startup hook with `lifespan` also took the suite from 337 warnings to 3.
+
+### Fixed
+- **A dropped connection could hand two workers the same case.** The broker opens
+  ONE connection at startup and every route closes over it; FastAPI runs sync
+  endpoints in a threadpool, so `db._LOCK` is the only thing making that safe.
+  Four public readers (`status`, `get_case`, `get_footprints`, `fleet`) and two
+  raw `conn.execute` calls in `app.py` skipped it. `status` backs `/healthz`,
+  which is unauthenticated and polled by the platform every 30 seconds, so it ran
+  on a timer against the same connection a `lease()` might have a transaction
+  open on — and `PgConnection.execute` repairs a dead connection by swapping the
+  underlying one IN PLACE. A failure between `BEGIN` and `COMMIT` therefore left
+  the COMMIT running on a fresh connection with nothing in it: the lease UPDATEs
+  died with the old connection while `lease()` returned its Lease objects anyway,
+  so a worker held cases the database still listed as pending and the next worker
+  leased the same ones. That is the one invariant `db.py` says matters most.
+
+  All four readers now hold the lock, `/healthz` goes through a locked
+  `db.ping()`, and `PgConnection` refuses to reconnect inside an open
+  transaction — deferring the repair to the next call outside one, so a doomed
+  transaction fails honestly instead of silently committing nothing.
+  Verified under contention as well as in unit tests: 400 cases, 24 concurrent
+  workers leasing/heartbeating/completing, and 8 threads hammering `/healthz`,
+  `/v1/status` and `/v1/cases` throughout — zero double-leases, zero errors, and
+  RSS flat at 70→73 MB. A smaller version of that runs in the normal suite.
+
+  `tests/test_connection_safety.py` pins the structural rule (every public
+  conn-taking function holds the lock, `app.py` never touches the raw
+  connection) so it cannot regress quietly. The concurrent-reader test reproduced
+  real corruption on SQLite before the fix: `InterfaceError('bad parameter or
+  other API misuse')`.
+- **A raster-host outage was frozen into the cache as "no trees".** `transient`
+  — the flag that stops a failed fetch being cached — was set only when the
+  *buildings* fetch failed. `terrain()` and `canopy()` never raise; they return
+  `{"source": "unavailable"}`, and that was cached at the current payload version
+  like a real answer. So a canopy read that timed out once was served as a
+  treeless site for the life of the case, and no amount of reopening it helped.
+  `unavailable` and `unknown` are facts about today and are no longer cached;
+  `flat` and `none` are facts about the site and still are. `PAYLOAD_VERSION`
+  goes to 3 so every case is re-fetched exactly once, flushing anything frozen.
+  The dashboard now shows the raster layer's actual error string instead of a
+  generic "unreachable", and the Docker CI job now performs a real `/vsicurl`
+  read of both rasters from inside the Linux image — importing rasterio is not
+  the same as rasterio being able to fetch a COG over HTTPS from that container.
+
+  And that CI step found the actual reason there were never any trees in
+  production: **`libexpat.so.1: cannot open shared object file`**. The rasterio
+  wheel bundles GDAL, GDAL links against the system libexpat, and
+  `python:3.12-slim` does not ship it — so rasterio installed cleanly, failed at
+  import, and every case reported terrain and canopy as unavailable while the
+  unit suite (on a dev machine that has the library) stayed green. The import
+  guard compounded it by reporting any failure as "rasterio not installed". The
+  Dockerfile now installs `libexpat1`, and both guards report the real exception.
+- **The elevation's terrain was buried under the building mass.** Each building
+  was drawn as one bar from its roof all the way down to the slab 20 m below the
+  lowest ground — so a few hundred of them at 0.16 opacity accumulated to
+  effectively opaque, covering the ground they were standing on. The ridge line
+  drawn over the top was a single 1.2 px stroke against that, and on a low-relief
+  site it sat exactly where the blue was densest.
+
+  The mass now stops at the local ground and continues to the slab at a tenth of
+  the opacity — the buried length is real and still drawn, it just no longer
+  competes with the datum. And the ground is now a proper section rather than one
+  ridge line: solid amber for the highest ground in each column, dashed for the
+  lowest, drawn last over everything. On a 60 m-relief site it reads as what it
+  is — a city in a valley with wooded slopes either side.
+- **The side elevation drew no terrain.** A scatter/gather bug: the code walked
+  the 48-column terrain grid and binned each column into one of 90 elevation
+  columns, which leaves 42 of the 90 untouched, so the "band" was a comb of
+  disjoint slivers that vanished under the building mass. Each destination
+  column now asks the source what is under it, which is correct for any pair of
+  resolutions; the canopy profile had the same bug (64 into 90). The ground line
+  is also re-stroked over the buildings, because a thousand of them at any
+  visible opacity accumulate into something solid and the terrain was the first
+  thing they buried.
+- **Nobody saw any trees, anywhere.** The footprints cache is keyed on
+  `case_id` alone and carries no schema column, so a payload written before
+  terrain and canopy existed was served forever -- every case anyone had already
+  opened kept answering with neither, which is indistinguishable from a world
+  with no trees in it. Payloads are now stamped with `payload_v` and a hit
+  carrying anything else is treated as a miss, so the first open after a shape
+  change re-queries once and caches the new answer.
+- **A site the building atlas does not cover returned 502.** GlobalBuildingAtlas
+  publishes 922 tiles of a possible 2,592; the rest are ocean and ice. A 404 on
+  the tile URL propagated as `building query failed`, which took the terrain and
+  the canopy down with it -- so a case in the Atlantic showed a transport error
+  instead of the far more useful answer the other two sources were ready to
+  give. A missing tile is now `TileNotPublished`, distinct from a transport
+  failure, and comes back as an empty building list. The three layers are
+  fetched independently, and when all three report a gap the panel says so
+  outright: *this case is not on land*. A missing tile is cached (it is a fact
+  about the site); an unreachable mirror is reported but NOT cached, so
+  reopening the case retries instead of freezing a blip into an empty city.
+
+### Added
+- **The site preview shows terrain and trees, not just buildings.**
+  `GET /v1/cases/{id}/footprints` now returns `terrain` (a GEDTM30 relief grid)
+  and `canopy` (Meta/WRI 1 m tree heights) alongside the footprints, both over
+  the full 1304 m mesh domain rather than the 520 m building box -- which is
+  what `site_geometry.build_site` reads (`half_t = HALF_M + buffer_m`). The
+  inspector draws all three: relief shaded under the plan view, canopy in green,
+  and in the isometric the buildings now stand *on* the terrain with see-through
+  green crown volumes beside them. Crowns are drawn see-through because that is
+  what they are in the solve -- the upper 59% of each tree becomes a porous
+  cellZone carrying `f = 2*Cd*LAD`, not a solid the flow goes around.
+
+  A treeless site and a site the canopy model does not cover are reported
+  differently (`canopy.source` is `meta-wri-chm-v1` with `frac_canopy: 0` versus
+  `none`), because only one of them means something is wrong.
+
+  The canopy tile key is computed rather than looked up: the Meta/WRI tiles are
+  named by zoom-9 Bing quadkey, which the product's own 1.194 m resolution
+  fixes, so the broker skips the 15 MB `tiles.geojson` index `canopy.py`
+  downloads. Pinned against published objects on four continents in
+  `tests/test_chm_tiles.py`.
+
+### Fixed
+- **The web service exceeded its memory limit and was restarted.** Two causes,
+  both in the footprints path. DuckDB sizes `memory_limit` and `threads` from
+  `/proc/meminfo`, which inside a container reports the HOST rather than the
+  cgroup limit the platform enforces: it reported a 51.1 GiB limit and 12
+  threads while running in a far smaller instance, so it never spilled and was
+  OOM-killed instead. And the handler used a bare `duckdb.connect()` that was
+  never closed, so every request leaked a whole buffer pool. Ceilings are now
+  explicit (`CASEBROKER_DUCKDB_MEMORY`, `CASEBROKER_DUCKDB_THREADS`,
+  `CASEBROKER_GDAL_CACHE_MB`) and the connection is a context manager. Measured
+  after: ~55 MB at rest, ~280 MB once the geo libraries are resident, and flat
+  across repeated queries instead of climbing. See "Sizing the instance" in
+  `docs/operations.md`.
+- **The Overture fallback is off unless asked for.** It shells out to a second
+  Python interpreter that loads pyarrow and materialises a whole GeoJSON, which
+  is the one part of this path no ceiling above can reach -- so it ran
+  automatically on every GBA hiccup inside a memory-capped process. Set
+  `CASEBROKER_OVERTURE_FALLBACK=1` to restore it while the mirror is down.
+- **The preview's elapsed-time counter jumped around, and the drawing vanished
+  once a minute.** The 60 s auto-refresh replaces the whole case table, which
+  threw away any rendered panel and restarted its fetch against a new `t0` while
+  the previous interval was still writing into an element both now shared -- so
+  the count could run backwards. The counter is now scoped to its own panel and
+  the payload is cached per case for the life of the page, so a refresh redraws
+  instantly and issues no request.
+- **The panel said "Overture" while drawing GlobalBuildingAtlas.** Labels,
+  legend and captions now describe what is actually fetched, including that
+  every GBA height is a PREDICTION (published RMSE 1.5-8.9 m) and what its
+  per-building variance is -- the "measured vs inferred" split the panel used to
+  show was an Overture-era question that GBA does not have.
+- **Raster statistics were computed at drawing resolution.** Averaging a 65 m
+  preview cell over trees, roofs and road reported Atlanta, a city of 25 m oaks,
+  as having a tallest tree of 8 m. Both rasters are now read four times finer
+  than they are drawn and the statistics taken there; the read costs the same,
+  since what it fetches is fixed by the window and not by the shape asked back.
 - **A case is drawn from the source its mesh was built from.** The footprints
   endpoint always tried GBA first, so a case meshed from Overture before the
   switch was drawn from GBA the first time anyone opened it, and a row cached
@@ -23,34 +449,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
   cases GBA will mesh included. It now takes the reported `height_source`,
   Overture for a case that finished before the builder could mesh GBA
   (2026-09-08 15:20 -04:00), and GBA otherwise; says which and how it knows
-  (`mesh_source`, `mesh_source_basis`); queries a cached row from the other
-  source again; and falls back in either direction, saying so in `fallback_from`.
-- **The case inspector's geometry panel says what it draws.** The footprints
-  endpoint switched to GlobalBuildingAtlas in `c9d22fa`, but the panel kept
-  announcing "Overture, same release the runner meshes", counted "querying
-  Overture…", and labelled every GBA height *measured* -- the mislabelling
-  `DOMAIN.md` exists to prevent. It now names the source that answered, calls GBA
-  heights predicted with their variance (median, and how many exceed 25), and
-  says so when the picture is Overture instead: a fallback because GBA could not
-  be read, or a row cached before the switch.
-- **The panel's timer no longer jumps.** Every counter wrote through one
-  page-wide id, and the case list rebuilds the panel on each refresh and row
-  click, so two loads could alternate in one span -- while the rebuild also sent
-  a second request for an answer already on its way. A case now has one load,
-  shared by every panel showing it and counted from when it started, and a
-  refresh no longer puts the bare "Show building footprints" button back over a
-  drawing the page already had.
-- **A first look costs the slower of two reads, not their sum.** The GEDTM30
-  terrain check ran after the building query and now runs beside it; measured
-  2026-09-15, GBA took 2.1-8.7 s and terrain 0.05-10.6 s, by site and by minute.
-  Concurrent requests for one case share one query rather than each reading the
-  same remote bytes.
-- **Terrain opens with 2 HTTP requests, not 10.** GDAL listed the bucket and
-  probed for eight sidecar files that do not exist before reading the COG. Opened
-  side by side: 8.4 s with the defaults, 1.5 s without the probing.
+  (`mesh_source`, `mesh_source_basis`); queries a cached row again when it came
+  from a source this case would not be drawn from now; and falls back in either
+  direction, saying so in `fallback_from`. Overture is an optional extra, so a
+  case meshed from it on an instance that will not read it is drawn from GBA and
+  labelled, rather than failing or quietly passing GBA off as the mesh's own.
+- **A rebuilt panel no longer starts a second query for an answer already on its
+  way.** Caching per case after the fetch fixed the refresh case; a panel rebuilt
+  WHILE the fetch was in flight still issued its own. A case now has one load,
+  shared by every panel showing it and counted from when it started, keyed by
+  case and state so a case that finishes while open is redrawn from its mesh's
+  source rather than from the answer taken while it was pending.
 - **A stalled GBA read times out.** duckdb 1.5.5 takes `http_timeout` in seconds
   and the broker passed `timeout * 1000`, so 300 s became 300,000 s and a hung
-  read never fell back to Overture.
+  read never fell back.
 - **The first footprints request after a deploy no longer downloads ~72 MB.** The
   image installs duckdb's httpfs and spatial extensions at build time, instead of
   on first use into a container filesystem every Render deploy discards.
@@ -64,6 +476,34 @@ finished case for Syncthing / a master-side pull to collect. See
 `docs/fleet.md`. MINOR: every protocol change is an optional addition.
 
 ### Added
+- **An `operator` role, and a Users tab to hand it out.** `admin` was the only
+  role that could write anything, so "let this person run the campaign" and
+  "let this person delete every account including yours" were the same grant --
+  which is how a deployment ends up with everyone an admin. An operator adds
+  cases, leases, heartbeats, completes, fails, releases and reports fleet
+  counts, and manages nothing: no accounts, no machine credentials, and no
+  purging. It is the role most accounts should have.
+
+  Two things stay with `admin` deliberately. **Purging** (`DELETE /v1/cases`)
+  takes the cases, their events and their footprints, and is the one campaign
+  operation with nothing behind it. **Machine credentials** can write the
+  campaign and outlive the account that issued them, so an operator who could
+  mint one would be an admin with extra steps -- revoking the person would not
+  revoke what they left behind. A write BEARER token can still purge, as it
+  always could: the documented `curl` depends on it, and narrowing it would not
+  make anything safer, since whoever holds the token can simply use it. What
+  changed is that an operator session is not enough.
+
+  Handing out a role no longer needs shell access to a box holding the DSN:
+  **Settings ▸ Users** lists every account with its role and last login, adds
+  one, changes a role (effective on that account's next request, with no
+  re-login), resets a password and deletes. `GET /v1/auth/state` now reports
+  the `roles` this broker accepts, so the picker is built from the server
+  rather than from a list in the page that could drift -- a drift that would
+  surface as a `400` at the moment someone is adding a colleague. Rows are
+  wired by data attribute rather than inline `onclick`, since a username is
+  attacker-chosen text. `casebroker account create --role operator` reads the
+  same list, so the CLI cannot fall behind either.
 - **Settings, with the first-run wizard behind it.** The dashboard opened on a
   Connection panel -- a form you had already filled in, a bearer-token box a
   signed-in operator has no use for, and a bar naming the live database host on
@@ -380,6 +820,21 @@ finished case for Syncthing / a master-side pull to collect. See
   30 GB home.
 
 ### Fixed
+- **Semantic versioning that nothing enforced had stopped happening.** Between
+  `v0.2.0` and `v0.3.0` four pull requests merged, the version moved once, and
+  nothing tagged it: the README's version badge read `v0.2.0` while the running
+  service's `/healthz` read `0.3.0`. Every version test passed the entire time,
+  because all seven of them compare the three *copies* of the number to each
+  other — and those agreed perfectly. The guard was on the wrong axis: internal
+  consistency, never release consistency. Merging a version bump now cuts the
+  tag and publishes the release itself, after running the suite and checking
+  `CHANGELOG.md` has a heading for that version; a merge that does not move the
+  version is a no-op. Tagging by hand is unchanged, mismatch check included.
+  The tag and the release are created in **one job** deliberately: a tag pushed
+  with `GITHUB_TOKEN` does not start another workflow run, so splitting them
+  would create tags that never became releases — the same bug, one layer
+  quieter. `tests/test_version.py` gains the check that was missing, that the
+  newest `CHANGELOG.md` release heading is the version the package declares.
 - **A revoked machine could never be given a new credential.** Revoke-then-
   reissue is the documented recovery for a box that has lost its token --
   `casebroker worker setup --rotate`, and Revoke then Issue in the dashboard --

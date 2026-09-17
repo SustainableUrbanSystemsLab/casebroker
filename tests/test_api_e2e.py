@@ -70,10 +70,14 @@ def test_healthz_says_whether_auth_is_on(client):
 
 
 def test_add_lease_complete_roundtrip(client):
-    assert client.post("/v1/cases", json=_cases(5)).json() == {"added": 5, "skipped": 0}
+    first = client.post("/v1/cases", json=_cases(5)).json()
+    assert (first["added"], first["skipped"]) == (5, 0)
+    # Every one of them is on land, so the admission gate took nothing.
+    assert first["rejected_not_on_land"] == 0
     # Re-posting the identical list adds nothing: this is the "grow the dataset"
     # path, and it must be safe to run twice.
-    assert client.post("/v1/cases", json=_cases(5)).json() == {"added": 0, "skipped": 5}
+    again = client.post("/v1/cases", json=_cases(5)).json()
+    assert (again["added"], again["skipped"]) == (0, 5)
 
     got = client.post("/v1/lease", json={"worker_id": "w1", "count": 2}).json()
     assert len(got) == 2
@@ -542,7 +546,12 @@ def test_healthz_reports_database_reachability_separately_from_liveness(tmp_path
             self._inner = inner
 
         def execute(self, sql, params=()):
-            if sql.strip() == "select 1":
+            # Matched case-insensitively: this stands in for "the liveness probe",
+            # not for one spelling of it. Pinning the literal meant that moving
+            # the probe into db.ping() (so /healthz stops touching the shared
+            # connection without the lock) silently stopped exercising the
+            # unreachable-database path, and the test passed by not testing.
+            if sql.strip().rstrip(";").upper() == "SELECT 1":
                 raise RuntimeError("server closed the connection unexpectedly")
             return self._inner.execute(sql, params)
 
@@ -565,6 +574,82 @@ def test_healthz_reports_database_reachability_separately_from_liveness(tmp_path
         # operator less than one that answers False, and tells a badge nothing.
         assert body["db_ok"] is False
         assert body["ok"] is True
+
+
+def test_healthz_survives_a_credential_it_cannot_resolve_during_an_outage(tmp_path):
+    """A CREDENTIALLED /healthz must answer `db_ok: false` too, never raise.
+
+    `_db_state()` already fails soft, but the DSN summary is gated on
+    `_is_authenticated()`, which resolves a session cookie through
+    `db.session_user` and ANY bearer token through `db.worker_token_owner` --
+    both database reads. So an anonymous /healthz reported the outage correctly
+    while a credentialled one raised, and the dashboard sends its session cookie
+    on every request (it is scoped to "/"). The operator signed in to diagnose
+    the outage was the one caller who could not see it: their wizard said
+    "Waiting for the broker to answer /healthz." instead of naming the database.
+    A container HEALTHCHECK carrying a token would have restart-looped a broker
+    whose only problem was its database, which is what `db_ok` exists to prevent.
+    """
+    import casebroker.db as dbmod
+    from fastapi.testclient import TestClient
+
+    from casebroker.app import create_app
+
+    real_connect = dbmod.connect
+
+    class DiesAfterSetup:
+        """Real connection while the app starts, dead for every statement after.
+
+        Not keyed on one SQL string, unlike the liveness stub above: the point
+        here is an outage that takes the session and token lookups down as well,
+        which is what a dropped Postgres connection actually does.
+        """
+
+        def __init__(self, inner):
+            self._inner = inner
+            self.down = False
+
+        def execute(self, sql, params=()):
+            if self.down:
+                raise RuntimeError("server closed the connection unexpectedly")
+            return self._inner.execute(sql, params)
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+    opened: list = []
+
+    def _tracking_connect(target):
+        conn = DiesAfterSetup(real_connect(target))
+        opened.append(conn)
+        return conn
+
+    dbmod.connect = _tracking_connect
+    try:
+        app = create_app(str(tmp_path / "outage.sqlite"), ["w"], ["r"])
+    finally:
+        dbmod.connect = real_connect
+
+    with TestClient(app) as c:
+        for conn in opened:
+            conn.down = True
+        callers = {
+            "anonymous": {"Authorization": ""},
+            # The env write token still goes through _machine_principal first,
+            # because revocation of a per-machine token is checked against the
+            # database rather than against a cached list.
+            "bearer token": {"Authorization": "Bearer w"},
+            "session cookie": {"Cookie": "wsb_session=not-a-real-session"},
+        }
+        for label, headers in callers.items():
+            res = c.get("/healthz", headers=headers)
+            assert res.status_code == 200, f"{label} /healthz answered {res.status_code}"
+            body = res.json()
+            assert body["ok"] is True, label
+            assert body["db_ok"] is False, f"{label} could not see the outage"
+            assert body["db"] is None, (
+                "a credential the broker cannot resolve must not open the DSN summary"
+            )
 
 
 def test_healthz_never_discloses_why_the_database_is_unreachable(tmp_path):
@@ -672,6 +757,27 @@ def test_dashboard_offers_login_rather_than_only_a_token_box(broker):
         assert needed in html, needed
     assert "/v1/auth/state" in html and "/v1/auth/login" in html
     assert "/v1/workers/tokens" in html
+
+
+def test_dashboard_lets_an_admin_manage_accounts(broker):
+    """Adding a colleague used to need shell access to a box holding the DSN --
+    which is a large part of why every account ended up an admin."""
+    html = broker.get("/", headers={"Authorization": ""}).text
+    for needed in ('id="users"', 'id="newUsername"', 'id="newUserPassword"',
+                   'id="newUserRole"', 'id="addUserBtn"', 'id="userList"'):
+        assert needed in html, needed
+    assert "/v1/users" in html
+
+    # The role picker reads the server's list rather than a copy in the page; a
+    # copy would drift, and the drift would surface as a 400 at the moment
+    # someone is adding a colleague.
+    assert "authState.roles" in html
+
+    # Rows are wired by data-attribute, not by building a JS string literal out
+    # of the username: a username is attacker-chosen text, and an apostrophe in
+    # an inline onclick is a syntax error before it is anything worse.
+    assert "data-role-for" in html and "data-del-for" in html
+    assert "onclick=\"deleteUser" not in html
 
 
 def test_the_dashboard_sends_cookies_on_its_auth_calls(broker):

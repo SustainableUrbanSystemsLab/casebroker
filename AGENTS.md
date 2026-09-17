@@ -127,6 +127,48 @@ disagrees with `pyproject.toml`. **MAJOR** is a breaking change to the
 worker-facing protocol — workers are long-lived and can be mid-lease for an hour,
 so a broker that stops speaking the old protocol strands them.
 
+## Where the campaign lives
+
+The runner pipeline — `site_sampler.py`, `site_geometry.py`, `canopy_zones.py`,
+`gba.py` and the rest of `real_cities/` — is in
+[windcomfort-real-cities](https://github.com/SustainableUrbanSystemsLab/windcomfort-real-cities),
+which carries this repo as the `benchmark/casebroker` submodule. Workers on PACE
+run **from that submodule**, so its pin is what a worker actually executes; the
+sbatch files refuse to start when it is behind this repo's `main`, which means
+every merge here wants a submodule bump there.
+
+`JP-Wind-ML-Comparison` is the paper the pipeline was split out of. It is being
+submitted and is not touched for campaign work; its own casebroker pin is stale
+and stays that way.
+
+## Before pushing to main
+
+Run `scripts/preflight.sh`. It runs the test suite, builds the image Render
+deploys, and — the part that matters — imports rasterio and performs a real
+remote COG read *inside* that image.
+
+That last check exists because the suite structurally cannot do it. rasterio
+imports fine on a dev machine, which has libexpat, and fails at import inside
+`python:3.12-slim`, which does not; the wheel installs cleanly either way. So a
+green suite coexisted with production reporting terrain and trees as
+`unavailable` for every case. It was diagnosed by pushing probe commits to main
+and reading CI logs, which left two red marks on the branch that gates deploys —
+the exact "trains people to ignore a red X" failure the deploy job's own
+comments warn about.
+
+**A change that touches dependencies, the Dockerfile, or anything the container
+installs cannot be verified by the tests.** Either run preflight, or open a PR
+and let CI run it before main. Do not use main's CI as a debugger.
+
+Note that it has to be a **PR**, not just a branch: `test.yml` triggers on
+`push` to `main` and on `pull_request`, so pushing a branch on its own runs
+nothing at all. A branch you push and never open a PR for is unverified, and
+looks exactly like a branch that passed.
+
+`--fast` skips the image build for changes that plainly cannot affect it. If no
+container engine is reachable, preflight says so and skips rather than passing
+quietly — the skipped checks are precisely the ones the suite cannot replace.
+
 ## Open problems
 
 - **GBA is CC BY-NC 4.0.** The default height source is non-commercial, stricter
@@ -143,7 +185,27 @@ so a broker that stops speaking the old protocol strands them.
   where GBA is thin). Only ~45% of sampled sites return buildings at all, and
   LCZ 1 — the scarcest and most valuable class — is ~25%. Coverage is thin across
   China and much of Africa. Sites that *do* pass may still have most heights
-  inferred rather than measured.
+  inferred rather than measured. The fallback is now behind
+  `CASEBROKER_OVERTURE_FALLBACK` because it shells out to a second interpreter,
+  which is the one thing in the footprints path the memory ceilings cannot reach.
+- **The broker's geo path has a ~280 MB floor.** DuckDB with httpfs and spatial,
+  plus GDAL and PROJ, are resident once `/footprints` has been called once, and
+  that is library code rather than anything a query holds. It sizes the instance;
+  see `docs/operations.md`.
 - **The published campaign predates the polar gate.** Production holds the
   ungated draw, including sites in Antarctica and one in the open Pacific.
-- **No land/water mask.** The polar gate catches poles, not oceans.
+  `POST /v1/cases` now refuses to admit a site the building atlas does not
+  cover, and `POST /v1/cases/land-audit` sweeps the rows that predate that gate
+  (dry-run by default, quarantine with `dry_run=false`). Both use the 922
+  published GBA tile keys as a coarse land mask — a 5° grid, so it catches the
+  open ocean and the ice sheets but not a point 2 km offshore. The exact
+  question is still the site preview's, from three independent sources. The
+  underlying cause is upstream — the sampler's LCZ raster reads snow, ice and
+  open water as built classes, and a uniformly misread surface is 100% "pure",
+  so the purity test cannot catch it — and is now gated there as well:
+  `site_sampler.py` applies the same published-tile mask to its candidate pool
+  before a draw, counting `rejected_not_on_land` separately from
+  `rejected_polar`. `SAMPLER_VERSION` moved to `sampler-v3` for that; the rank
+  salt stayed at `sampler-v1`, so a re-draw filters the old pool rather than
+  replacing it. The broker's check is now a backstop, which still matters: it
+  catches hand-added cases and anything drawn by an older sampler.

@@ -86,32 +86,6 @@ def test_concurrent_opens_of_one_case_share_one_building_query(broker, monkeypat
     assert got["second"].json()["cached"] is True
 
 
-def test_terrain_is_read_alongside_the_buildings_not_after_them(broker, monkeypatch):
-    """In sequence, a first look cost the SUM of two remote reads that each swing
-    by seconds from site to site. This GBA read will not finish until the
-    terrain read has started, which only a broker running both at once allows."""
-    from casebroker import footprints
-    terrain_started = threading.Event()
-
-    def gba_waiting_on_terrain(lat, lon):
-        if not terrain_started.wait(5):
-            raise RuntimeError("terrain was not being read while GBA was")
-        return _gba(lat, lon)
-
-    def terrain(lat, lon):
-        terrain_started.set()
-        return {"source": "gedtm30", "relief_m": 12.0, "min_m": 1.0, "max_m": 13.0}
-
-    monkeypatch.setattr(footprints, "fetch_gba", gba_waiting_on_terrain)
-    monkeypatch.setattr(footprints, "terrain", terrain)
-    monkeypatch.setattr(footprints, "fetch", _no_overture)
-
-    r = broker.get(f"/v1/cases/{_one_case(broker)}/footprints")
-    assert r.status_code == 200, r.text
-    assert r.json()["source"] == "globalbuildingatlas"
-    assert r.json()["terrain"]["source"] == "gedtm30"
-
-
 def test_dashboard_geometry_panel_says_what_it_draws(broker):
     """After the broker switched to GBA the panel still announced "Overture, same
     release the runner meshes", counted "querying Overture…", and called GBA's
@@ -121,7 +95,7 @@ def test_dashboard_geometry_panel_says_what_it_draws(broker):
     assert "same release the runner meshes" not in html
     assert "querying Overture" not in html
     assert "mesh_source" in html, "the panel must name the mesh's source, not assume one"
-    assert "predicted height" in html
+    assert "height predicted" in html and "model prediction" in html
     assert 'id="geoTick"' not in html
 
 
@@ -151,7 +125,7 @@ def _finish(client, metrics) -> str:
     return lease["case_id"]
 
 
-def _sources(monkeypatch, fail=()):
+def _sources(monkeypatch, fail=(), overture_enabled=True):
     """Both building reads replaced. Returns the list each call is recorded in."""
     from casebroker import footprints
     calls = []
@@ -172,6 +146,12 @@ def _sources(monkeypatch, fail=()):
     monkeypatch.setattr(footprints, "fetch_gba", gba)
     monkeypatch.setattr(footprints, "fetch", overture)
     monkeypatch.setattr(footprints, "terrain", lambda lat, lon: {"source": "flat"})
+    monkeypatch.setattr(footprints, "canopy", lambda lat, lon: {"source": "none"})
+    # Overture is an optional extra and its path is off unless asked for. On, so
+    # these can ask which source a case is drawn FROM rather than which one is
+    # installed; test_a_case_meshed_from_overture_is_labelled_where_overture_is_off
+    # covers the other setting.
+    monkeypatch.setattr(footprints, "OVERTURE_FALLBACK", overture_enabled)
     return calls
 
 
@@ -254,7 +234,12 @@ def test_a_cached_picture_from_the_wrong_source_is_queried_again(broker, monkeyp
     assert calls == ["gba"]
 
 
-def test_a_pre_switch_row_still_answers_for_a_case_meshed_from_overture(broker, monkeypatch):
+def test_a_pre_switch_row_is_refetched_from_the_mesh_source_not_from_gba(broker, monkeypatch):
+    """A row cached before the switch carries no `source` and no terrain or
+    canopy, so the payload-version guard refetches it whatever its source. What
+    must not happen is the refetch going to GBA because GBA is what the builder
+    meshes TODAY: this case's mesh is Overture's, and the second picture would
+    disagree with it exactly as the first one did."""
     import json
     from casebroker import db
     calls = _sources(monkeypatch)
@@ -264,9 +249,38 @@ def test_a_pre_switch_row_still_answers_for_a_case_meshed_from_overture(broker, 
                       json.dumps(PRE_SWITCH_ROW), 0)
 
     body = broker.get(f"/v1/cases/{case}/footprints").json()
-    assert calls == [] and body["cached"] is True
+    assert calls == ["overture"] and body["cached"] is False
     assert _seen(body) == ("overture", "overture", "reported"), \
         "`source` is stated, not left for the reader to infer from its absence"
+    # And once refetched it settles: the row it wrote is this case's own picture.
+    assert broker.get(f"/v1/cases/{case}/footprints").json()["cached"] is True
+    assert calls == ["overture"]
+
+
+def test_a_case_meshed_from_overture_is_labelled_where_overture_is_off(broker, monkeypatch):
+    """Overture is an optional extra: installing it is opt-in and using it needs
+    CASEBROKER_OVERTURE_FALLBACK, because it shells out to a second interpreter
+    that loads pyarrow inside a memory-capped web process. So the source a case
+    was meshed from is not always one this instance can draw.
+
+    Drawing GBA and calling it the mesh's would be the mislabelling DOMAIN.md
+    exists to prevent; refusing to draw anything would take the terrain and the
+    trees down with it. It draws GBA and says that is what it did -- and then
+    STOPS: a picture it cannot improve on must not be re-queried on every open."""
+    calls = _sources(monkeypatch, overture_enabled=False)
+    _case(broker, 32.0603, 118.7969)
+    case = _finish(broker, {"stage": "archived", "height_source": "overture"})
+
+    body = broker.get(f"/v1/cases/{case}/footprints").json()
+    assert calls == ["gba"], "the Overture path must not run where it is disabled"
+    assert _seen(body) == ("globalbuildingatlas", "overture", "reported"), \
+        "the mesh's source is still reported, even when it cannot be drawn"
+    assert "overture not enabled" in body["fallback_from"]
+
+    body = broker.get(f"/v1/cases/{case}/footprints").json()
+    assert calls == ["gba"] and body["cached"] is True, \
+        "a labelled substitution is cached; re-querying it every open buys nothing"
+    assert _seen(body) == ("globalbuildingatlas", "overture", "reported")
 
 
 def test_when_the_mesh_source_cannot_be_read_the_other_answers_and_says_so(broker, monkeypatch):

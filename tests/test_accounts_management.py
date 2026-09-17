@@ -615,3 +615,168 @@ def test_a_revoked_machine_name_can_be_issued_again(admin):
                       headers={"Authorization": f"Bearer {second}"}).status_code == 200
     assert admin.post("/v1/lease", json={"worker_id": "lab-ws-02", "count": 1},
                       headers={"Authorization": f"Bearer {first}"}).status_code == 401
+
+
+# -- the operator role: writes the campaign, manages nothing ------------------
+#
+# Before it existed, `admin` was the only role that could write, so "let this
+# person run the campaign" and "let this person delete every account including
+# yours" were the same grant. Every one of these was previously impossible to
+# express.
+
+def _as_operator(admin, username="bob"):
+    """An operator account, and a client logged in as them.
+
+    A SEPARATE TestClient, because the admin fixture's client carries the admin
+    session cookie -- reusing it would authorise every call below as the admin
+    and prove nothing about the role.
+    """
+    r = admin.post("/v1/users", json={"username": username, "password": PW2,
+                                      "role": "operator"})
+    assert r.status_code == 200, r.text
+    assert r.json()["role"] == "operator"
+    c = TestClient(admin.app)
+    assert c.post("/v1/auth/login",
+                  json={"username": username, "password": PW2}).status_code == 200
+    return c
+
+
+def _seed(client, n=2):
+    cases = [{"lat": 35.0 + i, "lon": 139.0 + i, "recipe": "v2-wind",
+              "city_cluster": "tokyo"} for i in range(n)]
+    r = client.post("/v1/cases", json=cases)
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def test_an_operator_can_run_the_campaign(admin):
+    """The whole point of the role: the daily work, with no admin rights."""
+    op = _as_operator(admin)
+
+    assert op.get("/v1/status").status_code == 200
+    assert op.get("/v1/cases").status_code == 200
+    _seed(op, 2)
+
+    leased = op.post("/v1/lease", json={"worker_id": "ws-01", "count": 1}).json()
+    assert len(leased) == 1
+    lease_id = leased[0]["lease_id"]
+    assert op.post("/v1/heartbeat", json={"lease_id": lease_id, "detail": "iter 1"}).status_code == 200
+    assert op.post("/v1/complete", json={"lease_id": lease_id,
+                                         "result_uri": "file:///r.tar.gz"}).status_code == 200
+
+    second = op.post("/v1/lease", json={"worker_id": "ws-01", "count": 1}).json()
+    assert op.post("/v1/release", json={"lease_id": second[0]["lease_id"]}).status_code == 200
+    assert op.post("/v1/fleet", json={"cluster": "lab", "queued": 3, "running": 1}).status_code == 200
+
+
+def test_an_operator_cannot_purge_the_campaign(admin):
+    """DELETE /v1/cases takes the cases, their events and their footprints. It
+    is the one campaign operation with nothing behind it, so it stays with the
+    people who manage the deployment rather than the people who run it."""
+    op = _as_operator(admin)
+    _seed(op, 2)
+
+    r = op.delete("/v1/cases?dry_run=false&expect=2")
+    assert r.status_code == 403
+    assert "operator" in r.json()["detail"] and "admin" in r.json()["detail"]
+    # A dry run is still a delete call, and is refused at the same gate --
+    # reporting what WOULD be deleted is not a privilege an operator has.
+    assert op.delete("/v1/cases").status_code == 403
+    assert admin.get("/v1/cases").json()["total"] == 2, "nothing may have been removed"
+
+
+def test_an_operator_manages_neither_accounts_nor_machines(admin):
+    """An operator that could mint a machine credential would be an admin with
+    extra steps: the credential can write the campaign and outlives the account
+    that issued it, so revoking the person would not revoke what they left."""
+    op = _as_operator(admin)
+
+    assert op.get("/v1/users").status_code == 403
+    assert op.post("/v1/users", json={"username": "mallory", "password": PW2,
+                                      "role": "admin"}).status_code == 403
+    assert op.post("/v1/users/ada/role", json={"role": "viewer"}).status_code == 403
+    assert op.delete("/v1/users/ada").status_code == 403
+
+    assert op.get("/v1/workers/tokens").status_code == 403
+    assert op.post("/v1/workers/tokens", json={"name": "sneaky"}).status_code == 403
+    assert op.delete("/v1/workers/tokens/anything").status_code == 403
+
+
+def test_an_operator_can_still_change_their_own_password(admin):
+    """Managing nobody else must not mean being unable to manage yourself."""
+    op = _as_operator(admin)
+    r = op.post("/v1/users/bob/password",
+                json={"current_password": PW2, "new_password": "a-brand-new-long-one"})
+    assert r.status_code == 200, r.text
+    # And still not anyone else's.
+    assert op.post("/v1/users/ada/password",
+                   json={"new_password": "not-your-account-to-reset"}).status_code == 403
+
+
+def test_a_viewer_is_unchanged_by_the_new_role(admin):
+    """The middle role must not have quietly widened the bottom one."""
+    admin.post("/v1/users", json={"username": "val", "password": PW2, "role": "viewer"})
+    v = TestClient(admin.app)
+    assert v.post("/v1/auth/login", json={"username": "val", "password": PW2}).status_code == 200
+
+    assert v.get("/v1/status").status_code == 200
+    r = v.post("/v1/cases", json=[{"lat": 34.0, "lon": -84.0, "recipe": "v2-wind",
+                                   "city_cluster": "tokyo"}])
+    assert r.status_code == 403 and "viewer" in r.json()["detail"]
+    assert v.delete("/v1/cases").status_code == 403
+    assert v.get("/v1/users").status_code == 403
+
+
+def test_promoting_an_operator_to_admin_grants_the_rest(admin):
+    """Roles have to be a live check, not something baked into the session at
+    login: the promotion must take effect without the account signing in again."""
+    op = _as_operator(admin)
+    assert op.get("/v1/users").status_code == 403
+
+    assert admin.post("/v1/users/bob/role", json={"role": "admin"}).status_code == 200
+    assert op.get("/v1/users").status_code == 200
+    assert op.post("/v1/workers/tokens", json={"name": "now-allowed"}).status_code == 200
+
+
+def test_the_last_admin_cannot_be_demoted_to_operator_either(admin):
+    """The guard counted admins, and an operator is not one -- but a third role
+    is exactly the kind of change that turns a two-way check into a hole."""
+    r = admin.post("/v1/users/ada/role", json={"role": "operator"})
+    assert r.status_code == 409
+    assert "only admin" in r.json()["detail"]
+    assert admin.get("/v1/users").status_code == 200, "ada must still be an admin"
+
+    # With a second admin it is allowed, which is what makes the guard a guard
+    # rather than a permanent ban.
+    admin.post("/v1/users", json={"username": "cleo", "password": PW2, "role": "admin"})
+    assert admin.post("/v1/users/ada/role", json={"role": "operator"}).status_code == 200
+
+
+def test_an_unknown_role_is_refused(admin):
+    r = admin.post("/v1/users", json={"username": "x", "password": PW2, "role": "superuser"})
+    assert r.status_code == 400
+    assert "operator" in r.json()["detail"], "the message should name the real roles"
+
+
+def test_auth_state_publishes_the_roles_the_broker_accepts(fresh):
+    """The dashboard's role pickers are built from this. Restating the list in
+    the page would let the two drift, and the drift would surface as a 400 at
+    the moment someone is trying to add a colleague."""
+    from casebroker import db
+    assert fresh.get("/v1/auth/state").json()["roles"] == list(db.ROLES)
+    assert "operator" in db.ROLES
+
+
+def test_a_write_token_may_still_purge(tmp_path):
+    """The deliberate carve-out. A machine or env write token could always call
+    this, and narrowing it here would strand the documented curl in
+    operations.md without making anything safer -- the holder can simply use the
+    token. What changed is that an operator SESSION is not enough."""
+    app = create_app(db_path=str(tmp_path / "purge.sqlite"), tokens=["shared-secret"])
+    c = TestClient(app)
+    hdr = {"Authorization": "Bearer shared-secret"}
+    c.post("/v1/cases", json=[{"lat": 34.0, "lon": -84.0, "recipe": "v2-wind",
+                               "city_cluster": "tokyo"}], headers=hdr)
+    r = c.request("DELETE", "/v1/cases?dry_run=false&expect=1", headers=hdr)
+    assert r.status_code == 200, r.text
+    assert r.json()["deleted"] == 1

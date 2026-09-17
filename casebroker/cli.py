@@ -412,6 +412,18 @@ def _account_db(args):
     return db.connect(dsn)
 
 
+def db_roles() -> tuple[str, ...]:
+    """The role names, read from db.ROLES rather than restated here.
+
+    Spelled out in argparse `choices`, a role the CLI had not heard of would be
+    refused before the database ever saw it -- so the list has to come from the
+    one place that defines it. Imported lazily like every other db use in this
+    module, since building the parser must not need a database driver.
+    """
+    from . import db
+    return db.ROLES
+
+
 def _read_password(args, prompt: str) -> str | None:
     """From stdin when asked, otherwise an interactive double-entry prompt.
 
@@ -631,10 +643,26 @@ def _write_env(path: pathlib.Path, values: dict) -> None:
     if remaining and out and out[-1].strip():
         out.append("")
     out.extend("%s=%s" % (k, v) for k, v in remaining.items())
-    path.write_text("\n".join(out).rstrip("\n") + "\n")
+    body = "\n".join(out).rstrip("\n") + "\n"
+    # Restricted BEFORE the credential is written, not after. Writing first and
+    # chmodding second lands the token at whatever the umask allows -- 0644 on a
+    # default login shell -- and leaves it world-readable for the gap between the
+    # two calls. On a shared cluster filesystem, where home directories are
+    # routinely group-readable, that gap is the whole exposure.
     try:
-        # The file now holds a live credential. Best effort: a no-op on Windows,
-        # where the parent directory's ACL is what actually governs access.
+        if path.exists():
+            path.chmod(0o600)
+            path.write_text(body)
+        else:
+            # O_CREAT with a mode means the file never exists at a wider one.
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as fh:
+                fh.write(body)
+    except OSError:
+        # Windows has no POSIX mode bits worth setting -- the parent directory's
+        # ACL governs there -- so fall back rather than failing the enrolment.
+        path.write_text(body)
+    try:
         path.chmod(0o600)
     except OSError:
         pass
@@ -859,7 +887,7 @@ def main(argv: list[str] | None = None) -> int:
                        help="database path or DSN (default: discovered, like doctor)")
         p.add_argument("--username", required=True)
         if role_default is not None:
-            p.add_argument("--role", choices=("admin", "viewer"), default=role_default)
+            p.add_argument("--role", choices=db_roles(), default=role_default)
         return p
 
     acn = _account_common(ac.add_parser(
@@ -880,7 +908,7 @@ def main(argv: list[str] | None = None) -> int:
 
     acr = _account_common(ac.add_parser("role", help="promote or demote an account"),
                           role_default=None)
-    acr.add_argument("--role", choices=("admin", "viewer"), required=True)
+    acr.add_argument("--role", choices=db_roles(), required=True)
     acr.set_defaults(func=cmd_account_role)
 
     acd = _account_common(ac.add_parser("delete", help="remove an account and its sessions"))
