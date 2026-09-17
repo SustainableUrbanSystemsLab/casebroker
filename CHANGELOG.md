@@ -16,6 +16,58 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
   the builder's `gba-lod1` tag, or `overture` for a report from its Overture path,
   which carries `height_provenance` and no tag. A run with no report -- STLs
   staged by the spec -- reports nothing rather than a guess.
+
+### Fixed
+- **A case is drawn from the source its mesh was built from.** The footprints
+  endpoint always tried GBA first, so a case meshed from Overture before the
+  switch was drawn from GBA the first time anyone opened it, and a row cached
+  before the switch -- Overture, with no `source` -- was served for good, pending
+  cases GBA will mesh included. It now takes the reported `height_source`,
+  Overture for a case that finished before the builder could mesh GBA
+  (2026-09-08 15:20 -04:00), and GBA otherwise; says which and how it knows
+  (`mesh_source`, `mesh_source_basis`); queries a cached row again when it came
+  from a source this case would not be drawn from now; and falls back in either
+  direction, saying so in `fallback_from`. Overture is an optional extra, so a
+  case meshed from it on an instance that will not read it is drawn from GBA and
+  labelled, rather than failing or quietly passing GBA off as the mesh's own.
+- **A rebuilt panel no longer starts a second query for an answer already on its
+  way.** Caching per case after the fetch fixed the refresh case; a panel rebuilt
+  WHILE the fetch was in flight still issued its own. A case now has one load,
+  shared by every panel showing it and counted from when it started, keyed by
+  case and state so a case that finishes while open is redrawn from its mesh's
+  source rather than from the answer taken while it was pending.
+- **A stalled GBA read times out.** duckdb 1.5.5 takes `http_timeout` in seconds
+  and the broker passed `timeout * 1000`, so 300 s became 300,000 s and a hung
+  read never fell back.
+- **The first footprints request after a deploy no longer downloads ~72 MB.** The
+  image installs duckdb's httpfs and spatial extensions at build time, instead of
+  on first use into a container filesystem every Render deploy discards.
+
+## [0.4.0] - 2026-09-17
+
+### Added
+- **Every change that lands on `main` now moves the version, and CI enforces
+  it.** The version stalled twice: four merges after `v0.2.0`, then
+  thirty-seven after `v0.3.0` — seven of them features — both times with the
+  whole suite green, because every version test compared the three *copies* of
+  the number to each other and those agreed perfectly. The first repair
+  automated the tagging and left the bump as a step someone had to remember at
+  the end of work that felt finished, which is why it failed again
+  immediately. A step nobody is compelled to take is not a process.
+
+  `scripts/bump_version.py --level minor` edits all three files that have to
+  agree (`pyproject.toml`, `uv.lock`, and a dated `## [x.y.z]` heading in this
+  file). `--suggest` derives the level from the conventional-commit subjects
+  this repo already writes — a suggestion, since MAJOR means a break in the
+  worker-facing protocol and no commit prefix can judge that. `--check` is the
+  gate, run on every pull request, and it fails with the exact command to fix
+  it. It also demands the changelog heading, so a version that `release.yml`
+  would refuse to publish is caught before the merge rather than after.
+
+  The bump stays *in* the change rather than in a bot commit afterwards: a
+  commit pushed with `GITHUB_TOKEN` does not re-trigger workflows, so the
+  deploy job would never run for it and the tag would claim a version the
+  deployed service was not reporting.
 - **A machine pairs itself from the browser — no password on a simulation
   node.** `POST /v1/pair/start` → a short code and a link; whoever is already
   signed in as an admin sees the request under Settings → Machines (the link
@@ -442,30 +494,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
   as having a tallest tree of 8 m. Both rasters are now read four times finer
   than they are drawn and the statistics taken there; the read costs the same,
   since what it fetches is fixed by the window and not by the shape asked back.
-- **A case is drawn from the source its mesh was built from.** The footprints
-  endpoint always tried GBA first, so a case meshed from Overture before the
-  switch was drawn from GBA the first time anyone opened it, and a row cached
-  before the switch -- Overture, with no `source` -- was served for good, pending
-  cases GBA will mesh included. It now takes the reported `height_source`,
-  Overture for a case that finished before the builder could mesh GBA
-  (2026-09-08 15:20 -04:00), and GBA otherwise; says which and how it knows
-  (`mesh_source`, `mesh_source_basis`); queries a cached row again when it came
-  from a source this case would not be drawn from now; and falls back in either
-  direction, saying so in `fallback_from`. Overture is an optional extra, so a
-  case meshed from it on an instance that will not read it is drawn from GBA and
-  labelled, rather than failing or quietly passing GBA off as the mesh's own.
-- **A rebuilt panel no longer starts a second query for an answer already on its
-  way.** Caching per case after the fetch fixed the refresh case; a panel rebuilt
-  WHILE the fetch was in flight still issued its own. A case now has one load,
-  shared by every panel showing it and counted from when it started, keyed by
-  case and state so a case that finishes while open is redrawn from its mesh's
-  source rather than from the answer taken while it was pending.
-- **A stalled GBA read times out.** duckdb 1.5.5 takes `http_timeout` in seconds
-  and the broker passed `timeout * 1000`, so 300 s became 300,000 s and a hung
-  read never fell back.
-- **The first footprints request after a deploy no longer downloads ~72 MB.** The
-  image installs duckdb's httpfs and spatial extensions at build time, instead of
-  on first use into a container filesystem every Render deploy discards.
 
 ## [0.3.0] - 2026-09-15
 
