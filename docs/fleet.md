@@ -37,7 +37,11 @@ all three; only how it is launched and how MPI is spelled differ:
 
 1. **Prerequisites**: `uv`; one runtime from the table; the `e3d` CLI for the
    OS (Linux: the `linux-x64` single-file build, currently at `$WC/bin/e3d` on
-   both clusters); a checkout of this repo and of `real_cities` beside it;
+   both clusters); a `git clone --recurse-submodules` of
+   [windcomfort-real-cities](https://github.com/SustainableUrbanSystemsLab/windcomfort-real-cities)
+   — the campaign repo, which carries this one as `benchmark/casebroker` and
+   `real_cities` beside it. **Not** JP-Wind-ML-Comparison: that is the paper,
+   and its casebroker pin is stale by design now that the campaign has moved;
    Git for Windows on a Windows box (`run_case.cmd` finds its bash).
 2. **Profile**: copy `machine.env.example` to `machine.env` (gitignored) and
    fill it in. The three that matter most:

@@ -127,6 +127,20 @@ disagrees with `pyproject.toml`. **MAJOR** is a breaking change to the
 worker-facing protocol — workers are long-lived and can be mid-lease for an hour,
 so a broker that stops speaking the old protocol strands them.
 
+## Where the campaign lives
+
+The runner pipeline — `site_sampler.py`, `site_geometry.py`, `canopy_zones.py`,
+`gba.py` and the rest of `real_cities/` — is in
+[windcomfort-real-cities](https://github.com/SustainableUrbanSystemsLab/windcomfort-real-cities),
+which carries this repo as the `benchmark/casebroker` submodule. Workers on PACE
+run **from that submodule**, so its pin is what a worker actually executes; the
+sbatch files refuse to start when it is behind this repo's `main`, which means
+every merge here wants a submodule bump there.
+
+`JP-Wind-ML-Comparison` is the paper the pipeline was split out of. It is being
+submitted and is not touched for campaign work; its own casebroker pin is stale
+and stays that way.
+
 ## Before pushing to main
 
 Run `scripts/preflight.sh`. It runs the test suite, builds the image Render
