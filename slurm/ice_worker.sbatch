@@ -72,6 +72,35 @@ command -v uv >/dev/null 2>&1 || {
 
 cd "$REPO/benchmark/casebroker" || exit 1
 
+# Refuse to run a stale broker client.
+#
+# This worker runs from the casebroker SUBMODULE inside the campaign repo, and
+# nothing else keeps that pin current: no pull in this script, no pull anywhere.
+# It was found 98 commits behind casebroker main -- 35 of them on the worker
+# and runner path -- which means a job launched from it would have produced
+# cases from an older pipeline than the broker's own preview describes: no
+# porous crowns, no per-direction inlet roughness, the old domain floor. The
+# broker would have accepted every result without complaint.
+#
+# A missing network is a WARNING (a fetch cannot be required of every node).
+# A known-stale pin is FATAL. The asymmetry is deliberate: not knowing is
+# survivable, knowingly running the wrong pipeline is not.
+if [ "${CASEBROKER_ALLOW_STALE:-0}" != "1" ]; then
+    if git fetch -q origin main 2>/dev/null; then
+        behind=$(git rev-list --count HEAD..origin/main 2>/dev/null || echo "?")
+        if [ "$behind" != "0" ]; then
+            echo "FATAL: benchmark/casebroker is $behind commit(s) behind casebroker main." >&2
+            echo "       A worker started here runs a client the broker no longer expects." >&2
+            echo "       Fix on the login node:" >&2
+            echo "         git -C \"$REPO\" submodule update --remote --merge benchmark/casebroker" >&2
+            echo "       To run a deliberate pin anyway: CASEBROKER_ALLOW_STALE=1" >&2
+            exit 1
+        fi
+    else
+        echo "WARN: could not fetch casebroker main; cannot confirm the submodule is current" >&2
+    fi
+fi
+
 # Keep the dashboard's queue card fresh. PACE forbids crontab ("You (pkastner3)
 # are not allowed to use this program"), so the reporting rides along with the
 # job that is already running: every five minutes for as long as this worker
