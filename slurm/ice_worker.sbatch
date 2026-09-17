@@ -37,7 +37,11 @@ set -uo pipefail
 # the worker exit 2 instead of holding the allocation and retrying.
 
 WC=${WIND_ROOT:-$HOME/windcomfort}
-REPO=${WIND_REPO:-$WC/repos/JP-Wind-ML-Comparison}
+# The CAMPAIGN repo, not the paper. JP-Wind-ML-Comparison is being submitted
+# and carried a casebroker pin 98 commits stale; windcomfort-real-cities is the
+# pipeline split out of it with the submodule kept current. A checkout of the
+# paper here runs the wrong pipeline and the guard below will refuse it.
+REPO=${WIND_REPO:-$WC/repos/windcomfort-real-cities}
 export WIND_ROOT="$WC"
 export EDDY3D_CLI=${EDDY3D_CLI:-$WC/bin/e3d}
 export WIND_NP=${SLURM_NTASKS:-24}
