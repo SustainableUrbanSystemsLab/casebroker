@@ -319,20 +319,26 @@ def test_the_bump_makes_the_check_pass(tmp_path):
         "uv.lock is a third copy of the number and has to move with the others"
 
 
-def test_check_passes_once_the_version_has_risen():
-    """Against the tag this release is built on, the working tree must already
-    satisfy the rule this commit introduces."""
-    r = _bump("--check", "--base", "v0.3.0")
-    assert r.returncode == 0, r.stdout + r.stderr
-    assert "version rises" in r.stdout
+def test_check_also_demands_the_changelog_heading(tmp_path):
+    """A version release.yml would refuse to publish is caught in the pull
+    request rather than after the merge, where the failure would be a landed
+    change that cannot be released.
 
+    Driven rather than grepped: the earlier version of this asserted on the
+    script's source text, which proves the line exists and nothing about
+    whether it fires.
+    """
+    repo = _scratch_repo(tmp_path)
+    # The version rises, but nothing writes the heading -- exactly what doing
+    # the bump by hand instead of with --level produces.
+    (repo / "pyproject.toml").write_text(
+        '[project]\nname = "casebroker"\nversion = "0.4.0"\n', encoding="utf-8")
 
-def test_check_also_demands_the_changelog_heading():
-    """Caught in the pull request, not at release time -- where the failure
-    would be a merged change that cannot be published."""
-    src = BUMP.read_text(encoding="utf-8")
-    assert 'f"## [{head}]" not in CHANGELOG' in src
-    assert "release.yml will refuse to publish" in src
+    r = _bump("--check", "--base", "HEAD", repo=repo)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "version rises 0.3.0 → 0.4.0" in r.stdout, "the rise itself is fine"
+    assert "no '## [0.4.0]' heading" in r.stdout
+    assert "release.yml will refuse to publish" in r.stdout
 
 
 def test_ci_runs_the_check_on_every_pull_request():
