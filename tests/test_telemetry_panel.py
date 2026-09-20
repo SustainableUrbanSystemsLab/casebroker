@@ -189,3 +189,26 @@ def test_a_failure_message_on_a_running_case_says_it_is_old():
     assert "Previous Attempt Failed" in banner
     assert 'c.state === "leased"' in banner
 
+
+
+def test_one_named_case_can_be_reopened_through_the_api(tmp_path):
+    """db.reopen_cases always accepted case_ids; the endpoint never passed them,
+    so ONE wrongly quarantined case could only be reached by a substring match
+    over every case's error text."""
+    from casebroker import db as D
+    client, conn = _client(tmp_path)
+    D.add_cases(conn, [{"case_id": "c0002", "spec": {}, "recipe": "v2", "split": "train",
+                        "lcz": "5", "city_cluster": "c1", "priority": 0}])
+    for _ in range(2):
+        leased = client.post("/v1/lease", json={"worker_id": "foam-1"}).json()
+        client.post("/v1/fail", json={"lease_id": leased[0]["lease_id"],
+                                      "error": "a direction ended without converging", "retryable": False})
+
+    peek = client.post("/v1/cases/reopen?case_id=c0002").json()
+    assert peek["matched"] == 1 and peek["reopened"] == 0, "dry run by default"
+
+    out = client.post("/v1/cases/reopen?case_id=c0002&dry_run=false").json()
+    assert out["reopened"] == 1
+    assert client.get("/v1/cases/c0002").json()["state"] == "pending"
+    # The control: the OTHER case, same error text, was not touched.
+    assert client.get("/v1/cases/c0001").json()["state"] == "quarantined"
