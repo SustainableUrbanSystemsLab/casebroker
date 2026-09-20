@@ -2734,24 +2734,26 @@
     // "nothing is coming". Every card carries its age, because a snapshot nobody
     // has refreshed describes a queue that has moved on, and showing that as
     // current is the one way this panel could mislead.
-    const fleet = st.fleet || [];
+    const cards = fleetCards(st.workers || [], st.fleet || [], Math.floor(Date.now() / 1000));
     const fq = $("fleetQueue");
-    if (fleet.length) {
+    if (cards.length) {
       fq.style.display = "flex";
-      fq.innerHTML = fleet.map((f) => {
-        const stale = f.age_seconds > 900;          // 15 min: longer than any poll
-        const age = f.age_seconds < 90 ? `${f.age_seconds}s ago`
-                  : f.age_seconds < 5400 ? `${Math.round(f.age_seconds / 60)}m ago`
-                  : `${Math.round(f.age_seconds / 3600)}h ago`;
-        return `<div class="fleet-card${stale ? " stale" : ""}">
-          <div class="fc-name"><span>${esc(f.cluster)}</span>
-            <span class="fc-age" style="color:${stale ? "var(--warn)" : "var(--text-muted)"}"
-                  title="${stale ? "stale — nobody has reported this queue recently" : "last reported"}">${age}</span></div>
+      fq.innerHTML = cards.map((c) => {
+        const age = c.age_seconds === null ? ""
+                  : c.age_seconds < 90 ? `${c.age_seconds}s ago`
+                  : c.age_seconds < 5400 ? `${Math.round(c.age_seconds / 60)}m ago`
+                  : `${Math.round(c.age_seconds / 3600)}h ago`;
+        return `<div class="fleet-card${c.stale ? " stale" : ""}">
+          <div class="fc-name"><span>${esc(c.name)}</span>
+            <span class="fc-age" style="color:${c.stale ? "var(--warn)" : "var(--text-muted)"}"
+                  title="${esc(c.age_title)}">${esc(age)}</span></div>
           <div class="fc-nums">
-            <span><span class="fc-n" style="color:var(--primary)">${f.running}</span><span class="fc-lbl">running</span></span>
-            <span><span class="fc-n">${f.queued}</span><span class="fc-lbl">queued</span></span>
+            <span><span class="fc-n" style="color:var(--primary)">${c.working}</span><span class="fc-lbl">working</span></span>
+            ${c.queued === null
+              ? `<span><span class="fc-n">${c.idle}</span><span class="fc-lbl">idle</span></span>`
+              : `<span><span class="fc-n">${c.queued}</span><span class="fc-lbl">queued</span></span>`}
           </div>
-          ${f.detail ? `<div class="fc-age" style="color:var(--text-muted);margin-top:3px">${esc(f.detail)}</div>` : ""}
+          ${c.detail ? `<div class="fc-age" style="color:var(--text-muted);margin-top:3px">${esc(c.detail)}</div>` : ""}
         </div>`;
       }).join("");
     } else {
@@ -3074,6 +3076,58 @@
       }
     }
     return Math.max(0, Math.min(1, fraction));
+  }
+
+  /// One card per place work happens, from BOTH sources.
+  ///
+  /// The strip used to be the reported SLURM queues alone, so a panel titled
+  /// "Worker Fleet" showed two clusters and left out every workstation actually
+  /// solving cases -- and kept showing those clusters for days after they went
+  /// quiet, because a report is the only thing that ages there.
+  ///
+  /// The two numbers come from different places and are deliberately not mixed:
+  /// `working` is OBSERVED (workers holding a lease right now, which the broker
+  /// knows exactly), while `queued` is REPORTED by a scheduler nobody can see
+  /// from here and may be stale or absent. A machine that reports no queue shows
+  /// its idle workers instead, which is the honest equivalent for a workstation.
+  function fleetCards(workers, fleet, nowSeconds) {
+    const byName = new Map();
+    const card = (name) => {
+      if (!byName.has(name)) byName.set(name, {
+        name, working: 0, idle: 0, queued: null, detail: "",
+        age_seconds: null, stale: false, age_title: "", newest_seen: null,
+      });
+      return byName.get(name);
+    };
+
+    for (const w of workers) {
+      // A worker with no cluster is a workstation; they are counted together
+      // rather than one card each, which on a lab of ten would be a wall.
+      const c = card(w.cluster || "Workstations");
+      if (w.current_case) c.working++; else c.idle++;
+      if (c.newest_seen === null || w.last_seen > c.newest_seen) c.newest_seen = w.last_seen;
+    }
+
+    for (const f of fleet) {
+      const c = card(f.cluster);
+      c.queued = f.queued;
+      c.detail = f.detail || "";
+      c.age_seconds = f.age_seconds;
+      c.stale = f.age_seconds > 900;                    // 15 min: longer than any poll
+      c.age_title = c.stale ? "stale — nobody has reported this queue recently" : "last reported";
+      // A cluster that reports a queue but has no live worker still says how many
+      // its scheduler believes are running, which is the one thing only it knows.
+      if (c.working === 0 && c.idle === 0 && f.running) c.working = f.running;
+    }
+
+    for (const c of byName.values()) {
+      if (c.age_seconds !== null) continue;             // a reported age wins: it is about the QUEUE
+      c.age_seconds = c.newest_seen === null ? null : Math.max(0, nowSeconds - c.newest_seen);
+      c.stale = c.age_seconds !== null && c.age_seconds > 300;   // the Offline rule, so one panel does not disagree with the other
+      c.age_title = c.stale ? "no worker here has been heard from recently" : "last seen";
+    }
+
+    return [...byName.values()].sort((a, b) => b.working - a.working || a.name.localeCompare(b.name));
   }
 
   function progressPhase(line) {

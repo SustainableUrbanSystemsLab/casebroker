@@ -92,3 +92,17 @@ def test_the_progress_text_is_a_block_so_it_cannot_run_into_the_case_id():
     assert "<span" not in cell, "the fallback must not be inline beside the case id"
     assert 'flex-direction:column' in html[html.index("w.current_case"):][:400]
 
+
+def test_the_fleet_strip_shows_the_whole_fleet():
+    """The panel is titled "Worker Fleet" and its strip was the reported SLURM
+    queues alone -- so two clusters showed and every workstation actually solving
+    cases did not. Runs the shipped fleetCards, like the progress grammar."""
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed on this machine; the JS half cannot be executed here")
+
+    result = subprocess.run([node, str(ROOT / "tests" / "fleet_cards_check.js")],
+                            cwd=ROOT, capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "all cases agree" in result.stdout
+
