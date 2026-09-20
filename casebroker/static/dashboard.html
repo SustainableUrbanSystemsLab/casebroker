@@ -2240,7 +2240,7 @@
       if (hasCan && can.frac_canopy > 0) {
         const v = can.vegetation;
         return `<div><span class="geo-swatch" style="background:var(--accent)"></span>trees — <b>${pct(can.frac_canopy)}%</b> under canopy, tallest <b>${can.max_height_m} m</b></div>`
-          + (v ? `<div><span class="geo-swatch" style="background:var(--accent);opacity:0.45"></span>all crowns as <b>${esc(v.label)}</b> — f = 2·Cd·LAD = <b>${v.f_per_m}</b> m⁻¹<div class="geo-note" style="margin-top:2px">One class for the whole site, picked by latitude alone (${esc(v.provenance)}) — a street tree, a park and a conifer stand all get this. The 55° band edge is steep: Copenhagen is 1.25, Hamburg 0.48.</div></div>` : "");
+          + (v ? `<div><span class="geo-swatch" style="background:var(--accent);opacity:0.45"></span>all crowns as <b>${esc(v.label)}</b> — f = 2·Cd·LAD = <b>${v.f_per_m}</b> m⁻¹<div class="geo-note" style="margin-top:2px">One class for every tree here, by latitude alone (${esc(v.provenance)}).</div></div>` : "");
       }
       if (hasCan) return `<div><span class="geo-swatch" style="background:var(--accent);opacity:0.35"></span><b>no trees</b> — treeless site, no canopy zone</div>`;
       if (can.source === "none") return `<div style="color:var(--text-muted)">trees unknown — the canopy model publishes no tile here</div>`;
@@ -2268,7 +2268,7 @@
     const atSea = d.tile_published === false && terr.source === "flat"
                   && (can.source === "none" || can.frac_canopy === 0);
     const provenance = gba
-      ? `<b>GBA LoD1</b> (TUM) buildings and heights, <b>GEDTM30</b> terrain, <b>Meta/WRI</b> canopy — the sources the runner meshes. Every GBA height is a prediction, not a survey: RMSE 1.5–8.9 m by continent. Judge the case on that, not the count.`
+      ? `<b>GBA LoD1</b> (TUM) · <b>GEDTM30</b> · <b>Meta/WRI</b>, the sources the runner meshes. Every GBA height is predicted, not surveyed — RMSE 1.5–8.9 m by continent, which is what to judge the case on.`
       : `Drawn from <b>Overture ${esc(d.release || "")}</b>${d.fallback_from ? ` — ${esc(d.fallback_from)}` : ""}. Overture tags a height on only a few buildings; the rest are extruded from the LCZ class constant, so ${withH === 0 ? "this tile's massing is entirely synthetic" : `only ${pct(withH / Math.max(1, withH + noH))}% of this massing is real`}.`;
 
     wrap.innerHTML = `
@@ -2300,12 +2300,16 @@
           <div style="margin-top:6px;color:var(--text-muted)">${gba ? "GlobalBuildingAtlas LoD1" : `Overture ${esc(d.release || "")}`}${d.cached ? " · cached" : ""}${d.truncated ? ` · truncated at ${d.n}` : ""}</div>
           ${d.fallback_from ? `<div class="geo-note" style="color:var(--warn)">${d.mesh_source === "overture" ? "Overture" : "GBA"} could not be drawn (${esc(d.fallback_from)}), so this is ${name}'s picture, which need not match this case's mesh.</div>` : ""}
           ${isMesh && basis[1] ? `<div class="geo-note">${basis[1]}</div>` : ""}
-          <div class="geo-note" style="margin-top:4px">Middle: isometric over the core. Heights ×${HEX}, relief ×${TEX === HEX ? HEX : TEX.toFixed(1)}, clamped at 150 m.</div>
-          <div class="geo-note">Buildings and trees are both modelled over the ${2 * CORE_M} m core only; the buffer carries terrain and inlet roughness, no explicit obstacles.</div>
-          <div class="geo-note">Bottom: elevation looking north across the domain, true metre scale, vertical ×${vExag.toFixed(0)}. The amber line is the ground section — solid for the highest ground in each column, dashed for the lowest, because each column spans ${2 * DOM_M} m north–south and a single line would claim a cross-section it never took.</div>
-          <div class="geo-note">Buildings run from roof to a slab ${SLAB_M} m below the lowest ground, as <code class="inline">watertight.py</code> extrudes them. The elevation shows all of that; the isometric only the first ${ISO_PIERCE_M} m.</div>
-          ${crowns ? `<div class="geo-note">Crowns are see-through because that is what they are in the solve — the upper 59% of each tree is a porous cellZone, f = 2·Cd·LAD, not a solid. ${crowns} crown cell${crowns === 1 ? "" : "s"} in the core.</div>` : ""}
-          ${gba && vMed != null ? `<div class="geo-note">Every one of those ${withH} heights is a model prediction, not a measurement — variance median ${vMed.toFixed(1)}, ${vHigh} above 25.</div>` : ""}
+          <div class="geo-note" style="margin-top:4px">Middle: isometric over the core, heights ×${HEX}, relief ×${TEX === HEX ? HEX : TEX.toFixed(1)}. Bottom: elevation looking north, true metres, vertical ×${vExag.toFixed(0)}.</div>
+          ${crowns ? `<div class="geo-note">${crowns} porous crown cell${crowns === 1 ? "" : "s"} — trees are cellZones in the solve, not solids.</div>` : ""}
+          <details class="geo-note" style="margin-top:2px">
+            <summary style="cursor:pointer">How to read these</summary>
+            <div style="margin-top:4px">Only the ${2 * CORE_M} m core carries buildings and trees; the buffer is terrain and inlet roughness.</div>
+            <div>The amber ground line is a section: solid for the highest ground in each column, dashed for the lowest, because a column spans ${2 * DOM_M} m north–south and one line would claim a cross-section it never took.</div>
+            <div>Buildings run from roof to a slab ${SLAB_M} m below the lowest ground, as <code class="inline">watertight.py</code> extrudes them — the elevation shows all of it, the isometric the first ${ISO_PIERCE_M} m.</div>
+            <div>Crowns are see-through because the upper 59% of each tree is a porous cellZone, f = 2·Cd·LAD.</div>
+            ${gba && vMed != null ? `<div>Height variance median ${vMed.toFixed(1)}; ${vHigh} above 25.</div>` : ""}
+          </details>
           ${atSea ? `<div class="geo-note" style="color:var(--bad)"><b>This case is not on land.</b> No building tile, no bare-earth terrain and no canopy tile, from three independent sources that disagree about almost everything else. The runner would mesh an empty flat plane here and solve it for 66 core-hours.</div>` : ""}
           <div class="geo-note">${provenance}</div>
         </div>
