@@ -1490,7 +1490,22 @@ _CASE_COLS = (
     " (SELECT e.detail FROM events e WHERE e.case_id = cases.case_id"
     "   AND e.event = 'progress' ORDER BY e.id DESC LIMIT 1) AS last_progress,"
     " (SELECT e.ts FROM events e WHERE e.case_id = cases.case_id"
-    "   AND e.event = 'progress' ORDER BY e.id DESC LIMIT 1) AS last_progress_at"
+    "   AND e.event = 'progress' ORDER BY e.id DESC LIMIT 1) AS last_progress_at,"
+    # Where the case is running RIGHT NOW. `cases.metrics` carries host/cluster
+    # too, but only complete() writes it, so for a leased case -- the one anybody
+    # opens the telemetry card to look at -- it is empty. The worker said where
+    # it was when it registered, so the answer is one join away.
+    #
+    # It is the worker's CURRENT registration, not a snapshot taken when this
+    # lease started: workers.host is overwritten on every lease call (see the
+    # upsert in register()), so a worker that moved hosts between claiming this
+    # case and now reports the new one. The window is small (a lease is released
+    # or expires before the worker takes another case) and the alternative is a
+    # per-lease copy of a field that is almost always identical; the recorded
+    # metrics remain the authority once the case finishes, and the panel prefers
+    # them.
+    " (SELECT w.host FROM workers w WHERE w.worker_id = cases.lease_worker) AS worker_host,"
+    " (SELECT w.cluster FROM workers w WHERE w.worker_id = cases.lease_worker) AS worker_cluster"
 )
 
 _CASE_COLS_NO_SPEC = _CASE_COLS.replace("cases.*", _CASE_COLS_WITHOUT_SPEC, 1)
