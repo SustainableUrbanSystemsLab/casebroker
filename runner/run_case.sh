@@ -61,6 +61,11 @@ PY=$(command -v python3 || command -v python) || { echo "no python on PATH" >&2;
 
 log() { echo "[$CASE_ID] $*" >&2; }
 fatal_case() { log "FATAL (will not retry): $*"; exit 64; }
+# Exit 69 is sysexits' EX_UNAVAILABLE: this MACHINE cannot run cases. The worker
+# releases the case instead of failing it, which refunds the attempt, and stops.
+# Without it a box with no runtime charges an attempt per lease and three of
+# those quarantine a site that is fine (COD-PKAST-7865, 2026-09-19).
+node_unfit() { log "NODE UNFIT (the case is untouched): $*"; exit 69; }
 # Exit 64 is reserved for "this SITE is broken" -- degenerate geometry that will
 # fail identically on every machine forever. A missing input file is not that: it
 # says the tooling or the staging is not ready, and the site itself is fine. The
@@ -113,10 +118,13 @@ detect_runtime() {
     case "$RUNTIME" in
         podman|docker|native) ;;
         auto)
-            if command -v podman >/dev/null 2>&1; then RUNTIME=podman
+            # `podman info` as well as `docker info`: the binary being installed
+            # says nothing about the machine being started, and picking a podman
+            # whose machine is down fails several minutes later, mid-case.
+            if command -v podman >/dev/null 2>&1 && podman info >/dev/null 2>&1; then RUNTIME=podman
             elif command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then RUNTIME=docker
             elif [ -x "$BLUECFD_HOME/OpenFOAM-12/platforms/mingw_w64Gcc122DPInt32Opt/bin/foamRun.exe" ]; then RUNTIME=native
-            else retry_case "no OpenFOAM runtime found: no podman, no running docker, no blueCFD at $BLUECFD_HOME"
+            else node_unfit "no OpenFOAM runtime found: no running podman, no running docker, no blueCFD at $BLUECFD_HOME"
             fi ;;
         *) retry_case "unknown WIND_RUNTIME '$RUNTIME' (podman|docker|native|auto)" ;;
     esac

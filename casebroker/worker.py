@@ -303,6 +303,20 @@ class Worker:
             except LeaseLost as e:
                 print(f"[warn] lease lost on {lease['case_id']}: {e}", file=sys.stderr)
             except Exception as e:
+                if getattr(e, "unfit", False):
+                    # Nothing to do with the case. Releasing refunds the attempt --
+                    # the treatment preemption already gets -- and stopping is what
+                    # keeps one dead daemon from walking the whole queue.
+                    print(f"[error] this machine cannot run cases: {e}", file=sys.stderr)
+                    print(f"[info] releasing {lease['case_id']}; its attempt is refunded",
+                          file=sys.stderr)
+                    try:
+                        self.release("node cannot run cases")
+                    except Exception as e2:
+                        print(f"[warn] could not release: {e2}", file=sys.stderr)
+                    self._current_lease = None
+                    self._current_case = None
+                    break
                 # retryable unless the runner explicitly says the case itself is
                 # broken -- a bad STL will fail identically on every machine, and
                 # cycling it through the fleet three times helps nobody.
@@ -325,6 +339,19 @@ class Worker:
 class FatalCaseError(RuntimeError):
     """Raised by a runner when the case can never succeed anywhere."""
     fatal = True
+
+
+class NodeUnfitError(RuntimeError):
+    """This MACHINE cannot run anything -- no runtime, a stopped daemon.
+
+    The opposite report from every other failure: the case is released rather
+    than failed, which REFUNDS the attempt, and the worker stops. A node that
+    kept leasing would charge every case in the queue for one local problem, and
+    three of those quarantine a site that nothing is wrong with -- which is how
+    COD-PKAST-7865 turned a stopped Docker Desktop into seven failed cases on
+    2026-09-19.
+    """
+    unfit = True
 
 
 def echo_runner(lease: LeaseDict, worker: Worker) -> dict[str, Any]:
@@ -468,7 +495,14 @@ def script_runner(script: str, timeout: int | None = None,
             tail = "\n".join(err_lines or out)[-2000:]
             # 64 is the campaign's agreed "this case is broken, do not retry"
             # code, so a bad tile is quarantined on its first attempt.
-            err = FatalCaseError if proc.returncode == 64 else RuntimeError
+            # 69 is sysexits' EX_UNAVAILABLE, and the runner uses it for "this
+            # machine cannot run cases" -- the mirror of 64's "this case cannot
+            # be run anywhere". The two are deliberately the same shape: one
+            # blames the case forever, the other blames the node and costs the
+            # case nothing.
+            err = (FatalCaseError if proc.returncode == 64
+                   else NodeUnfitError if proc.returncode == 69
+                   else RuntimeError)
             raise err(f"runner exited {proc.returncode}: {tail}")
         lines = [ln for ln in out if ln.strip()]
         if not lines:
