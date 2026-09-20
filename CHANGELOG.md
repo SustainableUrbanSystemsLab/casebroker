@@ -219,6 +219,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
   0.95x.
 
 ### Added
+- **Every column in both tables sorts.** Click a header; clicking the one already
+  sorted flips the direction. The case browser sorts on the SERVER
+  (`GET /v1/cases?sort=&direction=`), because the client holds one page of a
+  40,000-row table and reordering what is on screen would answer a different
+  question than the click asked. The fleet table sorts in the browser, where
+  `/v1/status` has already handed over every worker seen in 24 hours, so there is
+  nothing off-screen for it to be wrong about.
+
+  The sortable columns are an allowlist: the name reaches an `ORDER BY`, where
+  there is no placeholder to bind it with. Anything else falls back to the default
+  instead of raising, so a stale bookmark cannot break the browser, and `case_id`
+  breaks every tie — without it, paging a list sorted by a column with duplicates
+  can show one row twice and skip another. The default ordering is unchanged and
+  still uses `idx_cases_updated`.
 - **The fleet view says what each worker is holding.** The `workers` table has no
   in-flight state of its own, so the table could report how many cases a worker
   had finished and never what it was doing — the question actually asked of it

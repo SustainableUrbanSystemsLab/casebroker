@@ -54,15 +54,20 @@ def test_the_column_count_still_matches_the_detail_row():
 
 def test_a_worker_row_says_what_it_is_holding():
     """The Workers table could say how many cases a worker had finished and never
-    what it was doing — which is the question asked of it while a campaign runs.
-    The columns and the cells have to stay in step, or the table shears."""
+    what it was doing -- which is the question asked of it while a campaign runs.
+
+    The headers are GENERATED now (they carry the sort state), so the count comes
+    from WORKER_COLUMNS rather than from static markup; the cells still have to
+    match it or the table shears.
+    """
     html = (ROOT / "casebroker" / "static" / "dashboard.html").read_text(encoding="utf-8")
-    body = html[html.index('<tbody id="workersBody">') - 2000:]
-    head = html[:html.index('<tbody id="workersBody">')]
-    workers_head = head[head.rindex("<thead>"):]
-    # <th[ >] rather than "<th", which also matches <thead>.
-    columns = len(re.findall(r"<th[ >]", workers_head))
-    assert columns == 10, f"the workers table has {columns} columns"
+    block = html[html.index("const WORKER_COLUMNS = ["):]
+    block = block[:block.index("];")]
+    assert len(re.findall(r'\["[^"]+",\s*"[^"]+"\]', block)) == 10
+
+    row = html[html.index('$("workersBody").innerHTML'):]
+    row = row[:row.index("}).join")]
+    assert row.count("<td") == 10, f"the workers row draws {row.count('<td')} cells"
     assert "w.current_case" in html and "w.current_progress" in html
 
 

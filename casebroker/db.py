@@ -1392,16 +1392,49 @@ def status(conn, now: int | None = None) -> dict[str, Any]:
     }
 
 
+#: What the case browser may sort by, and the expression each name means. An
+#: ALLOWLIST because the value reaches an ORDER BY: a column name is not data,
+#: and there is no placeholder for one.
+#:
+#: Sorting belongs on the server here even though the table is rendered on the
+#: client, because the client only ever holds ONE PAGE. Sorting 50 rows of 40,000
+#: would reorder what is on screen and call it "sorted by attempts", which is a
+#: more convincing wrong answer than no sorting at all.
+CASE_SORTS = {
+    "case_id": "cases.case_id",
+    "state": "cases.state",
+    "split": "cases.split",
+    "lcz": "cases.lcz",
+    "city_cluster": "cases.city_cluster",
+    "recipe": "cases.recipe",
+    "attempts": "cases.attempts",
+    "updated_at": "cases.updated_at",
+    # The two folded-on columns. Ordering by the progress TEXT is what groups
+    # "everything still meshing" together, which is the question the column is
+    # there to answer.
+    "last_progress": "last_progress",
+    "last_error": "cases.last_error",
+}
+
+
 @_locked
 def list_cases(conn, state: str | None = None, split: str | None = None,
                city_cluster: str | None = None, limit: int = 50,
-               offset: int = 0) -> dict[str, Any]:
+               offset: int = 0, sort: str | None = None,
+               direction: str = "desc") -> dict[str, Any]:
     """A page of cases for the dashboard's case browser, most-recently-touched
     first -- that ordering is what makes "what just happened" the default view
     rather than an arbitrary slice of a 40,000-row table.
 
     Returns both the page and the total matching count, so a client can render
     "N of M" and page controls without a second round trip.
+
+    ``sort`` names one of ``CASE_SORTS``; anything else falls back to the default
+    rather than raising, because a stale bookmark must not break the browser. The
+    default ordering keeps using ``idx_cases_updated`` -- every other sort pays
+    for a sort of the filtered set, which is the honest cost of asking for one.
+    ``case_id`` breaks every tie, so paging through a sorted list cannot show the
+    same row twice or skip one.
     """
     limit = max(1, min(int(limit), 200))
     offset = max(0, int(offset))
@@ -1414,9 +1447,12 @@ def list_cases(conn, state: str | None = None, split: str | None = None,
         where.append("city_cluster = ?"); params.append(city_cluster)
     clause = (" WHERE " + " AND ".join(where)) if where else ""
     total = conn.execute("SELECT COUNT(*) n FROM cases" + clause, params).fetchone()["n"]
+    column = CASE_SORTS.get(sort or "", "cases.updated_at")
+    descending = str(direction).lower() != "asc"
+    order = f"{column} {'DESC' if descending else 'ASC'}, cases.case_id ASC"
     rows = conn.execute(
         "SELECT " + _CASE_COLS + " FROM cases" + clause +
-        " ORDER BY updated_at DESC LIMIT ? OFFSET ?",
+        " ORDER BY " + order + " LIMIT ? OFFSET ?",
         params + [limit, offset]).fetchall()
     return {"cases": [dict(r) for r in rows], "total": total, "limit": limit, "offset": offset}
 
