@@ -2885,6 +2885,11 @@
                   ? `<div style="display:flex;flex-direction:column;gap:4px;min-width:150px">`
                     + `<code class="inline">${esc(w.current_case)}</code>`
                     + (w.current_progress ? progressCell(w.current_progress) : "")
+                    // The age, for the same reason the detail card carries it: the
+                    // bar's moving band means "a worker is on this now", and only
+                    // this line says when that worker last actually said anything.
+                    + (w.current_progress && w.current_progress_at
+                        ? `<span style="color:var(--text-muted);font-size:10px;">last line ${esc(relTime(w.current_progress_at))}</span>` : "")
                     + `</div>`
                   : "—"}</td>
             <td class="num" style="font-weight:600;">${(w.cases_done || 0).toLocaleString()}</td>
@@ -2990,7 +2995,11 @@
               <dd>${esc(c.city_cluster || "—")}</dd>
               <dt>Priority</dt>
               <dd>${c.priority}</dd>
-              <dt>Attempts</dt>
+              <!-- Charged FAILURES, not starts: a release refunds one and a
+                   worker resuming its own case spends none, so a case can have
+                   run four times and read "1 / 3". The label said "Attempts",
+                   which reads as the opposite. -->
+              <dt title="failed attempts charged against this case; a released or resumed lease spends none">Attempts used</dt>
               <dd>
                 <span class="${c.attempts > 1 ? "chip" : ""}" style="${c.attempts > 1 ? "color:var(--warn);" : ""}">
                   ${c.attempts} / ${c.max_attempts}
@@ -3004,7 +3013,10 @@
             <h3>Compute & Execution Telemetry</h3>
             <dl class="kv-list">
               <dt>Worker</dt>
-              <dd class="mono">${esc(metrics.worker || c.lease_worker || "—")}</dd>
+              <dd class="mono" title="${c.lease_worker ? "holding the lease now" : (c.last_worker ? "the worker that last held this case" : "")}">${
+                esc(metrics.worker || c.lease_worker || c.last_worker || "—")}${
+                !c.lease_worker && !metrics.worker && c.last_worker
+                  ? `<span style="color:var(--text-muted);font-family:var(--font);font-size:10.5px;"> (last)</span>` : ""}</dd>
               <!-- Recorded first, live second. metrics is written by complete()
                    alone, so on a RUNNING case it is empty and these three rows
                    were "—" by construction -- on the card an operator opens to
@@ -3094,8 +3106,13 @@
           <div style="background:var(--bad-light); border:1px solid var(--bad); border-radius:8px; padding:12px 14px; margin-bottom:14px; color:var(--bad);">
             <div style="font-weight:600; margin-bottom:4px; font-size:12px; display:flex; align-items:center; gap:6px;">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>
-              Last Failure Error
+              ${c.state === "leased" || c.state === "pending"
+                  ? "Previous Attempt Failed" : "Last Failure Error"}
             </div>
+            ${c.state === "leased" || c.state === "pending"
+              ? `<div style="color:var(--text-muted);font-size:11px;margin-bottom:6px;">`
+                + `This case is ${esc(c.state === "leased" ? "running again" : "queued again")}; the message below is from an earlier attempt.</div>`
+              : ""}
             <code style="display:block; padding:8px; background:var(--surface); border:1px solid var(--border); color:inherit; white-space:pre-wrap; font-size:11.5px;">${esc(c.last_error)}</code>
           </div>` : ""}
 

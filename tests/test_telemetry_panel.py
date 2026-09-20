@@ -117,3 +117,75 @@ def test_the_lean_case_page_carries_the_worker_too(tmp_path):
     client.post("/v1/lease", json={"worker_id": "foam-1", "host": "cod-mbp", "cluster": "ICE"})
     lean = client.get("/v1/cases?include_spec=false&limit=1").json()["cases"][0]
     assert lean["worker_host"] == "cod-mbp"
+
+
+def test_a_failed_case_still_names_the_worker_that_had_it(tmp_path):
+    """fail() nulls lease_worker in the same statement that writes last_error, so
+    the card went blank about the worker on exactly the rows showing a failure --
+    the rows where somebody wants to know which machine to go and look at. The
+    events trail kept it."""
+    client, _ = _client(tmp_path)
+    leased = client.post("/v1/lease", json={"worker_id": "foam-1", "host": "cod-mbp",
+                                            "cluster": "ICE"}).json()
+    lease_id = leased[0]["lease_id"]
+    client.post("/v1/fail", json={"lease_id": lease_id, "error": "a direction ended without converging",
+                                  "retryable": True})
+
+    case = client.get("/v1/cases/c0001").json()
+    assert case["lease_worker"] is None, "the lease really is gone"
+    assert case["last_error"]
+    assert case["last_worker"] == "foam-1", "who last held it must survive the failure"
+
+
+def test_a_reopened_case_does_not_keep_its_failure_message(tmp_path):
+    """reopen_cases resets attempts because the history says nothing about the
+    case. The message is that same history in prose: leaving it behind puts a red
+    failure banner on a case that is now pending and blameless."""
+    from casebroker import db as D
+    client, conn = _client(tmp_path)
+    leased = client.post("/v1/lease", json={"worker_id": "foam-1"}).json()
+    client.post("/v1/fail", json={"lease_id": leased[0]["lease_id"],
+                                  "error": "Engine 'docker' is not available", "retryable": False})
+    assert client.get("/v1/cases/c0001").json()["state"] == "quarantined"
+
+    D.reopen_cases(conn, case_ids=["c0001"], dry_run=False)
+
+    case = client.get("/v1/cases/c0001").json()
+    assert case["state"] == "pending"
+    assert case["attempts"] == 0
+    assert not case["last_error"], "a reopened case carries no failure banner"
+
+
+def test_the_workers_table_knows_when_its_progress_line_was_written(tmp_path):
+    """The case row folds both the progress detail and its timestamp; the workers
+    query folded only the detail, so that table drew a moving bar with nothing
+    beside it to say the line was hours old."""
+    client, _ = _client(tmp_path)
+    leased = client.post("/v1/lease", json={"worker_id": "foam-1"}).json()
+    client.post("/v1/heartbeat", json={"lease_id": leased[0]["lease_id"],
+                                       "detail": "solve 3/8 dirs \u00b7 iter 412/2000"})
+
+    worker = next(w for w in client.get("/v1/status").json()["workers"]
+                  if w["worker_id"] == "foam-1")
+    assert worker["current_progress"], "the line itself"
+    assert worker["current_progress_at"], "and when it was said"
+
+
+def test_the_attempts_row_says_what_it_counts():
+    """It is a charged-FAILURE counter: a release refunds one and a worker
+    resuming its own case spends none, so a case can have run four times and read
+    "1 / 3". Labelling that "Attempts" reads as the opposite."""
+    src = DASH.read_text(encoding="utf-8")
+    assert "<dt>Attempts</dt>" not in src, "the bare label reads as a restart counter"
+    assert "Attempts used" in src
+
+
+def test_a_failure_message_on_a_running_case_says_it_is_old():
+    """last_error outlives the attempt that wrote it, so a case that failed once
+    and is now running again showed a red "Last Failure Error" about work that is
+    no longer happening."""
+    src = DASH.read_text(encoding="utf-8")
+    banner = src[src.index("Last Failure Error") - 800:src.index("Last Failure Error") + 800]
+    assert "Previous Attempt Failed" in banner
+    assert 'c.state === "leased"' in banner
+

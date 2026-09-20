@@ -1386,7 +1386,14 @@ def status(conn, now: int | None = None) -> dict[str, Any]:
             " (SELECT e.detail FROM events e WHERE e.event = 'progress'"
             "    AND e.case_id = (SELECT c.case_id FROM cases c WHERE c.lease_worker = w.worker_id"
             "                       AND c.state = 'leased' ORDER BY c.leased_at DESC LIMIT 1)"
-            "    ORDER BY e.id DESC LIMIT 1) AS current_progress"
+            "    ORDER BY e.id DESC LIMIT 1) AS current_progress,"
+            # ...and WHEN it said so. The case row folds both detail and ts; this
+            # query folded only the detail, so the workers table drew a moving
+            # progress bar with nothing beside it to say the line was hours old.
+            " (SELECT e.ts FROM events e WHERE e.event = 'progress'"
+            "    AND e.case_id = (SELECT c.case_id FROM cases c WHERE c.lease_worker = w.worker_id"
+            "                       AND c.state = 'leased' ORDER BY c.leased_at DESC LIMIT 1)"
+            "    ORDER BY e.id DESC LIMIT 1) AS current_progress_at"
             " FROM workers w WHERE w.last_seen > ? ORDER BY w.last_seen DESC LIMIT 500",
             (_now() - 86400,))],
     }
@@ -1505,7 +1512,15 @@ _CASE_COLS = (
     # metrics remain the authority once the case finishes, and the panel prefers
     # them.
     " (SELECT w.host FROM workers w WHERE w.worker_id = cases.lease_worker) AS worker_host,"
-    " (SELECT w.cluster FROM workers w WHERE w.worker_id = cases.lease_worker) AS worker_cluster"
+    " (SELECT w.cluster FROM workers w WHERE w.worker_id = cases.lease_worker) AS worker_cluster,"
+    # Who last HELD it, which on a failed case is the one thing the row cannot
+    # say for itself: fail() nulls lease_worker in the same statement that writes
+    # last_error, so the card goes blank about the worker on exactly the cases
+    # where somebody wants to know which machine to go and look at. The events
+    # trail kept it -- _event() stamps worker_id on every lease, heartbeat,
+    # failure and completion.
+    " (SELECT e.worker_id FROM events e WHERE e.case_id = cases.case_id"
+    "   AND e.worker_id IS NOT NULL ORDER BY e.id DESC LIMIT 1) AS last_worker"
 )
 
 _CASE_COLS_NO_SPEC = _CASE_COLS.replace("cases.*", _CASE_COLS_WITHOUT_SPEC, 1)
@@ -1966,8 +1981,14 @@ def reopen_cases(conn, *, error_contains: str | None = None,
     try:
         for cid in ids_hit:
             conn.execute(
+                # last_error goes with the attempts. The counter is reset because
+                # the history says nothing about the case; the message is the same
+                # history in prose, and leaving it behind puts a red "Last Failure
+                # Error" banner on a case that is now pending and blameless --
+                # which is the state an operator reopened it INTO.
                 "UPDATE cases SET state='pending', lease_id=NULL, lease_worker=NULL,"
-                " lease_expires=NULL, leased_at=NULL, attempts=0, updated_at=?"
+                " lease_expires=NULL, leased_at=NULL, attempts=0, last_error=NULL,"
+                " updated_at=?"
                 " WHERE case_id=? AND state='quarantined'", (now, cid))
             _event(conn, cid, None, "reopened",
                    "attempts refunded: " + (error_contains or "reopened by an operator"), now)
