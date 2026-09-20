@@ -312,6 +312,35 @@ def _may_lease_as(credential_name: str, worker_id: str) -> bool:
     return worker_id == credential_name or worker_id.startswith(credential_name + "-")
 
 
+def _if_none_match(header: str | None, etag: str) -> bool:
+    """Whether an `If-None-Match` header matches, by RFC 7232's WEAK comparison.
+
+    The weak part is not pedantry. The deployed broker sits behind Cloudflare,
+    which gzips the dashboard and, doing so, rewrites the strong ETag this app
+    sends into a weak one -- the browser then sends back `W/"33c77-18d6ee..."`
+    for an entity tagged `"33c77-18d6ee..."`. An exact string comparison says no
+    to every one of those, which is a 304 path that can never fire in production
+    while passing every test written against the app directly. Measured after
+    deploying exactly that: HTTP 200, 212,087 bytes, for a request carrying the
+    server's own tag back.
+
+    A weak validator is the right comparison for a cache revalidation anyway:
+    it asks "is this the same representation", which is what a browser reusing
+    a cached page needs, not "is this byte-for-byte the same entity".
+    """
+    if not header:
+        return False
+    for raw in header.split(","):
+        candidate = raw.strip()
+        if candidate == "*":
+            return True
+        if candidate.startswith(("W/", "w/")):
+            candidate = candidate[2:]
+        if candidate == etag:
+            return True
+    return False
+
+
 def create_app(db_path: str | None = None, tokens: list[str] | None = None,
                readonly_tokens: list[str] | None = None,
                setup_token: str | None = None) -> FastAPI:
@@ -780,7 +809,7 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         # nanoseconds changes on every deploy that changes the file.
         etag = f'"{stat.st_size:x}-{stat.st_mtime_ns:x}"'
         headers = {"ETag": etag, "Cache-Control": "no-cache"}
-        if etag in [t.strip() for t in (request.headers.get("if-none-match") or "").split(",")]:
+        if _if_none_match(request.headers.get("if-none-match"), etag):
             return Response(status_code=304, headers=headers)
         return FileResponse(path, headers=headers)
 
