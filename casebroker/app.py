@@ -1360,6 +1360,10 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         this "undo what that one broken node did" rather than "reopen everything".
 
         `dry_run` defaults to TRUE, as it does for the land audit and for purge.
+
+        `limit` bounds how many cases are REOPENED, not merely how many are shown
+        back. The reply carries `matched` and `capped` so a larger backlog is
+        visible; call again to take the next batch.
         """
         return db.reopen_cases(conn, error_contains=error_contains,
                                dry_run=dry_run, limit=limit)

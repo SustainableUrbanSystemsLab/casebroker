@@ -261,3 +261,41 @@ def test_a_worker_between_cases_still_appears_with_nothing_in_flight(tmp_path):
 
     assert worker["current_case"] is None
     assert worker["cases_done"] == 1
+
+
+def test_the_reopen_limit_bounds_what_it_CHANGES(tmp_path):
+    """`limit` used to cap only the examples listed back, while the write loop
+    ran over every match. So a dry run reporting "matched: 12, here are 3" and
+    the same call with dry_run=False reopened all twelve -- the one tool for
+    undoing damage was capable of a bigger surprise than the damage.
+
+    Repeated calls must drain the backlog, so the cap has to be deterministic
+    (case_id order) rather than arbitrary.
+    """
+    conn = make_db(tmp_path, n=12)
+    for _ in range(12):
+        quarantine_one(conn)
+    assert db.list_cases(conn, state="quarantined", limit=50)["total"] == 12
+
+    peek = db.reopen_cases(conn, error_contains="Docker daemon", limit=3)
+    assert peek["matched"] == 12
+    assert len(peek["examples"]) == 3
+    assert peek["capped"] is True, "a dry run must say the backlog is larger than the cap"
+    assert peek["reopened"] == 0
+
+    first = db.reopen_cases(conn, error_contains="Docker daemon", dry_run=False, limit=3)
+    assert first["reopened"] == 3, "the cap bounds the WRITES"
+    assert first["capped"] is True
+    still = db.list_cases(conn, state="quarantined", limit=50)["total"]
+    assert still == 9, f"nine must still be quarantined, found {still}"
+
+    # Deterministic order, so calling again makes progress rather than
+    # re-picking the same three.
+    second = db.reopen_cases(conn, error_contains="Docker daemon", dry_run=False, limit=3)
+    assert second["reopened"] == 3
+    assert db.list_cases(conn, state="quarantined", limit=50)["total"] == 6
+
+    rest = db.reopen_cases(conn, error_contains="Docker daemon", dry_run=False, limit=50)
+    assert rest["reopened"] == 6
+    assert rest["capped"] is False, "nothing was held back this time"
+    assert db.list_cases(conn, state="quarantined", limit=50)["total"] == 0

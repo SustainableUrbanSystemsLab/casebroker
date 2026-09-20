@@ -1946,6 +1946,16 @@ def reopen_cases(conn, *, error_contains: str | None = None,
     ``dry_run`` defaults to TRUE, as it does for the land audit and for purge:
     finding out how many cases are affected must not be the same keystroke as
     changing production.
+
+    ``limit`` bounds the WRITES, not just the examples shown. It used to bound
+    only the latter, which made the dry run actively misleading: it reported
+    ``matched: 3000`` with fifty examples, and the same call with
+    ``dry_run=False`` reopened all three thousand. A caller who passes a limit is
+    asking for a bounded change to production, and this is the tool for undoing
+    damage -- it must not be capable of a larger surprise than the one it repairs.
+    Rows are taken in ``case_id`` order, so repeated calls drain the backlog
+    deterministically, and ``capped`` beside ``matched`` and ``reopened`` is what
+    keeps the truncation visible instead of silent.
     """
     where = ["state = 'quarantined'"]
     params: list[Any] = []
@@ -1971,15 +1981,19 @@ def reopen_cases(conn, *, error_contains: str | None = None,
             found.append({"case_id": row["case_id"], "attempts": row["attempts"],
                           "last_error": detail[:200]})
 
+    # The cap applies to what is CHANGED, not only to what is listed back.
+    to_reopen = ids_hit[:limit]
+
     out: dict[str, Any] = {"matched": len(ids_hit), "examples": found,
-                           "dry_run": dry_run, "reopened": 0}
-    if dry_run or not ids_hit:
+                           "dry_run": dry_run, "reopened": 0,
+                           "capped": len(ids_hit) > len(to_reopen)}
+    if dry_run or not to_reopen:
         return out
 
     now = _now()
     conn.execute("BEGIN IMMEDIATE")
     try:
-        for cid in ids_hit:
+        for cid in to_reopen:
             conn.execute(
                 # last_error goes with the attempts. The counter is reset because
                 # the history says nothing about the case; the message is the same
@@ -1996,7 +2010,7 @@ def reopen_cases(conn, *, error_contains: str | None = None,
     except Exception:
         conn.execute("ROLLBACK")
         raise
-    out["reopened"] = len(ids_hit)
+    out["reopened"] = len(to_reopen)
     return out
 
 
