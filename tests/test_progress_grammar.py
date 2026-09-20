@@ -89,7 +89,16 @@ def test_the_progress_text_is_a_block_so_it_cannot_run_into_the_case_id():
     html = (ROOT / "casebroker" / "static" / "dashboard.html").read_text(encoding="utf-8")
     cell = html[html.index("function progressCell(line)"):]
     cell = cell[:cell.index("\n  }")]
-    assert "<span" not in cell, "the fallback must not be inline beside the case id"
+    # Keyed on the hazard, not on the tag: the caption's label and percentage are
+    # spans INSIDE a flex row of their own and cannot touch the case id. What may
+    # never be inline is the top-level element each branch returns, which is what
+    # sits directly beside the id.
+    returned = [line.strip() for line in cell.splitlines()
+                if "return `<" in line or "+ `<div" in line]
+    assert returned, "progressCell() returns nothing that looks like markup"
+    for line in returned:
+        if "return `<" in line:
+            assert "return `<div" in line, f"progressCell returns an inline element: {line}"
     assert 'flex-direction:column' in html[html.index("w.current_case"):][:400]
 
 
