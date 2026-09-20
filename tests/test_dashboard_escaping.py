@@ -34,8 +34,8 @@ SERVER_FIELDS = (
     "role", "split", "machine", "last_progress", "hostname",
 )
 # Helpers that escape, or that cannot produce markup (numbers, dates).
-SAFE_CALLS = ("esc(", "formatBytes(", "relTime(", "badge(", "toLocaleString(",
-              "toFixed(", "Number(", "Math.")
+SAFE_CALLS = ("esc(", "formatBytes(", "relTime(", "badge(", "progressCell(",
+              "toLocaleString(", "toFixed(", "Number(", "Math.")
 
 
 def _interpolations():
@@ -62,6 +62,24 @@ def test_badge_escapes_both_positions():
     body = m.group(1)
     assert body.count("esc(state)") >= 2, (
         "badge() must escape `state` in the attribute AND the text")
+
+
+def test_progress_cell_escapes_the_line_it_draws():
+    """`progressCell` is on the allowlist above, so its own escaping is what the
+    allowlist is asserting. The line it draws is `last_progress` -- a string a
+    worker credential writes -- and it reaches the DOM twice: as the bar's title
+    and as the text under it."""
+    src = DASH.read_text()
+    m = re.search(r"function progressCell\(line\)\s*\{(.+?)\n  \}", src, re.S)
+    assert m, "progressCell() not found"
+    body = m.group(1)
+    # Every interpolation of the line itself must go through esc(); the only other
+    # things interpolated are a rounded number and a phase word this file chose.
+    for expr in re.findall(r"\$\{([^{}]*)\}", body):
+        if "line" in expr:
+            assert "esc(" in expr, f"progressCell interpolates the line unescaped: ${{{expr}}}"
+    assert body.count("esc(line)") >= 2, (
+        "progressCell() must escape the line in the title AND the text")
 
 
 def test_esc_covers_every_character_that_matters():
