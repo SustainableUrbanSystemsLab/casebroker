@@ -2833,8 +2833,10 @@
             <td>${relTime(w.first_seen)}</td>
             <td>${relTime(w.last_seen)}</td>
             <td>${w.current_case
-                  ? `<code class="inline">${esc(w.current_case)}</code>`
+                  ? `<div style="display:flex;flex-direction:column;gap:4px;min-width:150px">`
+                    + `<code class="inline">${esc(w.current_case)}</code>`
                     + (w.current_progress ? progressCell(w.current_progress) : "")
+                    + `</div>`
                   : "—"}</td>
             <td class="num" style="font-weight:600;">${(w.cases_done || 0).toLocaleString()}</td>
             <td class="num${(w.cases_failed || 0) > 0 ? ' alert' : ''}">${(w.cases_failed || 0).toLocaleString()}</td>
@@ -3024,7 +3026,14 @@
   function progressFraction(line) {
     if (!line) return null;
     const pair = (text) => {
-      for (const token of String(text).split(/[\s,]+/)) {
+      for (const raw of String(text).split(/[\s,]+/)) {
+        // Punctuation around the pair is stripped so the two shapes older workers
+        // still send are understood as well: "step 3/5: 03_snappyHexMesh" from a
+        // node built before the grammar existed, and "case_270 [3/8 dirs] iter 412"
+        // from runner/run_case.sh, which is what every cluster worker sends. Both
+        // carry a real count of work done; there is no reason to show them as text
+        // when the number is right there.
+        const token = raw.replace(/^[\[(]+/, "").replace(/[\])::;.]+$/, "");
         const m = /^(-?[\d.]+)\/(-?[\d.]+)$/.exec(token);
         if (!m) continue;
         const a = parseFloat(m[1]), b = parseFloat(m[2]);
@@ -3065,7 +3074,11 @@
   function progressCell(line) {
     if (!line) return "—";
     const f = progressFraction(line);
-    if (f === null) return `<span class="mono" style="font-size:11px">${esc(line)}</span>`;
+    // A block, not an inline span: beside a case id in the fleet table an inline
+    // one runs straight into it -- "v2-05b5c7e73e5ddcb2step 3/5: …" is what that
+    // looked like.
+    if (f === null) return `<div class="mono" style="font-size:11px;color:var(--text-muted);`
+      + `overflow:hidden;text-overflow:ellipsis" title="${esc(line)}">${esc(line)}</div>`;
     const pct = Math.round(f * 100);
     const phase = progressPhase(line);
     return `<div style="min-width:120px">`

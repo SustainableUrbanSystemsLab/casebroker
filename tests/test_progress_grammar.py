@@ -80,3 +80,15 @@ def test_a_failed_case_says_why_without_being_opened():
     cell = html[html.index("c.state === \"leased\" ? progressCell(c.last_progress)"):]
     cell = cell[:cell.index("</td>")]
     assert cell.count("esc(") >= 2, "the failure text reaches the DOM twice and must be escaped twice"
+
+
+def test_the_progress_text_is_a_block_so_it_cannot_run_into_the_case_id():
+    """In the fleet table the case id and the progress sit in one cell. An inline
+    span put them flush against each other -- "v2-05b5c7e73e5ddcb2step 3/5: …" is
+    what that looked like on screen."""
+    html = (ROOT / "casebroker" / "static" / "dashboard.html").read_text(encoding="utf-8")
+    cell = html[html.index("function progressCell(line)"):]
+    cell = cell[:cell.index("\n  }")]
+    assert "<span" not in cell, "the fallback must not be inline beside the case id"
+    assert 'flex-direction:column' in html[html.index("w.current_case"):][:400]
+
