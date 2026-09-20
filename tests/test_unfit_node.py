@@ -213,3 +213,25 @@ def test_a_heartbeat_keeps_the_worker_out_of_Offline(tmp_path):
     seen_now = dict(conn.execute(
         "SELECT last_seen FROM workers WHERE worker_id='ws-01'").fetchone())["last_seen"]
     assert seen_now == seen_at_lease + 600, "the heartbeat IS the liveness signal for a long solve"
+
+
+def test_the_endpoint_needs_a_credential_and_changes_nothing_by_default(tmp_path):
+    """What the dashboard's Reopen card calls. Write auth, and the same dry_run
+    default the database function has -- a scan must never be the keystroke that
+    changes production."""
+    from fastapi.testclient import TestClient
+
+    from casebroker.app import create_app
+
+    app = create_app(str(tmp_path / "api.sqlite"), ["w"], ["r"])
+    with TestClient(app) as c:
+        assert c.post("/v1/cases/reopen").status_code in (401, 403)
+
+        auth = {"Authorization": "Bearer w"}
+        body = c.post("/v1/cases/reopen", headers=auth).json()
+        assert body["dry_run"] is True and body["reopened"] == 0
+        # A read token can see the campaign but must not change it. The code is
+        # this broker's business (it answers 401 for a wrong-scope token); what
+        # this pins is that it is refused.
+        assert c.post("/v1/cases/reopen", headers={"Authorization": "Bearer r"}).status_code in (401, 403)
+

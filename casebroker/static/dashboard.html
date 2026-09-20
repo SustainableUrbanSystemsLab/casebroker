@@ -1533,6 +1533,26 @@
           </div>
           <div id="landResult" style="margin-top:12px;"></div>
         </div>
+
+        <div class="detail-card" style="margin-top:14px;">
+          <h3>Cases a broken node quarantined</h3>
+          <div class="panel-subtitle" style="margin-bottom:10px;">
+            Quarantine is meant to say "this site is broken everywhere". A node
+            that could not run anything — a stopped container daemon, no solver
+            installed — used to charge an attempt per lease instead, and three of
+            those park a site with nothing wrong with it. Reopening puts them
+            back in the pool with their attempts reset. Match on what the case
+            last failed with, so this undoes one broken machine rather than
+            releasing every genuinely degenerate site.
+          </div>
+          <div class="row" style="gap:8px; align-items:center;">
+            <input type="text" id="reopenMatch" placeholder="last failure contains…"
+                   value="is not available" style="flex:1; min-width:220px;">
+            <button id="reopenScanBtn" type="button" class="subtle">Scan</button>
+            <button id="reopenFixBtn" type="button" style="display:none;">Reopen</button>
+          </div>
+          <div id="reopenResult" style="margin-top:12px;"></div>
+        </div>
       </div>
       <div id="campaignLocked" class="panel-subtitle">
         Sign in as an operator or an admin to run campaign housekeeping.
@@ -3966,6 +3986,60 @@
       refresh();
     } catch (e) {
       $("landResult").innerHTML = `<span style="font-size:12px;color:var(--bad)">quarantine failed: ${esc(e.message || e.status || e)}</span>`;
+    } finally {
+      b.disabled = false;
+    }
+  });
+
+  function renderReopenResult(d, changed) {
+    const n = changed ? d.reopened : d.matched;
+    if (!n) {
+      $("reopenResult").innerHTML = changed
+        ? `<div style="font-size:12px;color:var(--accent)">Done — nothing left to reopen.</div>`
+        : `<div style="font-size:12px;color:var(--accent)">No quarantined case last failed with that. Nothing to do.</div>`;
+      $("reopenFixBtn").style.display = "none";
+      return;
+    }
+    const rows = (d.examples || []).map((e) => `<div style="font-size:12px;margin-top:4px">`
+      + `<code class="inline">${esc(e.case_id)}</code> `
+      + `<span style="color:var(--text-muted)">attempt ${e.attempts} — ${esc(e.last_error || "")}</span></div>`).join("");
+    $("reopenResult").innerHTML = changed
+      ? `<div style="font-size:12px;color:var(--accent)">${n} case${n === 1 ? "" : "s"} back in the pool, attempts reset.</div>`
+      : `<div style="font-size:12px"><strong>${n}</strong> quarantined case${n === 1 ? "" : "s"} match. Nothing has changed yet.</div>${rows}`;
+  }
+
+  $("reopenScanBtn").addEventListener("click", async () => {
+    const b = $("reopenScanBtn");
+    b.disabled = true;
+    $("reopenResult").innerHTML = `<span style="font-size:12px;color:var(--text-muted)">scanning…</span>`;
+    $("reopenFixBtn").style.display = "none";
+    try {
+      const q = encodeURIComponent($("reopenMatch").value.trim());
+      const d = await campaignCall("/v1/cases/reopen?error_contains=" + q);
+      renderReopenResult(d, false);
+      if (d.matched) {
+        $("reopenFixBtn").textContent = `Reopen ${d.matched} case${d.matched === 1 ? "" : "s"}`;
+        $("reopenFixBtn").style.display = "";
+      }
+    } catch (e) {
+      $("reopenResult").innerHTML = `<span style="font-size:12px;color:var(--bad)">scan failed: ${esc(e.message || e.status || e)}</span>`;
+    } finally {
+      b.disabled = false;
+    }
+  });
+
+  $("reopenFixBtn").addEventListener("click", async () => {
+    const b = $("reopenFixBtn");
+    b.disabled = true;
+    try {
+      const q = encodeURIComponent($("reopenMatch").value.trim());
+      const d = await campaignCall("/v1/cases/reopen?dry_run=false&error_contains=" + q);
+      renderReopenResult(d, true);
+      showToast(`${d.reopened} case${d.reopened === 1 ? "" : "s"} reopened`);
+      loadCases();
+      refresh();
+    } catch (e) {
+      $("reopenResult").innerHTML = `<span style="font-size:12px;color:var(--bad)">reopen failed: ${esc(e.message || e.status || e)}</span>`;
     } finally {
       b.disabled = false;
     }
