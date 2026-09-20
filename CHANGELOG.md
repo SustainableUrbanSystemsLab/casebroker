@@ -226,7 +226,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
   does for the land audit and for purge. `runner/run_case.sh` has carried the
   warning since the first ICE run — a wrongly fatal error "silently removes a
   site from the campaign with no way back short of editing the database" — and
-  until now there was no way back.
+  until now there was no way back. **Settings ▸ Campaign** has the button:
+  type what the cases last failed with, Scan to see how many match, then Reopen.
 
 ### Fixed
 - **A machine that could not run anything was charging the campaign's cases for
