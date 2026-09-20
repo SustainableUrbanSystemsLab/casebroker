@@ -90,6 +90,9 @@ CREATE TABLE IF NOT EXISTS cases (
 -- is what keeps a lease O(log n) instead of a scan over 30,000 rows.
 CREATE INDEX IF NOT EXISTS idx_cases_claim ON cases(state, priority, case_id);
 CREATE INDEX IF NOT EXISTS idx_cases_lease ON cases(lease_id);
+-- What a worker is holding right now. Without it the dashboard's
+-- "working on" lookup scans every case once per worker.
+CREATE INDEX IF NOT EXISTS idx_cases_lease_worker ON cases(lease_worker, state);
 CREATE INDEX IF NOT EXISTS idx_cases_split ON cases(split, state);
 -- The dashboard's case list orders by updated_at DESC, and without this the
 -- plan is "SCAN cases" plus a temp B-tree: a full sort of the whole table for
@@ -261,6 +264,9 @@ CREATE TABLE IF NOT EXISTS cases (
 
 CREATE INDEX IF NOT EXISTS idx_cases_claim ON cases(state, priority, case_id);
 CREATE INDEX IF NOT EXISTS idx_cases_lease ON cases(lease_id);
+-- What a worker is holding right now. Without it the dashboard's
+-- "working on" lookup scans every case once per worker.
+CREATE INDEX IF NOT EXISTS idx_cases_lease_worker ON cases(lease_worker, state);
 CREATE INDEX IF NOT EXISTS idx_cases_split ON cases(split, state);
 -- The dashboard's case list orders by updated_at DESC, and without this the
 -- plan is "SCAN cases" plus a temp B-tree: a full sort of the whole table for
@@ -1367,8 +1373,21 @@ def status(conn, now: int | None = None) -> dict[str, Any]:
         "eta_days": round(remaining / done_24h, 1) if done_24h else None,
         # Seen in the last 24h, not "the 50 most recent": a Phoenix pool alone can
         # exceed 50, and a count cap silently aged live workers off the dashboard.
+        # Plus what each one is holding right now. The workers table itself has no
+        # in-flight state, so a fleet view could say how many a worker had finished
+        # and never what it was doing -- which is the question asked of it while a
+        # campaign is running. Two correlated subqueries rather than a join: a
+        # worker with no case must still appear, and the progress line is the same
+        # one _CASE_COLS folds onto a case.
         "workers": [dict(r) for r in conn.execute(
-            "SELECT * FROM workers WHERE last_seen > ? ORDER BY last_seen DESC LIMIT 500",
+            "SELECT w.*,"
+            " (SELECT c.case_id FROM cases c WHERE c.lease_worker = w.worker_id"
+            "    AND c.state = 'leased' ORDER BY c.leased_at DESC LIMIT 1) AS current_case,"
+            " (SELECT e.detail FROM events e WHERE e.event = 'progress'"
+            "    AND e.case_id = (SELECT c.case_id FROM cases c WHERE c.lease_worker = w.worker_id"
+            "                       AND c.state = 'leased' ORDER BY c.leased_at DESC LIMIT 1)"
+            "    ORDER BY e.id DESC LIMIT 1) AS current_progress"
+            " FROM workers w WHERE w.last_seen > ? ORDER BY w.last_seen DESC LIMIT 500",
             (_now() - 86400,))],
     }
 

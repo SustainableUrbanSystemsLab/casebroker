@@ -219,6 +219,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
   0.95x.
 
 ### Added
+- **The fleet view says what each worker is holding.** The `workers` table has no
+  in-flight state of its own, so the table could report how many cases a worker
+  had finished and never what it was doing — the question actually asked of it
+  while a campaign runs. `/v1/status` now folds the case a worker currently holds,
+  and that case's latest progress line, onto each row, through correlated
+  subqueries rather than a join so an idle worker still appears. A new
+  `idx_cases_lease_worker` index backs the lookup; without it the dashboard would
+  scan every case once per worker.
+- **A failed case says why without being opened.** `last_error` was in the case
+  list payload for every row and reachable only by expanding one case at a time,
+  so "7 failed" was as much as the table could say. The first line now shows in
+  the list, full text on hover.
 - **A progress bar for meshing and solving, on the case list and in the case
   detail.** The heartbeat has always carried a free-text `detail` line and the
   broker has always kept its history, but prose cannot be drawn, and the list

@@ -13,6 +13,7 @@ copy -- against the exact strings the C# side's own tests pin.
 from __future__ import annotations
 
 import pathlib
+import re
 import shutil
 import subprocess
 
@@ -49,3 +50,28 @@ def test_the_column_count_still_matches_the_detail_row():
     assert head.count("<th>") == 9, f"the case table has {head.count('<th>')} columns"
     assert 'colspan="9"' in html
     assert 'colspan="8"' not in html
+
+
+def test_a_worker_row_says_what_it_is_holding():
+    """The Workers table could say how many cases a worker had finished and never
+    what it was doing — which is the question asked of it while a campaign runs.
+    The columns and the cells have to stay in step, or the table shears."""
+    html = (ROOT / "casebroker" / "static" / "dashboard.html").read_text(encoding="utf-8")
+    body = html[html.index('<tbody id="workersBody">') - 2000:]
+    head = html[:html.index('<tbody id="workersBody">')]
+    workers_head = head[head.rindex("<thead>"):]
+    # <th[ >] rather than "<th", which also matches <thead>.
+    columns = len(re.findall(r"<th[ >]", workers_head))
+    assert columns == 10, f"the workers table has {columns} columns"
+    assert "w.current_case" in html and "w.current_progress" in html
+
+
+def test_a_failed_case_says_why_without_being_opened():
+    """`last_error` was in the list payload for every row and reachable only by
+    expanding one case at a time -- so "7 failed" was as much as the table said."""
+    html = (ROOT / "casebroker" / "static" / "dashboard.html").read_text(encoding="utf-8")
+    assert "c.last_error" in html
+    # Escaped in both the title and the text: a worker credential writes this string.
+    cell = html[html.index("c.state === \"leased\" ? progressCell(c.last_progress)"):]
+    cell = cell[:cell.index("</td>")]
+    assert cell.count("esc(") >= 2, "the failure text reaches the DOM twice and must be escaped twice"
