@@ -219,6 +219,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
   0.95x.
 
 ### Added
+- **The fleet strip is the whole fleet, not just the SLURM queues.** The panel is
+  titled "Worker Fleet" and its top strip showed only clusters that had reported a
+  scheduler queue — so two stale cluster cards were visible while every
+  workstation actually solving cases was missing from it. Every place work
+  happens now gets a card, workstations counted together rather than one card
+  each.
+
+  The two numbers come from different places and are kept apart: `working` is
+  OBSERVED, workers holding a lease right now, which the broker knows exactly;
+  `queued` is REPORTED by a scheduler nobody can see from here, and keeps its
+  staleness marker. A machine that reports no queue shows its idle workers
+  instead. A cluster whose report is old still appears with what its scheduler
+  last said, because that is the one number only it knows.
 - **Every column in both tables sorts.** Click a header; clicking the one already
   sorted flips the direction. The case browser sorts on the SERVER
   (`GET /v1/cases?sort=&direction=`), because the client holds one page of a
