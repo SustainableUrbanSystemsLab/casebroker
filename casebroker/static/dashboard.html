@@ -1214,7 +1214,7 @@
     <div id="workersEmpty" class="empty-state">—</div>
     <div class="table-wrap" id="workersTableWrap" style="display:none">
       <table id="workersTable">
-        <thead>
+        <thead id="workersHead">
           <tr>
             <th>Worker ID</th>
             <th>Host</th>
@@ -1308,7 +1308,7 @@
 
     <div class="table-wrap" id="casesTableWrap" style="display:none">
       <table id="casesTable">
-        <thead>
+        <thead id="casesHead">
           <tr>
             <th>Case ID</th>
             <th>State</th>
@@ -2759,13 +2759,55 @@
       fq.innerHTML = "";
     }
 
-    // Workers Table
-    const workers = st.workers || [];
+    const WORKER_COLUMNS = [
+    ["Worker ID", "worker_id"], ["Host", "host"], ["Cluster", "cluster"],
+    ["Status", "last_seen"], ["First seen", "first_seen"], ["Last seen", "last_seen"],
+    ["Working on", "current_case"], ["Done", "cases_done"], ["Failed", "cases_failed"],
+    ["Reliability", "reliability"],
+  ];
+
+  /// Sorts the WHOLE fleet: /v1/status hands over every worker seen in 24 h, so
+  /// unlike the case list there is nothing off-screen for this to be wrong about.
+  function sortWorkers(workers) {
+    const key = workerSort.key;
+    const sign = workerSort.dir === "asc" ? 1 : -1;
+    const value = (w) => {
+      if (key === "reliability") {
+        const total = (w.cases_done || 0) + (w.cases_failed || 0);
+        // A worker with no finished cases has no reliability. Sorting it as 0
+        // would rank it below one that has genuinely failed everything.
+        return total > 0 ? w.cases_done / total : -1;
+      }
+      const v = w[key];
+      return v === null || v === undefined ? "" : v;
+    };
+    return [...workers].sort((a, b) => {
+      const x = value(a), y = value(b);
+      if (typeof x === "number" && typeof y === "number") return (x - y) * sign;
+      return String(x).localeCompare(String(y)) * sign;
+    });
+  }
+
+  function renderWorkersHead() {
+    $("workersHead").innerHTML = "<tr>" + WORKER_COLUMNS
+      .map(([label, key], i) => sortableTh(label, key, workerSort.key, workerSort.dir, "workers",
+                                           i >= 7 ? "num" : ""))
+      .join("") + "</tr>";
+    wireSorting("workersHead", (key) => {
+      if (workerSort.key === key) workerSort.dir = workerSort.dir === "asc" ? "desc" : "asc";
+      else { workerSort.key = key; workerSort.dir = "desc"; }
+      if (lastStatus) renderStatus(lastStatus);        // re-render from what is already loaded
+    });
+  }
+
+  // Workers Table
+    const workers = sortWorkers(st.workers || []);
     $("workerCountBadge").textContent = `${workers.length} known`;
     if (workers.length) {
       $("workersEmpty").style.display = "none";
       $("workersTableWrap").style.display = "block";
       $("workersTable").style.display = "table";
+      renderWorkersHead();
       $("workersBody").innerHTML = workers.map((w) => {
         const isRecent = (Math.floor(Date.now() / 1000) - w.last_seen) < 300;
         const totalW = (w.cases_done || 0) + (w.cases_failed || 0);
@@ -2810,7 +2852,34 @@
   }
 
   // -- Case Browser Logic ------------------------------------------------------
-  const caseList = { state: "", split: "", city: "", limit: 25, offset: 0, total: 0, singleId: null };
+  // sort/dir go to the SERVER: the client holds one page of a 40,000-row table,
+  // so sorting what is on screen would answer a different question than the one
+  // the click asks. The workers table sorts in the browser instead -- /v1/status
+  // hands over the whole fleet, so there is nothing off-screen to be wrong about.
+  const caseList = { state: "", split: "", city: "", limit: 25, offset: 0, total: 0,
+                     singleId: null, sort: "updated_at", dir: "desc" };
+  const workerSort = { key: "last_seen", dir: "desc" };
+
+  /// A header cell that sorts. `active` decides the arrow, so a table always says
+  /// what it is ordered by rather than leaving the reader to guess.
+  function sortableTh(label, key, active, dir, handler, cls) {
+    const on = key === active;
+    return `<th${cls ? ` class="${cls}"` : ""} data-sort-key="${esc(key)}" data-sort-handler="${esc(handler)}"`
+      + ` style="cursor:pointer;user-select:none" title="Sort by ${esc(label)}">`
+      + `${esc(label)}<span style="opacity:${on ? 1 : 0.25}">${on ? (dir === "asc" ? " ▲" : " ▼") : " ↕"}</span></th>`;
+  }
+
+  /// One delegated listener per table: headers are re-rendered on every refresh,
+  /// so binding to each cell would leak a listener a minute.
+  function wireSorting(theadId, onPick) {
+    const head = document.getElementById(theadId);
+    if (!head || head.dataset.sortWired) return;
+    head.dataset.sortWired = "1";
+    head.addEventListener("click", (e) => {
+      const th = e.target.closest("th[data-sort-key]");
+      if (th) onPick(th.getAttribute("data-sort-key"));
+    });
+  }
   let openDetailId = null;
 
   function badge(state) {
@@ -3005,7 +3074,29 @@
       + `<div class="mono" style="font-size:10px;color:var(--text-muted);margin-top:3px">${esc(line)}</div></div>`;
   }
 
+  const CASE_COLUMNS = [
+    ["Case ID", "case_id"], ["State", "state"], ["Split", "split"], ["LCZ", "lcz"],
+    ["City Cluster", "city_cluster"], ["Recipe", "recipe"], ["Attempts", "attempts"],
+    ["Progress", "last_progress"], ["Updated", "updated_at"],
+  ];
+
+  function renderCasesHead() {
+    $("casesHead").innerHTML = "<tr>" + CASE_COLUMNS
+      .map(([label, key]) => sortableTh(label, key, caseList.sort, caseList.dir, "cases"))
+      .join("") + "</tr>";
+    wireSorting("casesHead", (key) => {
+      // Clicking the column it is already sorted by flips the direction; a new
+      // column starts descending, which is what "show me the worst" wants from
+      // attempts and from a timestamp alike.
+      if (caseList.sort === key) caseList.dir = caseList.dir === "asc" ? "desc" : "asc";
+      else { caseList.sort = key; caseList.dir = "desc"; }
+      caseList.offset = 0;              // a different order means a different page 1
+      loadCases();
+    });
+  }
+
   function renderCasesTable(cases) {
+    renderCasesHead();
     $("casesEmpty").style.display = cases.length ? "none" : "block";
     $("casesEmpty").textContent = "No cases match this filter.";
     $("casesTableWrap").style.display = cases.length ? "block" : "none";
@@ -3089,7 +3180,8 @@
       return;
     }
 
-    const q = new URLSearchParams({ limit: caseList.limit, offset: caseList.offset });
+    const q = new URLSearchParams({ limit: caseList.limit, offset: caseList.offset,
+                                    sort: caseList.sort, direction: caseList.dir });
     if (caseList.state) q.set("state", caseList.state);
     if (caseList.split) q.set("split", caseList.split);
     if (caseList.city) q.set("city_cluster", caseList.city);
