@@ -3042,6 +3042,18 @@
       }
       return null;
     };
+    // A step count whose CURRENT step is the solver is not a fraction of the case.
+    // "step 2/2: 01_foamRun" is printed the moment a run that takes hours begins,
+    // so drawing 2/2 shows a finished case at the start of its longest phase --
+    // worse than no bar, because it is confidently wrong. Such a line falls back
+    // to text unless it also carries a real iteration pair (iter 412/2000), which
+    // is what a node new enough to count iterations sends.
+    // No \b before the name: the steps are numbered ("01_foamRun"), and an
+    // underscore IS a word character, so a leading boundary never matches.
+    const solving = /(foamrun|simplefoam|urbanmicroclimatefoam|foammultirun|potentialfoam)/i;
+    const hasIterations = /\biter\s+[\d.]+\s*\/\s*[\d.]+/i.test(String(line));
+    if (solving.test(String(line)) && !hasIterations) return null;
+
     const parts = String(line).split("·");
     const outer = pair(parts[0]);
     if (outer === null) return null;
