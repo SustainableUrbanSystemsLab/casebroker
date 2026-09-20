@@ -219,6 +219,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
   0.95x.
 
 ### Added
+- **A progress bar for meshing and solving, on the case list and in the case
+  detail.** The heartbeat has always carried a free-text `detail` line and the
+  broker has always kept its history, but prose cannot be drawn, and the list
+  never showed it at all — the data was in the payload for every row and simply
+  not rendered. Nodes now put a grammar in front of that line (`mesh 3/5 ·
+  03_snappyHexMesh`, `solve 3/8 dirs · iter 412/2000`) and the dashboard turns it
+  into a bar, falling back to the text for anything that does not parse, so an
+  older worker still reports and a phase can still say something no bar could.
+
+  The bar is drawn only for a case that is actually `leased`: a finished case's
+  last line is whatever it said before archiving, and a bar frozen at 87 % under
+  a case marked done reads as stuck rather than finished.
+
+  Two implementations of one format drift silently — a bar that never appears, or
+  one that is wrong — so `test_progress_grammar.py` runs the shipped JavaScript,
+  pulled out of `dashboard.html` rather than copied, against the exact strings
+  Eddy3D's own `TestNodeProgress` pins on the writing side.
 - **A way back from quarantine.** `POST /v1/cases/reopen` puts quarantined cases
   back in the pool with their attempts reset, filtered by what the case last
   failed with (`error_contains`) so it undoes one broken node rather than

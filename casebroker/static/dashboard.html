@@ -1316,6 +1316,7 @@
             <th>City Cluster</th>
             <th>Recipe</th>
             <th>Attempts</th>
+            <th>Progress</th>
             <th>Updated</th>
           </tr>
         </thead>
@@ -2876,7 +2877,7 @@
               <dd>${c.lease_expires ? relTime(c.lease_expires) + " (from now)" : "—"}</dd>
               <dt>Progress</dt>
               <dd class="mono" title="${esc(c.last_progress || "")}">
-                ${esc(c.last_progress || "—")}
+                ${progressCell(c.last_progress)}
                 ${c.last_progress_at ? `<span style="color:var(--text-muted);font-family:var(--font);"> · ${esc(relTime(c.last_progress_at))}</span>` : ""}
               </dd>
             </dl>
@@ -2941,6 +2942,64 @@
       </div>`;
   }
 
+  // The grammar a node puts on its heartbeat: "<phase> i/n [unit] · rest", where rest may carry a
+  // second pair ("iter 412/2000") for how far into the current unit it is. Written by
+  // MetaFOAM.Lib/Node/NodeProgress.cs in the Eddy3D repo, whose TestNodeProgress pins the exact
+  // strings this has to read. Anything that does not parse stays text -- that is what keeps an
+  // older worker, and every line a phase wants to say in prose, working.
+  function progressFraction(line) {
+    if (!line) return null;
+    const pair = (text) => {
+      for (const token of String(text).split(/[\s,]+/)) {
+        const m = /^(-?[\d.]+)\/(-?[\d.]+)$/.exec(token);
+        if (!m) continue;
+        const a = parseFloat(m[1]), b = parseFloat(m[2]);
+        if (!isFinite(a) || !isFinite(b) || b <= 0 || a < 0) continue;
+        return a / b;
+      }
+      return null;
+    };
+    const parts = String(line).split("·");
+    const outer = pair(parts[0]);
+    if (outer === null) return null;
+    const head = /^(-?[\d.]+)\/(-?[\d.]+)$/;
+    let fraction = outer;
+    if (parts.length > 1) {
+      const inner = pair(parts.slice(1).join(" "));
+      if (inner !== null) {
+        // Rebuild from the counts so the inner pair lands INSIDE the current unit rather than
+        // being averaged with the outer one.
+        for (const token of String(parts[0]).split(/[\s,]+/)) {
+          const m = head.exec(token);
+          if (!m) continue;
+          const done = parseFloat(m[1]), total = parseFloat(m[2]);
+          if (total > 0) fraction = (done + inner) / total;
+          break;
+        }
+      }
+    }
+    return Math.max(0, Math.min(1, fraction));
+  }
+
+  function progressPhase(line) {
+    if (!line) return "";
+    const word = String(line).trim().split(/[\s·]/)[0];
+    return word === "mesh" || word === "solve" ? word : "";
+  }
+
+  /// A bar when the line carries a fraction, the text either way.
+  function progressCell(line) {
+    if (!line) return "—";
+    const f = progressFraction(line);
+    if (f === null) return `<span class="mono" style="font-size:11px">${esc(line)}</span>`;
+    const pct = Math.round(f * 100);
+    const phase = progressPhase(line);
+    return `<div style="min-width:120px">`
+      + `<div class="progress-bar-wrap" style="height:8px" title="${esc(line)}">`
+      + `<div class="progress-segment ${phase === "mesh" ? "leased" : "done"}" style="width:${pct}%"></div></div>`
+      + `<div class="mono" style="font-size:10px;color:var(--text-muted);margin-top:3px">${esc(line)}</div></div>`;
+  }
+
   function renderCasesTable(cases) {
     $("casesEmpty").style.display = cases.length ? "none" : "block";
     $("casesEmpty").textContent = "No cases match this filter.";
@@ -2962,10 +3021,11 @@
           <td>${esc(c.city_cluster || "—")}</td>
           <td>${esc(c.recipe || "—")}</td>
           <td>${c.attempts} / ${c.max_attempts}</td>
+          <td>${c.state === "leased" ? progressCell(c.last_progress) : "—"}</td>
           <td>${relTime(c.updated_at)}</td>
         </tr>
         <tr class="caseDetailRow${open ? "" : " closed"}">
-          <td colspan="8">
+          <td colspan="9">
             ${open ? caseDetailHtml(c) : ""}
           </td>
         </tr>`;
