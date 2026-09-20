@@ -48,8 +48,12 @@ needing numpy/rasterio/trimesh must go through
 every case identically.
 
 **Check which branch and which commit a cluster is on.** A Phoenix job queued
-hours earlier started running old code and quarantined ~900 cases. Clusters
-check out `v2-dataset-extension` in the parent and `main` in this submodule.
+hours earlier started running old code and quarantined ~900 cases. Every
+worker now runs from `windcomfort-real-cities` on `main`, with this repo as its
+`benchmark/casebroker` submodule -- the clusters through `slurm/*.sbatch`, which
+refuse to start when that pin is behind this repo's `main`, and Windows
+workstations through `bootstrap_worker.ps1`. Nothing clones
+`JP-Wind-ML-Comparison` any more (see "Where the campaign lives" below).
 
 **The dashboard's data path is `/v1/status`, not `/healthz`.** A browser that
 could reach one but not the other connected fine and then couldn't name what it

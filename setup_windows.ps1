@@ -65,7 +65,7 @@ if ($RealCities -and (Test-Path (Join-Path $RealCities "site_geometry.py"))) {
     Push-Location $RealCities
     try { uv sync -q | Out-Null; Pass "real_cities at $RealCities (uv sync ok)" } catch { Fail "real_cities uv sync failed in $RealCities" }
     Pop-Location
-} else { Fail "real_cities checkout not found (pass -RealCities <path to JP-Wind-ML-Comparison\benchmark\real_cities>)" }
+} else { Fail "real_cities checkout not found (pass -RealCities <path to windcomfort-real-cities\benchmark\real_cities>)" }
 
 # this repo's venv
 Push-Location $here

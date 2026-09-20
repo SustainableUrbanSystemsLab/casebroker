@@ -15,7 +15,7 @@ starts pulling cases. Rehearsed end to end on COD-PKAST-7865 (Docker Desktop,
 | **one solver runtime** | | |
 | &nbsp;&nbsp;Docker Desktop (WSL 2 backend) | `WIND_RUNTIME=docker`; pulls `dicehub/openfoam:12` on first case | give it most of the cores and RAM in Settings > Resources |
 | &nbsp;&nbsp;or blueCFD-Core 2024 + MS-MPI | `WIND_RUNTIME=native`, no container | `C:\blueCFD-Core-2024`, `C:\Program Files\Microsoft MPI` |
-| this repo + `real_cities` | worker/runner, geometry builder | clone `JP-Wind-ML-Comparison`; both live under `benchmark/` |
+| this repo + `real_cities` | worker/runner, geometry builder | `git clone --recurse-submodules` [windcomfort-real-cities](https://github.com/SustainableUrbanSystemsLab/windcomfort-real-cities) (the campaign repo, `main`); both live under `benchmark/`. **Not** `JP-Wind-ML-Comparison`: that is the paper, and its casebroker pin is stale on purpose |
 | `e3d.exe` | builds the OpenFOAM case | copy `E:\wind\bin\e3d.exe` from the master, or `dotnet publish Eddy3DCli -c Release -r win-x64 --self-contained -p:PublishSingleFile=true` |
 
 A local disk with room: geometry cache + checkpoints + finished archives
@@ -28,7 +28,7 @@ From the `casebroker` folder, in PowerShell:
 
 ```powershell
 .\setup_windows.ps1 -Token <write token> -WorkerId lab-ws-02 -Root E:\wind `
-    -RealCities C:\src\JP-Wind-ML-Comparison\benchmark\real_cities -Smoke
+    -RealCities C:\src\windcomfort-real-cities\benchmark\real_cities -Smoke
 ```
 
 It prints PASS/FAIL per prerequisite, creates `E:\wind\{bin,done,cases,...}`,
@@ -56,6 +56,10 @@ Rules that are easy to get wrong:
   Check either with
   `uv run casebroker token check --broker <url> --token <t> --expect write`,
   which also names which kind you handed it.
+- Browser pairing (`eddy3d-cli setup-simulation-node`) does **not** produce a
+  token for this script. It stores its credential for the native
+  `eddy3d-cli run-simulation-node` runner instead, and never writes
+  `machine.env`; see [Enrol each machine](operations.md#first-run-from-nothing-to-a-working-broker).
 
 ## 3. Run
 
