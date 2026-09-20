@@ -34,7 +34,7 @@ import weakref
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
-from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
@@ -1345,7 +1345,8 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
 
     @app.post("/v1/cases/reopen", dependencies=[WriteAuth])
     def reopen_cases(error_contains: str | None = None, dry_run: bool = True,
-                     limit: int = 50) -> dict[str, Any]:
+                     limit: int = 50,
+                     case_id: list[str] | None = Query(None)) -> dict[str, Any]:
         """Put quarantined cases back in the pool, attempts refunded.
 
         Quarantine means "this site is broken everywhere". It also collects cases
@@ -1364,8 +1365,13 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         `limit` bounds how many cases are REOPENED, not merely how many are shown
         back. The reply carries `matched` and `capped` so a larger backlog is
         visible; call again to take the next batch.
+
+        `case_id` (repeatable) names cases outright. The database layer always
+        took a list; the endpoint never passed one through, so an operator looking
+        at ONE wrongly quarantined case had only a substring match over everybody's
+        errors to reach it with. Combines with `error_contains` as an AND.
         """
-        return db.reopen_cases(conn, error_contains=error_contains,
+        return db.reopen_cases(conn, error_contains=error_contains, case_ids=case_id,
                                dry_run=dry_run, limit=limit)
 
     @app.delete("/v1/cases", dependencies=[PurgeAuth])
