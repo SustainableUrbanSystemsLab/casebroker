@@ -97,8 +97,18 @@ def test_include_spec_false_drops_the_spec_and_nothing_else(tmp_path):
     assert full and lean
     assert set(full[0]) - set(lean[0]) == {"spec"}, "exactly one column may differ"
     assert set(lean[0]) - set(full[0]) == set()
-    # And it is worth doing: the spec is most of the bytes.
-    assert len(json.dumps(lean)) * 2 < len(json.dumps(full))
+    # And it is worth doing. The bar is DERIVED from the fixture rather than
+    # guessed: the saving must be the specs themselves, and `spec` must be the
+    # largest field on the row. A ratio like "lean * 2 < full" is a threshold in
+    # disguise -- it moved the day two null columns were added, which says
+    # nothing about whether dropping the spec is still worth it.
+    saved = len(json.dumps(full)) - len(json.dumps(lean))
+    spec_bytes = sum(len(json.dumps(c["spec"])) for c in full)
+    assert saved >= spec_bytes * 0.9, f"dropping the spec saved {saved} of {spec_bytes} spec bytes"
+
+    widths = {k: len(json.dumps(v)) for k, v in full[0].items()}
+    assert max(widths, key=widths.get) == "spec", (
+        f"spec is no longer the widest column; the biggest is {max(widths, key=widths.get)}")
 
 
 def test_the_default_still_carries_the_spec(tmp_path):

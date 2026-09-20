@@ -932,6 +932,13 @@
   .kv-list dt { color: var(--text-muted); font-weight: 500; }
   .kv-list dd { margin: 0; word-break: break-all; color: var(--text-primary); display: flex; align-items: center; gap: 6px; }
   .kv-list dd.mono { font-family: var(--font-mono); font-size: 11.5px; }
+  /* A dd is a flex ROW, so two block children sit beside each other -- which put
+     the progress caption next to the bar in a 1fr column and let word-break
+     split it mid-word ("last lin / e 9h ago"). A row with more than one line
+     stacks instead, and min-width:0 lets its children ellipsize rather than
+     pushing the grid column wider than the card. */
+  .kv-list dd.stack { flex-direction: column; align-items: stretch; gap: 0; min-width: 0; }
+  .kv-list dd.stack > * { min-width: 0; max-width: 100%; }
 
   .copy-btn {
     background: transparent;
@@ -2453,11 +2460,19 @@
   function relTime(unixSeconds) {
     if (!unixSeconds) return "—";
     const s = Math.floor(Date.now() / 1000) - unixSeconds;
-    if (s < 0) return "just now";
-    if (s < 60) return s + "s ago";
-    if (s < 3600) return Math.floor(s / 60) + "m ago";
-    if (s < 86400) return Math.floor(s / 3600) + "h ago";
-    return Math.floor(s / 86400) + "d ago";
+    // SIGNED, because one field here is normally in the FUTURE. lease_expires is
+    // `now + lease_seconds` (db.py), and the old past-only version answered
+    // "just now" for every future instant -- a lease with one second left and
+    // one with 24 hours left printed the same nine characters, in the row an
+    // operator opens precisely to find out whether the worker is still talking.
+    // The call site then pasted " (from now)" onto it, so a LAPSED lease read
+    // "3d ago (from now)".
+    const ahead = s < 0;
+    const a = Math.abs(s);
+    if (a < 60) return ahead ? "in " + a + "s" : a + "s ago";
+    if (a < 3600) return ahead ? "in " + Math.floor(a / 60) + "m" : Math.floor(a / 60) + "m ago";
+    if (a < 86400) return ahead ? "in " + Math.floor(a / 3600) + "h" : Math.floor(a / 3600) + "h ago";
+    return ahead ? "in " + Math.floor(a / 86400) + "d" : Math.floor(a / 86400) + "d ago";
   }
 
   function formatBytes(bytes) {
@@ -2472,9 +2487,14 @@
   function formatDuration(sec) {
     if (sec == null) return "—";
     if (sec < 60) return sec + " s";
+    // Hours and days, because these are CFD solves: an 8-hour foamRun rendered
+    // "480m 0s" and a two-day campaign case "2880m 0s", which nobody reads as a
+    // duration. Minutes stay exact below the hour, where they are what you want.
     const m = Math.floor(sec / 60);
-    const rem = Math.round(sec % 60);
-    return `${m}m ${rem}s`;
+    if (sec < 3600) return `${m}m ${Math.round(sec % 60)}s`;
+    const h = Math.floor(sec / 3600);
+    if (sec < 86400) return `${h}h ${Math.floor((sec % 3600) / 60)}m`;
+    return `${Math.floor(sec / 86400)}d ${Math.floor((sec % 86400) / 3600)}h`;
   }
 
   function parseMaybeJson(s) {
@@ -2985,22 +3005,46 @@
             <dl class="kv-list">
               <dt>Worker</dt>
               <dd class="mono">${esc(metrics.worker || c.lease_worker || "—")}</dd>
+              <!-- Recorded first, live second. metrics is written by complete()
+                   alone, so on a RUNNING case it is empty and these three rows
+                   were "—" by construction -- on the card an operator opens to
+                   see where the case is running RIGHT NOW. The live values come
+                   from the worker registration folded onto the case row. -->
               <dt>Host</dt>
-              <dd class="mono">${esc(metrics.host || "—")}</dd>
+              <dd class="mono">${esc(metrics.host || c.worker_host || "—")}</dd>
               <dt>Cluster</dt>
-              <dd>${esc(metrics.cluster || "—")}</dd>
+              <dd>${esc(metrics.cluster || c.worker_cluster || "—")}</dd>
               <dt>Wall Time</dt>
-              <dd>${formatDuration(metrics.wall_seconds)}</dd>
+              <dd title="${metrics.wall_seconds != null ? "as recorded when the case finished" : "this lease only — a resumed case restarts this clock"}">${
+                metrics.wall_seconds != null
+                  ? formatDuration(metrics.wall_seconds)
+                  : (c.leased_at && c.state === "leased"
+                      ? formatDuration(Math.floor(Date.now() / 1000) - c.leased_at) + " (this lease)"
+                      : "—")}</dd>
               <dt>Created</dt>
               <dd>${c.created_at ? new Date(c.created_at * 1000).toLocaleString() : "—"}</dd>
-              <dt>Updated</dt>
-              <dd>${c.updated_at ? new Date(c.updated_at * 1000).toLocaleString() : "—"}</dd>
+              <!-- An age, not a wall-clock stamp: on a leased case every heartbeat
+                   writes updated_at, so "2m ago" is the one field that says the
+                   worker is still speaking. The absolute time stays on hover. -->
+              <dt>${c.state === "leased" ? "Last heartbeat" : "Updated"}</dt>
+              <dd title="${c.updated_at ? esc(new Date(c.updated_at * 1000).toLocaleString()) : ""}">${
+                c.updated_at ? esc(relTime(c.updated_at)) : "—"}</dd>
               <dt>Lease Expiry</dt>
-              <dd>${c.lease_expires ? relTime(c.lease_expires) + " (from now)" : "—"}</dd>
+              <dd>${c.lease_expires ? esc(relTime(c.lease_expires)) : "—"}</dd>
+              <!-- The bar, with its moving band, means "a worker is on this right
+                   now". Only a LEASED case is, so every other state shows the
+                   last line as text. The cases table has always gated it this
+                   way; the panel did not, so a done or failed case animated
+                   forever under its own failure message. -->
               <dt>Progress</dt>
-              <dd class="mono" title="${esc(c.last_progress || "")}">
-                ${progressCell(c.last_progress)}
-                ${c.last_progress_at ? `<span style="color:var(--text-muted);font-family:var(--font);"> · ${esc(relTime(c.last_progress_at))}</span>` : ""}
+              <dd class="mono stack" title="${esc(c.last_progress || "")}">
+                ${c.state === "leased" ? progressCell(c.last_progress) : progressText(c.last_progress)}
+                <!-- The age goes UNDER the bar, not after it: inline, in a
+                     column this narrow, it wrapped into the bar and broke
+                     mid-word ("9h a / go"). It is also the line that stops the
+                     moving band from overclaiming -- the bar says a worker is
+                     on this, the age says when it last said anything. -->
+                ${c.last_progress_at ? `<div style="color:var(--text-muted);font-family:var(--font);font-size:10.5px;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">last line ${esc(relTime(c.last_progress_at))}</div>` : ""}
               </dd>
             </dl>
           </div>
@@ -3226,6 +3270,15 @@
   /// When the line is prose, it stays prose. (Suppressing the bar for the second
   /// case was the previous attempt at honesty and it threw away a true number:
   /// "step 2/2" really does mean one step of two is done.)
+  /// The line as prose, with no bar. What progressCell falls back to when it
+  /// cannot parse a fraction -- and what a case nobody is working on gets,
+  /// whatever its line says.
+  function progressText(line) {
+    if (!line) return "\u2014";
+    return `<div class="mono" style="font-size:11px;color:var(--text-muted);`
+      + `overflow:hidden;text-overflow:ellipsis" title="${esc(line)}">${esc(line)}</div>`;
+  }
+
   function progressCell(line) {
     if (!line) return "\u2014";
     const p = progressParse(line);
@@ -3295,7 +3348,13 @@
       // NOT named `detail`: that is one of the server field names the escaping
       // sweep watches for, and a local of that name would make every future
       // interpolation of it look like escaped server data.
-      const expandedCase = open ? Object.assign({}, c, caseDetails.get(c.case_id) || {}) : null;
+      // The LIVE row wins; the cached record contributes only what the list no
+      // longer carries (the spec). The other order froze the whole telemetry
+      // panel: caseDetails is fetched once when the row opens and never again,
+      // so with the cached copy last, every 60 s refresh re-rendered the panel
+      // from a snapshot -- progress, lease expiry, attempts and state all stuck
+      // at whatever they were when the row was first expanded.
+      const expandedCase = open ? Object.assign({}, caseDetails.get(c.case_id) || {}, c) : null;
       return `
         <tr class="caseRow${open ? " open" : ""}" data-id="${esc(c.case_id)}">
           <td>
