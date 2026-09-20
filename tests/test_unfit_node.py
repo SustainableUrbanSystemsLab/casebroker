@@ -235,3 +235,29 @@ def test_the_endpoint_needs_a_credential_and_changes_nothing_by_default(tmp_path
         # this pins is that it is refused.
         assert c.post("/v1/cases/reopen", headers={"Authorization": "Bearer r"}).status_code in (401, 403)
 
+
+
+def test_the_fleet_view_can_say_which_case_a_worker_is_holding(tmp_path):
+    """The workers table has no in-flight state of its own, so /v1/status folds the
+    case a worker currently holds -- and its latest progress line -- onto the row."""
+    conn = make_db(tmp_path)
+    leased = db.lease(conn, "ws-01", 1, 900)[0]
+    db.heartbeat(conn, leased.lease_id, 900, detail="solve 3/8 dirs · iter 412/2000")
+
+    worker = next(w for w in db.status(conn)["workers"] if w["worker_id"] == "ws-01")
+
+    assert worker["current_case"] == leased.case_id
+    assert worker["current_progress"] == "solve 3/8 dirs · iter 412/2000"
+
+
+def test_a_worker_between_cases_still_appears_with_nothing_in_flight(tmp_path):
+    """The control for the subquery: an idle worker must not drop off the fleet
+    view, which is what a join instead of a correlated subquery would have done."""
+    conn = make_db(tmp_path)
+    leased = db.lease(conn, "ws-01", 1, 900)[0]
+    db.complete(conn, leased.lease_id, "file:///r.tar.gz")
+
+    worker = next(w for w in db.status(conn)["workers"] if w["worker_id"] == "ws-01")
+
+    assert worker["current_case"] is None
+    assert worker["cases_done"] == 1

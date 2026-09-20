@@ -1222,6 +1222,7 @@
             <th>Status</th>
             <th>First seen</th>
             <th>Last seen</th>
+            <th>Working on</th>
             <th class="num">Done</th>
             <th class="num">Failed</th>
             <th class="num">Reliability</th>
@@ -2789,6 +2790,10 @@
             </td>
             <td>${relTime(w.first_seen)}</td>
             <td>${relTime(w.last_seen)}</td>
+            <td>${w.current_case
+                  ? `<code class="inline">${esc(w.current_case)}</code>`
+                    + (w.current_progress ? progressCell(w.current_progress) : "")
+                  : "—"}</td>
             <td class="num" style="font-weight:600;">${(w.cases_done || 0).toLocaleString()}</td>
             <td class="num${(w.cases_failed || 0) > 0 ? ' alert' : ''}">${(w.cases_failed || 0).toLocaleString()}</td>
             <td class="num" style="font-family:var(--font-mono); font-size:12px;">${reliability}</td>
@@ -3021,7 +3026,11 @@
           <td>${esc(c.city_cluster || "—")}</td>
           <td>${esc(c.recipe || "—")}</td>
           <td>${c.attempts} / ${c.max_attempts}</td>
-          <td>${c.state === "leased" ? progressCell(c.last_progress) : "—"}</td>
+          <td>${c.state === "leased" ? progressCell(c.last_progress)
+                : c.last_error
+                  ? `<span class="mono" style="font-size:11px;color:var(--bad)" title="${esc(c.last_error)}">`
+                    + `${esc(String(c.last_error).split("\n")[0].slice(0, 70))}</span>`
+                  : "—"}</td>
           <td>${relTime(c.updated_at)}</td>
         </tr>
         <tr class="caseDetailRow${open ? "" : " closed"}">
