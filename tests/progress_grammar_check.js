@@ -36,6 +36,12 @@ const cases = [
 const legacy = [
   ['step 3/5: 03_snappyHexMesh', 0.6],
   ['case_270 [3/8 dirs] iter 412 p=3.2e-05 Ux=8.1e-07 (2.3 h)', 3 / 8],
+  // The step count whose current step IS the solver: a full bar the moment a
+  // multi-hour run begins. Text, not a fraction.
+  ['step 2/2: 01_foamRun', null],
+  ['step 1/1: 01_urbanMicroclimateFoam', null],
+  // ... unless the line carries real iterations, which a newer node sends.
+  ['solve 3/8 dirs · iter 412/2000', (3 + 412 / 2000) / 8],
 ];
 let bad = 0;
 for (const [line, want] of legacy) {
