@@ -46,10 +46,11 @@ cd C:\src\casebroker
 
 Then `.\start_worker.ps1`.
 
-What it does: checks prerequisites, clones both repos (`real_cities` from the
-**`v2-dataset-extension`** branch — the geometry builder is not on `main`),
-copies `e3d.exe`, writes `machine.env`, proves the token against the broker,
-and with `-Smoke` runs one crude case end to end first.
+What it does: checks prerequisites, clones both repos (`real_cities` from
+**`windcomfort-real-cities`**, the campaign repo, on `main` — not from the paper,
+`JP-Wind-ML-Comparison`, whose casebroker pin is stale on purpose), copies
+`e3d.exe`, writes `machine.env`, proves the token against the broker, and with
+`-Smoke` runs one crude case end to end first.
 
 Rules that bite if ignored:
 

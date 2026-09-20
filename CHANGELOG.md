@@ -219,6 +219,27 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
   0.95x.
 
 ### Fixed
+- **`bootstrap_worker.ps1` built new Windows workers from the paper, not the
+  campaign.** It cloned `JP-Wind-ML-Comparison` on `v2-dataset-extension` for
+  `real_cities`, so every node bootstrapped from the dashboard's *Issue token*
+  paste line ran the paper's geometry pipeline — the repo AGENTS.md says is not
+  touched for campaign work and whose casebroker pin is stale on purpose. The
+  clusters had already moved to `windcomfort-real-cities` (#10); this script,
+  `setup_windows.ps1`'s hint, `machine.env.example` and `docs/windows-worker.md`
+  had not. It now clones `windcomfort-real-cities` on `main` — its only branch,
+  checked to carry `site_geometry.py` and the rest of the builder before the
+  default changed, and `-b v2-dataset-extension` would have failed outright
+  there. A node re-running the script gets the new checkout beside the old one
+  and a `machine.env` pointing at it; the old `C:\src\JP-Wind-ML-Comparison` is
+  left where it is.
+- **The enrolment docs did not know pairing existed.** `docs/operations.md`
+  now documents `eddy3d-cli setup-simulation-node` beside `casebroker worker
+  setup` and *Issue token*, and `fleet.md` and `windows-worker.md` say the one
+  thing that is easy to get wrong: a paired credential is stored for the native
+  `run-simulation-node` runner and never lands in `machine.env`, so it does not
+  feed `start_worker.sh`/`.ps1`. `fleet.md`'s `C:\rc2\syncthing\` path is also
+  readable again: its `\r` had been stored as a carriage return, so it rendered
+  as `C:c2\syncthing\`.
 - **The setup wizard blamed the database for a `/healthz` nobody was waiting
   for.** Reported from a live dashboard reading "Step 1 of 5 — 2 done" with
   Database stuck on "Waiting for the broker to answer /healthz." while the

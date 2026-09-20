@@ -56,6 +56,13 @@ all three; only how it is launched and how MPI is spelled differ:
      older model. A cluster gets **one credential per cluster**, named after
      it: every SLURM task runs as `phoenix-<job>-<task>`, and a credential
      covers every worker id under its own name.
+     `uv run casebroker worker setup --broker <url>`, run on the box itself,
+     does the same without the dashboard and writes the token into
+     `machine.env` for you (it asks for your admin login once and keeps no
+     session). Browser pairing (`eddy3d-cli setup-simulation-node`) is a
+     different path: its credential serves the native `run-simulation-node`
+     runner and never lands in `machine.env` -- see
+     [operations.md](operations.md#first-run-from-nothing-to-a-working-broker).
    - `WIND_NP` -- ranks per case, **measured per machine** (below). Until
      measured, `min(24, cores/2)`.
 3. **Start it**: `./start_worker.sh` (Linux, WSL, git-bash) or
@@ -163,7 +170,7 @@ machine that should be silent between cases you can also pause the folder
 and have a cron unpause/pause it; the scan call is simpler and enough.
 
 **Measured, 2026-09-12** (two Syncthing v2.1.5 instances, one standing in for a
-remote worker, `C:c2\syncthing\`): a 23 MB case archive replicated
+remote worker, `C:\rc2\syncthing\`): a 23 MB case archive replicated
 worker -> master over a direct QUIC connection with identical SHA-256 and
 `needBytes 0`; a new 5 MB file then sat in `$WIND_DONE` for **45 s with
 nothing transferred** (watcher off, `rescanIntervalS 0`), and appeared on the
@@ -185,7 +192,7 @@ opened on either side.
    master directory with no collisions and no per-worker folder admin.
 4. Put `WIND_SYNCTHING_URL/APIKEY/FOLDER` in `machine.env`.
 
-`C:c2\syncthing\configure.ps1` does steps 2-3 over the REST API and is the
+`C:\rc2\syncthing\configure.ps1` does steps 2-3 over the REST API and is the
 reference for the exact field values.
 
 **PACE: the master pulls.** A daemon does not fit shared login nodes or

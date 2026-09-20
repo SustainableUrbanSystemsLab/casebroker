@@ -65,7 +65,8 @@ uv run casebroker worker setup --broker https://broker.example.org
 
 It asks for your broker login, mints a credential for **this** machine, writes
 it into `machine.env`, and drops the admin session again — nothing long-lived is
-left on a shared lab machine. The worker id defaults to the hostname; pass
+left on a shared lab machine. Your admin *password* is still typed on the box,
+though; pairing, below, is what removes that. The worker id defaults to the hostname; pass
 `--worker-id` to override, and `--rotate` if the box has lost its credential and
 needs a fresh one. Existing settings in `machine.env` (`WIND_NP`, the runtime
 paths) are preserved.
@@ -74,6 +75,26 @@ Or from the dashboard, if you would rather not log in at the box: **Machines** �
 *Issue token*, named after the worker id that box will run under. The token is
 shown **once** — only its hash is stored — with the exact `bootstrap_worker.ps1`
 line to paste there.
+
+Or **pair it from the browser**, with nothing secret typed on the node at all —
+**Eddy3D `dev` only, in no release yet**, so build `eddy3d-cli` from `dev`:
+
+```bash
+eddy3d-cli setup-simulation-node https://broker.example.org
+```
+
+It shows a short code and opens the broker. Signed in as an admin, check the
+code matches under **Settings ▸ Machines** (the printed `/?pair=CODE` link opens
+straight to it) and approve. The node generates its own credential and only its
+SHA-256 ever reaches the broker ([protocol](protocol.md)). `--no-browser` on a
+login node; `--name <cluster>` for a cluster, as with *Issue token*.
+
+The credential lands in `%LOCALAPPDATA%\Eddy3D\node\credential.json` on
+Windows and `~/.local/share/Eddy3D/node/` on Linux (`EDDY3D_NODE_DIR` overrides
+it, for clusters whose systems share one home) — **not** in `machine.env`. So
+pairing serves `eddy3d-cli run-simulation-node`, the native runner, and not
+`start_worker.sh`/`.ps1`, which still read `CASEBROKER_TOKEN` from
+`machine.env`. Use one of the two routes above for those.
 
 Either way, revoking one machine is a button, takes effect on its next request,
 and leaves every other machine running. **A machine's credential may only lease

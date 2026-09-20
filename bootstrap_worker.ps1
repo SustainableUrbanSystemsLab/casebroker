@@ -28,7 +28,7 @@ param(
     [string]$SrcDir = "C:\src",
     [string]$MasterDeviceId = "DW2QZ5L-CFGJL7D-X4VRTG5-SZ6535Q-Y2JGKT6-RFCZ6AN-RBRFEXB-IQ54MQ7",
     [string]$E3dSource = "",
-    [string]$RealCitiesBranch = "v2-dataset-extension",
+    [string]$RealCitiesBranch = "main",
     [int]$Np = 0,
     [switch]$Smoke,
     [switch]$SkipSyncthing
@@ -88,22 +88,26 @@ if (Test-Path (Join-Path $repo ".git")) {
     Git clone https://github.com/SustainableUrbanSystemsLab/casebroker.git $repo
     Pass "casebroker cloned"
 }
-# real_cities lives in the sibling analysis repo and is what builds each site's
-# geometry; without it the first case dies at "building geometry".
-#
-# ON THE BRANCH, NOT main. The geometry builder -- site_geometry.py, gba.py,
-# canopy_zones.py, upstream_z0.py -- exists only on v2-dataset-extension. A
-# default clone yields a real_cities with 12 files and no builder, and the
-# failure then surfaces minutes into the first case as a ModuleNotFound rather
-# than here at setup. Verified by cloning both.
-$rcRepo = Join-Path $SrcDir "JP-Wind-ML-Comparison"
+# real_cities is what builds each site's geometry; without it the first case
+# dies at "building geometry". It comes from windcomfort-real-cities -- the
+# CAMPAIGN repo -- not from JP-Wind-ML-Comparison. That is the paper the pipeline
+# was split out of: it is being submitted, is not touched for campaign work, and
+# its casebroker pin is stale on purpose. This script cloned it (on
+# v2-dataset-extension, the only branch there that had the builder) until the
+# campaign moved, so a node bootstrapped from the dashboard's paste line ran the
+# paper's geometry pipeline; the clusters had already moved (slurm/*.sbatch).
+# windcomfort-real-cities has one branch, main, and it carries site_geometry.py,
+# gba.py and the rest of the builder -- checked against the repo before this
+# default changed. The site_geometry.py guard below still catches a wrong branch
+# at setup rather than minutes into the first case.
+$rcRepo = Join-Path $SrcDir "windcomfort-real-cities"
 $rc = Join-Path $rcRepo "benchmark\real_cities"
 if (Test-Path (Join-Path $rcRepo ".git")) {
     Git -C $rcRepo fetch origin $RealCitiesBranch
     Git -C $rcRepo checkout $RealCitiesBranch
     Git -C $rcRepo pull --ff-only
 } else {
-    Git clone -b $RealCitiesBranch https://github.com/SustainableUrbanSystemsLab/JP-Wind-ML-Comparison.git $rcRepo
+    Git clone -b $RealCitiesBranch https://github.com/SustainableUrbanSystemsLab/windcomfort-real-cities.git $rcRepo
 }
 if (-not (Test-Path (Join-Path $rc "site_geometry.py"))) {
     Die "real_cities at $rc has no site_geometry.py -- wrong branch? expected $RealCitiesBranch"
