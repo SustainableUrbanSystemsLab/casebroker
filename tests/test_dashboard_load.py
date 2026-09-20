@@ -132,3 +132,26 @@ def test_the_dashboard_answers_a_conditional_request_with_304(tmp_path):
     assert len(DASH_COPY) > 1000
     stale = client.get("/", headers={"If-None-Match": '"deadbeef-0"'})
     assert stale.status_code == 200
+
+
+def test_a_weak_etag_still_matches(tmp_path):
+    """Cloudflare gzips the dashboard and rewrites the strong ETag into a weak
+    one, so the browser sends back `W/"..."` for an entity tagged `"..."`. An
+    exact comparison refuses every one of those -- a 304 path that passes every
+    test against the app and can never fire in production. Measured after
+    deploying exactly that: HTTP 200 and 212,087 bytes for a request carrying
+    the server's own tag back.
+
+    RFC 7232 specifies weak comparison for If-None-Match, which is also the
+    right question for a cache revalidation."""
+    client = _seeded_client(tmp_path)
+    etag = client.get("/").headers["etag"]
+
+    assert client.get("/", headers={"If-None-Match": f"W/{etag}"}).status_code == 304
+    assert client.get("/", headers={"If-None-Match": etag}).status_code == 304
+    # A list, as a browser with several cached representations sends.
+    assert client.get("/", headers={"If-None-Match": f'"other", W/{etag}'}).status_code == 304
+    assert client.get("/", headers={"If-None-Match": "*"}).status_code == 304
+    # And it still says no to a tag that is not ours.
+    assert client.get("/", headers={"If-None-Match": 'W/"nope-0"'}).status_code == 200
+
