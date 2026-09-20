@@ -12,16 +12,23 @@ const grab = (name) => {
   throw new Error('unbalanced: ' + name);
 };
 const esc = (s) => String(s);
+eval(grab('progressLabel'));
+eval(grab('progressParse'));
 eval(grab('progressFraction'));
+eval(grab('progressRunning'));
 eval(grab('progressPhase'));
+const SOLVER_STEP = /(foamrun|simplefoam|urbanmicroclimatefoam|foammultirun|potentialfoam)/i;
 
 // The exact strings MetaFOAM.Lib.Tests/TestNodeProgress.cs pins on the writer side.
+// A step count names the step RUNNING, so the work behind it is i-1 of n; a
+// "dirs" count is directions FINISHED, so it is i of n. Reading the first as the
+// second is what drew a full bar the instant a multi-hour solve began.
 const cases = [
-  ['mesh 3/5 · 03_snappyHexMesh', 0.6, 'mesh'],
+  ['mesh 3/5 · 03_snappyHexMesh', 0.4, 'mesh'],
   ['solve 3/8 dirs · iter 412/2000', (3 + 412/2000) / 8, 'solve'],
   ['solve 0/8 dirs · starting', 0, 'solve'],
   ['solve 9/8 dirs · iter 2100/2000', 1, 'solve'],
-  ['mesh 2/4', 0.5, 'mesh'],
+  ['mesh 2/4', 0.25, 'mesh'],
   ['site geometry', null, ''],
   ['build-case', null, ''],
   ['archiving', null, ''],
@@ -34,13 +41,14 @@ const cases = [
 // what every cluster worker runs. Both carry a real count, so both get a bar.
 // JS-only on purpose -- the C# side writes one format and need not read these.
 const legacy = [
-  ['step 3/5: 03_snappyHexMesh', 0.6],
+  ['step 3/5: 03_snappyHexMesh', 0.4],
   ['case_270 [3/8 dirs] iter 412 p=3.2e-05 Ux=8.1e-07 (2.3 h)', 3 / 8],
-  // The step count whose current step IS the solver: a full bar the moment a
-  // multi-hour run begins. Text, not a fraction.
-  ['step 2/2: 01_foamRun', null],
-  ['step 1/1: 01_urbanMicroclimateFoam', null],
-  // ... unless the line carries real iterations, which a newer node sends.
+  // The line the field reported. One step of two really is finished, so the bar
+  // fills to there and the second step is drawn as the ACTIVE unit -- neither a
+  // full bar (confidently wrong) nor no bar at all (throws away a true number).
+  ['step 2/2: 01_foamRun', 0.5],
+  ['step 1/1: 01_urbanMicroclimateFoam', 0],
+  // A newer node counts iterations, and then nothing is unknown.
   ['solve 3/8 dirs · iter 412/2000', (3 + 412 / 2000) / 8],
 ];
 let bad = 0;
@@ -57,5 +65,37 @@ for (const [line, want, phase] of cases) {
   const pOk = progressPhase(line) === phase;
   if (!ok || !pOk) { bad++; console.log(`MISMATCH ${JSON.stringify(line)} -> ${got} (want ${want}), phase ${progressPhase(line)} (want ${phase})`); }
 }
-console.log(bad === 0 ? `all ${cases.length + legacy.length} strings agree with the C# writer` : `${bad} mismatches`);
+// The ACTIVE span: how much of the bar is the unit under way. Mirrors
+// NodeProgress.RunningSpanOf, and it is what replaced suppressing the bar.
+const running = [
+  ['step 2/2: 01_foamRun', 0.5],
+  ['mesh 3/5 · 03_snappyHexMesh', 0.2],
+  ['step 1/1: 01_urbanMicroclimateFoam', 1],
+  // Nothing is under way once the line says how far into it we are.
+  ['solve 3/8 dirs · iter 412/2000', 0],
+  ['alive', 0],
+];
+for (const [line, want] of running) {
+  const got = progressRunning(line);
+  if (Math.abs(got - want) > 1e-9) { bad++; console.log(`RUNNING MISMATCH ${JSON.stringify(line)} -> ${got} (want ${want})`); }
+}
+
+// The words beside the bar. A step whose program IS the solver says "Solving",
+// which is the one thing "step 2/2" alone does not tell an operator.
+const labels = [
+  ['step 2/2: 01_foamRun', 'Solving · step 2/2 · foamRun'],
+  ['mesh 3/5 · 03_snappyHexMesh', 'Meshing · step 3/5 · snappyHexMesh'],
+  ['solve 3/8 dirs · iter 412/2000', 'Solving · dir 4/8 · iter 412/2000'],
+  ['solve 0/8 dirs · starting', 'Solving · dir 1/8'],
+  // The last direction must not read as a ninth.
+  ['solve 8/8 dirs · starting', 'Solving · dir 8/8'],
+];
+for (const [line, want] of labels) {
+  const got = progressParse(line).label;
+  if (got !== want) { bad++; console.log(`LABEL MISMATCH ${JSON.stringify(line)} -> ${JSON.stringify(got)} (want ${JSON.stringify(want)})`); }
+}
+
+console.log(bad === 0
+  ? `all ${cases.length + legacy.length + running.length + labels.length} strings agree with the C# writer`
+  : `${bad} mismatches`);
 process.exit(bad === 0 ? 0 : 1);

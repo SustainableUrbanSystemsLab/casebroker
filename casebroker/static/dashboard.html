@@ -748,6 +748,29 @@
     height: 100%;
     transition: width 0.4s cubic-bezier(0.4, 0, 0.2, 1);
   }
+  .progress-bar-wrap.thin { height: 6px; box-shadow: none; }
+  /* The unit under way. Not a fabricated fill: a translucent band the width of
+     that one unit, with the barber-pole motion every progress indicator since
+     the 1990s has used for "working, duration unknown". */
+  .progress-segment.active {
+    opacity: 0.45;
+    background-image: repeating-linear-gradient(
+      -45deg, rgba(255, 255, 255, 0.55) 0 5px, rgba(255, 255, 255, 0) 5px 10px);
+    background-size: 14.15px 100%;
+    animation: progress-stripes 900ms linear infinite;
+  }
+  @keyframes progress-stripes { from { background-position: 0 0; } to { background-position: 14.15px 0; } }
+  /* Motion is decoration here -- the width already carries the meaning -- so it
+     goes away for anyone who asked for less of it, and the band stays visible. */
+  @media (prefers-reduced-motion: reduce) {
+    .progress-segment.active { animation: none; }
+  }
+  .progress-caption {
+    display: flex; justify-content: space-between; gap: 8px; align-items: baseline;
+    margin-top: 4px; font-size: 10.5px; color: var(--text-muted);
+  }
+  .progress-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .progress-pct { flex: none; font-variant-numeric: tabular-nums; }
   .progress-segment.done { background: var(--accent); }
   .progress-segment.leased { background: var(--primary); }
   .progress-segment.pending { background: var(--warn); }
@@ -2889,6 +2912,23 @@
     });
   }
   let openDetailId = null;
+  // The one expanded row's FULL record, which is the only place a spec is read.
+  // The case page no longer carries specs (they were most of its bytes and the
+  // table draws none of them), so the row that needs one fetches its own. Kept
+  // for the life of the page: an auto-refresh re-renders the table every 60 s
+  // and re-fetching then would make the panel flicker once a minute.
+  const caseDetails = new Map();
+
+  function ensureCaseDetail(id, rows) {
+    if (!id || caseDetails.has(id)) return;
+    caseDetails.set(id, null);                 // in flight: one request, not one per render
+    api("/v1/cases/" + encodeURIComponent(id)).then((full) => {
+      caseDetails.set(id, full);
+      if (openDetailId === id) renderCasesTable(rows);
+    }).catch(() => {
+      caseDetails.delete(id);                  // a failed fetch may be retried by reopening
+    });
+  }
 
   function badge(state) {
     // Escaped in both positions. The broker writes `state` from a fixed set, so
@@ -3030,56 +3070,92 @@
   // strings this has to read. Anything that does not parse stays text -- that is what keeps an
   // older worker, and every line a phase wants to say in prose, working.
   function progressFraction(line) {
+    const p = progressParse(line);
+    return p === null ? null : p.fraction;
+  }
+
+  /// How much of the bar is the unit currently RUNNING -- the part whose own
+  /// progress nobody can measure. Material's answer to "known start, unknown
+  /// end" is not a missing bar and not a fabricated one: it is a determinate
+  /// fill for what is finished plus an ACTIVE indicator over what is under way.
+  function progressRunning(line) {
+    const p = progressParse(line);
+    return p === null ? 0 : p.running;
+  }
+
+  /// The whole reading of one heartbeat line, or null when it says nothing a bar
+  /// could draw: { fraction, running, label, precise }.
+  ///
+  /// Two counting conventions live in this grammar and reading one as the other
+  /// is what made a case look FINISHED the moment its longest phase began. A
+  /// step count names the step now RUNNING -- "step 2/2: 01_foamRun" is printed
+  /// as a multi-hour solve starts -- so the work behind it is i-1 of n. A "dirs"
+  /// count is directions FINISHED, so it is i of n as it stands. Both are counts
+  /// of completed work once read correctly, and completed work is the only thing
+  /// a determinate bar may claim.
+  function progressParse(line) {
     if (!line) return null;
-    const pair = (text) => {
-      for (const raw of String(text).split(/[\s,]+/)) {
+    const text = String(line);
+    const pairIn = (part) => {
+      for (const raw of String(part).split(/[\s,]+/)) {
         // Punctuation around the pair is stripped so the two shapes older workers
         // still send are understood as well: "step 3/5: 03_snappyHexMesh" from a
         // node built before the grammar existed, and "case_270 [3/8 dirs] iter 412"
-        // from runner/run_case.sh, which is what every cluster worker sends. Both
-        // carry a real count of work done; there is no reason to show them as text
-        // when the number is right there.
+        // from runner/run_case.sh, which is what every cluster worker sends.
         const token = raw.replace(/^[\[(]+/, "").replace(/[\])::;.]+$/, "");
         const m = /^(-?[\d.]+)\/(-?[\d.]+)$/.exec(token);
         if (!m) continue;
         const a = parseFloat(m[1]), b = parseFloat(m[2]);
         if (!isFinite(a) || !isFinite(b) || b <= 0 || a < 0) continue;
-        return a / b;
+        return { a, b };
       }
       return null;
     };
-    // A step count whose CURRENT step is the solver is not a fraction of the case.
-    // "step 2/2: 01_foamRun" is printed the moment a run that takes hours begins,
-    // so drawing 2/2 shows a finished case at the start of its longest phase --
-    // worse than no bar, because it is confidently wrong. Such a line falls back
-    // to text unless it also carries a real iteration pair (iter 412/2000), which
-    // is what a node new enough to count iterations sends.
-    // No \b before the name: the steps are numbered ("01_foamRun"), and an
-    // underscore IS a word character, so a leading boundary never matches.
-    const solving = /(foamrun|simplefoam|urbanmicroclimatefoam|foammultirun|potentialfoam)/i;
-    const hasIterations = /\biter\s+[\d.]+\s*\/\s*[\d.]+/i.test(String(line));
-    if (solving.test(String(line)) && !hasIterations) return null;
 
-    const parts = String(line).split("·");
-    const outer = pair(parts[0]);
+    const parts = text.split("\u00b7");
+    const head = parts[0];
+    const outer = pairIn(head);
     if (outer === null) return null;
-    const head = /^(-?[\d.]+)\/(-?[\d.]+)$/;
-    let fraction = outer;
-    if (parts.length > 1) {
-      const inner = pair(parts.slice(1).join(" "));
-      if (inner !== null) {
-        // Rebuild from the counts so the inner pair lands INSIDE the current unit rather than
-        // being averaged with the outer one.
-        for (const token of String(parts[0]).split(/[\s,]+/)) {
-          const m = head.exec(token);
-          if (!m) continue;
-          const done = parseFloat(m[1]), total = parseFloat(m[2]);
-          if (total > 0) fraction = (done + inner) / total;
-          break;
-        }
-      }
+    const inner = parts.length > 1 ? pairIn(parts.slice(1).join(" ")) : null;
+
+    const countsFinished = /\bdirs?\b/i.test(head);
+    const completed = Math.max(0, countsFinished ? outer.a : outer.a - 1);
+    const clamp = (x) => Math.max(0, Math.min(1, x));
+    // The inner pair says how far into the current unit we are, which is what
+    // keeps the bar moving through the hours one direction takes. With it there
+    // is nothing unknown left to mark as active.
+    const fraction = clamp(inner === null ? completed / outer.b : (completed + inner.a / inner.b) / outer.b);
+    const running = inner === null ? clamp(1 / outer.b) : 0;
+
+    return { fraction, running, precise: inner !== null, label: progressLabel(text, head, outer, inner, countsFinished) };
+  }
+
+  // Which OpenFOAM programs mean "this step is the solve". No \b before the name:
+  // the steps are numbered ("01_foamRun"), and an underscore IS a word character,
+  // so a leading boundary never matches.
+  const SOLVER_STEP = /(foamrun|simplefoam|urbanmicroclimatefoam|foammultirun|potentialfoam)/i;
+
+  /// What the bar cannot say, in words. Sentence case, no dictionary names, no
+  /// counts the reader has to decode -- the raw line stays in the tooltip.
+  function progressLabel(text, head, outer, inner, countsFinished) {
+    const word = head.trim().split(/[\s]/)[0].toLowerCase();
+    const phase = SOLVER_STEP.test(text) || word === "solve" || countsFinished ? "Solving" : "Meshing";
+    if (countsFinished) {
+      // Directions FINISHED, so the one under way is the next.
+      const dir = `dir ${Math.min(outer.a + 1, outer.b)}/${outer.b}`;
+      return inner === null ? `${phase} \u00b7 ${dir}` : `${phase} \u00b7 ${dir} \u00b7 iter ${inner.a}/${inner.b}`;
     }
-    return Math.max(0, Math.min(1, fraction));
+    // The detail is whatever follows the count: after the separator when there
+    // is one ("mesh 3/5 \u00b7 03_snappyHexMesh"), otherwise after the pair itself,
+    // which is how the older "step 2/2: 01_foamRun" carries it.
+    const after = text.indexOf("\u00b7") >= 0
+      ? text.split("\u00b7").slice(1).join(" ")
+      : text.replace(/^[\s\S]*?\d+\s*\/\s*\d+/, "");
+    const tail = after.replace(/^[\s:\])]+/, "").trim();
+    // "03_snappyHexMesh" is a step's ordinal plus its program; the ordinal is
+    // already in the count beside it.
+    const name = tail.replace(/^\d+_/, "").trim();
+    return `${phase} \u00b7 step ${outer.a}/${outer.b}` + (name ? ` \u00b7 ${name}` : "");
   }
 
   /// One card per place work happens, from BOTH sources.
@@ -3140,21 +3216,47 @@
     return word === "mesh" || word === "solve" ? word : "";
   }
 
-  /// A bar when the line carries a fraction, the text either way.
+  /// One heartbeat line as a progress indicator.
+  ///
+  /// Three states, and the middle one is the whole point. When the line says
+  /// exactly how far into its current unit it is, the bar is DETERMINATE and
+  /// carries a percentage. When it only says which unit is under way, the bar
+  /// fills to the work genuinely FINISHED and marks the running unit with an
+  /// active indicator -- no percentage, because none of it would be backed.
+  /// When the line is prose, it stays prose. (Suppressing the bar for the second
+  /// case was the previous attempt at honesty and it threw away a true number:
+  /// "step 2/2" really does mean one step of two is done.)
   function progressCell(line) {
-    if (!line) return "—";
-    const f = progressFraction(line);
+    if (!line) return "\u2014";
+    const p = progressParse(line);
     // A block, not an inline span: beside a case id in the fleet table an inline
-    // one runs straight into it -- "v2-05b5c7e73e5ddcb2step 3/5: …" is what that
+    // one runs straight into it -- "v2-05b5c7e73e5ddcb2step 3/5: ..." is what that
     // looked like.
-    if (f === null) return `<div class="mono" style="font-size:11px;color:var(--text-muted);`
+    if (p === null) return `<div class="mono" style="font-size:11px;color:var(--text-muted);`
       + `overflow:hidden;text-overflow:ellipsis" title="${esc(line)}">${esc(line)}</div>`;
-    const pct = Math.round(f * 100);
-    const phase = progressPhase(line);
-    return `<div style="min-width:120px">`
-      + `<div class="progress-bar-wrap" style="height:8px" title="${esc(line)}">`
-      + `<div class="progress-segment ${phase === "mesh" ? "leased" : "done"}" style="width:${pct}%"></div></div>`
-      + `<div class="mono" style="font-size:10px;color:var(--text-muted);margin-top:3px">${esc(line)}</div></div>`;
+
+    const pct = Math.round(p.fraction * 100);
+    const runPct = Math.round(p.running * 100);
+    // One hue, deliberately. Green is this dashboard's DONE colour -- on the
+    // campaign bar, on every badge -- so a green bar on a case still solving
+    // says the wrong thing in the one glance a status colour gets. A case with
+    // progress is a LEASED case, so it wears the leased colour and the label
+    // beside it is what says meshing or solving.
+    // aria-valuenow is the finished work only; aria-valuetext is what a screen
+    // reader should actually hear, since "50%" alone would imply the rest is
+    // idle when it is the part being worked on.
+    const aria = p.precise
+      ? `aria-valuenow="${pct}"`
+      : `aria-valuenow="${pct}" aria-valuetext="${esc(p.label)}, at least ${pct}% complete, in progress"`;
+    return `<div style="min-width:132px" title="${esc(line)}">`
+      + `<div class="progress-bar-wrap thin" role="progressbar" aria-valuemin="0" aria-valuemax="100" ${aria}>`
+      + `<div class="progress-segment leased" style="width:${pct}%"></div>`
+      + (runPct > 0 ? `<div class="progress-segment leased active" style="width:${runPct}%"></div>` : "")
+      + `</div>`
+      + `<div class="progress-caption">`
+      + `<span class="progress-label">${esc(p.label)}</span>`
+      + (p.precise ? `<span class="progress-pct mono">${pct}%</span>` : "")
+      + `</div></div>`;
   }
 
   const CASE_COLUMNS = [
@@ -3187,6 +3289,13 @@
 
     $("casesBody").innerHTML = cases.map((c) => {
       const open = c.case_id === openDetailId;
+      // The list row plus whatever the full record added (spec). Before it
+      // lands the panel draws from the row alone, which is every field except
+      // the spec -- a blank moment rather than a missing panel.
+      // NOT named `detail`: that is one of the server field names the escaping
+      // sweep watches for, and a local of that name would make every future
+      // interpolation of it look like escaped server data.
+      const expandedCase = open ? Object.assign({}, c, caseDetails.get(c.case_id) || {}) : null;
       return `
         <tr class="caseRow${open ? " open" : ""}" data-id="${esc(c.case_id)}">
           <td>
@@ -3209,7 +3318,7 @@
         </tr>
         <tr class="caseDetailRow${open ? "" : " closed"}">
           <td colspan="9">
-            ${open ? caseDetailHtml(c) : ""}
+            ${open ? caseDetailHtml(expandedCase) : ""}
           </td>
         </tr>`;
     }).join("");
@@ -3220,6 +3329,7 @@
     // which looked like the fetch had failed; with the per-case cache in
     // loadFootprints it costs no request.
     autoLoadGeometry();
+    ensureCaseDetail(openDetailId, cases);
 
     $("casesBody").querySelectorAll("tr.caseRow").forEach((tr) => {
       tr.addEventListener("click", () => {
@@ -3246,11 +3356,35 @@
     $("casesNext").disabled = offset + limit >= total;
   }
 
-  async function loadCases() {
+  /// The case request, STARTED but not awaited.
+  ///
+  /// Split from the rendering so `refresh` can put it on the wire in the same
+  /// tick as /healthz and /v1/status instead of after both have answered. What
+  /// it returns is a promise and the shape to expect back, nothing more.
+  function startCases() {
     if (caseList.singleId) {
+      return { single: true, promise: api("/v1/cases/" + encodeURIComponent(caseList.singleId)) };
+    }
+    const q = new URLSearchParams({ limit: caseList.limit, offset: caseList.offset,
+                                    sort: caseList.sort, direction: caseList.dir });
+    if (caseList.state) q.set("state", caseList.state);
+    if (caseList.split) q.set("split", caseList.split);
+    if (caseList.city) q.set("city_cluster", caseList.city);
+    // The page ships every case's `spec` -- a few hundred bytes of site,
+    // directions and mesh settings each -- and the table draws none of it. Only
+    // the ONE expanded row needs it, and that row fetches its own full record.
+    // Measured on a 4,000-case campaign: 61.6 KB a page, 25.0 KB without it.
+    q.set("include_spec", "false");
+    return { single: false, promise: api("/v1/cases?" + q.toString()) };
+  }
+
+  async function loadCases(started) {
+    const req = started || startCases();
+    if (req.single) {
       try {
-        const c = await api("/v1/cases/" + encodeURIComponent(caseList.singleId));
+        const c = await req.promise;
         openDetailId = c.case_id;
+        caseDetails.set(c.case_id, c);   // already the full record, spec included
         renderCasesTable([c]);
         caseList.total = 1;
       } catch (e) {
@@ -3263,14 +3397,8 @@
       return;
     }
 
-    const q = new URLSearchParams({ limit: caseList.limit, offset: caseList.offset,
-                                    sort: caseList.sort, direction: caseList.dir });
-    if (caseList.state) q.set("state", caseList.state);
-    if (caseList.split) q.set("split", caseList.split);
-    if (caseList.city) q.set("city_cluster", caseList.city);
-
     try {
-      const page = await api("/v1/cases?" + q.toString());
+      const page = await req.promise;
       caseList.total = page.total;
       renderCasesTable(page.cases);
       renderPager();
@@ -3973,8 +4101,26 @@
     setConn("working", "refreshing…");
 
     try {
-      // First, check unauthenticated healthz to see server state & DB
-      const health = await checkHealth();
+      // Every request this page needs is independent of the others, so they go
+      // out TOGETHER. They used to be awaited in a chain -- /healthz, then
+      // /v1/status, then the case page -- and against the deployed broker each
+      // round trip measures ~350 ms of pure latency while the queries behind
+      // them take about a millisecond, so the chain spent roughly a second
+      // doing nothing but waiting. One round trip instead of three.
+      //
+      // The auth gate still branches on /healthz. When it says "no credential",
+      // the other two turn out to have been wasted -- one cheap 401 -- which is
+      // the price of not making every authenticated load wait to find out.
+      const healthP = checkHealth();
+      const statusP = api("/v1/status");
+      const casesReq = startCases();
+      // Handlers attached NOW, in the same tick they were created: a rejection
+      // nobody is listening to yet is an unhandled rejection, and on the gated
+      // path below nobody ever listens.
+      statusP.catch(() => {});
+      casesReq.promise.catch(() => {});
+
+      const health = await healthP;
       const token = $("token").value.trim();
 
       // If the server requires SOME credential and this visitor has none.
@@ -4000,7 +4146,7 @@
       }
 
       $("authNotice").style.display = "none";
-      const st = await api("/v1/status");
+      const st = await statusP;
       lastStatus = st;
       setConn("ok", "connected");
       showErr(null);
@@ -4022,7 +4168,7 @@
       $("connectedDb").title = (health && health.db) || "";
       $("connectedSummary").style.display = "flex";
       renderStatus(st);
-      await loadCases();
+      await loadCases(casesReq);
       await checkFinished(st.by_state?.["done"] ?? null);
       nextRefreshSeconds = 60;
     } catch (e) {

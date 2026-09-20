@@ -75,8 +75,11 @@ def test_progress_cell_escapes_the_line_it_draws():
     body = m.group(1)
     # Every interpolation of the line itself must go through esc(); the only other
     # things interpolated are a rounded number and a phase word this file chose.
+    # `label` counts as the line too: it is BUILT from the heartbeat (it carries
+    # the step's program name verbatim), so an unescaped label is the same hole
+    # one indirection further along.
     for expr in re.findall(r"\$\{([^{}]*)\}", body):
-        if "line" in expr:
+        if "line" in expr or "label" in expr:
             assert "esc(" in expr, f"progressCell interpolates the line unescaped: ${{{expr}}}"
     assert body.count("esc(line)") >= 2, (
         "progressCell() must escape the line in the title AND the text")

@@ -759,10 +759,30 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         return {"scope": "none", "auth": "token"}
 
     @app.get("/", include_in_schema=False)
-    def dashboard() -> FileResponse:
+    def dashboard(request: Request) -> Response:
         """A minimal ops UI: campaign status, workers, one-case lookup. Vanilla HTML/JS,
-        no build step, no external requests other than to this broker's own API."""
-        return FileResponse(_STATIC_DIR / "dashboard.html")
+        no build step, no external requests other than to this broker's own API.
+
+        The conditional request is answered HERE because `FileResponse` does not:
+        it computes an ETag and sends it, and then ignores the `If-None-Match`
+        the browser sends back, so every load re-downloaded the whole page.
+        Measured against the deployed broker: a request carrying the exact ETag
+        the server had just issued came back `200` with all 203,794 bytes. With
+        this, the same request is a `304` with no body.
+
+        `no-cache` rather than a max-age, deliberately: the page must never be
+        served stale from a cache after a deploy -- it is the thing that talks to
+        this broker's API. `no-cache` means "revalidate every time", which is the
+        round trip above, and the 304 makes that round trip carry no payload."""
+        path = _STATIC_DIR / "dashboard.html"
+        stat = path.stat()
+        # Strong enough for a file served off disk, and cheap: size plus mtime in
+        # nanoseconds changes on every deploy that changes the file.
+        etag = f'"{stat.st_size:x}-{stat.st_mtime_ns:x}"'
+        headers = {"ETag": etag, "Cache-Control": "no-cache"}
+        if etag in [t.strip() for t in (request.headers.get("if-none-match") or "").split(",")]:
+            return Response(status_code=304, headers=headers)
+        return FileResponse(path, headers=headers)
 
 
     # -- identity: who you are, and which machine that is -------------------
@@ -1674,12 +1694,16 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
     def list_cases(state: str | None = None, split: str | None = None,
                    city_cluster: str | None = None, limit: int = 50,
                    offset: int = 0, sort: str | None = None,
-                   direction: str = "desc") -> dict[str, Any]:
+                   direction: str = "desc", include_spec: bool = True) -> dict[str, Any]:
         """A page of cases for the dashboard's case browser -- most recently
         touched first, optionally filtered by state/split/city. Distinct from
-        ``GET /v1/cases/{case_id}`` (one case by id, used for a direct lookup)."""
+        ``GET /v1/cases/{case_id}`` (one case by id, used for a direct lookup).
+
+        ``include_spec=false`` leaves out the largest column, which more than
+        halves the page; a caller that wants one case's spec asks for that case."""
         return db.list_cases(conn, state=state, split=split, city_cluster=city_cluster,
-                             limit=limit, offset=offset, sort=sort, direction=direction)
+                             limit=limit, offset=offset, sort=sort, direction=direction,
+                             include_spec=include_spec)
 
     return app
 
