@@ -1141,6 +1141,13 @@ def heartbeat(conn, lease_id: str, lease_seconds: int = 3600,
         return False
     conn.execute("UPDATE cases SET lease_expires=?, updated_at=? WHERE lease_id=?",
                  (now + lease_seconds, now, lease_id))
+    # The WORKER was heard from too. Only lease, complete and fail used to touch
+    # this, and the dashboard calls a worker Offline after 300 s without it -- so
+    # a node solving a three-hour case, heartbeating every five minutes exactly as
+    # designed, went Offline five minutes in and stayed there until the case
+    # finished. The heartbeat IS the liveness signal; nothing else says a long
+    # solve is alive.
+    conn.execute("UPDATE workers SET last_seen=? WHERE worker_id=?", (now, row["lease_worker"]))
     if detail:
         # Only when it CHANGED. The worker heartbeats every 5 minutes for the
         # whole multi-hour solve, and reports "alive" whenever the runner has
@@ -1798,6 +1805,83 @@ def quarantine_not_on_land(conn, is_land, dry_run: bool = True,
         conn.execute("ROLLBACK")
         raise
     out["quarantined"] = len(ids_hit)
+    return out
+
+
+
+@_locked
+def reopen_cases(conn, *, error_contains: str | None = None,
+                 case_ids: list[str] | None = None,
+                 dry_run: bool = True, limit: int = 50) -> dict[str, Any]:
+    """Put quarantined cases back in the pool, with their attempts refunded.
+
+    Quarantine is meant to say "this SITE is broken" -- degenerate geometry that
+    fails identically everywhere. It also catches cases that merely ran three
+    times on machines that could not run anything: a stopped Docker daemon
+    charged an attempt per lease, and three of those quarantine a perfectly good
+    site (COD-PKAST-7865, 2026-09-19). ``runner/run_case.sh`` has carried the
+    warning for a year -- a wrongly fatal error "silently removes a site from the
+    campaign with no way back short of editing the database" -- and this is that
+    way back, so nobody has to open the database by hand.
+
+    The attempts counter is RESET rather than decremented. A case reopened after
+    a fleet-wide problem has a history of failures that say nothing about it, and
+    leaving them counted would quarantine it again on the first real one.
+
+    ``error_contains`` matches the last failure text the case recorded, which is
+    what makes this usable as "undo what that one broken node did" instead of
+    "reopen everything and hope". Matching is case-insensitive and substring, and
+    it looks at the events trail rather than a summary column so a case that
+    failed for two different reasons is judged on its LAST one.
+
+    ``dry_run`` defaults to TRUE, as it does for the land audit and for purge:
+    finding out how many cases are affected must not be the same keystroke as
+    changing production.
+    """
+    where = ["state = 'quarantined'"]
+    params: list[Any] = []
+    if case_ids:
+        where.append("case_id IN (%s)" % ",".join("?" for _ in case_ids))
+        params.extend(case_ids)
+
+    rows = conn.execute(
+        "SELECT case_id, attempts, max_attempts, updated_at FROM cases"
+        " WHERE " + " AND ".join(where) + " ORDER BY case_id", params).fetchall()
+
+    found, ids_hit = [], []
+    for r in rows:
+        row = dict(r)
+        last = conn.execute(
+            "SELECT detail FROM events WHERE case_id=? AND event IN ('failed', 'quarantined')"
+            " ORDER BY id DESC LIMIT 1", (row["case_id"],)).fetchone()
+        detail = (dict(last)["detail"] if last else None) or ""
+        if error_contains and error_contains.lower() not in detail.lower():
+            continue
+        ids_hit.append(row["case_id"])
+        if len(found) < limit:
+            found.append({"case_id": row["case_id"], "attempts": row["attempts"],
+                          "last_error": detail[:200]})
+
+    out: dict[str, Any] = {"matched": len(ids_hit), "examples": found,
+                           "dry_run": dry_run, "reopened": 0}
+    if dry_run or not ids_hit:
+        return out
+
+    now = _now()
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        for cid in ids_hit:
+            conn.execute(
+                "UPDATE cases SET state='pending', lease_id=NULL, lease_worker=NULL,"
+                " lease_expires=NULL, leased_at=NULL, attempts=0, updated_at=?"
+                " WHERE case_id=? AND state='quarantined'", (now, cid))
+            _event(conn, cid, None, "reopened",
+                   "attempts refunded: " + (error_contains or "reopened by an operator"), now)
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    out["reopened"] = len(ids_hit)
     return out
 
 

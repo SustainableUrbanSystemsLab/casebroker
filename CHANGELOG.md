@@ -218,7 +218,40 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
   `auth.DECOY_HASH`, computed once at import from random bytes. Measured after:
   0.95x.
 
+### Added
+- **A way back from quarantine.** `POST /v1/cases/reopen` puts quarantined cases
+  back in the pool with their attempts reset, filtered by what the case last
+  failed with (`error_contains`) so it undoes one broken node rather than
+  releasing every genuinely degenerate site. `dry_run` defaults to TRUE, as it
+  does for the land audit and for purge. `runner/run_case.sh` has carried the
+  warning since the first ICE run — a wrongly fatal error "silently removes a
+  site from the campaign with no way back short of editing the database" — and
+  until now there was no way back.
+
 ### Fixed
+- **A machine that could not run anything was charging the campaign's cases for
+  it.** COD-PKAST-7865 ran a worker with Docker Desktop stopped: it leased case
+  after case and failed each one with "Docker daemon is not running", 7 failures
+  and 0 completions, taking one case from attempt 2 to attempt 3. Attempts are
+  finite and the third quarantines the case, so a local problem was deleting
+  good sites from the campaign.
+
+  The runner now says which kind of failure it is: exit **69** (sysexits'
+  `EX_UNAVAILABLE`, "this machine cannot run cases") is the mirror of the 64 it
+  already had for "this case cannot be run anywhere". The worker turns 69 into a
+  RELEASE — refunding the attempt, the treatment preemption already gets — and
+  stops, instead of walking the queue failing everything in it. `detect_runtime`
+  also probes `podman info` the way it always probed `docker info`: a binary
+  being installed says nothing about the machine being started, and picking a
+  podman whose machine is down fails minutes later, mid-case. The matching fix on
+  the Eddy3D side shipped as `061de886` there.
+- **A worker solving a long case reported itself Offline.** The dashboard calls a
+  worker Offline after 300 s without `last_seen`, and only lease, complete and
+  fail moved it — never the heartbeat. So a node heartbeating every five minutes
+  exactly as designed went Offline five minutes into a three-hour solve and
+  stayed there until it finished, which is what the fleet view was showing while
+  the nodes were in fact alive. The heartbeat now marks the worker seen: it IS
+  the liveness signal for a long solve, and nothing else says one is alive.
 - **`bootstrap_worker.ps1` built new Windows workers from the paper, not the
   campaign.** It cloned `JP-Wind-ML-Comparison` on `v2-dataset-extension` for
   `real_cities`, so every node bootstrapped from the dashboard's *Issue token*

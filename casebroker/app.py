@@ -1294,6 +1294,27 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         return db.quarantine_not_on_land(conn, footprints.on_land,
                                          dry_run=dry_run, limit=limit)
 
+    @app.post("/v1/cases/reopen", dependencies=[WriteAuth])
+    def reopen_cases(error_contains: str | None = None, dry_run: bool = True,
+                     limit: int = 50) -> dict[str, Any]:
+        """Put quarantined cases back in the pool, attempts refunded.
+
+        Quarantine means "this site is broken everywhere". It also collects cases
+        that merely met three machines that could not run anything: a stopped
+        container daemon charged an attempt per lease, and three of those
+        quarantine a site with nothing wrong with it. `runner/run_case.sh` has
+        carried the warning since the first ICE run -- a wrongly fatal error
+        "silently removes a site from the campaign with no way back short of
+        editing the database" -- and this is that way back.
+
+        `error_contains` matches the case's LAST failure text, which is what makes
+        this "undo what that one broken node did" rather than "reopen everything".
+
+        `dry_run` defaults to TRUE, as it does for the land audit and for purge.
+        """
+        return db.reopen_cases(conn, error_contains=error_contains,
+                               dry_run=dry_run, limit=limit)
+
     @app.delete("/v1/cases", dependencies=[PurgeAuth])
     def purge_cases(expect: int | None = None, recipe: str | None = None,
                     state: str | None = None, dry_run: bool = True) -> dict[str, Any]:
