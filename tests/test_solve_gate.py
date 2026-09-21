@@ -258,3 +258,98 @@ def test_nan_in_the_solver_residuals_fails_a_binary_case(tmp_path):
     (proc0 / "250" / "U").write_bytes(b"FoamFile { format binary; }\n" + bytes([0, 1]))
     rc, out = run_gate(0, log, proc0, "250")
     assert rc == 1 and "solver residuals" in out
+
+
+# -- naming a divergence as a divergence ------------------------------------
+#
+# Case v2-000c178c579bf034 (Shanghai, 2026-09-21) diverged on a mesh with 165
+# highly skew faces, one rank hit the FOAM_SIGFPE trap, and MS-MPI tore down the
+# other 35. What the campaign stored was "MPI ABORT: Parallel job was aborted",
+# so the investigation went looking for a broken MS-MPI install. MPI was healthy
+# -- `mpiexec -n 4` ran clean on the same box while the case sat quarantined.
+# These tests pin the gate to naming the cause over the wreckage.
+
+
+def diverged_log(tmp_path, name="12.log", trap=True):
+    """A real divergence: the continuity error doubling its exponent each step,
+    then the FPE trap firing inside the pressure correction. The numbers are the
+    ones the case above actually printed."""
+    body = (
+        "sigFpe : Enabling floating point exception trapping (FOAM_SIGFPE).\n"
+        "Time = 1\n\n"
+        "time step continuity errors : sum local = 0.0002611373, global = -1.2881506e-05\n"
+        "time step continuity errors : sum local = 7.0329264, global = -0.042743328\n"
+        "time step continuity errors : sum local = 2.1507614e+09, global = 647103.14\n"
+        "time step continuity errors : sum local = 3.5680245e+30, global = 1.1554529e+25\n"
+    )
+    if trap:
+        body += (
+            "[15] Generating stack trace...\n"
+            "\tZN4Foam6sigFpe13sigFpeHandlerEi [0x7ff89a13c774+0x34]\n"
+            "\tZN4Foam7solvers19incompressibleFluid15correctPressureEv [0x7ff89522b130+0xb0]\n"
+            "job aborted:\n[15] process exited without calling finalize\n"
+            "MPI_ABORT was invoked on rank 15\n"
+        )
+    log = tmp_path / name
+    log.write_text(body)
+    return log
+
+
+def test_a_diverged_solve_is_named_as_divergence_not_an_mpi_abort(tmp_path):
+    log = diverged_log(tmp_path)
+    rc, out = run_gate(1, log, make_fields(tmp_path, latest="1"), "1")
+    assert rc == 1
+    assert "diverged" in out, f"the cause has to be in the line the broker stores: {out!r}"
+    # The exit code is still reported -- naming the cause replaces nothing.
+    assert "exited 1" in out
+
+
+def test_a_continuity_blowup_alone_names_divergence_without_a_stack_trace(tmp_path):
+    """A rank killed by the scheduler mid-divergence leaves the continuity trail
+    but no backtrace. The blow-up is enough on its own."""
+    log = diverged_log(tmp_path, trap=False)
+    rc, out = run_gate(1, log, make_fields(tmp_path, latest="1"), "1")
+    assert rc == 1 and "diverged" in out
+    assert "1e+30" in out, f"the magnitude reached, so the reader can judge it: {out!r}"
+
+
+def test_a_diverged_solve_that_exits_zero_is_still_named(tmp_path):
+    """MPI_ABORT is in the fatal pattern, so this log failed before this change
+    too -- but as a generic "fatal error in 12.log" that named the abort."""
+    log = diverged_log(tmp_path)
+    rc, out = run_gate(0, log, make_fields(tmp_path, latest="1"), "1")
+    assert rc == 1 and "diverged" in out
+
+
+def test_an_ordinary_nonzero_exit_is_still_just_the_exit_code(tmp_path):
+    """The control. An OOM kill says nothing about the solution, and must not be
+    dressed up as a divergence -- that would send the next reader to the mesh."""
+    log = converged_log(tmp_path)
+    rc, out = run_gate(137, log, make_fields(tmp_path), "250")
+    assert rc == 1
+    assert "mpirun exited 137" in out
+    assert "diverged" not in out
+
+
+def test_a_large_but_finite_continuity_sum_is_not_a_divergence(tmp_path):
+    """Healthy sums on a big mesh reach 1e+09 without anything being wrong. The
+    threshold sits at 1e+15, far above the noise and far below a real blow-up."""
+    log = tmp_path / "12.log"
+    log.write_text(
+        "time step continuity errors : sum local = 2.1507614e+09, global = 4.2e+05\n"
+        "SIMPLE solution converged in 250 iterations\n\nEnd\n"
+    )
+    assert run_gate(0, log, make_fields(tmp_path), "250") == (0, "OK")
+
+
+def test_the_sigfpe_banner_alone_is_not_a_divergence(tmp_path):
+    """The banner opens every healthy log. It contains "sigFpe" but not the
+    handler frame, and must not be read as a trap that fired."""
+    log = converged_log(tmp_path, name="banner.log")
+    log.write_text(
+        "sigFpe : Enabling floating point exception trapping (FOAM_SIGFPE).\n"
+        + log.read_text()
+    )
+    rc, out = run_gate(1, log, make_fields(tmp_path), "250")
+    assert rc == 1
+    assert "diverged" not in out and "mpirun exited 1" in out
