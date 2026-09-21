@@ -372,6 +372,59 @@ def test_a_database_created_with_a_32_bit_column_is_widened_in_place():
         fresh_conn().execute("DROP TABLE IF EXISTS %s" % table)
 
 
+def test_a_declared_recipe_filters_the_lease_and_the_build_is_recorded():
+    """The lease gained an IN (...) over declared recipes and four worker columns.
+    Both are new SQL on the production engine, which no SQLite test exercises."""
+    seed(2, "recipes")                                   # recipe "pgtest"
+    conn = fresh_conn()
+    w = prefix("w-build")
+    assert db.lease(conn, w, count=5, build="1.0+aaaaaaaa", version="1.0",
+                    platform="linux-x64", recipes=[prefix("some-other-recipe")]) == []
+    got = db.lease(conn, w, count=5, build="1.0+bbbbbbbb", version="1.0",
+                   platform="linux-x64", recipes=["pgtest"])
+    assert len(got) == 2
+    row = fresh_conn().execute(
+        "SELECT build, platform, recipes, drain FROM workers WHERE worker_id = ?", (w,)).fetchone()
+    assert (row["build"], row["platform"], row["drain"]) == ("1.0+bbbbbbbb", "linux-x64", 0)
+    assert "pgtest" in row["recipes"]
+
+    # Draining: no new case, and its OWN case still comes back without an attempt.
+    db.set_worker_drain(conn, w, True, "pgtest drain")
+    assert db.lease(conn, w, count=5, recipes=["pgtest"]) == []
+    own = db.lease(conn, w, count=1, recipes=["pgtest"], resume_case_ids=[got[0].case_id])
+    assert [g.case_id for g in own] == [got[0].case_id] and own[0].attempt == got[0].attempt
+
+    # A finished case is tallied for the build its archive names.
+    build = prefix("build")
+    assert db.complete(conn, own[0].lease_id, "file:///pgtest-build",
+                       metrics={"eddy3d_build": build, "unconverged_count": 1})
+    tally = fresh_conn().execute("SELECT done, unconverged FROM build_stats WHERE build = ?", (build,)).fetchone()
+    assert (tally["done"], tally["unconverged"]) == (1, 1)
+    fresh_conn().execute("DELETE FROM build_stats WHERE build = ?", (build,))
+
+
+@scratch_only
+def test_the_release_catalog_and_target_roundtrip():
+    """Fleet-wide settings: only ever written against a throwaway Postgres -- the
+    main-only job points this file at the LIVE campaign database, and a test must
+    never be what retargets a fleet."""
+    conn = fresh_conn()
+    build, w = prefix("rel"), prefix("w-rel")
+    try:
+        db.lease(conn, w, build="0.0+old", platform="linux-x64")
+        db.register_release(conn, build, "linux-x64", "E3D-x", "ab" * 32, by="pgtest")
+        db.register_release(conn, build, "linux-x64", "E3D-y", "cd" * 32, by="pgtest")   # re-published
+        db.set_setting(conn, "target_build", build, by="pgtest")
+        got = db.node_release(conn, w, "linux-x64", "0.0+old")
+        assert (got["target_build"], got["file"], got["sha256"]) == (build, "E3D-y", "cd" * 32)
+        assert db.lease_refusal(conn, "0.0+old") is None
+        assert any(b["build"] == build for b in db.list_releases(conn)["builds"])
+    finally:
+        db.set_setting(conn, "target_build", None, by="pgtest")
+        db.delete_release(conn, build, by="pgtest")
+        fresh_conn().execute("DELETE FROM events WHERE worker_id = 'pgtest'")
+
+
 def test_many_real_connections_racing_never_double_lease():
     """End-to-end: many HTTP-style callers hitting the real deployed system never
     see a case double-assigned. This does NOT test FOR UPDATE SKIP LOCKED in

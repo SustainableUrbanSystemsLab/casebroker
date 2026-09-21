@@ -115,10 +115,12 @@ def test_the_workers_table_sorts_every_column_it_draws():
     block = block[:block.index("];")]
     import re
     labels = re.findall(r'\["([^"]+)",\s*"([^"]+)"\]', block)
-    assert len(labels) == 10, f"the workers table draws {len(labels)} headers"
+    # 11 since the Build column: which CODE a worker runs, beside where it runs.
+    assert len(labels) == 11, f"the workers table draws {len(labels)} headers"
     # Status is a reading of last_seen and reliability is computed from the two
     # counts; both have to sort by something real rather than by a missing field.
     by_label = dict(labels)
     assert by_label["Status"] == "last_seen"
+    assert by_label["Build"] == "build"
     assert by_label["Reliability"] == "reliability"
     assert "if (key === \"reliability\")" in dash, "reliability needs its own comparison"

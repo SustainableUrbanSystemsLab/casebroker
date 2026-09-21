@@ -160,6 +160,39 @@ class LeaseIn(BaseModel):
     # this same worker_id. Never honoured for a different worker -- the
     # checkpoint is on that machine's own disk.
     resume_case_ids: list[str] | None = Field(default=None, max_length=64)
+    # WHICH CODE is asking. All optional and additive: a worker built before
+    # them still leases exactly as it did. `build` is version+commit -- the
+    # product version is the same for every push, so it cannot tell two nodes
+    # apart -- and `recipes` are the exact recipes this build can produce.
+    build: str | None = Field(default=None, max_length=96)
+    version: str | None = Field(default=None, max_length=64)
+    platform: str | None = Field(default=None, max_length=32)
+    recipes: list[str] | None = Field(default=None, max_length=64)
+
+
+class ReleaseIn_(BaseModel):
+    """One published build for one platform. Named with a trailing underscore
+    because ReleaseIn is already the body of POST /v1/release (giving a case
+    back), which is a different meaning of the same word."""
+    build: str = Field(min_length=3, max_length=96)
+    platform: str = Field(min_length=3, max_length=32)
+    file: str = Field(min_length=1, max_length=200)
+    sha256: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-fA-F]{64}$")
+    notes: str | None = Field(default=None, max_length=500)
+
+
+class TargetIn(BaseModel):
+    build: str | None = Field(default=None, max_length=96)
+    apply: str | None = Field(default=None, max_length=16)
+
+
+class PolicyIn(BaseModel):
+    require_build: bool | None = None
+    blocked_builds: list[str] | None = Field(default=None, max_length=64)
+
+
+class DrainIn(BaseModel):
+    reason: str | None = Field(default=None, max_length=200)
 
 
 class FleetIn(BaseModel):
@@ -1427,13 +1460,104 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
                      f"cannot lease as {body.worker_id!r}. Use that machine's own "
                      "token, or set CASEBROKER_WORKER_ID to match it -- or to "
                      f"anything under it, such as {machine['name']}-<job>-<task>.")
+        # 426, not 403: the credential is fine and the BUILD is not. A node that
+        # sees it knows to wait for its update rather than to re-pair.
+        refused = db.lease_refusal(conn, body.build)
+        if refused:
+            raise HTTPException(426, refused)
         got = db.lease(conn, body.worker_id, count=body.count,
                        lease_seconds=body.lease_seconds, splits=body.splits,
                        host=body.host, cluster=body.cluster,
-                       resume_case_ids=body.resume_case_ids)
+                       resume_case_ids=body.resume_case_ids,
+                       build=body.build, version=body.version,
+                       platform=body.platform, recipes=body.recipes)
         return [LeaseOut(case_id=g.case_id, lease_id=g.lease_id, expires_at=g.expires_at,
                          attempt=g.attempt, spec=g.spec) for g in got]
 
+
+    # -- node releases -----------------------------------------------------
+    #
+    # The broker says WHICH build a node should run and what its file must hash
+    # to. It never serves the file: nodes take it from their own release share
+    # (Syncthing, next to the folder their archives already travel through) and
+    # verify it against the hash given here, over the one channel that is
+    # already authenticated per machine.
+
+    @app.get("/v1/node/release", dependencies=[WriteAuth])
+    def node_release(request: Request, worker_id: str, platform: str | None = None,
+                     build: str | None = None) -> dict[str, Any]:
+        """What this node should be running. Asked before every lease, and
+        during a solve so an update does not have to wait for the case."""
+        machine = _machine_principal(request)
+        if machine and not _may_lease_as(machine["name"], worker_id):
+            raise HTTPException(403, f"this credential belongs to {machine['name']!r}")
+        return db.node_release(conn, worker_id, platform, build)
+
+    @app.get("/v1/releases", dependencies=[ReadAuth])
+    def releases() -> dict[str, Any]:
+        return db.list_releases(conn)
+
+    @app.post("/v1/releases")
+    def register_release(body: ReleaseIn_, user=AdminAuth) -> dict[str, Any]:
+        """Record a published build. Admin only, like everything below: pointing
+        a fleet at a build is remote code execution by design, so who may do it
+        is the whole security model."""
+        db.register_release(conn, body.build, body.platform, body.file, body.sha256,
+                            body.notes, by=user["username"])
+        return {"build": body.build, "platform": body.platform}
+
+    @app.delete("/v1/releases/{build}")
+    def delete_release(build: str, user=AdminAuth) -> dict[str, Any]:
+        current = db.list_releases(conn)
+        if current["target_build"] == build:
+            raise HTTPException(409, f"{build} is the fleet's target; move the target first")
+        return {"removed": db.delete_release(conn, build, by=user["username"])}
+
+    @app.put("/v1/releases/target")
+    def set_release_target(body: TargetIn, user=AdminAuth) -> dict[str, Any]:
+        """Point the whole fleet at a build (or, with build=null, at nothing).
+
+        Refused for a build with no published file: every node would learn it
+        should move and none of them could."""
+        if body.apply is not None:
+            if body.apply not in db.APPLY_MODES:
+                raise HTTPException(422, f"apply must be one of {', '.join(db.APPLY_MODES)}")
+            db.set_setting(conn, "target_apply", body.apply, by=user["username"])
+        if "build" in body.model_fields_set:
+            if body.build and not any(r["build"] == body.build for r in db.list_releases(conn)["releases"]):
+                raise HTTPException(409, f"{body.build} has no published file; register it first")
+            db.set_setting(conn, "target_build", body.build, by=user["username"])
+        return db.list_releases(conn)
+
+    @app.put("/v1/releases/policy")
+    def set_release_policy(body: PolicyIn, user=AdminAuth) -> dict[str, Any]:
+        if body.require_build is not None:
+            db.set_setting(conn, "require_build", "1" if body.require_build else "0", by=user["username"])
+        if body.blocked_builds is not None:
+            db.set_setting(conn, "blocked_builds", json.dumps(sorted(set(body.blocked_builds))),
+                           by=user["username"])
+        return db.list_releases(conn)
+
+    @app.put("/v1/workers/{worker_id}/target")
+    def set_worker_target(worker_id: str, body: TargetIn, user=AdminAuth) -> dict[str, Any]:
+        """The canary: move ONE worker to a build, ahead of the fleet."""
+        if body.build and not any(r["build"] == body.build for r in db.list_releases(conn)["releases"]):
+            raise HTTPException(409, f"{body.build} has no published file; register it first")
+        if not db.set_worker_target(conn, worker_id, body.build, by=user["username"]):
+            raise HTTPException(404, f"no worker named {worker_id!r}")
+        return {"worker_id": worker_id, "target_build": body.build}
+
+    @app.post("/v1/workers/{worker_id}/drain")
+    def drain_worker(worker_id: str, body: DrainIn, user=AdminAuth) -> dict[str, Any]:
+        if not db.set_worker_drain(conn, worker_id, True, body.reason, by=user["username"]):
+            raise HTTPException(404, f"no worker named {worker_id!r}")
+        return {"worker_id": worker_id, "drain": True}
+
+    @app.post("/v1/workers/{worker_id}/undrain")
+    def undrain_worker(worker_id: str, user=AdminAuth) -> dict[str, Any]:
+        if not db.set_worker_drain(conn, worker_id, False, by=user["username"]):
+            raise HTTPException(404, f"no worker named {worker_id!r}")
+        return {"worker_id": worker_id, "drain": False}
 
     @app.post("/v1/heartbeat", dependencies=[WriteAuth])
     def heartbeat(body: HeartbeatIn) -> dict[str, bool]:

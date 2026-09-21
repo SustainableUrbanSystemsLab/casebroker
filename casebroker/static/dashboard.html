@@ -1249,6 +1249,7 @@
             <th>Worker ID</th>
             <th>Host</th>
             <th>Cluster</th>
+            <th>Build</th>
             <th>Status</th>
             <th>First seen</th>
             <th>Last seen</th>
@@ -1621,6 +1622,55 @@
         </div>
         <div id="issuedBox" style="display:none; margin-top:10px;"></div>
         <div id="machineList" style="margin-top:12px;"></div>
+
+        <!-- Which CODE the fleet runs. The broker never serves the file: it names
+             a build and the hash its file must have, and each node takes the file
+             from its own release share and verifies it before running a byte.
+             Pointing a fleet at code is remote execution by design, which is why
+             this lives behind the same admin gate as issuing credentials. -->
+        <div class="panel-title-group" style="margin:22px 0 4px;"><h2>Node builds</h2></div>
+        <div class="panel-subtitle">
+          Publish a build to the nodes' release share, register it here, move ONE worker to it,
+          watch a few cases, then set it as the fleet's target. Nodes switch by themselves at the
+          boundary you choose; a case is never touched by two builds without the archive saying so.
+        </div>
+        <div class="row" style="margin-top:12px; align-items:flex-end;">
+          <div class="field" style="min-width:260px; flex:1;">
+            <label for="relTarget">Fleet target</label>
+            <select id="relTarget"></select>
+          </div>
+          <div class="field" style="min-width:210px;">
+            <label for="relApply">Nodes switch</label>
+            <select id="relApply">
+              <option value="case">after the case in flight</option>
+              <option value="direction">after the current wind direction</option>
+              <option value="now">now (the case is given back)</option>
+            </select>
+          </div>
+          <div><button id="relTargetBtn" type="button">Set target</button></div>
+        </div>
+        <div class="row" style="margin-top:10px; align-items:flex-end;">
+          <div class="field" style="flex:1; min-width:260px;">
+            <label for="relBlocked">Blocked builds
+              <span class="label-hint">(comma-separated; a blocked build is refused new cases)</span>
+            </label>
+            <input type="text" id="relBlocked" placeholder="1.14.0.827+0e9e6863" />
+          </div>
+          <label style="display:flex; align-items:center; gap:6px; font-size:12px; padding-bottom:8px;">
+            <input type="checkbox" id="relRequire" /> only lease to nodes that declare a build
+          </label>
+          <div><button id="relPolicyBtn" type="button">Save policy</button></div>
+        </div>
+        <div id="relBuilds" style="margin-top:12px;"></div>
+        <div id="relWorkers" style="margin-top:12px;"></div>
+        <div class="field" style="margin-top:12px;">
+          <label for="relPaste">Register a published build
+            <span class="label-hint">(paste what <code class="inline">E3D node-release publish</code> printed)</span>
+          </label>
+          <textarea id="relPaste" rows="4" spellcheck="false"
+                    placeholder='[{"build":"1.14.0.827+0e9e6863","platform":"win-x64","file":"E3D-1.14.0.827+0e9e6863-win-x64.exe","sha256":"…"}]'></textarea>
+        </div>
+        <div><button id="relRegisterBtn" type="button">Register</button></div>
       </div>
       <div id="machinesLocked" class="panel-subtitle">
         Sign in as an admin to issue and revoke machine credentials.
@@ -2878,7 +2928,7 @@
 
     const WORKER_COLUMNS = [
     ["Worker ID", "worker_id"], ["Host", "host"], ["Cluster", "cluster"],
-    ["Status", "last_seen"], ["First seen", "first_seen"], ["Last seen", "last_seen"],
+    ["Build", "build"], ["Status", "last_seen"], ["First seen", "first_seen"], ["Last seen", "last_seen"],
     ["Working on", "current_case"], ["Done", "cases_done"], ["Failed", "cases_failed"],
     ["Reliability", "reliability"],
   ];
@@ -2908,7 +2958,7 @@
   function renderWorkersHead() {
     $("workersHead").innerHTML = "<tr>" + WORKER_COLUMNS
       .map(([label, key], i) => sortableTh(label, key, workerSort.key, workerSort.dir, "workers",
-                                           i >= 7 ? "num" : ""))
+                                           i >= 8 ? "num" : ""))
       .join("") + "</tr>";
     wireSorting("workersHead", (key) => {
       if (workerSort.key === key) workerSort.dir = workerSort.dir === "asc" ? "desc" : "asc";
@@ -2942,10 +2992,12 @@
             </td>
             <td>${w.host ? `<span class="chip mono">${esc(w.host)}</span>` : "—"}</td>
             <td>${w.cluster ? `<span class="chip">${esc(w.cluster)}</span>` : "—"}</td>
+            <td>${buildCell(w)}</td>
             <td>
               <span class="badge ${isRecent ? "done" : "quarantined"}">
                 ${isRecent ? "Active" : "Offline"}
               </span>
+              ${w.drain ? `<span class="badge leased" title="${esc(w.drain_reason || "no new cases; the one in flight finishes")}">${w.current_case ? "Draining" : "Drained"}</span>` : ""}
             </td>
             <td>${relTime(w.first_seen)}</td>
             <td>${relTime(w.last_seen)}</td>
@@ -3712,6 +3764,7 @@
     // DOM because everything still reads $("token").value.
     $("connectForm").style.display = signedIn ? "none" : "";
     if (isAdmin) { loadMachines(); loadPairings(); loadUsers(); } else machineCount = null;
+    loadReleases();
     renderWizard();
   }
 
@@ -3814,6 +3867,126 @@
       $("userList").innerHTML =
         '<div class="panel-subtitle">Could not list accounts: ' + esc(e.message) + "</div>";
     }
+  }
+
+  // -- Node builds ------------------------------------------------------------
+  // The release catalog is readable by anyone who can read the campaign (the
+  // fleet table needs the target to say "this worker is behind"); changing it
+  // needs an admin session, which the server enforces -- the gate here only
+  // decides whether the controls are drawn.
+  let lastReleases = null;
+
+  function shortBuild(b) { return b ? String(b) : ""; }
+
+  /// A worker's build, and whether it is where it should be. `target_build` on
+  /// the worker is a canary override; otherwise the fleet's target applies.
+  function buildCell(w) {
+    if (!w.build) return `<span style="color:var(--text-muted)" title="this worker never declared a build: it predates build identity">undeclared</span>`;
+    const want = w.target_build || (lastReleases && lastReleases.target_build) || null;
+    const behind = want && want !== w.build;
+    const blocked = lastReleases && (lastReleases.blocked_builds || []).includes(w.build);
+    return `<code class="inline" title="${esc(w.platform || "")}">${esc(shortBuild(w.build))}</code>`
+      + (blocked ? ` <span class="badge quarantined" title="refused new cases">blocked</span>` : "")
+      + (behind ? ` <span class="badge pending" title="${esc(w.target_build ? "canary target" : "fleet target")}">→ ${esc(shortBuild(want))}</span>` : "");
+  }
+
+  let lastReleasesText = "";
+  async function loadReleases() {
+    let next = null;
+    try { next = await api("/v1/releases"); } catch (e) { next = null; }
+    // Re-render only when something CHANGED: this runs on every refresh, and the
+    // catalog changes a few times in a campaign, not every thirty seconds.
+    const text = JSON.stringify(next);
+    const changed = text !== lastReleasesText;
+    lastReleases = next;
+    lastReleasesText = text;
+    renderReleases();
+    if (changed && lastStatus) renderStatus(lastStatus);   // the Build column reads the target
+  }
+
+  function renderReleases() {
+    const r = lastReleases;
+    if (!r || !$("relTarget")) return;
+    const names = [...new Set((r.releases || []).map((x) => x.build))];
+    $("relTarget").innerHTML = `<option value="">(none — nodes stay where they are)</option>`
+      + names.map((b) => `<option value="${esc(b)}"${b === r.target_build ? " selected" : ""}>${esc(b)}</option>`).join("");
+    $("relApply").value = r.target_apply || "case";
+    $("relRequire").checked = !!r.require_build;
+    $("relBlocked").value = (r.blocked_builds || []).join(", ");
+
+    const platforms = (b) => (r.releases || []).filter((x) => x.build === b).map((x) => x.platform).sort().join(" ");
+    $("relBuilds").innerHTML = (r.builds || []).length === 0
+      ? `<div class="panel-subtitle">No build has been declared or registered yet.</div>`
+      : `<div class="table-wrap"><table><thead><tr><th>Build</th><th>Published for</th>`
+        + `<th class="num">Workers</th><th class="num">Done</th><th class="num">Unconverged</th><th class="num">Failed</th><th></th></tr></thead><tbody>`
+        + r.builds.map((b) => `<tr>
+            <td><code class="inline">${esc(b.build)}</code>${b.build === r.target_build ? ` <span class="badge done">fleet target</span>` : ""}</td>
+            <td>${platforms(b.build) ? esc(platforms(b.build)) : `<span style="color:var(--text-muted)">not published</span>`}</td>
+            <td class="num">${b.active}/${b.workers}</td>
+            <td class="num">${(b.done || 0).toLocaleString()}</td>
+            <td class="num${b.unconverged ? " alert" : ""}">${(b.unconverged || 0).toLocaleString()}</td>
+            <td class="num${b.failed ? " alert" : ""}">${(b.failed || 0).toLocaleString()}</td>
+            <td>${platforms(b.build) && b.build !== r.target_build
+                  ? `<button type="button" class="ghost" data-rel-remove="${esc(b.build)}">Remove</button>` : ""}</td>
+          </tr>`).join("") + `</tbody></table></div>`;
+
+    const workers = (lastStatus && lastStatus.workers) || [];
+    $("relWorkers").innerHTML = workers.length === 0 ? "" :
+      `<div class="table-wrap"><table><thead><tr><th>Worker</th><th>Runs</th><th>Canary target</th><th>New cases</th></tr></thead><tbody>`
+      + workers.map((w) => `<tr>
+          <td><code class="inline">${esc(w.worker_id)}</code></td>
+          <td>${buildCell(w)}</td>
+          <td><select data-rel-worker="${esc(w.worker_id)}">
+                <option value="">(follow the fleet)</option>
+                ${names.map((b) => `<option value="${esc(b)}"${b === w.target_build ? " selected" : ""}>${esc(b)}</option>`).join("")}
+              </select></td>
+          <td><button type="button" class="ghost" data-rel-drain="${esc(w.worker_id)}" data-on="${w.drain ? "1" : ""}">${w.drain ? "Resume" : "Drain"}</button></td>
+        </tr>`).join("") + `</tbody></table></div>`;
+
+    document.querySelectorAll("[data-rel-remove]").forEach((el) => el.onclick = () => releaseCall(
+      "/v1/releases/" + encodeURIComponent(el.dataset.relRemove), { method: "DELETE" }, "Removed"));
+    document.querySelectorAll("[data-rel-worker]").forEach((el) => el.onchange = () => releaseCall(
+      "/v1/workers/" + encodeURIComponent(el.dataset.relWorker) + "/target",
+      jsonBody("PUT", { build: el.value || null }), el.value ? "Canary set" : "Following the fleet"));
+    document.querySelectorAll("[data-rel-drain]").forEach((el) => el.onclick = () => {
+      const id = encodeURIComponent(el.dataset.relDrain);
+      if (el.dataset.on) return releaseCall("/v1/workers/" + id + "/undrain", { method: "POST" }, "Resumed");
+      const reason = window.prompt("Why is this worker being drained? (shown on the fleet table)", "") ;
+      if (reason === null) return;
+      releaseCall("/v1/workers/" + id + "/drain", jsonBody("POST", { reason: reason || null }), "Draining");
+    });
+  }
+
+  function jsonBody(method, body) {
+    return { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) };
+  }
+
+  async function releaseCall(path, opts, said) {
+    try { await userCall(path, opts); showToast(said); }
+    catch (e) { showToast(e.message); }
+    await refresh();
+    await loadReleases();
+  }
+
+  function wireReleases() {
+    if (!$("relTargetBtn")) return;
+    $("relTargetBtn").onclick = () => releaseCall("/v1/releases/target",
+      jsonBody("PUT", { build: $("relTarget").value || null, apply: $("relApply").value }), "Fleet target saved");
+    $("relPolicyBtn").onclick = () => releaseCall("/v1/releases/policy", jsonBody("PUT", {
+      require_build: $("relRequire").checked,
+      blocked_builds: $("relBlocked").value.split(",").map((x) => x.trim()).filter(Boolean),
+    }), "Policy saved");
+    $("relRegisterBtn").onclick = async () => {
+      let rows;
+      try { rows = JSON.parse($("relPaste").value); } catch (e) { showToast("That is not JSON"); return; }
+      if (!Array.isArray(rows)) rows = [rows];
+      try {
+        for (const row of rows) await userCall("/v1/releases", jsonBody("POST", row));
+        $("relPaste").value = "";
+        showToast("Registered " + rows.length + " file" + (rows.length === 1 ? "" : "s"));
+      } catch (e) { showToast(e.message); }
+      await loadReleases();
+    };
   }
 
   async function userCall(path, opts) {
@@ -4313,6 +4486,7 @@
       $("connectedSummary").style.display = "flex";
       renderStatus(st);
       await loadCases(casesReq);
+      loadReleases();          // not awaited: the fleet table is already drawn without it
       await checkFinished(st.by_state?.["done"] ?? null);
       nextRefreshSeconds = 60;
     } catch (e) {
@@ -4593,6 +4767,7 @@
   $("authForm").addEventListener("submit", submitAuth);
   $("logoutBtn").addEventListener("click", doLogout);
   $("issueBtn").addEventListener("click", issueMachine);
+  wireReleases();
   $("addUserBtn").addEventListener("click", addUser);
   // refresh() needs authState to tell a signed-in operator from a visitor with
   // no credential at all. Racing the two meant a /healthz that answered first

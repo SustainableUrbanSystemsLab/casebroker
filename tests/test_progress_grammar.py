@@ -63,11 +63,11 @@ def test_a_worker_row_says_what_it_is_holding():
     html = (ROOT / "casebroker" / "static" / "dashboard.html").read_text(encoding="utf-8")
     block = html[html.index("const WORKER_COLUMNS = ["):]
     block = block[:block.index("];")]
-    assert len(re.findall(r'\["[^"]+",\s*"[^"]+"\]', block)) == 10
+    assert len(re.findall(r'\["[^"]+",\s*"[^"]+"\]', block)) == 11
 
     row = html[html.index('$("workersBody").innerHTML'):]
     row = row[:row.index("}).join")]
-    assert row.count("<td") == 10, f"the workers row draws {row.count('<td')} cells"
+    assert row.count("<td") == 11, f"the workers row draws {row.count('<td')} cells"
     assert "w.current_case" in html and "w.current_progress" in html
 
 
