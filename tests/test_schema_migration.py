@@ -68,6 +68,25 @@ def test_the_two_schema_constants_have_not_drifted(tmp_path):
         assert set(sqlite_tables[table]) == set(pg_tables[table]), table
 
 
+def test_only_a_32_bit_column_the_schema_now_declares_BIGINT_is_widened():
+    """The decision half of the Postgres widening, which needs no Postgres."""
+    schema = ("CREATE TABLE IF NOT EXISTS cases (case_id TEXT PRIMARY KEY, "
+              "result_bytes BIGINT, attempts INTEGER NOT NULL DEFAULT 0);")
+    reported = [("cases", "result_bytes", "integer"), ("cases", "attempts", "integer"),
+                ("cases", "case_id", "text"), ("somebody_elses", "result_bytes", "integer")]
+    assert db.columns_to_widen(schema, reported) == [("cases", "result_bytes")]
+    already = [("cases", "result_bytes", "bigint")]
+    assert db.columns_to_widen(schema, already) == []
+
+
+def test_production_result_bytes_is_64_bit_on_postgres():
+    """An archive passes 2.1 GB. SQLite's INTEGER holds it; Postgres's does not."""
+    assert "BIGINT" in db.parse_schema_columns(db.PG_SCHEMA)["cases"]["result_bytes"].upper()
+    reported = [("cases", "result_bytes", "integer")]          # production, before this
+    assert db.columns_to_widen(db.PG_SCHEMA, reported) == [("cases", "result_bytes")]
+    assert db.widen_columns(None, db.SCHEMA, is_pg=False) == []  # SQLite: nothing to do, conn untouched
+
+
 # -- a fresh database --------------------------------------------------------
 
 def test_a_fresh_database_gets_every_table_and_index(tmp_path):

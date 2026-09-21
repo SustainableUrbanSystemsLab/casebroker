@@ -333,6 +333,45 @@ def test_add_lease_complete_roundtrip_over_a_real_connection():
     assert st["by_state"].get("done", 0) >= 1
 
 
+def test_an_archive_over_2_GiB_completes():
+    """Field hit, 2026-09-20: every /v1/complete for a large wind case answered
+    500. result_bytes was INTEGER, which on Postgres is 32 bits; SQLite's is 64,
+    so no SQLite test could see it. The worker reported "HTTP 500" three times
+    for work that had finished, and the case was quarantined."""
+    cid = seed(1, "bigarchive")[0]
+    conn = fresh_conn()
+    leased = db.lease(conn, prefix("w-big"))
+    assert [l.case_id for l in leased] == [cid]
+    five_gib = 5 * 1024 ** 3
+    assert db.complete(conn, leased[0].lease_id, "file:///pgtest-big", nbytes=five_gib)
+    row = fresh_conn().execute(
+        "SELECT state, result_bytes FROM cases WHERE case_id = ?", (cid,)).fetchone()
+    assert (row["state"], row["result_bytes"]) == ("done", five_gib)
+
+
+@scratch_only
+def test_a_database_created_with_a_32_bit_column_is_widened_in_place():
+    """CREATE TABLE IF NOT EXISTS never compares types, so declaring BIGINT
+    reaches fresh databases only. Production is not one."""
+    table = _RECON_TABLE + "_widen"
+    conn = fresh_conn()
+    conn.execute("DROP TABLE IF EXISTS %s" % table)
+    conn.execute("CREATE TABLE %s (id TEXT PRIMARY KEY, nbytes INTEGER, n INTEGER)" % table)
+    conn.execute("INSERT INTO %s(id, nbytes, n) VALUES ('kept', 7, 1)" % table)
+    schema = ("CREATE TABLE IF NOT EXISTS %s (id TEXT PRIMARY KEY, nbytes BIGINT, "
+              "n INTEGER);" % table)
+    try:
+        with pytest.raises(Exception):          # the control: it really is 32 bits
+            fresh_conn().execute("UPDATE %s SET nbytes = ? WHERE id = 'kept'" % table, (5 * 1024 ** 3,))
+        assert db.widen_columns(conn, schema, is_pg=True) == ["%s.nbytes" % table]
+        conn.execute("UPDATE %s SET nbytes = ? WHERE id = 'kept'" % table, (5 * 1024 ** 3,))
+        row = conn.execute("SELECT nbytes, n FROM %s" % table).fetchone()
+        assert (row["nbytes"], row["n"]) == (5 * 1024 ** 3, 1)
+        assert db.widen_columns(conn, schema, is_pg=True) == []   # and only once
+    finally:
+        fresh_conn().execute("DROP TABLE IF EXISTS %s" % table)
+
+
 def test_many_real_connections_racing_never_double_lease():
     """End-to-end: many HTTP-style callers hitting the real deployed system never
     see a case double-assigned. This does NOT test FOR UPDATE SKIP LOCKED in
