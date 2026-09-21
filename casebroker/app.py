@@ -1485,13 +1485,19 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
 
     @app.get("/v1/node/release", dependencies=[WriteAuth])
     def node_release(request: Request, worker_id: str, platform: str | None = None,
-                     build: str | None = None) -> dict[str, Any]:
+                     build: str | None = None, failed_build: str | None = None,
+                     failed_reason: str | None = None) -> dict[str, Any]:
         """What this node should be running. Asked before every lease, and
-        during a solve so an update does not have to wait for the case."""
+        during a solve so an update does not have to wait for the case.
+
+        `failed_build` is a node saying it TRIED a build, could not start it and
+        rolled back: the one thing an unattended update must never hide."""
         machine = _machine_principal(request)
         if machine and not _may_lease_as(machine["name"], worker_id):
             raise HTTPException(403, f"this credential belongs to {machine['name']!r}")
-        return db.node_release(conn, worker_id, platform, build)
+        return db.node_release(conn, worker_id, platform, build,
+                               failed_build=(failed_build or "")[:96] or None,
+                               failed_reason=failed_reason)
 
     @app.get("/v1/releases", dependencies=[ReadAuth])
     def releases() -> dict[str, Any]:

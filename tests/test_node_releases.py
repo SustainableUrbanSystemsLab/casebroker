@@ -235,3 +235,17 @@ def test_a_finished_case_is_counted_for_the_build_its_ARCHIVE_names(conn):
     assert (builds[NEW]["done"], builds[NEW]["unconverged"], builds[NEW]["failed"]) == (2, 1, 0)
     assert (builds[OLD]["done"], builds[OLD]["failed"]) == (0, 1)
     assert builds[OLD]["workers"] == 1
+
+
+def test_a_node_that_rolled_back_says_so_once_and_it_clears_when_it_gets_there(conn):
+    """An unattended update must never hide that it failed."""
+    db.lease(conn, "foam-1", build=OLD, platform="win-x64")
+    for _ in range(3):                                   # it says so with EVERY ask
+        db.node_release(conn, "foam-1", "win-x64", OLD, failed_build=NEW, failed_reason="exit -532462766 at startup")
+    row = conn.execute("SELECT update_failed FROM workers WHERE worker_id='foam-1'").fetchone()
+    assert NEW in row["update_failed"] and "startup" in row["update_failed"]
+    audited = conn.execute("SELECT COUNT(*) AS n FROM events WHERE event='update-failed'").fetchone()["n"]
+    assert audited == 1, "recorded once per failure, not once per minute"
+
+    db.node_release(conn, "foam-1", "win-x64", NEW)       # later: on the build, nothing failed
+    assert conn.execute("SELECT update_failed FROM workers WHERE worker_id='foam-1'").fetchone()["update_failed"] is None

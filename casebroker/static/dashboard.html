@@ -3887,6 +3887,7 @@
     const blocked = lastReleases && (lastReleases.blocked_builds || []).includes(w.build);
     return `<code class="inline" title="${esc(w.platform || "")}">${esc(shortBuild(w.build))}</code>`
       + (blocked ? ` <span class="badge quarantined" title="refused new cases">blocked</span>` : "")
+      + (w.update_failed ? ` <span class="badge quarantined" title="${esc(w.update_failed)}">update failed</span>` : "")
       + (behind ? ` <span class="badge pending" title="${esc(w.target_build ? "canary target" : "fleet target")}">→ ${esc(shortBuild(want))}</span>` : "");
   }
 
