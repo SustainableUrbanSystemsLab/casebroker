@@ -9,6 +9,37 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 ## [Unreleased]
 
 ### Added
+- **Nodes can be updated while a campaign runs.** The broker now knows WHICH
+  BUILD every worker is (`build` = version+commit, sent with each lease -- the
+  product version is the same for every push, so it could not tell two nodes
+  apart), and holds the control plane for moving a fleet between builds, modelled
+  on how SLURM does it: the controller says what to run and never ships code.
+  - A **release catalog** (`POST /v1/releases`): the builds an operator published
+    to the nodes' release share, per platform, with the sha256 a node verifies
+    before running a byte. `GET /v1/node/release` tells one node its target, the
+    file and hash, how eagerly to switch (`case` / `direction` / `now`), and
+    whether it is draining.
+  - A **fleet target** and a per-worker **canary** override
+    (`PUT /v1/releases/target`, `PUT /v1/workers/{id}/target`), refused for a
+    build nobody published. `build_stats` tallies done / unconverged / failed
+    per build -- counted for the build the ARCHIVE names, since a case can be
+    finished by a node updated after it started -- which is what a canary is
+    promoted on.
+  - **Drain** (`POST /v1/workers/{id}/drain`): no new case, the one in flight
+    finishes, and the worker may still resume its OWN case -- which is how a node
+    restarts onto a new build mid-case without losing it.
+  - **Policy**: `require_build` refuses workers that declare none (every node
+    from before build identity), `blocked_builds` refuses named ones; both answer
+    426, not 403 -- the credential is fine and the build is not.
+  - All of it admin-only and written to the audit trail: pointing a fleet at
+    code is remote execution by design, so who may do it is the security model.
+  - Dashboard: a Build column on the fleet table (with the target a worker is
+    behind, and Draining/Drained), and a Node builds panel under Machines.
+- **A case is only handed to a node that declared its recipe.** A lease may carry
+  `recipes`; when it does, the claim is `recipe IN (...)`, resume included.
+  Workers that declare nothing are unfiltered, as before. Schema version 4.
+
+### Added
 - **Copy all errors.** A button in the case browser copies every failing case as
   plain text -- case id, state, attempts, coordinates, the full error, and each
   failed attempt with the machine it failed on -- led by a count of the most

@@ -109,7 +109,24 @@ CREATE TABLE IF NOT EXISTS workers (
     first_seen   INTEGER NOT NULL,
     last_seen    INTEGER NOT NULL,
     cases_done   INTEGER NOT NULL DEFAULT 0,
-    cases_failed INTEGER NOT NULL DEFAULT 0
+    cases_failed INTEGER NOT NULL DEFAULT 0,
+    -- WHICH CODE this worker is. A campaign runs for months and its nodes are
+    -- updated while it runs; the product version is the same for every push, so
+    -- `build` (version+commit) is the only thing that tells two nodes apart.
+    -- NULL = a worker from before builds were declared.
+    build        TEXT,
+    version      TEXT,
+    platform     TEXT,
+    -- JSON list of the exact recipes it can produce; NULL = never declared.
+    recipes      TEXT,
+    -- Drain is "no NEW work": the case in flight finishes, and the worker may
+    -- still resume its OWN case after a restart. The operator's handle for any
+    -- maintenance, not only an update.
+    drain        INTEGER NOT NULL DEFAULT 0,
+    drain_reason TEXT,
+    -- A per-worker target overrides the fleet's: how ONE node is moved to a new
+    -- build first, watched, and only then followed by the rest.
+    target_build TEXT
 );
 -- What a SCHEDULER holds that has not reached the broker yet. A worker queued in
 -- SLURM has never contacted this service -- it does not exist here until its
@@ -226,6 +243,39 @@ CREATE TABLE IF NOT EXISTS schema_meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+
+-- Fleet-wide switches an operator sets while a campaign runs: which build the
+-- nodes should be on, how eagerly they move to it, and which builds are refused.
+CREATE TABLE IF NOT EXISTS settings (
+    key        TEXT PRIMARY KEY,
+    value      TEXT NOT NULL,
+    updated_at INTEGER NOT NULL,
+    updated_by TEXT
+);
+
+-- The builds an operator has PUBLISHED to the nodes' release share, one row per
+-- platform, with the hash a node verifies before it runs a byte of it. The
+-- broker never serves the file: it says WHICH build and WHAT it must hash to.
+CREATE TABLE IF NOT EXISTS releases (
+    build     TEXT NOT NULL,
+    platform  TEXT NOT NULL,
+    file      TEXT NOT NULL,
+    sha256    TEXT NOT NULL,
+    notes     TEXT,
+    added_at  INTEGER NOT NULL,
+    added_by  TEXT,
+    PRIMARY KEY (build, platform)
+);
+
+-- What each build has DONE, which is what decides whether a canary is promoted.
+CREATE TABLE IF NOT EXISTS build_stats (
+    build       TEXT PRIMARY KEY,
+    done        INTEGER NOT NULL DEFAULT 0,
+    failed      INTEGER NOT NULL DEFAULT 0,
+    unconverged INTEGER NOT NULL DEFAULT 0,
+    first_seen  INTEGER NOT NULL,
+    last_seen   INTEGER NOT NULL
+);
 """
 
 # Same schema, Postgres-flavoured: no PRAGMAs (meaningless there), and the
@@ -288,7 +338,24 @@ CREATE TABLE IF NOT EXISTS workers (
     first_seen   INTEGER NOT NULL,
     last_seen    INTEGER NOT NULL,
     cases_done   INTEGER NOT NULL DEFAULT 0,
-    cases_failed INTEGER NOT NULL DEFAULT 0
+    cases_failed INTEGER NOT NULL DEFAULT 0,
+    -- WHICH CODE this worker is. A campaign runs for months and its nodes are
+    -- updated while it runs; the product version is the same for every push, so
+    -- `build` (version+commit) is the only thing that tells two nodes apart.
+    -- NULL = a worker from before builds were declared.
+    build        TEXT,
+    version      TEXT,
+    platform     TEXT,
+    -- JSON list of the exact recipes it can produce; NULL = never declared.
+    recipes      TEXT,
+    -- Drain is "no NEW work": the case in flight finishes, and the worker may
+    -- still resume its OWN case after a restart. The operator's handle for any
+    -- maintenance, not only an update.
+    drain        INTEGER NOT NULL DEFAULT 0,
+    drain_reason TEXT,
+    -- A per-worker target overrides the fleet's: how ONE node is moved to a new
+    -- build first, watched, and only then followed by the rest.
+    target_build TEXT
 );
 -- What a SCHEDULER holds that has not reached the broker yet. A worker queued in
 -- SLURM has never contacted this service -- it does not exist here until its
@@ -403,6 +470,39 @@ CREATE TABLE IF NOT EXISTS schema_meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+
+-- Fleet-wide switches an operator sets while a campaign runs: which build the
+-- nodes should be on, how eagerly they move to it, and which builds are refused.
+CREATE TABLE IF NOT EXISTS settings (
+    key        TEXT PRIMARY KEY,
+    value      TEXT NOT NULL,
+    updated_at INTEGER NOT NULL,
+    updated_by TEXT
+);
+
+-- The builds an operator has PUBLISHED to the nodes' release share, one row per
+-- platform, with the hash a node verifies before it runs a byte of it. The
+-- broker never serves the file: it says WHICH build and WHAT it must hash to.
+CREATE TABLE IF NOT EXISTS releases (
+    build     TEXT NOT NULL,
+    platform  TEXT NOT NULL,
+    file      TEXT NOT NULL,
+    sha256    TEXT NOT NULL,
+    notes     TEXT,
+    added_at  INTEGER NOT NULL,
+    added_by  TEXT,
+    PRIMARY KEY (build, platform)
+);
+
+-- What each build has DONE, which is what decides whether a canary is promoted.
+CREATE TABLE IF NOT EXISTS build_stats (
+    build       TEXT PRIMARY KEY,
+    done        INTEGER NOT NULL DEFAULT 0,
+    failed      INTEGER NOT NULL DEFAULT 0,
+    unconverged INTEGER NOT NULL DEFAULT 0,
+    first_seen  INTEGER NOT NULL,
+    last_seen   INTEGER NOT NULL
+);
 """
 
 
@@ -424,7 +524,7 @@ CREATE TABLE IF NOT EXISTS schema_meta (
 # already existed, and only then build the indexes -- an index is very often the
 # thing that references the newly added column.
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 # A column definition that cannot be bolted onto a table that already exists.
 # Detected and reported by name, because the alternative -- quietly adding the
@@ -1021,8 +1121,22 @@ def lease(conn, worker_id: str, count: int = 1,
           lease_seconds: int = 3600, splits: list[str] | None = None,
           now: int | None = None, host: str | None = None,
           cluster: str | None = None,
-          resume_case_ids: list[str] | None = None) -> list[Lease]:
+          resume_case_ids: list[str] | None = None,
+          build: str | None = None, version: str | None = None,
+          platform: str | None = None,
+          recipes: list[str] | None = None) -> list[Lease]:
     """Atomically claim up to ``count`` cases.
+
+    ``recipes`` are the exact recipes this worker can produce. When it declares
+    any, it is handed only those: a recipe is the contract a training set is
+    partitioned by, and a node that does not know one must never be given it (the
+    alternative was measured -- recipe selection by prefix solved a v4 case as v3
+    and archived it labelled v4). A worker that declares NOTHING predates
+    declarations and is left unfiltered, which is what `require_build` exists to
+    fence off when a campaign needs it.
+
+    A DRAINING worker gets no new case, and may still resume its own: that is how
+    a node restarts onto a new build in the middle of a case without losing it.
 
     Expired leases are reclaimed by the same statement that hands out fresh work,
     so a crashed or preempted worker's cases re-enter the pool with no reaper
@@ -1050,6 +1164,10 @@ def lease(conn, worker_id: str, count: int = 1,
     # which is the entire point of moving off one file that serialises
     # everything to begin with.
     lock_clause = " FOR UPDATE SKIP LOCKED" if is_pg else ""
+    recipe_sql, recipe_params = "", []
+    if recipes:
+        recipe_sql = " AND recipe IN (" + ",".join("?" for _ in recipes) + ")"
+        recipe_params = list(recipes)
 
     def claim(rows, resumed: bool) -> None:
         for row in rows:
@@ -1081,22 +1199,32 @@ def lease(conn, worker_id: str, count: int = 1,
 
     conn.execute("BEGIN IMMEDIATE")
     try:
+        known = conn.execute(
+            "SELECT drain FROM workers WHERE worker_id = ?", (worker_id,)).fetchone()
+        draining = bool(known and known["drain"])
+
         if resume_case_ids:
             ids = list(dict.fromkeys(resume_case_ids))[:count]
             placeholders = ",".join("?" for _ in ids)
+            # Draining narrows a resume to the case this worker STILL HOLDS: taking
+            # a pending case back would be new work by another name.
+            own_only = ("(state = 'leased' AND lease_worker = ?)" if draining else
+                        "(state = 'pending'"
+                        "      OR (state = 'leased' AND (lease_expires < ?"
+                        "          OR (leased_at IS NOT NULL AND leased_at < ?)"
+                        "          OR lease_worker = ?)))")
+            own_params = ([worker_id] if draining
+                          else [now, now - MAX_LEASE_AGE_SECONDS, worker_id])
             rows = conn.execute(
                 "SELECT case_id, spec, attempts, max_attempts, state, lease_worker"
                 " FROM cases WHERE case_id IN (" + placeholders + ")"
-                " AND (state = 'pending'"
-                "      OR (state = 'leased' AND (lease_expires < ?"
-                "          OR (leased_at IS NOT NULL AND leased_at < ?)"
-                "          OR lease_worker = ?)))"
+                " AND " + own_only + recipe_sql +
                 " ORDER BY case_id ASC" + lock_clause,
-                [*ids, now, now - MAX_LEASE_AGE_SECONDS, worker_id],
+                [*ids, *own_params, *recipe_params],
             ).fetchall()
             claim(rows, resumed=True)
 
-        remaining = count - len(out)
+        remaining = 0 if draining else count - len(out)
         if remaining > 0:
             params: list[Any] = [now, now - MAX_LEASE_AGE_SECONDS]
             split_sql = ""
@@ -1104,6 +1232,7 @@ def lease(conn, worker_id: str, count: int = 1,
                 placeholders = ",".join("?" for _ in splits)
                 split_sql = " AND split IN (" + placeholders + ")"
                 params.extend(splits)
+            params.extend(recipe_params)
             params.append(remaining)
             rows = conn.execute(
                 "SELECT case_id, spec, attempts, max_attempts, state, lease_worker FROM cases"
@@ -1115,7 +1244,7 @@ def lease(conn, worker_id: str, count: int = 1,
                 " WHERE (state = 'pending'"
                 "        OR (state = 'leased' AND (lease_expires < ?"
                 "            OR (leased_at IS NOT NULL AND leased_at < ?))))"
-                + split_sql +
+                + split_sql + recipe_sql +
                 # Every worker targets the same "lowest" rows. That is contention by
                 # design, not by accident: under SKIP LOCKED a locked row is simply
                 # skipped, and case_id is a hash so the tiebreak is effectively random
@@ -1129,16 +1258,219 @@ def lease(conn, worker_id: str, count: int = 1,
         # same worker_id can in principle move machines across a restart, and a
         # stale "where did this run" answer is worse than a slightly redundant
         # write on every poll.
+        # ...and so is the build: it changes under a worker_id every time the node
+        # is updated, which is the whole point of recording it.
         conn.execute(
-            "INSERT INTO workers(worker_id, host, cluster, first_seen, last_seen)"
-            " VALUES (?,?,?,?,?)"
+            "INSERT INTO workers(worker_id, host, cluster, first_seen, last_seen,"
+            " build, version, platform, recipes)"
+            " VALUES (?,?,?,?,?,?,?,?,?)"
             " ON CONFLICT(worker_id) DO UPDATE SET"
-            " last_seen=excluded.last_seen, host=excluded.host, cluster=excluded.cluster",
-            (worker_id, host, cluster, now, now))
+            " last_seen=excluded.last_seen, host=excluded.host, cluster=excluded.cluster,"
+            " build=excluded.build, version=excluded.version,"
+            " platform=excluded.platform, recipes=excluded.recipes",
+            (worker_id, host, cluster, now, now, build, version, platform,
+             json.dumps(list(recipes)) if recipes else None))
         conn.execute("COMMIT")
     except Exception:
         conn.execute("ROLLBACK")
         raise
+    return out
+
+
+def _count_for_build(conn, build: str | None, worker_id: str | None, now: int,
+                     done: int = 0, failed: int = 0, unconverged: int = 0) -> None:
+    """Add to a build's tally. Called inside the caller's transaction.
+
+    `build` None means "whatever this worker last said it was" -- a failure has no
+    archive to name one. A worker that never declared a build is not counted:
+    a row called NULL would only ever be a bucket of everything unknown.
+    """
+    if not build and worker_id:
+        row = conn.execute("SELECT build FROM workers WHERE worker_id = ?", (worker_id,)).fetchone()
+        build = row["build"] if row else None
+    if not build:
+        return
+    conn.execute(
+        "INSERT INTO build_stats(build, done, failed, unconverged, first_seen, last_seen)"
+        " VALUES (?,?,?,?,?,?)"
+        " ON CONFLICT(build) DO UPDATE SET done = build_stats.done + excluded.done,"
+        " failed = build_stats.failed + excluded.failed,"
+        " unconverged = build_stats.unconverged + excluded.unconverged,"
+        " last_seen = excluded.last_seen",
+        (build, done, failed, unconverged, now, now))
+
+
+# -- node releases: WHICH build the fleet runs, never the build itself ---------
+#
+# A campaign runs for months and its nodes are updated while it runs. SLURM's
+# answer to the same problem is the model here: the controller is upgraded first
+# and says what version it expects; nodes DRAIN rather than die; running work
+# keeps the binary it started with; and the controller never ships code. So the
+# broker holds a catalog of published builds with their hashes, one fleet target
+# (and per-worker overrides, for a canary), and a drain flag -- and the node
+# fetches the file from its own release share and verifies it against the hash
+# it was given over this authenticated channel.
+
+#: When a node moves to the target build. "case" waits for the case in flight;
+#: "direction" stops after the wind direction being solved and resumes the same
+#: case on the new build; "now" gives the case back and restarts at once.
+APPLY_MODES = ("case", "direction", "now")
+
+
+def _setting(conn, key: str, default: str | None = None) -> str | None:
+    row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+    return row["value"] if row else default
+
+
+@_locked
+def get_settings(conn) -> dict[str, str]:
+    return {r["key"]: r["value"] for r in conn.execute("SELECT key, value FROM settings").fetchall()}
+
+
+@_locked
+def set_setting(conn, key: str, value: str | None, by: str | None = None,
+                now: int | None = None) -> None:
+    """Set, or with ``value=None`` clear, one fleet setting. Audited: a change to
+    what thousands of machine-hours will run is exactly the event someone asks
+    about afterwards."""
+    now = now or _now()
+    if value is None:
+        conn.execute("DELETE FROM settings WHERE key = ?", (key,))
+    else:
+        conn.execute(
+            "INSERT INTO settings(key, value, updated_at, updated_by) VALUES (?,?,?,?)"
+            " ON CONFLICT(key) DO UPDATE SET value = excluded.value,"
+            " updated_at = excluded.updated_at, updated_by = excluded.updated_by",
+            (key, value, now, by))
+    _event(conn, None, by, "setting", "%s = %s" % (key, value if value is not None else "(cleared)"), now)
+
+
+@_locked
+def register_release(conn, build: str, platform: str, file: str, sha256: str,
+                     notes: str | None = None, by: str | None = None,
+                     now: int | None = None) -> None:
+    """Record that a build's file for one platform is on the release share.
+
+    Re-registering replaces the row: the operator re-published the file, and the
+    hash a node verifies has to be the hash of what is actually there.
+    """
+    now = now or _now()
+    conn.execute(
+        "INSERT INTO releases(build, platform, file, sha256, notes, added_at, added_by)"
+        " VALUES (?,?,?,?,?,?,?)"
+        " ON CONFLICT(build, platform) DO UPDATE SET file = excluded.file,"
+        " sha256 = excluded.sha256, notes = excluded.notes,"
+        " added_at = excluded.added_at, added_by = excluded.added_by",
+        (build, platform, file, sha256.lower(), notes, now, by))
+    _event(conn, None, by, "release", "%s %s %s" % (build, platform, sha256.lower()[:12]), now)
+
+
+@_locked
+def delete_release(conn, build: str, by: str | None = None, now: int | None = None) -> int:
+    now = now or _now()
+    n = conn.execute("DELETE FROM releases WHERE build = ?", (build,)).rowcount
+    if n:
+        _event(conn, None, by, "release", "%s removed" % build, now)
+    return n
+
+
+@_locked
+def list_releases(conn) -> dict[str, Any]:
+    """Everything the release panel draws, in one locked read."""
+    settings = {r["key"]: r["value"] for r in conn.execute("SELECT key, value FROM settings").fetchall()}
+    releases = [dict(r) for r in conn.execute(
+        "SELECT build, platform, file, sha256, notes, added_at, added_by FROM releases"
+        " ORDER BY added_at DESC, build, platform").fetchall()]
+    stats = {r["build"]: dict(r) for r in conn.execute("SELECT * FROM build_stats").fetchall()}
+    live = _now() - 300
+    running: dict[str, dict[str, int]] = {}
+    for r in conn.execute(
+            "SELECT build, last_seen FROM workers WHERE build IS NOT NULL AND last_seen > ?",
+            (_now() - 86400,)).fetchall():
+        b = running.setdefault(r["build"], {"workers": 0, "active": 0})
+        b["workers"] += 1
+        b["active"] += 1 if r["last_seen"] > live else 0
+    builds = sorted(set(stats) | set(running) | {r["build"] for r in releases})
+    return {
+        "target_build": settings.get("target_build"),
+        "target_apply": settings.get("target_apply", "case"),
+        "require_build": settings.get("require_build") == "1",
+        "blocked_builds": json.loads(settings.get("blocked_builds") or "[]"),
+        "releases": releases,
+        "builds": [{"build": b, **{k: stats.get(b, {}).get(k, 0) for k in ("done", "failed", "unconverged")},
+                    **running.get(b, {"workers": 0, "active": 0})} for b in builds],
+    }
+
+
+@_locked
+def set_worker_target(conn, worker_id: str, build: str | None, by: str | None = None,
+                      now: int | None = None) -> bool:
+    now = now or _now()
+    n = conn.execute("UPDATE workers SET target_build = ? WHERE worker_id = ?",
+                     (build, worker_id)).rowcount
+    if n:
+        _event(conn, None, by, "worker-target", "%s -> %s" % (worker_id, build or "(fleet)"), now)
+    return bool(n)
+
+
+@_locked
+def set_worker_drain(conn, worker_id: str, drain: bool, reason: str | None = None,
+                     by: str | None = None, now: int | None = None) -> bool:
+    now = now or _now()
+    n = conn.execute("UPDATE workers SET drain = ?, drain_reason = ? WHERE worker_id = ?",
+                     (1 if drain else 0, reason if drain else None, worker_id)).rowcount
+    if n:
+        _event(conn, None, by, "drain" if drain else "undrain",
+               "%s%s" % (worker_id, (": " + reason) if drain and reason else ""), now)
+    return bool(n)
+
+
+@_locked
+def lease_refusal(conn, build: str | None) -> str | None:
+    """Why this build may not lease at all, or None.
+
+    Builds are NAMED, never ordered -- a rollback is just another target -- so the
+    fence is two explicit rules rather than a minimum version: a campaign can
+    insist on a declared build (which excludes every node from before builds
+    existed, the ones that select a recipe by prefix), and can block named builds
+    that are known to be bad.
+    """
+    if not build:
+        if _setting(conn, "require_build") == "1":
+            return ("this campaign only leases to nodes that declare their build, and this one "
+                    "declared none: it predates build identity and must be updated")
+        return None
+    if build in json.loads(_setting(conn, "blocked_builds") or "[]"):
+        return "build %s is blocked for this campaign; update this node" % build
+    return None
+
+
+@_locked
+def node_release(conn, worker_id: str, platform: str | None, build: str | None) -> dict[str, Any]:
+    """What one node should be running, and whether it may take new work.
+
+    Asked before every lease and during a solve. The answer names a build, the
+    file it is on the release share under and the hash that file must have; the
+    node does the rest.
+    """
+    w = conn.execute(
+        "SELECT drain, drain_reason, target_build FROM workers WHERE worker_id = ?",
+        (worker_id,)).fetchone()
+    canary = bool(w and w["target_build"])
+    target = (w["target_build"] if canary else None) or _setting(conn, "target_build")
+    out: dict[str, Any] = {
+        "target_build": target, "canary": canary, "current": bool(target) and target == build,
+        "apply": _setting(conn, "target_apply", "case"),
+        "drain": bool(w and w["drain"]), "drain_reason": w["drain_reason"] if w else None,
+        "blocked": bool(build) and build in json.loads(_setting(conn, "blocked_builds") or "[]"),
+        "file": None, "sha256": None,
+    }
+    if target and target != build and platform:
+        rel = conn.execute(
+            "SELECT file, sha256 FROM releases WHERE build = ? AND platform = ?",
+            (target, platform)).fetchone()
+        if rel:
+            out["file"], out["sha256"] = rel["file"], rel["sha256"]
     return out
 
 
@@ -1263,6 +1595,11 @@ def complete(conn, lease_id: str, result_uri: str,
         conn.execute(
             "UPDATE workers SET cases_done = cases_done + 1, last_seen=? WHERE worker_id=?",
             (now, row["lease_worker"]))
+        # The build the ARCHIVE names, not the worker's current one: a case can be
+        # finished by a node that was updated after it started, and the metrics
+        # say which build wrote the result.
+        _count_for_build(conn, (metrics or {}).get("eddy3d_build"), row["lease_worker"], now,
+                         done=1, unconverged=1 if (metrics or {}).get("unconverged_count") else 0)
         _event(conn, row["case_id"], row["lease_worker"], "done", result_uri, now)
         conn.execute("COMMIT")
     except Exception:
@@ -1291,6 +1628,7 @@ def fail(conn, lease_id: str, error: str, retryable: bool = True,
         conn.execute(
             "UPDATE workers SET cases_failed = cases_failed + 1, last_seen=? WHERE worker_id=?",
             (now, row["lease_worker"]))
+        _count_for_build(conn, None, row["lease_worker"], now, failed=1)
         _event(conn, row["case_id"], row["lease_worker"],
                "failed" if state == "pending" else "quarantined", error[:500], now)
         conn.execute("COMMIT")
