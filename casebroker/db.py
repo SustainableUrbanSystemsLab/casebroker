@@ -126,7 +126,10 @@ CREATE TABLE IF NOT EXISTS workers (
     drain_reason TEXT,
     -- A per-worker target overrides the fleet's: how ONE node is moved to a new
     -- build first, watched, and only then followed by the rest.
-    target_build TEXT
+    target_build TEXT,
+    -- "<build>: <why>" when this node tried a build, could not start it, and
+    -- went back to the one before. Cleared when it reaches its target.
+    update_failed TEXT
 );
 -- What a SCHEDULER holds that has not reached the broker yet. A worker queued in
 -- SLURM has never contacted this service -- it does not exist here until its
@@ -355,7 +358,10 @@ CREATE TABLE IF NOT EXISTS workers (
     drain_reason TEXT,
     -- A per-worker target overrides the fleet's: how ONE node is moved to a new
     -- build first, watched, and only then followed by the rest.
-    target_build TEXT
+    target_build TEXT,
+    -- "<build>: <why>" when this node tried a build, could not start it, and
+    -- went back to the one before. Cleared when it reaches its target.
+    update_failed TEXT
 );
 -- What a SCHEDULER holds that has not reached the broker yet. A worker queued in
 -- SLURM has never contacted this service -- it does not exist here until its
@@ -1446,7 +1452,9 @@ def lease_refusal(conn, build: str | None) -> str | None:
 
 
 @_locked
-def node_release(conn, worker_id: str, platform: str | None, build: str | None) -> dict[str, Any]:
+def node_release(conn, worker_id: str, platform: str | None, build: str | None,
+                 failed_build: str | None = None, failed_reason: str | None = None,
+                 now: int | None = None) -> dict[str, Any]:
     """What one node should be running, and whether it may take new work.
 
     Asked before every lease and during a solve. The answer names a build, the
@@ -1454,8 +1462,17 @@ def node_release(conn, worker_id: str, platform: str | None, build: str | None) 
     node does the rest.
     """
     w = conn.execute(
-        "SELECT drain, drain_reason, target_build FROM workers WHERE worker_id = ?",
+        "SELECT drain, drain_reason, target_build, update_failed FROM workers WHERE worker_id = ?",
         (worker_id,)).fetchone()
+    if w is not None:
+        # A node that rolled itself back says so with every ask; recorded (and
+        # audited) once per failure, and forgotten the moment it is on target.
+        said = ("%s: %s" % (failed_build, (failed_reason or "could not be started")[:300])
+                if failed_build else None)
+        if said != w["update_failed"]:
+            conn.execute("UPDATE workers SET update_failed = ? WHERE worker_id = ?", (said, worker_id))
+            if said:
+                _event(conn, None, worker_id, "update-failed", said, now or _now())
     canary = bool(w and w["target_build"])
     target = (w["target_build"] if canary else None) or _setting(conn, "target_build")
     out: dict[str, Any] = {
