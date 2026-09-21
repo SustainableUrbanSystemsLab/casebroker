@@ -45,6 +45,7 @@ _ALLOWED_UNLOCKED = {
     "_existing_tables",    # schema bring-forward, under _LOCK in connect()
     "_existing_columns",
     "reconcile_columns",
+    "widen_columns",       # ditto: called only from apply_schema
     "apply_schema",
     "schema_version",
 }

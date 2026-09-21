@@ -8,6 +8,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+### Fixed
+- **An archive over 2 GiB can be completed.** `cases.result_bytes` was `INTEGER`,
+  which on Postgres is 32 bits, so any `/v1/complete` reporting more than
+  2,147,483,647 bytes dies with "integer out of range" -- an unhandled 500. The
+  worker retries nine times, can only report `HTTP 500`, and after three attempts
+  the case is quarantined for work that had finished. Found from the symptom
+  (cases quarantined 3/3 with exactly `HTTP 500`), not from the server log.
+  SQLite's `INTEGER` is 64 bits, so the default suite could not see it. The column
+  is `BIGINT` now, and because `CREATE TABLE IF NOT EXISTS` never compares types,
+  `widen_columns` brings an existing database forward (int4 -> int8, lossless)
+  the first time a version-3 broker connects. Schema version 3.
+
 ## [0.5.0] - 2026-09-17
 
 ### Added

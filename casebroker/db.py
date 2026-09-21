@@ -256,7 +256,12 @@ CREATE TABLE IF NOT EXISTS cases (
     last_error     TEXT,
     result_uri     TEXT,
     result_sha256  TEXT,
-    result_bytes   INTEGER,
+    -- BIGINT, not INTEGER: Postgres INTEGER is 32 bits, and a wind case's archive
+    -- passes 2.1 GB. Every such /v1/complete then died with "integer out of
+    -- range" -- an unhandled 500 the worker could only report as "HTTP 500",
+    -- for work that had FINISHED -- three times, and the case was quarantined.
+    -- SQLite's INTEGER is 64 bits, so the suite never saw it.
+    result_bytes   BIGINT,
     metrics        TEXT,
     created_at     INTEGER NOT NULL,
     updated_at     INTEGER NOT NULL
@@ -419,7 +424,7 @@ CREATE TABLE IF NOT EXISTS schema_meta (
 # already existed, and only then build the indexes -- an index is very often the
 # thing that references the newly added column.
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # A column definition that cannot be bolted onto a table that already exists.
 # Detected and reported by name, because the alternative -- quietly adding the
@@ -618,6 +623,41 @@ def reconcile_columns(conn, script: str, is_pg: bool) -> list[str]:
     return added
 
 
+def columns_to_widen(script: str, reported: Iterable[tuple[str, str, str]]) -> list[tuple[str, str]]:
+    """``(table, column)`` for every column the schema declares BIGINT that the
+    database still holds as a 32-bit ``integer``.
+
+    `reported` is ``(table, column, data_type)`` as information_schema spells it.
+    Pure, so the decision is testable without a Postgres: the reconciler above
+    only ever ADDS columns, and `CREATE TABLE IF NOT EXISTS` never compares
+    types, so without this a declared BIGINT reaches fresh databases only and
+    production keeps the INTEGER it was created with.
+    """
+    declared = parse_schema_columns(script)
+    out = []
+    for table, column, data_type in reported:
+        ddl = declared.get(table, {}).get(column)
+        if ddl and data_type.lower() == "integer" and re.search(r"\bBIGINT\b", ddl, re.IGNORECASE):
+            out.append((table, column))
+    return sorted(out)
+
+
+def widen_columns(conn, script: str, is_pg: bool) -> list[str]:
+    """Postgres only; SQLite's INTEGER is already 64 bits. int4 -> int8 is a
+    lossless rewrite, and repeating it on a column that is already BIGINT is a
+    no-op, so two processes starting at once cannot hurt each other."""
+    if not is_pg:
+        return []
+    rows = conn.execute(
+        "SELECT table_name AS t, column_name AS c, data_type AS d "
+        "FROM information_schema.columns WHERE table_schema = current_schema()").fetchall()
+    widened = []
+    for table, column in columns_to_widen(script, [(r["t"], r["c"], r["d"]) for r in rows]):
+        conn.execute("ALTER TABLE %s ALTER COLUMN %s TYPE BIGINT" % (table, column))
+        widened.append("%s.%s" % (table, column))
+    return widened
+
+
 def apply_schema(conn, script: str, is_pg: bool) -> list[str]:
     """Create the tables, reconcile the ones that predate this version, then
     build the indexes. Returns the columns added, so a caller can log that an
@@ -648,6 +688,11 @@ def apply_schema(conn, script: str, is_pg: bool) -> list[str]:
     row = conn.execute(
         "SELECT value FROM schema_meta WHERE key = 'version'").fetchone()
     if row is None or row["value"] != str(SCHEMA_VERSION):
+        # Behind the version check, so a connection to an up-to-date database
+        # pays nothing for it.
+        widened = widen_columns(conn, script, is_pg)
+        if widened:
+            print("[schema] widened to BIGINT: " + ", ".join(widened), file=sys.stderr)
         conn.execute(
             "INSERT INTO schema_meta(key, value) VALUES ('version', ?) "
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
