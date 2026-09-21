@@ -1729,6 +1729,14 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         return row
 
 
+    @app.get("/v1/errors", dependencies=[ReadAuth])
+    def list_errors(limit: int = 2000) -> dict[str, Any]:
+        """Every case carrying an error, in full, with each failed attempt and the
+        machine it failed on -- what the dashboard's "Copy all errors" pastes into
+        a bug report. Read scope: an error message is a solver log tail, and
+        nothing here is more than the case list already shows."""
+        return db.list_errors(conn, limit=limit)
+
     @app.get("/v1/cases", dependencies=[ReadAuth])
     def list_cases(state: str | None = None, split: str | None = None,
                    city_cluster: str | None = None, limit: int = 50,

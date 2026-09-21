@@ -1585,6 +1585,53 @@ def ping(conn) -> None:
 
 
 @_locked
+def list_errors(conn, limit: int = 2000) -> dict[str, Any]:
+    """Every case that currently carries an error, with each failed attempt.
+
+    For pasting into a bug report, so it is one flat answer rather than a page:
+    ``last_error`` in full (the case list truncates nothing but shows one case at
+    a time), plus the per-attempt history from ``events`` -- a case that failed
+    three different ways on three machines is a different bug from one that
+    failed the same way three times, and ``last_error`` alone cannot tell them
+    apart. Worst first: quarantined cases, then by recency.
+    """
+    limit = max(1, min(int(limit), 5000))
+    total = conn.execute(
+        "SELECT COUNT(*) AS n FROM cases WHERE last_error IS NOT NULL").fetchone()["n"]
+    rows = conn.execute(
+        "SELECT case_id, state, attempts, max_attempts, spec, recipe, city_cluster,"
+        " last_error, updated_at FROM cases WHERE last_error IS NOT NULL"
+        " ORDER BY (state = 'quarantined') DESC, updated_at DESC LIMIT ?",
+        (limit,)).fetchall()
+    cases = [dict(r) for r in rows]
+    by_id = {c["case_id"]: c for c in cases}
+    for c in cases:
+        # Only the coordinates: a site that fails is usually a PLACE that fails,
+        # and the rest of the spec would multiply the paste for nothing.
+        try:
+            spec = json.loads(c.pop("spec") or "{}")
+        except ValueError:
+            spec = {}
+        c["lat"], c["lon"] = spec.get("lat"), spec.get("lon")
+        c["history"] = []
+    # One query for all histories, not one per case: this runs under _LOCK, and a
+    # campaign-wide failure is exactly when there are thousands of rows here.
+    ids = list(by_id)
+    for i in range(0, len(ids), 500):
+        chunk = ids[i:i + 500]
+        marks = ",".join("?" * len(chunk))
+        for e in conn.execute(
+                "SELECT e.case_id, e.ts, e.event, e.worker_id, e.detail, w.host, w.cluster"
+                " FROM events e LEFT JOIN workers w ON w.worker_id = e.worker_id"
+                f" WHERE e.event IN ('failed','quarantined') AND e.case_id IN ({marks})"
+                " ORDER BY e.id", chunk).fetchall():
+            d = dict(e)
+            by_id[d.pop("case_id")]["history"].append(d)
+    return {"total": total, "returned": len(cases), "truncated": total > len(cases),
+            "cases": cases}
+
+
+@_locked
 def get_case(conn, case_id: str) -> dict[str, Any] | None:
     row = conn.execute("SELECT " + _CASE_COLS + " FROM cases WHERE case_id=?",
                        (case_id,)).fetchone()

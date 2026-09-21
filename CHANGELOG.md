@@ -8,6 +8,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+### Added
+- **Copy all errors.** A button in the case browser copies every failing case as
+  plain text -- case id, state, attempts, coordinates, the full error, and each
+  failed attempt with the machine it failed on -- led by a count of the most
+  common first lines, so the same failure on hundreds of cases reads as one bug.
+  Backed by `GET /v1/errors` (read scope).
+
 ### Fixed
 - **An archive over 2 GiB can be completed.** `cases.result_bytes` was `INTEGER`,
   which on Postgres is 32 bits, so any `/v1/complete` reporting more than
