@@ -1325,6 +1325,13 @@
           Reset
         </button>
       </div>
+
+      <div>
+        <button id="copyErrors" type="button" class="subtle"
+                title="Copy every case's error, with its case ID and each failed attempt, as text for a bug report">
+          Copy all errors
+        </button>
+      </div>
     </div>
 
     <div id="casesEmpty" class="empty-state">
@@ -2380,6 +2387,67 @@
       document.body.removeChild(ta);
       showToast(label);
     });
+  };
+
+  // -- Copy all errors --------------------------------------------------------
+  // Plain text on purpose: it is pasted into a chat or an issue, where a table
+  // or JSON is harder to read than to produce. Nothing is escaped because
+  // nothing is rendered -- it only ever reaches the clipboard.
+  window.formatErrors = (data, broker) => {
+    const iso = (t) => t ? new Date(t * 1000).toISOString().replace(".000Z", "Z") : "?";
+    const lines = [
+      `casebroker errors -- ${broker} -- ${new Date().toISOString()}`,
+      `${data.total} case(s) with an error` +
+        (data.truncated ? ` (first ${data.returned} shown; quarantined first, then most recent)` : ""),
+    ];
+    // The same message on hundreds of cases is one bug, and saying so up front
+    // is what makes a 2,000-case paste readable.
+    const counts = new Map();
+    for (const c of data.cases) {
+      const key = (c.last_error || "").trim().split("\n")[0].slice(0, 160);
+      counts.set(key, (counts.get(key) || 0) + 1);
+    }
+    const top = [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 15);
+    if (data.cases.length > 1) {
+      lines.push("", "Most common first lines:");
+      for (const [msg, n] of top) lines.push(`  ${String(n).padStart(5)} x  ${msg}`);
+    }
+    for (const c of data.cases) {
+      lines.push("", "=".repeat(72),
+        // Concatenated, not interpolated: tests/test_dashboard_escaping.py treats every
+        // template literal holding a server field as markup, and this file should not
+        // need an exemption from that rule for text that only reaches the clipboard.
+        [c.case_id, "[" + c.state + "]", "attempts " + c.attempts + "/" + c.max_attempts,
+         "lat " + c.lat, "lon " + c.lon, c.city_cluster || "", "recipe " + (c.recipe || "")].join("  "),
+        `updated ${iso(c.updated_at)}`, "", (c.last_error || "").trim());
+      const history = c.history || [];
+      if (history.length) {
+        lines.push("", "attempts:");
+        for (const h of history) {
+          const where = [h.worker_id, h.host, h.cluster].filter(Boolean).join(" / ") || "unknown worker";
+          lines.push("  " + [iso(h.ts), h.event, where].join("  "));
+          const detail = (h.detail || "").trim();
+          // The final attempt's text is last_error above; repeat only what differs.
+          if (detail && !(c.last_error || "").startsWith(detail)) lines.push("    " + detail.replace(/\n/g, "\n    "));
+        }
+      }
+    }
+    return lines.join("\n") + "\n";
+  };
+
+  window.copyAllErrors = async () => {
+    const button = $("copyErrors");
+    button.disabled = true;
+    try {
+      const data = await api("/v1/errors?limit=2000");
+      if (!data.total) { showToast("No case has an error"); return; }
+      window.copyText(window.formatErrors(data, $("broker").value.replace(/\/+$/, "")),
+        `Copied errors of ${data.returned} case(s)` + (data.truncated ? ` of ${data.total}` : ""));
+    } catch (e) {
+      showToast("Could not fetch errors: " + e.message);
+    } finally {
+      button.disabled = false;
+    }
   };
 
   // -- State & Inputs ---------------------------------------------------------
@@ -4588,6 +4656,7 @@
     }, 300);
   });
 
+  $("copyErrors").addEventListener("click", () => window.copyAllErrors());
   $("resetFilters").addEventListener("click", () => {
     $("caseState").value = "";
     $("caseSplitFilter").value = "";
