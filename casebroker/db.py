@@ -135,7 +135,26 @@ CREATE TABLE IF NOT EXISTS workers (
     target_build TEXT,
     -- "<build>: <why>" when this node tried a build, could not start it, and
     -- went back to the one before. Cleared when it reaches its target.
-    update_failed TEXT
+    update_failed TEXT,
+    -- What the node last SAID about moving to its target ("the broker wants
+    -- build X and has no file registered for win-x64", "installed and verified;
+    -- switching after the case"), and when. Cleared once it is there.
+    update_state     TEXT,
+    update_state_at  INTEGER,
+    -- When it last asked /v1/node/release. A node that never asks cannot update
+    -- itself whatever the target says: a Python worker, or an E3D.exe from
+    -- before releases existed.
+    release_asked_at INTEGER,
+    -- When the canary target was set, so "behind for six hours" can be said.
+    target_set_at    INTEGER,
+    -- The build before the last change, when it changed, and how many times in
+    -- a row the change undid the previous one: two clients sharing a worker_id
+    -- show up as the build flipping back and forth on every poll.
+    prev_build       TEXT,
+    build_changed_at INTEGER,
+    build_flips      INTEGER,
+    id_conflict      TEXT,
+    id_conflict_at   INTEGER
 );
 -- What a SCHEDULER holds that has not reached the broker yet. A worker queued in
 -- SLURM has never contacted this service -- it does not exist here until its
@@ -282,6 +301,9 @@ CREATE TABLE IF NOT EXISTS build_stats (
     done        INTEGER NOT NULL DEFAULT 0,
     failed      INTEGER NOT NULL DEFAULT 0,
     unconverged INTEGER NOT NULL DEFAULT 0,
+    -- Summed wall time of the done cases, so a mean per build can be compared
+    -- with the build before it. BIGINT: the 2 GiB lesson of result_bytes.
+    wall_seconds BIGINT,
     first_seen  INTEGER NOT NULL,
     last_seen   INTEGER NOT NULL
 );
@@ -372,7 +394,26 @@ CREATE TABLE IF NOT EXISTS workers (
     target_build TEXT,
     -- "<build>: <why>" when this node tried a build, could not start it, and
     -- went back to the one before. Cleared when it reaches its target.
-    update_failed TEXT
+    update_failed TEXT,
+    -- What the node last SAID about moving to its target ("the broker wants
+    -- build X and has no file registered for win-x64", "installed and verified;
+    -- switching after the case"), and when. Cleared once it is there.
+    update_state     TEXT,
+    update_state_at  INTEGER,
+    -- When it last asked /v1/node/release. A node that never asks cannot update
+    -- itself whatever the target says: a Python worker, or an E3D.exe from
+    -- before releases existed.
+    release_asked_at INTEGER,
+    -- When the canary target was set, so "behind for six hours" can be said.
+    target_set_at    INTEGER,
+    -- The build before the last change, when it changed, and how many times in
+    -- a row the change undid the previous one: two clients sharing a worker_id
+    -- show up as the build flipping back and forth on every poll.
+    prev_build       TEXT,
+    build_changed_at INTEGER,
+    build_flips      INTEGER,
+    id_conflict      TEXT,
+    id_conflict_at   INTEGER
 );
 -- What a SCHEDULER holds that has not reached the broker yet. A worker queued in
 -- SLURM has never contacted this service -- it does not exist here until its
@@ -517,6 +558,9 @@ CREATE TABLE IF NOT EXISTS build_stats (
     done        INTEGER NOT NULL DEFAULT 0,
     failed      INTEGER NOT NULL DEFAULT 0,
     unconverged INTEGER NOT NULL DEFAULT 0,
+    -- Summed wall time of the done cases, so a mean per build can be compared
+    -- with the build before it. BIGINT: the 2 GiB lesson of result_bytes.
+    wall_seconds BIGINT,
     first_seen  INTEGER NOT NULL,
     last_seen   INTEGER NOT NULL
 );
@@ -1258,7 +1302,8 @@ def lease(conn, worker_id: str, count: int = 1,
     conn.execute("BEGIN IMMEDIATE")
     try:
         known = conn.execute(
-            "SELECT drain FROM workers WHERE worker_id = ?", (worker_id,)).fetchone()
+            "SELECT drain, build, prev_build, build_changed_at, build_flips"
+            " FROM workers WHERE worker_id = ?", (worker_id,)).fetchone()
         draining = bool(known and known["drain"])
 
         if resume_case_ids:
@@ -1328,6 +1373,8 @@ def lease(conn, worker_id: str, count: int = 1,
             " platform=excluded.platform, recipes=excluded.recipes",
             (worker_id, host, cluster, now, now, build, version, platform,
              json.dumps(list(recipes)) if recipes else None))
+        if known is not None and (known["build"] or None) != (build or None):
+            _note_build_change(conn, worker_id, known, build, now)
         conn.execute("COMMIT")
     except Exception:
         conn.execute("ROLLBACK")
@@ -1336,7 +1383,8 @@ def lease(conn, worker_id: str, count: int = 1,
 
 
 def _count_for_build(conn, build: str | None, worker_id: str | None, now: int,
-                     done: int = 0, failed: int = 0, unconverged: int = 0) -> None:
+                     done: int = 0, failed: int = 0, unconverged: int = 0,
+                     wall_seconds: int = 0) -> None:
     """Add to a build's tally. Called inside the caller's transaction.
 
     `build` None means "whatever this worker last said it was" -- a failure has no
@@ -1349,13 +1397,49 @@ def _count_for_build(conn, build: str | None, worker_id: str | None, now: int,
     if not build:
         return
     conn.execute(
-        "INSERT INTO build_stats(build, done, failed, unconverged, first_seen, last_seen)"
-        " VALUES (?,?,?,?,?,?)"
+        "INSERT INTO build_stats(build, done, failed, unconverged, wall_seconds,"
+        " first_seen, last_seen)"
+        " VALUES (?,?,?,?,?,?,?)"
         " ON CONFLICT(build) DO UPDATE SET done = build_stats.done + excluded.done,"
         " failed = build_stats.failed + excluded.failed,"
         " unconverged = build_stats.unconverged + excluded.unconverged,"
+        " wall_seconds = COALESCE(build_stats.wall_seconds, 0) + excluded.wall_seconds,"
         " last_seen = excluded.last_seen",
-        (build, done, failed, unconverged, now, now))
+        (build, done, failed, unconverged, wall_seconds, now, now))
+
+
+#: Two changes of build under one worker_id closer together than this, each
+#: undoing the one before, are read as two clients sharing the id, not as updates.
+ID_CONFLICT_WINDOW = 3600
+
+
+def _note_build_change(conn, worker_id: str, known, build: str | None, now: int) -> None:
+    """The build under a worker_id changed. Once, that is an update, and it goes
+    in the audit trail. Flipping back and forth is something else: two clients
+    sharing one id -- an E3D node and a Python worker started from the same
+    machine.env -- each overwriting the other's build on every poll. The fleet
+    table shows whichever wrote last, so the flip itself is what is recorded.
+    """
+    def name(b):
+        return b or "undeclared"
+    old = known["build"] or None
+    # A flip is a change back to what the build was before the LAST change,
+    # within the window. Two flips in a row (A -> B -> A -> B) is the verdict:
+    # one alone is a rollback an operator may well have made on purpose.
+    flip = ((known["prev_build"] or None) == (build or None)
+            and known["build_changed_at"] is not None
+            and now - known["build_changed_at"] < ID_CONFLICT_WINDOW)
+    flips = (known["build_flips"] or 0) + 1 if flip else 0
+    conn.execute(
+        "UPDATE workers SET prev_build = ?, build_changed_at = ?, build_flips = ?"
+        " WHERE worker_id = ?", (old, now, flips, worker_id))
+    _event(conn, None, worker_id, "build-changed", "%s -> %s" % (name(old), name(build)), now)
+    if flips >= 2:
+        said = "%s and %s" % (name(build), name(old))
+        conn.execute(
+            "UPDATE workers SET id_conflict = ?, id_conflict_at = ? WHERE worker_id = ?",
+            (said, now, worker_id))
+        _event(conn, None, worker_id, "shared-id", said, now)
 
 
 # -- node releases: WHICH build the fleet runs, never the build itself ---------
@@ -1391,6 +1475,11 @@ def set_setting(conn, key: str, value: str | None, by: str | None = None,
     """Set, or with ``value=None`` clear, one fleet setting. Audited: a change to
     what thousands of machine-hours will run is exactly the event someone asks
     about afterwards."""
+    _set_setting(conn, key, value, by, now)
+
+
+def _set_setting(conn, key: str, value: str | None, by: str | None = None,
+                 now: int | None = None) -> None:
     now = now or _now()
     if value is None:
         conn.execute("DELETE FROM settings WHERE key = ?", (key,))
@@ -1432,13 +1521,36 @@ def delete_release(conn, build: str, by: str | None = None, now: int | None = No
     return n
 
 
+#: How long a worker may lag its target before it is called stuck, by how it
+#: was told to switch: "now" restarts at once, "direction" waits for the wind
+#: direction being solved, "case" for the case in flight -- which takes hours.
+STUCK_AFTER = {"now": 30 * 60, "direction": 4 * 3600, "case": 12 * 3600}
+
+
+def _live_workers(conn, now: int):
+    """Seen in the last 24 h: the same fleet /v1/status shows."""
+    return conn.execute(
+        "SELECT worker_id, build, platform, target_build, target_set_at, update_failed,"
+        " release_asked_at, last_seen FROM workers WHERE last_seen > ?",
+        (now - 86400,)).fetchall()
+
+
 @_locked
-def list_releases(conn) -> dict[str, Any]:
+def list_releases(conn, now: int | None = None) -> dict[str, Any]:
     """Everything the release panel draws, in one locked read."""
-    settings = {r["key"]: r["value"] for r in conn.execute("SELECT key, value FROM settings").fetchall()}
+    now = now or _now()
+    settings = {r["key"]: dict(r) for r in conn.execute(
+        "SELECT key, value, updated_at FROM settings").fetchall()}
+
+    def value(key, default=None):
+        return settings[key]["value"] if key in settings else default
+
     releases = [dict(r) for r in conn.execute(
         "SELECT build, platform, file, sha256, notes, added_at, added_by FROM releases"
         " ORDER BY added_at DESC, build, platform").fetchall()]
+    published: dict[str, set[str]] = {}
+    for r in releases:
+        published.setdefault(r["build"], set()).add(r["platform"])
     stats = {r["build"]: dict(r) for r in conn.execute("SELECT * FROM build_stats").fetchall()}
     # The earliest date this build shows up anywhere: when a case first
     # completed or failed on it (build_stats.first_seen), or -- for a build
@@ -1449,36 +1561,173 @@ def list_releases(conn) -> dict[str, Any]:
     for r in releases:
         if r["build"] not in first_published or r["added_at"] < first_published[r["build"]]:
             first_published[r["build"]] = r["added_at"]
-    live = _now() - 300
+    live = now - 300
+    workers = _live_workers(conn, now)
     running: dict[str, dict[str, int]] = {}
-    for r in conn.execute(
-            "SELECT build, last_seen FROM workers WHERE build IS NOT NULL AND last_seen > ?",
-            (_now() - 86400,)).fetchall():
-        b = running.setdefault(r["build"], {"workers": 0, "active": 0})
-        b["workers"] += 1
-        b["active"] += 1 if r["last_seen"] > live else 0
-    builds = sorted(set(stats) | set(running) | {r["build"] for r in releases})
+    platforms_in_use: set[str] = set()
+    for r in workers:
+        if r["platform"]:
+            platforms_in_use.add(r["platform"])
+        if r["build"]:
+            b = running.setdefault(r["build"], {"workers": 0, "active": 0})
+            b["workers"] += 1
+            b["active"] += 1 if r["last_seen"] > live else 0
+    target = value("target_build")
+    apply = value("target_apply", "case")
+    builds = sorted(set(stats) | set(running) | set(published))
+
+    def row(b):
+        s = stats.get(b, {})
+        done, failed, unconverged = s.get("done", 0), s.get("failed", 0), s.get("unconverged", 0)
+        return {
+            "build": b, "done": done, "failed": failed, "unconverged": unconverged,
+            **running.get(b, {"workers": 0, "active": 0}),
+            "published": sorted(published.get(b, ())),
+            # Live workers on a platform this build has no file for: told to move,
+            # they could not, and nothing said so.
+            "missing_platforms": sorted(platforms_in_use - published.get(b, set())),
+            # Counts alone do not say "worse than the build before": rates and a
+            # mean do, once there are enough cases to mean anything.
+            "mean_wall_seconds": (round(s["wall_seconds"] / done)
+                                  if done and s.get("wall_seconds") else None),
+            "unconverged_rate": round(unconverged / done, 3) if done else None,
+            "failed_rate": round(failed / (done + failed), 3) if done + failed else None,
+            "first_seen": min(d for d in (s.get("first_seen"), first_published.get(b)) if d is not None)
+                          if s.get("first_seen") or b in first_published else None,
+        }
+
+    # The fleet, counted the way the panel's summary line reads it.
+    summary = {"workers": len(workers), "on_target": 0, "behind": 0, "stuck": 0,
+               "undeclared": 0, "update_failed": 0, "cannot_update": 0, "canaries": 0}
+    since_fleet = settings["target_build"]["updated_at"] if target else None
+    for r in workers:
+        want = r["target_build"] or target
+        if r["target_build"]:
+            summary["canaries"] += 1
+        if not r["build"]:
+            summary["undeclared"] += 1
+        if r["update_failed"]:
+            summary["update_failed"] += 1
+        if not want or not r["build"]:
+            continue
+        if want == r["build"]:
+            summary["on_target"] += 1
+            continue
+        summary["behind"] += 1
+        if not r["release_asked_at"]:
+            summary["cannot_update"] += 1
+        since = r["target_set_at"] if r["target_build"] else since_fleet
+        if since and now - since > STUCK_AFTER.get(apply, STUCK_AFTER["case"]):
+            summary["stuck"] += 1
     return {
-        "target_build": settings.get("target_build"),
-        "target_apply": settings.get("target_apply", "case"),
-        "require_build": settings.get("require_build") == "1",
-        "blocked_builds": json.loads(settings.get("blocked_builds") or "[]"),
+        "target_build": target,
+        "target_since": since_fleet,
+        "target_apply": apply,
+        "previous_target": value("previous_target"),
+        "require_build": value("require_build") == "1",
+        "blocked_builds": json.loads(value("blocked_builds") or "[]"),
+        "release_repo": value("release_repo"),
+        "stuck_after": STUCK_AFTER,
         "releases": releases,
-        "builds": [{"build": b, **{k: stats.get(b, {}).get(k, 0) for k in ("done", "failed", "unconverged")},
-                    **running.get(b, {"workers": 0, "active": 0}),
-                    "first_seen": min(d for d in (stats.get(b, {}).get("first_seen"), first_published.get(b))
-                                      if d is not None)
-                                  if stats.get(b, {}).get("first_seen") or b in first_published else None}
-                   for b in builds],
+        "builds": [row(b) for b in builds],
+        "fleet": summary,
     }
+
+
+@_locked
+def platform_gaps(conn, build: str, worker_id: str | None = None,
+                  now: int | None = None) -> list[str]:
+    """Platforms of the live workers -- or of ONE worker -- that `build` has no
+    file for. A target every node learns and some cannot reach is the silent
+    failure the guard on setting one exists for."""
+    now = now or _now()
+    have = {r["platform"] for r in conn.execute(
+        "SELECT platform FROM releases WHERE build = ?", (build,)).fetchall()}
+    if worker_id is not None:
+        w = conn.execute("SELECT platform FROM workers WHERE worker_id = ?", (worker_id,)).fetchone()
+        used = {w["platform"]} if w and w["platform"] else set()
+    else:
+        used = {r["platform"] for r in _live_workers(conn, now) if r["platform"]}
+    return sorted(used - have)
+
+
+@_locked
+def release_in_use(conn, build: str, now: int | None = None) -> str | None:
+    """Why this build's catalog entry has to stay, or None: it is the fleet's
+    target, a canary's target, or what a live worker is running right now."""
+    now = now or _now()
+    if _setting(conn, "target_build") == build:
+        return "%s is the fleet's target; move the target first" % build
+    canaries = sorted(r["worker_id"] for r in conn.execute(
+        "SELECT worker_id FROM workers WHERE target_build = ?", (build,)).fetchall())
+    if canaries:
+        return "%s is the canary target of %s; clear that first" % (build, ", ".join(canaries))
+    running = sorted(r["worker_id"] for r in _live_workers(conn, now) if r["build"] == build)
+    if running:
+        return "%s is what %s is running; move or drain them first" % (build, ", ".join(running))
+    return None
+
+
+def _set_target(conn, build: str | None, by: str | None, now: int) -> None:
+    """Point the fleet at a build and remember where it was: what a roll back
+    returns to. Two targets in a row toggle, which is what "back" means."""
+    current = _setting(conn, "target_build")
+    if build == current:
+        return
+    if current:
+        _set_setting(conn, "previous_target", current, by, now)
+    _set_setting(conn, "target_build", build, by, now)
+
+
+@_locked
+def set_target(conn, build: str | None, by: str | None = None, now: int | None = None) -> None:
+    _set_target(conn, build, by, now or _now())
+
+
+@_locked
+def promote_canary(conn, worker_id: str, by: str | None = None, now: int | None = None) -> str:
+    """The canary's build becomes the fleet's target and its override is
+    cleared: the two calls an operator made by hand, as one that cannot be
+    left half done."""
+    now = now or _now()
+    w = conn.execute("SELECT target_build FROM workers WHERE worker_id = ?", (worker_id,)).fetchone()
+    if w is None:
+        raise KeyError(worker_id)
+    if not w["target_build"]:
+        raise ValueError("%s is not a canary: it follows the fleet" % worker_id)
+    build = w["target_build"]
+    conn.execute("UPDATE workers SET target_build = NULL, target_set_at = NULL WHERE worker_id = ?",
+                 (worker_id,))
+    _set_target(conn, build, by, now)
+    _event(conn, None, by, "promote", "%s, proven on %s, is the fleet's target" % (build, worker_id), now)
+    return build
+
+
+@_locked
+def roll_back(conn, by: str | None = None, block: bool = False, now: int | None = None) -> str:
+    """Return the fleet to the build it was on before the current target. With
+    `block`, the current one is refused to every node as well: the kill switch,
+    for a build that has to stop NOW rather than at each node's next ask."""
+    now = now or _now()
+    current, previous = _setting(conn, "target_build"), _setting(conn, "previous_target")
+    if not previous:
+        raise ValueError("nothing to roll back to: no earlier target is remembered")
+    if block and current:
+        blocked = set(json.loads(_setting(conn, "blocked_builds") or "[]"))
+        blocked.add(current)
+        _set_setting(conn, "blocked_builds", json.dumps(sorted(blocked)), by, now)
+    _set_target(conn, previous, by, now)
+    _event(conn, None, by, "rollback",
+           "%s -> %s%s" % (current or "(none)", previous, ", blocked" if block else ""), now)
+    return previous
 
 
 @_locked
 def set_worker_target(conn, worker_id: str, build: str | None, by: str | None = None,
                       now: int | None = None) -> bool:
     now = now or _now()
-    n = conn.execute("UPDATE workers SET target_build = ? WHERE worker_id = ?",
-                     (build, worker_id)).rowcount
+    n = conn.execute("UPDATE workers SET target_build = ?, target_set_at = ? WHERE worker_id = ?",
+                     (build, now if build else None, worker_id)).rowcount
     if n:
         _event(conn, None, by, "worker-target", "%s -> %s" % (worker_id, build or "(fleet)"), now)
     return bool(n)
@@ -1519,16 +1768,24 @@ def lease_refusal(conn, build: str | None) -> str | None:
 @_locked
 def node_release(conn, worker_id: str, platform: str | None, build: str | None,
                  failed_build: str | None = None, failed_reason: str | None = None,
-                 now: int | None = None) -> dict[str, Any]:
+                 state: str | None = None, now: int | None = None) -> dict[str, Any]:
     """What one node should be running, and whether it may take new work.
 
     Asked before every lease and during a solve. The answer names a build, the
     file it is on the release share under and the hash that file must have; the
     node does the rest.
+
+    `state` is what the node says about the move it was last told to make --
+    waiting for the file, installed and verified, switching after the case --
+    kept until it is on target. Without it an operator who set a target saw
+    every worker as "behind" and nothing about whether anything was happening.
     """
+    now = now or _now()
     w = conn.execute(
         "SELECT drain, drain_reason, target_build, update_failed FROM workers WHERE worker_id = ?",
         (worker_id,)).fetchone()
+    canary = bool(w and w["target_build"])
+    target = (w["target_build"] if canary else None) or _setting(conn, "target_build")
     if w is not None:
         # A node that rolled itself back says so with every ask; recorded (and
         # audited) once per failure, and forgotten the moment it is on target.
@@ -1537,9 +1794,19 @@ def node_release(conn, worker_id: str, platform: str | None, build: str | None,
         if said != w["update_failed"]:
             conn.execute("UPDATE workers SET update_failed = ? WHERE worker_id = ?", (said, worker_id))
             if said:
-                _event(conn, None, worker_id, "update-failed", said, now or _now())
-    canary = bool(w and w["target_build"])
-    target = (w["target_build"] if canary else None) or _setting(conn, "target_build")
+                _event(conn, None, worker_id, "update-failed", said, now)
+        # The ask itself is evidence -- a node that never asks cannot update
+        # itself -- and what it says about the move is kept until it is there.
+        if not target or target == build:
+            conn.execute("UPDATE workers SET release_asked_at = ?, update_state = NULL,"
+                         " update_state_at = NULL WHERE worker_id = ?", (now, worker_id))
+        elif state:
+            conn.execute("UPDATE workers SET release_asked_at = ?, update_state = ?,"
+                         " update_state_at = ? WHERE worker_id = ?",
+                         (now, state[:200], now, worker_id))
+        else:
+            conn.execute("UPDATE workers SET release_asked_at = ? WHERE worker_id = ?",
+                         (now, worker_id))
     out: dict[str, Any] = {
         "target_build": target, "canary": canary, "current": bool(target) and target == build,
         "apply": _setting(conn, "target_apply", "case"),
@@ -1680,8 +1947,14 @@ def complete(conn, lease_id: str, result_uri: str,
         # The build the ARCHIVE names, not the worker's current one: a case can be
         # finished by a node that was updated after it started, and the metrics
         # say which build wrote the result.
-        _count_for_build(conn, (metrics or {}).get("eddy3d_build"), row["lease_worker"], now,
-                         done=1, unconverged=1 if (metrics or {}).get("unconverged_count") else 0)
+        m = metrics or {}
+        wall = m.get("wall_seconds")
+        if not isinstance(wall, (int, float)) or wall < 0:
+            # The worker's own clock when it kept one; the lease's age otherwise.
+            wall = (now - row["leased_at"]) if row["leased_at"] else 0
+        _count_for_build(conn, m.get("eddy3d_build"), row["lease_worker"], now,
+                         done=1, unconverged=1 if m.get("unconverged_count") else 0,
+                         wall_seconds=int(wall))
         _event(conn, row["case_id"], row["lease_worker"], "done", result_uri, now)
         conn.execute("COMMIT")
     except Exception:

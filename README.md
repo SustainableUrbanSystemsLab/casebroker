@@ -34,7 +34,8 @@ Why a broker rather than splitting the case list across machines up front:
 | [`docs/protocol.md`](docs/protocol.md) | Client/server interaction, every endpoint, the state machine |
 | [`docs/operations.md`](docs/operations.md) | First run, accounts, tokens, storage, releases, deploying |
 | [`docs/dashboard.md`](docs/dashboard.md) | The ops UI and read-only sharing |
-| [`docs/e3d-contract.md`](docs/e3d-contract.md) | The seam to the CFD: what `e3d` must do, and why it never holds a broker credential |
+| [`docs/releases.md`](docs/releases.md) | Moving the fleet between builds while a campaign runs: catalog, canary, promote, roll back, the badges |
+| [`docs/e3d-contract.md`](docs/e3d-contract.md) | The seam to the CFD: what `E3D.exe` must do on the Python path, and why it never holds a broker credential there |
 | `casebroker/` | The service: `app.py` (API), `db.py` (both engines, and the schema), `auth.py` (passwords, sessions, machine tokens), `worker.py` (the client), `cli.py` (`casebroker`), `ids.py` (case identity and splits) |
 | `runner/run_case.sh` | The seam to the CFD: geometry → mesh → solve → sample |
 | `slurm/` | Worker pools for Phoenix and ICE |

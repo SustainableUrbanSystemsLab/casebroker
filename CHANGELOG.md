@@ -8,6 +8,50 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-09-22
+
+### Added
+- **Running a fleet update, from the panel or a terminal.** Beyond "point at a
+  build", the things an operator did by hand or could not see:
+  - **What each node says about its update.** `GET /v1/node/release` takes
+    `state`; the Build column's badge behind a target now says WHY -- the
+    node's own word ("the broker wants X and has no file on the share yet"), a
+    rollback, nothing to fetch for its platform, or that it has never asked and
+    so cannot update itself (a Python worker, an E3D.exe from before releases).
+    Before, every worker read "→ NEW" and nothing said whether anything was
+    happening.
+  - **A target every platform can reach.** Setting a target, or a canary, with
+    no file for a platform live workers run on is refused (409, naming the
+    platform); `force` insists. The catalog lists `published` and
+    `missing_platforms` per build.
+  - **Promote, roll back, kill switch.** `POST /v1/releases/promote` clears a
+    canary's override and sets the fleet's target in one call;
+    `POST /v1/releases/rollback` returns to the target before (remembered as
+    `previous_target`), and with `block: true` refuses the build being left to
+    every node at its next lease. Buttons for all three on the panel.
+  - **Stuck.** A worker behind its target longer than a switch at the chosen
+    boundary should take (`stuck_after`: now 30 min, direction 4 h, case 12 h)
+    is called stuck, with the age on its badge; the fleet summary counts them.
+  - **`casebroker release register|target|promote|rollback|list`.** The catalog
+    from a terminal or a CI step (`--password-stdin`), reading the
+    `release.json` the E3D node build writes instead of pasting it.
+  - **Rates and a mean.** Per build: unconverged and failure rates, mean wall
+    seconds (from `wall_seconds` in the metrics, or the lease's age); the
+    target's row says "worse than <previous>" when both have enough cases and
+    it is.
+  - **Delete guard.** A build that is the target, a canary's target, or what a
+    live worker runs cannot be removed from the catalog (409 says which).
+  - **Shared worker id.** A build flipping back and forth under one id -- an E3D
+    node and a Python worker started from the same machine.env -- is recorded
+    as `id_conflict`, audited as `shared-id`, and badged; every change of build
+    is audited as `build-changed`.
+  - **Panel copy.** A one-line fleet summary; who published each build, when,
+    and its notes; commit and compare links on GitHub (`release_repo` in the
+    policy); the `require_build` switch says how many workers it would refuse.
+  - `docs/releases.md` (the loop, the badges, the guards, the endpoints);
+    `docs/e3d-contract.md` rewritten around the E3D node. Schema version 5.
+
+
 ## [0.12.3] - 2026-09-22
 
 ### Fixed

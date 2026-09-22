@@ -25,6 +25,7 @@ import hmac
 import json
 import contextlib
 import os
+import re
 import secrets
 import threading
 import time
@@ -82,6 +83,16 @@ class SetupIn(BaseModel):
     # in the body as well as a bearer header so the browser setup form can send
     # it without inventing a header.
     setup_token: str | None = Field(default=None, max_length=256)
+
+
+def _commit() -> str | None:
+    """The commit this process was built from, when the platform says: Render
+    sets RENDER_GIT_COMMIT, Actions sets GITHUB_SHA, and CASEBROKER_COMMIT is
+    for anything else. The version alone moves once per commit now, but a
+    number does not say WHICH commit is live; this does."""
+    sha = (os.environ.get("CASEBROKER_COMMIT") or os.environ.get("RENDER_GIT_COMMIT")
+           or os.environ.get("GITHUB_SHA") or "").strip()
+    return sha[:8] or None
 
 
 class LoginIn(BaseModel):
@@ -184,11 +195,26 @@ class ReleaseIn_(BaseModel):
 class TargetIn(BaseModel):
     build: str | None = Field(default=None, max_length=96)
     apply: str | None = Field(default=None, max_length=16)
+    # Set a target some live platform has no file for anyway. Off by default:
+    # the nodes on that platform would learn they should move and could not.
+    force: bool = False
 
 
 class PolicyIn(BaseModel):
     require_build: bool | None = None
     blocked_builds: list[str] | None = Field(default=None, max_length=64)
+    # "owner/name" on GitHub, for the commit links the panel draws from build
+    # names; "" clears it.
+    release_repo: str | None = Field(default=None, max_length=120)
+
+
+class PromoteIn(BaseModel):
+    worker_id: str = Field(min_length=1, max_length=200)
+
+
+class RollbackIn(BaseModel):
+    # Also refuse the build being left, to every node, at once: the kill switch.
+    block: bool = False
 
 
 class DrainIn(BaseModel):
@@ -750,7 +776,7 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
             posture = "unknown"
         else:
             posture = "OPEN"
-        return {"ok": True, "version": __version__,
+        return {"ok": True, "version": __version__, "commit": _commit(),
                 "auth": posture,
                 # A boolean, never the count: /v1/auth/state already tells an
                 # anonymous caller whether this broker has been set up, so this
@@ -1509,18 +1535,21 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
     @app.get("/v1/node/release", dependencies=[WriteAuth])
     def node_release(request: Request, worker_id: str, platform: str | None = None,
                      build: str | None = None, failed_build: str | None = None,
-                     failed_reason: str | None = None) -> dict[str, Any]:
+                     failed_reason: str | None = None, state: str | None = None) -> dict[str, Any]:
         """What this node should be running. Asked before every lease, and
         during a solve so an update does not have to wait for the case.
 
         `failed_build` is a node saying it TRIED a build, could not start it and
-        rolled back: the one thing an unattended update must never hide."""
+        rolled back: the one thing an unattended update must never hide.
+        `state` is what it says about the move it was last told to make, shown
+        on the fleet table beside the target it is behind."""
         machine = _machine_principal(request)
         if machine and not _may_lease_as(machine["name"], worker_id):
             raise HTTPException(403, f"this credential belongs to {machine['name']!r}")
         return db.node_release(conn, worker_id, platform, build,
                                failed_build=(failed_build or "")[:96] or None,
-                               failed_reason=failed_reason)
+                               failed_reason=failed_reason,
+                               state=(state or "")[:200] or None)
 
     @app.get("/v1/releases", dependencies=[ReadAuth])
     def releases() -> dict[str, Any]:
@@ -1537,9 +1566,12 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
 
     @app.delete("/v1/releases/{build}")
     def delete_release(build: str, user=AdminAuth) -> dict[str, Any]:
-        current = db.list_releases(conn)
-        if current["target_build"] == build:
-            raise HTTPException(409, f"{build} is the fleet's target; move the target first")
+        # Not only the fleet's target: a canary pointed at it would be left with
+        # a target nobody can fetch, and a node RUNNING it would show as behind
+        # a catalog that no longer names what it is on.
+        why = db.release_in_use(conn, build)
+        if why:
+            raise HTTPException(409, why)
         return {"removed": db.delete_release(conn, build, by=user["username"])}
 
     @app.put("/v1/releases/target")
@@ -1555,7 +1587,14 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         if "build" in body.model_fields_set:
             if body.build and not any(r["build"] == body.build for r in db.list_releases(conn)["releases"]):
                 raise HTTPException(409, f"{body.build} has no published file; register it first")
-            db.set_setting(conn, "target_build", body.build, by=user["username"])
+            # ...and a file for every platform the LIVE fleet runs on, or the
+            # nodes on the missing one would be told to move and could not.
+            gaps = db.platform_gaps(conn, body.build) if body.build else []
+            if gaps and not body.force:
+                raise HTTPException(
+                    409, f"{body.build} has no file for {', '.join(gaps)}, which live workers "
+                         "run on; register one, or pass force=true to leave them behind")
+            db.set_target(conn, body.build, by=user["username"])
         return db.list_releases(conn)
 
     @app.put("/v1/releases/policy")
@@ -1565,6 +1604,31 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         if body.blocked_builds is not None:
             db.set_setting(conn, "blocked_builds", json.dumps(sorted(set(body.blocked_builds))),
                            by=user["username"])
+        if body.release_repo is not None:
+            repo = body.release_repo.strip()
+            if repo and not re.fullmatch(r"[\w.-]+/[\w.-]+", repo):
+                raise HTTPException(422, "release_repo is owner/name on GitHub, e.g. Eddy3D-Dev/Eddy3D")
+            db.set_setting(conn, "release_repo", repo or None, by=user["username"])
+        return db.list_releases(conn)
+
+    @app.post("/v1/releases/promote")
+    def promote_canary(body: PromoteIn, user=AdminAuth) -> dict[str, Any]:
+        """The canary's build becomes the fleet's target, in one call."""
+        try:
+            db.promote_canary(conn, body.worker_id, by=user["username"])
+        except KeyError:
+            raise HTTPException(404, f"no worker named {body.worker_id!r}")
+        except ValueError as e:
+            raise HTTPException(409, str(e))
+        return db.list_releases(conn)
+
+    @app.post("/v1/releases/rollback")
+    def roll_back(body: RollbackIn, user=AdminAuth) -> dict[str, Any]:
+        """Back to the target before this one; with `block`, the kill switch."""
+        try:
+            db.roll_back(conn, by=user["username"], block=body.block)
+        except ValueError as e:
+            raise HTTPException(409, str(e))
         return db.list_releases(conn)
 
     @app.put("/v1/workers/{worker_id}/target")
@@ -1572,6 +1636,10 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         """The canary: move ONE worker to a build, ahead of the fleet."""
         if body.build and not any(r["build"] == body.build for r in db.list_releases(conn)["releases"]):
             raise HTTPException(409, f"{body.build} has no published file; register it first")
+        gaps = db.platform_gaps(conn, body.build, worker_id=worker_id) if body.build else []
+        if gaps and not body.force:
+            raise HTTPException(409, f"{body.build} has no file for {gaps[0]}, which {worker_id} "
+                                     "runs on; register one, or pass force=true")
         if not db.set_worker_target(conn, worker_id, body.build, by=user["username"]):
             raise HTTPException(404, f"no worker named {worker_id!r}")
         return {"worker_id": worker_id, "target_build": body.build}
@@ -1738,7 +1806,7 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         # Costs nothing: both values are already in this process's memory, and
         # this endpoint is read-authenticated, so it discloses strictly less
         # widely than /healthz already does unauthenticated.
-        return {**db.status(conn), "version": __version__,
+        return {**db.status(conn), "version": __version__, "commit": _commit(),
                 "db": _redact_db_target(db_path)}
 
 
