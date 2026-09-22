@@ -131,6 +131,7 @@ than silent. Creating the first account closes it.
 | `POST /v1/cases` | Append cases. **Idempotent** — re-posting an existing id is a no-op, which is how the dataset grows |
 | `GET /v1/cases` | Paginated, filterable (`state`, `split`, `city_cluster`) list of cases, most recently touched first — what the dashboard's case browser calls |
 | `GET /v1/cases/{case_id}` | One case's full record by id |
+| `GET /v1/storage` | How much space the database uses: the total, per table (rows, size, index share) largest first, bytes per case, and the plan's limit when known -- `CASEBROKER_DB_QUOTA_MB`, or for a Supabase DSN an assumed 500 MB free plan, labelled as the assumption it is. What the dashboard's header **storage** button shows |
 | `GET /v1/errors` | Every case that carries an error, in one answer: `last_error` in full, the site's coordinates, and each failed attempt with the worker, host and cluster it failed on. Quarantined first, then most recent; `limit` (default 2000, max 5000) and `truncated` says when it bit. What the dashboard's **Copy all errors** button turns into text for a bug report |
 | `POST /v1/lease` | Claim up to N cases. Empty list = drained, not an error. Workers report their `host`/`cluster` here (optional) so "what machine produced this" stays answerable later |
 | `POST /v1/heartbeat` | Extend the lease. **409 means stop working on that case**. Refused once the lease is older than `CASEBROKER_MAX_LEASE_AGE` (7 days), which releases the case: a heartbeat proves the worker is alive, not that it is progressing |
