@@ -153,6 +153,31 @@ class CaseIn(BaseModel):
     spec: dict[str, Any] = Field(default_factory=dict)
     priority: int = 100
     max_attempts: int = 3
+    # Free key/value labels ("campaign": "v2-pilot"): filtered by later, shown
+    # on the case. Re-posting a case rewrites them.
+    labels: dict[str, str] | None = None
+
+
+class CancelIn(BaseModel):
+    reason: str | None = Field(default=None, max_length=300)
+    # Quarantine it with the reason instead of putting it back in the pool.
+    park: bool = False
+
+
+_LABEL_KEY = re.compile(r"^[A-Za-z0-9_.-]{1,32}$")
+
+
+def _check_labels(labels: dict[str, str] | None) -> dict[str, str] | None:
+    if not labels:
+        return None
+    if len(labels) > 16:
+        raise HTTPException(422, "at most 16 labels per case")
+    for k, v in labels.items():
+        if not _LABEL_KEY.match(k):
+            raise HTTPException(422, f"label key {k!r}: letters, digits, '_', '.', '-', up to 32")
+        if not isinstance(v, str) or not v.strip() or len(v) > 64:
+            raise HTTPException(422, f"label {k!r}: a value is 1 to 64 characters")
+    return {k: v.strip() for k, v in labels.items()}
 
 
 class LeaseIn(BaseModel):
@@ -1392,6 +1417,7 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
                 "split": ids.split_for(c.city_cluster),
                 "priority": c.priority,
                 "max_attempts": c.max_attempts,
+                "labels": _check_labels(c.labels),
             })
         out: dict[str, Any] = dict(db.add_cases(conn, rows))
         # Always present, so a caller can read it without a version check, and
@@ -1594,6 +1620,16 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
                 raise HTTPException(
                     409, f"{body.build} has no file for {', '.join(gaps)}, which live workers "
                          "run on; register one, or pass force=true to leave them behind")
+            # ...and it has to KNOW the recipes the queue holds, or every node on
+            # it would refuse those cases at the lease. Checked only when some
+            # worker on that build has said what it knows.
+            lacks = db.recipe_gaps(conn, body.build) if body.build else []
+            if lacks and not body.force:
+                raise HTTPException(
+                    409, f"{body.build} does not know "
+                         + ", ".join(f"{g['recipe']} ({g['cases']} queued)" for g in lacks)
+                         + "; every node on it would refuse those cases. Pass force=true to "
+                           "point the fleet at it anyway")
             db.set_target(conn, body.build, by=user["username"])
         return db.list_releases(conn)
 
@@ -2030,6 +2066,19 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
                 db.put_footprints(conn, case_id, json.dumps(fc), fc["n"])
         return {**fc, **meshed, "cached": False}
 
+    @app.post("/v1/cases/{case_id}/cancel")
+    def cancel_case(case_id: str, body: CancelIn, user=AdminAuth) -> dict[str, Any]:
+        """Pull a leased case off its node. The node stops at its next
+        heartbeat; the attempt is refunded; the case is requeued, or parked in
+        quarantine with the reason. Admin only: it ends a solve on purpose."""
+        try:
+            return db.cancel_case(conn, case_id, by=user["username"], reason=body.reason,
+                                  park=body.park)
+        except KeyError:
+            raise HTTPException(404, "no such case")
+        except ValueError as e:
+            raise HTTPException(409, str(e))
+
     @app.get("/v1/cases/{case_id}", dependencies=[ReadAuth])
     def get_case(case_id: str) -> dict[str, Any]:
         row = db.get_case(conn, case_id)
@@ -2083,7 +2132,8 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
     def list_cases(state: str | None = None, split: str | None = None,
                    city_cluster: str | None = None, limit: int = 50,
                    offset: int = 0, sort: str | None = None,
-                   direction: str = "desc", include_spec: bool = True) -> dict[str, Any]:
+                   direction: str = "desc", include_spec: bool = True,
+                   label: str | None = None) -> dict[str, Any]:
         """A page of cases for the dashboard's case browser -- most recently
         touched first, optionally filtered by state/split/city. Distinct from
         ``GET /v1/cases/{case_id}`` (one case by id, used for a direct lookup).
@@ -2092,7 +2142,7 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         halves the page; a caller that wants one case's spec asks for that case."""
         return db.list_cases(conn, state=state, split=split, city_cluster=city_cluster,
                              limit=limit, offset=offset, sort=sort, direction=direction,
-                             include_spec=include_spec)
+                             include_spec=include_spec, label=label)
 
     return app
 

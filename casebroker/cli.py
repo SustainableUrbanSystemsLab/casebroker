@@ -795,6 +795,10 @@ def _print_catalog(r: dict) -> None:
             b.get("active", 0), b.get("workers", 0), b.get("done", 0), b.get("unconverged", 0),
             b.get("failed", 0),
             "  no file for %s" % ", ".join(b["missing_platforms"]) if b.get("missing_platforms") else ""))
+        if b.get("knows") is not None:
+            print("      knows %s%s" % (
+                ", ".join(b["knows"]) or "(no recipe)",
+                ("; does not know %s" % ", ".join(b["missing_recipes"])) if b.get("missing_recipes") else ""))
 
 
 def _admin_call(args, method: str, path: str, payload, said: str) -> int:

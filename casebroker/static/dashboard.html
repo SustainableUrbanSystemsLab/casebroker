@@ -1627,6 +1627,13 @@
         <input type="text" id="caseCityFilter" placeholder="Filter by city..." />
       </div>
 
+      <div class="field" style="min-width: 160px; flex: 1;">
+        <label for="caseLabelFilter">Label
+          <span class="label-hint">(key:value, or a key)</span>
+        </label>
+        <input type="text" id="caseLabelFilter" placeholder="campaign:v2-pilot" />
+      </div>
+
       <div class="field" style="min-width: 240px; flex: 2;">
         <label for="caseId">Jump to Case ID</label>
         <input type="text" id="caseId" placeholder="e.g. v2-4894713a345a4429" />
@@ -3779,7 +3786,7 @@
   // so sorting what is on screen would answer a different question than the one
   // the click asks. The workers table sorts in the browser instead -- /v1/status
   // hands over the whole fleet, so there is nothing off-screen to be wrong about.
-  const caseList = { state: "", split: "", city: "", limit: 25, offset: 0, total: 0,
+  const caseList = { state: "", split: "", city: "", label: "", limit: 25, offset: 0, total: 0,
                      singleId: null, sort: "updated_at", dir: "desc" };
   const workerSort = { key: "last_seen", dir: "desc" };
 
@@ -3921,6 +3928,29 @@
       if (full.state === was && full.state !== "leased") redrawPctCard(id);
       else redrawOpenCase(id);
     }).catch(() => {});                        // the copy on screen is still true of when it was read
+  }
+
+  /// The stages a case went through, as the broker read them off its progress
+  /// trail: how long each took, which one it is in now, which one a failure
+  /// landed in. One row per attempt when there was more than one.
+  function stagesHtml(c) {
+    const segs = c.stages || [];
+    if (!segs.length) return "";
+    const running = c.state === "leased";
+    const attempts = [...new Set(segs.map((s) => s.attempt))];
+    const chip = (s) => {
+      const open = s.ended_at == null && running;
+      const failedHere = !running && c.last_error && s.stage === c.failed_in && s === segs[segs.length - 1];
+      return `<span class="chip${open ? " mono" : ""}" style="${failedHere ? "color:var(--bad);border-color:var(--bad);" : ""}"`
+        + ` title="${esc((s.detail || "") + (s.started_at ? " · started " + relTime(s.started_at) : ""))}">`
+        + `${esc(s.stage)}${s.seconds != null ? " " + esc(ageShort(s.seconds)) : ""}${open ? " …" : ""}</span>`;
+    };
+    return `<div class="detail-card" style="margin-bottom:14px;">
+        <h3>Stages <span class="label-hint" style="font-weight:400;">(from the lines the worker reported; a stage lasts as long as the lines it covers, so its length is the heartbeat's)</span></h3>
+        ${attempts.map((a) => `<div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:6px;">`
+          + (attempts.length > 1 ? `<span class="label-hint">attempt ${a}:</span>` : "")
+          + segs.filter((s) => s.attempt === a).map(chip).join("") + `</div>`).join("")}
+      </div>`;
   }
 
   function badge(state) {
@@ -4800,6 +4830,8 @@
               <dd>${esc(c.city_cluster || "—")}</dd>
               <dt>Priority</dt>
               <dd>${c.priority}</dd>
+              ${c.labels && Object.keys(c.labels).length ? `<dt title="posted with the case; click one to filter the browser by it">Labels</dt>
+              <dd>${Object.entries(c.labels).map(([k, v]) => `<span class="chip mono" style="cursor:pointer" data-label="${esc(k)}:${esc(v)}" title="filter by ${esc(k)}:${esc(v)}">${esc(k)}: ${esc(v)}</span>`).join(" ")}</dd>` : ""}
               <!-- Charged FAILURES, not starts: a release refunds one and a
                    worker resuming its own case spends none, so a case can have
                    run four times and read "1 / 3". The label said "Attempts",
@@ -4848,6 +4880,11 @@
                 c.updated_at ? esc(relTime(c.updated_at)) : "—"}</dd>
               <dt>Lease Expiry</dt>
               <dd>${c.lease_expires ? esc(relTime(c.lease_expires)) : "—"}</dd>
+              <!-- Ending a solve on purpose, with a reason in the trail: the one
+                   place a live worker's lease is released by hand. -->
+              ${c.state === "leased" ? `<dt title="take this case off the node holding it; the node stops at its next heartbeat and the attempt is refunded">Pull off node</dt>
+              <dd><button type="button" class="ghost" data-pull="${esc(c.case_id)}" data-worker="${esc(c.lease_worker || "")}" data-park="" title="back into the queue for the next node">Requeue</button>
+                  <button type="button" class="ghost" data-pull="${esc(c.case_id)}" data-worker="${esc(c.lease_worker || "")}" data-park="1" title="into quarantine with the reason, where Reopen finds it">Park</button></dd>` : ""}
               <!-- The bar, with its moving band, means "a worker is on this right
                    now". Only a LEASED case is, so every other state shows the
                    last line as text. The cases table has always gated it this
@@ -4912,6 +4949,7 @@
           </div>
         </div>
 
+        ${stagesHtml(c)}
         ${c.last_error ? `
           <div style="background:var(--bad-light); border:1px solid var(--bad); border-radius:8px; padding:12px 14px; margin-bottom:14px; color:var(--bad);">
             <div style="font-weight:600; margin-bottom:4px; font-size:12px; display:flex; align-items:center; gap:6px;">
@@ -4923,6 +4961,7 @@
               ? `<div style="color:var(--text-muted);font-size:11px;margin-bottom:6px;">`
                 + `This case is ${esc(c.state === "leased" ? "running again" : "queued again")}; the message below is from an earlier attempt.</div>`
               : ""}
+            ${c.failed_in ? `<div style="font-size:11px;margin-bottom:6px;">failed during <b>${esc(c.failed_in)}</b>, by the last line the worker reported</div>` : ""}
             <code style="display:block; padding:8px; background:var(--surface); border:1px solid var(--border); color:inherit; white-space:pre-wrap; font-size:11.5px;">${esc(c.last_error)}</code>
           </div>` : ""}
 
@@ -5282,6 +5321,7 @@
     if (caseList.state) q.set("state", caseList.state);
     if (caseList.split) q.set("split", caseList.split);
     if (caseList.city) q.set("city_cluster", caseList.city);
+    if (caseList.label) q.set("label", caseList.label);
     // The page ships every case's `spec` -- a few hundred bytes of site,
     // directions and mesh settings each -- and the table draws none of it. Only
     // the ONE expanded row needs it, and that row fetches its own full record.
@@ -6028,6 +6068,9 @@
             <td>${(b.published || []).length ? esc(b.published.join(" ")) : `<span style="color:var(--text-muted)">not published</span>`}`
               + ((b.missing_platforms || []).length
                   ? `<div class="label-hint" style="color:var(--bad)" title="live workers on this platform would be told to move and could not">no file for ${esc(b.missing_platforms.join(", "))}</div>` : "")
+              + (b.knows ? `<div class="label-hint" title="the recipes workers on this build declared">knows ${esc(b.knows.join(", ") || "no recipe")}</div>` : "")
+              + ((b.missing_recipes || []).length
+                  ? `<div class="label-hint" style="color:var(--bad)" title="queued cases need these; every node on this build would refuse them">does not know ${esc(b.missing_recipes.map((x) => `${x} (${(r.queue_recipes || {})[x] || 0} queued)`).join(", "))}</div>` : "")
               + `</td>
             <td class="num">${b.active}/${b.workers}</td>
             <td class="num">${(b.done || 0).toLocaleString()}</td>
@@ -6093,7 +6136,7 @@
   async function releaseCallForcing(path, body, said) {
     try { await userCall(path, jsonBody("PUT", body)); showToast(said); }
     catch (e) {
-      if (/no file for/.test(e.message)
+      if (/no file for|does not know/.test(e.message)
           && window.confirm(e.message + "\n\nSet it anyway and leave those workers behind?")) {
         try { await userCall(path, jsonBody("PUT", { ...body, force: true })); showToast(said); }
         catch (e2) { showToast(e2.message); }
@@ -7720,15 +7763,59 @@
     }, 300);
   });
 
+  let labelTimer = null;
+  $("caseLabelFilter").addEventListener("input", (e) => {
+    if (labelTimer) clearTimeout(labelTimer);
+    labelTimer = setTimeout(() => {
+      caseList.label = e.target.value.trim();
+      caseList.offset = 0;
+      caseList.singleId = null;
+      openDetailId = null;
+      loadCases();
+    }, 300);
+  });
+
+  // Clicks INSIDE an open case: a label chip filters by it, and the pull-off
+  // buttons ask before ending a solve. Capture phase on the table, so the row's
+  // own click (which would fold the case) never sees them.
+  $("casesTable").addEventListener("click", (e) => {
+    const chip = e.target.closest("[data-label]");
+    if (chip) {
+      e.stopPropagation();
+      $("caseLabelFilter").value = chip.dataset.label;
+      caseList.label = chip.dataset.label;
+      caseList.offset = 0;
+      caseList.singleId = null;
+      openDetailId = null;
+      loadCases();
+      return;
+    }
+    const pull = e.target.closest("[data-pull]");
+    if (pull) {
+      e.stopPropagation();
+      const park = !!pull.dataset.park;
+      const reason = window.prompt(
+        `Pull ${pull.dataset.pull} off ${pull.dataset.worker || "its node"} and ${park ? "park it" : "put it back in the queue"}?\n`
+        + "The node stops at its next heartbeat (up to a few minutes in); the attempt is refunded.\n\nWhy? (kept in the case's trail)", "");
+      if (reason === null) return;
+      userCall("/v1/cases/" + encodeURIComponent(pull.dataset.pull) + "/cancel",
+               jsonBody("POST", { reason: reason || null, park }))
+        .then(() => { showToast(park ? "Parked" : "Back in the queue"); loadCases(); })
+        .catch((err) => showToast(err.message));
+    }
+  }, true);
+
   $("copyErrors").addEventListener("click", () => window.copyAllErrors());
   $("resetFilters").addEventListener("click", () => {
     $("caseState").value = "";
     $("caseSplitFilter").value = "";
     $("caseCityFilter").value = "";
+    $("caseLabelFilter").value = "";
     $("caseId").value = "";
     caseList.state = "";
     caseList.split = "";
     caseList.city = "";
+    caseList.label = "";
     caseList.singleId = null;
     caseList.offset = 0;
     openDetailId = null;
