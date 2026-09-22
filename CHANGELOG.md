@@ -8,6 +8,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-09-22
+
+### Changed
+- **Site Geometry: the three views are one size**, 300 x 300 each. The side
+  elevation was 168 px tall; it now fills a square like the plan and the
+  isometric, so its vertical exaggeration roughly doubles (about x30 to x59 on
+  a typical site) -- the caption quotes the factor, as it always did.
+
+### Added
+- **Zoom buttons on each Site Geometry view**: + and − zoom 1.6x about the
+  middle of what is on screen, reset returns to the whole drawing; − and
+  reset are greyed on the whole drawing and + at the 40x limit. Scroll, drag,
+  pinch and double-click work as before.
+- A zoomed view **survives the minute's auto-refresh**. The refresh rebuilds
+  the open case's panel, and every zoom used to revert within a minute; each
+  view's zoom is now kept per case and put back after the rebuild.
+
 ## [0.11.0] - 2026-09-22
 
 ### Added
