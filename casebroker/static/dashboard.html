@@ -950,12 +950,171 @@
     padding: 16px 20px;
     background: var(--surface-elevated);
   }
+  /* Four cards: parameters, compute, storage, mesh & solve. Explicit column
+     counts rather than auto-fit: auto-fit at 280 px put three on a row and the
+     fourth alone under them, which reads as an afterthought. 4 on a wide
+     screen, 2 on a laptop half-screen or a tablet, 1 on a phone. minmax(0,..)
+     so a long build string cannot push a column wider than its share. */
   .detail-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    grid-template-columns: repeat(4, minmax(0, 1fr));
     gap: 16px;
     margin-bottom: 14px;
+    /* Each card its own height: a solving case's Mesh & Solve card is the
+       tallest by far, and stretching the other three to it drew three tall
+       empty boxes beside it. */
+    align-items: start;
   }
+  @media (max-width: 1339px) { .detail-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  @media (max-width: 759px) {
+    .detail-grid { grid-template-columns: minmax(0, 1fr); }
+    /* On a phone the case table is wider than the screen and scrolls sideways
+       in its wrapper, and the expanded row is as wide as the TABLE -- so "one
+       column" was an 836 px card on a 375 px screen. The cards are pinned to
+       the visible part of the wrapper instead (sticky), one screen wide; 88 px
+       is main's, the panel's and the wrapper's gutters, 40 the panel's own.
+       The geometry below keeps the table's width, as it always had. */
+    .caseDetail .detail-grid, .caseDetail .pct-card {
+      position: sticky; left: 20px; width: calc(100vw - 128px);
+    }
+  }
+
+  /* -- Mesh & Solve card ------------------------------------------------------ */
+  .ms-sec + .ms-sec { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--border-subtle); }
+  .ms-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
+  .ms-title { font-weight: 700; font-size: 12px; color: var(--text-primary); }
+  .ms-at { margin-left: auto; font-size: 10.5px; color: var(--text-muted); white-space: nowrap;
+           overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+  .ms-note { font-size: 12px; color: var(--text-muted); line-height: 1.45; }
+  /* Words and numbers here, not hashes: break between words ("49 k cells /
+     rank"), and inside one only when it alone is wider than the card (a
+     build string). The kv-list default breaks anywhere, for SHA-256s. */
+  .ms-sec .kv-list dd { word-break: normal; overflow-wrap: anywhere; }
+  .ms-table { width: 100%; border-collapse: collapse; font-size: 11.5px; margin-top: 8px; table-layout: auto; }
+  /* Scoped under .caseDetail: `tr.caseDetailRow td` (the expanded row's own
+     cell -- no padding, the well colour, a 2px rule) matches every td nested
+     in the panel too, and outranks a bare `.ms-table td`. */
+  .caseDetail .ms-table thead { background: none; }
+  .caseDetail .ms-table th { padding: 3px 4px; font-size: 10px; letter-spacing: 0.04em; text-align: left;
+                             border-bottom: 1px solid var(--border); }
+  .caseDetail .ms-table td { padding: 3px 4px; background: none; border-bottom: 1px solid var(--border-subtle);
+                             color: var(--text-primary); font-family: var(--font-mono); font-size: 11px;
+                             white-space: nowrap; }
+  .caseDetail .ms-table th.num, .caseDetail .ms-table td.num { text-align: right; }
+  .caseDetail .ms-table tr:hover td { background: none; }
+  .caseDetail .ms-table tr:last-child td, .caseDetail .ms-table tr.has-sub td { border-bottom: 0; }
+  .caseDetail .ms-table td.ms-name { max-width: 90px; overflow: hidden; text-overflow: ellipsis; }
+  .caseDetail .ms-table td.ms-sub { white-space: normal; font-family: var(--font-sans); font-size: 11px;
+                                    color: var(--bad); padding-top: 0; }
+  .caseDetail .ms-table td.ms-over { color: var(--bad); font-weight: 700; }
+  /* A verdict: one line, never broken inside a word (the dd it sits in breaks
+     anywhere, for hashes), and cut short rather than wrapped when a node sends
+     a status nobody expected. */
+  .vbadge { display: inline-block; vertical-align: middle; padding: 1px 6px; border-radius: 5px; font-size: 10.5px;
+            font-weight: 600; font-family: var(--font-mono); line-height: 1.5; white-space: nowrap;
+            word-break: normal; max-width: 14em; overflow: hidden; text-overflow: ellipsis; }
+  .vbadge.ok   { background: var(--accent-light); color: var(--accent); }
+  .vbadge.bad  { background: var(--bad-light); color: var(--bad); }
+  .vbadge.warn { background: var(--warn-light); color: var(--warn); }
+  .vbadge.info { background: var(--primary-light); color: var(--primary); }
+  .vbadge.muted { background: var(--surface-elevated); color: var(--text-muted); border: 1px solid var(--border); }
+  .ms-dirbar { height: 5px; border-radius: 3px; background: var(--surface-hover); overflow: hidden; margin: 2px 0 0; }
+  .ms-dirbar > span { display: block; height: 100%; background: var(--accent); }
+  .ms-finished { display: grid; grid-template-columns: minmax(0, max-content) minmax(0, auto) 1fr; gap: 2px 8px;
+                 font-size: 11px; margin-top: 6px; align-items: center; }
+  .ms-finished .mono { font-family: var(--font-mono); color: var(--text-primary); overflow: hidden;
+                       text-overflow: ellipsis; white-space: nowrap; }
+  .ms-finished .it { color: var(--text-muted); text-align: right; font-variant-numeric: tabular-nums; }
+  .ms-sublabel { font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em;
+                 color: var(--text-muted); margin-top: 10px; }
+
+  /* -- Histograms (the dataset drawer and "Where this case sits") -------------
+     One renderer, histSvg(). Bars are the reference distribution; an outline is
+     the whole campaign drawn behind an LCZ's bars; the marker is this case. */
+  .hist { display: block; overflow: visible; flex: none; }
+  /* The bars carry the distribution's shape, which no text beside them does:
+     0.72 is the least opacity that keeps them 3:1 on --surface in both themes
+     (3.2:1 light, 3.8:1 dark), the rule the page holds control edges to. */
+  .hist .hb { fill: var(--primary); opacity: 0.72; }
+  .hist .hb.on { opacity: 1; }
+  .hist .ho { fill: none; stroke: var(--text-muted); stroke-width: 1; opacity: 0.7; }
+  .hist .hbase { stroke: var(--border); stroke-width: 1; }
+  .hist .hmed { stroke: var(--text-secondary); stroke-width: 1; stroke-dasharray: 2 2; }
+  .hist .hhalo { stroke: var(--surface); stroke-width: 5; }
+  .hist .hmark { stroke: var(--brand); stroke-width: 2; }
+  .hist .hcap { fill: var(--brand); }
+  .hist .hempty { stroke: var(--text-muted); stroke-width: 1; stroke-dasharray: 3 3; }
+
+  /* -- Where this case sits -------------------------------------------------- */
+  .pct-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
+  .pct-head h3 { margin: 0; }
+  .seg { display: inline-flex; border: 1px solid var(--btn-border); border-radius: 7px; overflow: hidden; }
+  .seg button { border: 0; border-radius: 0; padding: 3px 10px; font-size: 11.5px; font-weight: 500;
+                background: transparent; color: var(--text-secondary); }
+  .seg button + button { border-left: 1px solid var(--btn-border); }
+  /* Not by colour alone (1.2:1 between the two states): an underline in
+     --brand, as .drawer-tab[aria-selected] has, and a heavier weight. */
+  .seg button[aria-pressed="true"] { background: var(--brand-light); color: var(--brand); font-weight: 700;
+                                     box-shadow: inset 0 -2px 0 var(--brand); }
+  .seg button:disabled { opacity: 0.45; }
+  .pct-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(250px, 100%), 1fr)); gap: 10px 18px; }
+  /* A narrow card scrolls its per-mesh table rather than spilling it. */
+  .ms-scroll { overflow-x: auto; }
+  .pct-group { grid-column: 1 / -1; font-size: 10.5px; font-weight: 700; text-transform: uppercase;
+               letter-spacing: 0.05em; color: var(--text-muted); margin-top: 6px;
+               padding-bottom: 3px; border-bottom: 1px solid var(--border-subtle); }
+  .pct-group:first-child { margin-top: 0; }
+  .pct-tile { min-width: 0; }
+  .pct-label { font-size: 11.5px; color: var(--text-secondary); white-space: nowrap; overflow: hidden;
+               text-overflow: ellipsis; }
+  .pct-row { display: flex; align-items: center; gap: 10px; margin-top: 2px; }
+  .pct-val { font-size: 12.5px; font-weight: 600; color: var(--text-primary); font-variant-numeric: tabular-nums;
+             line-height: 1.3; }
+  .pct-rank { font-size: 11px; color: var(--text-muted); line-height: 1.3; }
+  .pct-foot { font-size: 11px; color: var(--text-muted); margin-top: 10px; }
+
+  /* -- Dataset drawer --------------------------------------------------------- */
+  .drawer-toolbar { display: flex; align-items: center; gap: 8px; padding: 10px 20px;
+                    border-bottom: 1px solid var(--border); font-size: 12px; color: var(--text-secondary); }
+  .drawer-toolbar select { width: auto; padding: 5px 10px; font-size: 12.5px; }
+  .ds-total { font-size: 28px; font-weight: 700; letter-spacing: -0.01em; font-variant-numeric: tabular-nums; }
+  .ds-sub { color: var(--text-secondary); font-size: 12.5px; margin-top: 2px; }
+  .ds-note { color: var(--text-muted); font-size: 11.5px; margin-top: 6px; line-height: 1.45; }
+  .ds-counts { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px 22px; }
+  .ds-h { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em;
+          color: var(--text-muted); margin: 0 0 6px; }
+  .ds-bars { display: grid; grid-template-columns: minmax(0, max-content) minmax(40px, 1fr) auto;
+             gap: 3px 8px; align-items: center; font-size: 12px; }
+  .ds-bars .k { color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 150px; }
+  .ds-bars .k.bucket { color: var(--text-muted); font-style: italic; }
+  .ds-bars .t { height: 8px; border-radius: 3px; background: var(--surface-hover); overflow: hidden; }
+  .ds-bars .t > span { display: block; height: 100%; background: var(--primary); opacity: 0.75; min-width: 1px; }
+  .ds-bars .t > span.done { background: var(--accent); opacity: 1; }
+  .ds-bars .t > span.leased { background: var(--primary); opacity: 1; }
+  .ds-bars .t > span.pending { background: var(--warn); opacity: 1; }
+  .ds-bars .t > span.quarantined { background: var(--bad); opacity: 1; }
+  .ds-bars .n { text-align: right; font-variant-numeric: tabular-nums; color: var(--text-primary); }
+  .ds-more { font-size: 11.5px; color: var(--text-muted); margin-top: 4px; }
+  .ds-more summary { cursor: pointer; }
+  .ds-group { font-size: 12px; font-weight: 700; color: var(--text-primary); margin: 18px 0 2px;
+              padding-bottom: 4px; border-bottom: 1px solid var(--border); }
+  .ds-metric { display: flex; align-items: center; gap: 12px; padding: 8px 0;
+               border-bottom: 1px solid var(--border-subtle); flex-wrap: wrap; }
+  .ds-metric .main { flex: 1 1 200px; min-width: 0; }
+  .ds-metric .lbl { font-size: 12.5px; font-weight: 600; color: var(--text-primary); }
+  .ds-metric .unit { font-weight: 400; color: var(--text-muted); }
+  .ds-metric .st { font-size: 11.5px; color: var(--text-secondary); margin-top: 2px; font-variant-numeric: tabular-nums; }
+  .ds-metric .st b { color: var(--text-primary); font-weight: 600; }
+  .ds-metric .fig { flex: none; }
+  .ds-axis { display: flex; justify-content: space-between; font-size: 10px; color: var(--text-muted);
+             font-variant-numeric: tabular-nums; margin-top: 1px; }
+  .ds-legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 11px; color: var(--text-muted); margin-top: 8px; }
+  .ds-legend i { display: inline-block; width: 12px; height: 8px; vertical-align: -0px; margin-right: 5px; border-radius: 2px; }
+  .ds-msg { font-size: 12.5px; color: var(--text-secondary); line-height: 1.5; }
+  .ds-msg .why { color: var(--text-muted); font-size: 11.5px; margin-top: 6px; font-family: var(--font-mono);
+                 word-break: break-word; }
+  #datasetBody > * { transition: opacity 0.12s ease; }
+  #datasetBody.is-stale > * { opacity: 0.5; transition-delay: 0.2s; }
   .detail-card {
     background: var(--surface);
     border: 1px solid var(--border);
@@ -1181,6 +1340,17 @@
       </span>
 
       <div class="header-actions">
+        <button id="datasetBtn" class="subtle icon-btn" title="Dataset statistics"
+                aria-label="Dataset statistics" aria-haspopup="dialog" aria-expanded="false">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+               stroke-linecap="round" aria-hidden="true">
+            <line x1="3" y1="21" x2="21" y2="21"></line>
+            <line x1="6" y1="17" x2="6" y2="12"></line>
+            <line x1="10.5" y1="17" x2="10.5" y2="5"></line>
+            <line x1="15" y1="17" x2="15" y2="9"></line>
+            <line x1="19.5" y1="17" x2="19.5" y2="14"></line>
+          </svg>
+        </button>
         <button id="storageBtn" class="subtle icon-btn" title="Database storage"
                 aria-label="Database storage" aria-haspopup="dialog" aria-expanded="false">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -1525,6 +1695,31 @@
     </button>
   </div>
   <div class="drawer-body" id="storageBody"></div>
+</aside>
+
+<!-- Dataset: the campaign as a training set -- counts, and every metric's
+     distribution over all cases or one LCZ (GET /v1/dataset). Read-only;
+     opened from the header. -->
+<div id="datasetScrim" class="drawer-scrim"></div>
+<aside id="datasetDrawer" class="drawer" role="dialog" aria-modal="true"
+       aria-labelledby="datasetTitle" aria-hidden="true">
+  <div class="drawer-head">
+    <h2 id="datasetTitle">Dataset</h2>
+    <button id="datasetRefresh" class="subtle" style="margin-left:auto" type="button">Refresh</button>
+    <button id="datasetClose" class="subtle icon-btn" aria-label="Close dataset" title="Close (Esc)">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+        <line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line>
+      </svg>
+    </button>
+  </div>
+  <div class="drawer-toolbar">
+    <label for="datasetRef" style="font-weight:600">Distributions of</label>
+    <select id="datasetRef">
+      <option value="">All cases</option>
+    </select>
+    <span id="datasetRefNote" style="color:var(--text-muted);font-size:11.5px"></span>
+  </div>
+  <div class="drawer-body" id="datasetBody"></div>
 </aside>
 
 <div id="settingsScrim" class="drawer-scrim"></div>
@@ -3093,6 +3288,11 @@
       try { body = (await res.text()).slice(0, 200); } catch (e) {}
       const err = new Error(`${res.status} ${res.statusText} — ${body || "(no body)"}`);
       err.status = res.status;
+      // Seconds, when the broker says when to ask again (a 503 from
+      // /v1/dataset does). Only readable same-origin: it is not a
+      // CORS-safelisted header, so a cross-origin page gets null and its
+      // caller falls back to its own interval.
+      err.retryAfter = Number(res.headers.get("Retry-After")) || null;
       throw err;
     }
     return res.json();
@@ -3566,13 +3766,22 @@
     renderCasesTable(casesOnScreen);
   }
 
+  /// A record that landed, with when, and which dataset copy the page held
+  /// when it was ASKED for (see caseRankGen).
+  function storeCaseDetail(id, full, gen) {
+    caseDetails.set(id, full);
+    caseDetailAt.set(id, Date.now());
+    caseRankGen.set(id, gen);
+  }
+
   function ensureCaseDetail(id) {
     if (!id || caseDetails.has(id)) return;
     if (Date.now() - (caseDetailFailed.get(id) || 0) < CASE_DETAIL_RETRY_MS) return;
     caseDetailFailed.delete(id);
     caseDetails.set(id, null);                 // in flight: one request, not one per render
+    const gen = datasetGen();
     api("/v1/cases/" + encodeURIComponent(id)).then((full) => {
-      caseDetails.set(id, full);
+      storeCaseDetail(id, full, gen);
       redrawOpenCase(id);
     }).catch(() => {
       // Only if it is still THIS fetch's placeholder: a lookup of the same id
@@ -3583,6 +3792,64 @@
       caseDetailFailed.set(id, Date.now());
       redrawOpenCase(id);                      // the placeholder becomes "—"
     });
+  }
+
+  // The record is cached for the life of the page (above), which was right
+  // while it only added the spec -- a spec never changes. It now also carries
+  // the node's telemetry and the case's percentiles, and on a RUNNING case
+  // those move: the solve report names the direction and iteration it is on.
+  // So the open case's record is re-read, at most twice a minute, while it is
+  // still moving -- leased, or its state has changed since the copy was taken,
+  // or its ranks are behind the dataset copy drawn beside them (ranksBehind).
+  // Quietly: the copy on screen stays until the new one lands, so the panel
+  // never blanks, and a failed re-read keeps the old one.
+  const caseDetailAt = new Map();              // case_id -> ms when its record landed
+  const CASE_DETAIL_REFRESH_MS = 30000;        // well under the 60 s refresh: each tick re-reads
+  // The ranks in a record come from the broker's cached aggregate as of the
+  // read (peek()), and the histograms and n beside them from the page's
+  // dataset copy, which is re-read every minute: the two drift apart as the
+  // campaign grows. The broker's aggregate only ever moves forward and is
+  // never older than the last /v1/dataset answer, so a record ASKED FOR after
+  // the page's copy was read was ranked against that copy or a newer one. This
+  // is the generated_at of the copy held at that moment, 0 with none.
+  const caseRankGen = new Map();               // case_id -> dataset generated_at when its record was asked for
+
+  function datasetGen() {
+    return dataset.data && finite(dataset.data.generated_at) ? Number(dataset.data.generated_at) : 0;
+  }
+
+  /// Whether a node has reported anything this case could be ranked by.
+  function caseHasData(rec) {
+    return Object.keys(isObj(rec.telemetry) ? rec.telemetry : {}).length > 0
+      || Object.keys(parseMaybeJson(rec.metrics) || {}).length > 0;
+  }
+
+  /// Whether the record's ranks may be older than the dataset copy drawn
+  /// beside them -- or it has none only because it was read before the page
+  /// knew the broker had any aggregate. An empty map asked for AFTER the page
+  /// had a copy is final: the broker ranked everything the case has.
+  function ranksBehind(id, rec) {
+    if (!isObj(rec.percentiles)) return false; // a broker that does not rank
+    const asked = caseRankGen.get(id) || 0;
+    if (datasetGen() <= asked) return false;
+    return Object.keys(rec.percentiles).length > 0 || (asked === 0 && caseHasData(rec));
+  }
+
+  function refreshCaseDetail(id, live) {
+    const rec = id ? caseDetails.get(id) : null;
+    if (!rec || !live) return;                 // none yet, or in flight: ensureCaseDetail's
+    if (Date.now() - (caseDetailAt.get(id) || 0) < CASE_DETAIL_REFRESH_MS) return;
+    if (live.state !== "leased" && live.state === rec.state && !ranksBehind(id, rec)) return;
+    caseDetailAt.set(id, Date.now());          // one re-read per window, landed or not
+    const gen = datasetGen(), was = rec.state;
+    api("/v1/cases/" + encodeURIComponent(id)).then((full) => {
+      if (!caseDetails.get(id)) return;        // forgotten meanwhile
+      storeCaseDetail(id, full, gen);
+      // No node holds it and it did not move: only its ranks can have
+      // changed, so only their card is redrawn (and keeps its focus).
+      if (full.state === was && full.state !== "leased") redrawPctCard(id);
+      else redrawOpenCase(id);
+    }).catch(() => {});                        // the copy on screen is still true of when it was read
   }
 
   function badge(state) {
@@ -3643,6 +3910,618 @@
     // One wrapper: .kv-list dd is a flex row, and loose text beside inline spans
     // becomes separate flex items, which wrapped "Munich" as "Mu / nich".
     return `<span style="display:block;word-break:normal;overflow-wrap:anywhere">${country}${town}${map}</span>`;
+  }
+
+  // -- Numbers from the node's telemetry and the dataset ---------------------------
+  const isObj = (v) => !!v && typeof v === "object" && !Array.isArray(v);
+  const finite = (v) => v != null && v !== "" && typeof v !== "boolean" && Number.isFinite(Number(v));
+
+  /// A cell count the way a mesh is talked about: "2.20 M", "845 k", "912".
+  function formatCells(n) {
+    if (!finite(n)) return "—";
+    const v = Number(n), a = Math.abs(v);
+    const k = Math.round(v / 1e3);             // the unit is chosen after rounding: 999,500 is "1.00 M", not "1000 k"
+    if (a >= 1e6 || Math.abs(k) >= 1000) return (v / 1e6).toFixed(2) + " M";
+    if (a >= 1e4) return k + " k";
+    return Math.round(v).toLocaleString();
+  }
+
+  /// A metric's value, short, in its registry unit (casebroker/dataset.py
+  /// METRICS): durations and cell counts in their own forms, degrees with a
+  /// degree sign, metres with " m" unless `bare` (a p10–p90 pair would say it
+  /// twice), and dimensionless ratios to three significant figures.
+  function formatMetric(v, unit, bare) {
+    if (!finite(v)) return "—";
+    const x = Number(v), a = Math.abs(x);
+    if (unit === "cells") return formatCells(x);
+    if (unit === "s") return formatDuration(Math.round(x));
+    let s;
+    if (Number.isInteger(x) && a < 1e6) s = x.toLocaleString();
+    else if (a >= 1e6) s = (x / 1e6).toFixed(2) + " M";
+    else if (a >= 1e4) s = Math.round(x).toLocaleString();
+    else if (a >= 100) s = x.toFixed(0);
+    else if (a >= 10) s = x.toFixed(1);
+    else if (a >= 1) s = x.toFixed(2);
+    else if (a >= 0.001) s = x.toFixed(3);
+    else s = x.toExponential(1);
+    if (unit === "deg") return s + "°";
+    return unit && !bare ? s + " " + unit : s;
+  }
+
+  /// "64th", "1st", "99.5th": a percentile rank as the server sends it (0..100,
+  /// two decimals). Whole numbers in the middle, where a tenth means nothing;
+  /// one decimal at the ends, where 99.5 and 100 are different claims --
+  /// rounded TOWARDS the middle there, so the largest of 2,000 (99.97) reads
+  /// "99.9th" and never "100th", which only a rank of exactly 100 says (the
+  /// server keeps the maximum below it: docs/protocol.md). The 1e-9 absorbs
+  /// the binary error in x * 10 (99.1 * 10 is 990.99999999999994).
+  function ordinal(p) {
+    if (!finite(p)) return "—";
+    const x = Number(p);
+    const r = x > 99 ? Math.floor(x * 10 + 1e-9) / 10
+      : x < 1 ? Math.ceil(x * 10 - 1e-9) / 10 : Math.round(x);
+    if (!Number.isInteger(r)) return r + "th";
+    const t = r % 100, u = r % 10;
+    return r + (t >= 11 && t <= 13 ? "th" : u === 1 ? "st" : u === 2 ? "nd" : u === 3 ? "rd" : "th");
+  }
+
+  /// One histogram as inline SVG -- the dataset drawer's rows and a case's
+  /// "Where this case sits" tiles both draw with this, so the two read alike.
+  /// `hist` is the counts over the metric's 25 SHARED `bins` edges (the
+  /// campaign's p1..p99; values outside are in the end bins). opts: w, h;
+  /// mark (this case's value: a line and a cap, its bin drawn solid); median
+  /// (dashed); outline (a second hist, e.g. all cases behind one LCZ, as a
+  /// step line -- each scaled to its own peak, so it is the SHAPES that are
+  /// compared, not the counts); tip (hover text). Decorative to assistive tech:
+  /// the numbers beside every one of these say what it shows.
+  function histSvg(bins, hist, opts) {
+    const o = opts || {};
+    const w = o.w || 120, h = o.h || 28;
+    const n = Array.isArray(hist) ? hist.length : 0;
+    const lo = Number(Array.isArray(bins) ? bins[0] : NaN);
+    const hi = Number(Array.isArray(bins) ? bins[bins.length - 1] : NaN);
+    const hasMark = finite(o.mark);
+    const top = hasMark ? 5 : 1;               // room for the marker's cap
+    const base = h - 0.5, ph = h - 1 - top;
+    const open = `<svg class="hist" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" aria-hidden="true" focusable="false">`
+      + (o.tip ? `<title>${esc(o.tip)}</title>` : "");
+    const counts = n ? hist.map((c) => (finite(c) ? Math.max(0, Number(c)) : 0)) : [];
+    const peak = counts.length ? Math.max(...counts) : 0;
+    const xOf = (v) => Math.max(0, Math.min(w, (Number(v) - lo) / (hi - lo) * w));
+    const usable = n > 0 && Number.isFinite(lo) && Number.isFinite(hi) && hi > lo;
+    if (!usable || peak <= 0) {
+      // Nothing reported for this set: a dashed baseline, the same size, so a
+      // row of them does not jump when the first value arrives.
+      return open + `<line class="hempty" x1="0" y1="${base}" x2="${w}" y2="${base}"></line></svg>`;
+    }
+    const bw = w / n;
+    // The bin the server counted this value in: the last edge at or below it
+    // (its bisect_right - 1), clamped into the end bins as it clamps. Found on
+    // the edges themselves, not from lo and hi: they are lo + step * i, and a
+    // value on an edge (0.94 against 0.9400000000000001) can land a bin off.
+    const markBin = hasMark
+      ? Math.min(n - 1, Math.max(0, bins.findLastIndex((e) => Number(e) <= Number(o.mark)))) : -1;
+    let outline = "";
+    if (Array.isArray(o.outline) && o.outline.length === n) {
+      const oc = o.outline.map((c) => (finite(c) ? Math.max(0, Number(c)) : 0));
+      const opk = Math.max(...oc);
+      if (opk > 0) {
+        let d = `M0 ${base}`;
+        oc.forEach((c, i) => {
+          const y = (base - c / opk * ph).toFixed(2);
+          d += ` L${(i * bw).toFixed(2)} ${y} L${((i + 1) * bw).toFixed(2)} ${y}`;
+        });
+        outline = `<path class="ho" d="${d} L${w} ${base}"></path>`;
+      }
+    }
+    let bars = "";
+    counts.forEach((c, i) => {
+      if (!c) return;
+      const bh = Math.max(1, c / peak * ph);
+      bars += `<rect class="hb${i === markBin ? " on" : ""}" x="${(i * bw + 0.5).toFixed(2)}" y="${(base - bh).toFixed(2)}"`
+        + ` width="${Math.max(0.6, bw - 1).toFixed(2)}" height="${bh.toFixed(2)}"></rect>`;
+    });
+    let med = "";
+    if (finite(o.median)) {
+      const x = xOf(o.median).toFixed(2);
+      med = `<line class="hmed" x1="${x}" y1="${top}" x2="${x}" y2="${base}"></line>`;
+    }
+    let mark = "";
+    if (hasMark) {
+      const x = xOf(o.mark);
+      // A halo in the card's own colour under the line: it crosses its own
+      // solid bin, and pink on blue differs by hue alone.
+      mark = `<line class="hhalo" x1="${x.toFixed(2)}" y1="${top}" x2="${x.toFixed(2)}" y2="${h}"></line>`
+        + `<line class="hmark" x1="${x.toFixed(2)}" y1="${top - 1}" x2="${x.toFixed(2)}" y2="${h}"></line>`
+        + `<path class="hcap" d="M${(x - 4).toFixed(2)} 0 L${(x + 4).toFixed(2)} 0 L${x.toFixed(2)} ${top} Z"></path>`;
+    }
+    return open + outline + bars
+      + `<line class="hbase" x1="0" y1="${base}" x2="${w}" y2="${base}"></line>` + med + mark + `</svg>`;
+  }
+
+  // -- The dataset (GET /v1/dataset), one copy for the whole page ----------------
+  // Shared by the Dataset drawer and every opened case, and kept 60 s -- the
+  // broker's own aggregate is cached 60 s, so asking sooner gets the same
+  // answer back. A render never waits for it: it draws what is cached (even a
+  // stale copy) and datasetPeek() fetches a stale or missing one in the
+  // background, whose landing redraws whatever shows it. A failure backs off --
+  // Retry-After on a 503, 30 s otherwise -- so a render loop cannot hammer an
+  // endpoint that is failing, and a 503 (the broker's last computation failed
+  // and it has none to serve) retries by itself while something on screen
+  // still wants the answer. A 401 is forgotten once the page's own requests
+  // succeed again (refresh()): it was the credential's answer, not the data's.
+  const DATASET_TTL_MS = 60000;
+  const dataset = { base: null, data: null, at: 0, inFlight: null, error: null, retryAt: 0, retryTimer: null };
+
+  function datasetWanted() { return datasetOpen() || !!openDetailId; }
+
+  /// The cached answer (possibly stale) or null. Starts a fetch when the copy
+  /// is stale or missing, none is in flight, and no back-off is running.
+  function datasetPeek() {
+    const base = brokerBase($("broker").value);
+    if (dataset.base !== base) {               // another broker: its campaign, not this one's
+      clearTimeout(dataset.retryTimer);
+      Object.assign(dataset, { base, data: null, at: 0, inFlight: null, error: null, retryAt: 0, retryTimer: null });
+    }
+    const stale = !dataset.data || Date.now() - dataset.at >= DATASET_TTL_MS;
+    if (stale && !dataset.inFlight && Date.now() >= dataset.retryAt) datasetFetch();
+    return dataset.data;
+  }
+
+  function datasetFetch() {
+    const base = dataset.base;
+    const p = api("/v1/dataset").then((d) => {
+      if (dataset.base !== base) return;
+      dataset.data = d; dataset.at = Date.now(); dataset.error = null; dataset.retryAt = 0;
+    }, (e) => {
+      if (dataset.base !== base) return;
+      dataset.error = e;
+      const wait = e.status === 503 ? Math.min(60, Math.max(3, e.retryAfter || 10)) : 30;
+      dataset.retryAt = Date.now() + wait * 1000;
+      if (e.status === 503) {
+        clearTimeout(dataset.retryTimer);
+        dataset.retryTimer = setTimeout(() => { if (datasetWanted()) datasetPeek(); }, wait * 1000 + 50);
+      }
+    }).finally(() => {
+      if (dataset.inFlight === p) dataset.inFlight = null;
+      if (dataset.base === base) datasetLanded();
+    });
+    dataset.inFlight = p;
+    if (datasetOpen()) renderDataset();        // the drawer says it is asking
+    return p;
+  }
+
+  /// A fetch settled (or a retry started): redraw what shows the dataset.
+  function datasetLanded() {
+    if (datasetOpen()) renderDataset();
+    if (openDetailId) {
+      redrawPctCard(openDetailId);
+      // A newer copy leaves the open record's ranks behind it: re-read them.
+      refreshCaseDetail(openDetailId, casesOnScreen.find((c) => c.case_id === openDetailId));
+    }
+  }
+
+  // -- Mesh & Solve: the node's mesh and solve reports for one case -------------
+  // checkMesh's own limits: it flags a cell's skewness over 4 and a face's
+  // non-orthogonality over 70 degrees, which is where OpenFOAM's solvers start
+  // needing correctors to stay stable.
+  const SKEW_LIMIT = 4, NONORTH_LIMIT = 70;
+  const MS_TITLE = "Mesh &amp; Solve";
+
+  /// "reported 3m ago by node-a", from the at/worker every report is stamped
+  /// with by the broker (not by the node).
+  function reportedHtml(k, prefix, cls) {
+    if (!isObj(k) || (!k.at && !k.worker)) return "";
+    const when = finite(k.at) ? relTime(Number(k.at)) : "";
+    const stamp = finite(k.at) ? new Date(Number(k.at) * 1000).toLocaleString() : "";
+    const by = k.worker ? " by " + esc(k.worker) : "";
+    return `<span class="${esc(cls == null ? "ms-at" : cls)}" title="${esc(stamp)}">${esc(prefix || "reported")} ${esc(when)}${by}</span>`;
+  }
+
+  function verdictBadge(ok, yes, no) {
+    if (ok === true) return `<span class="vbadge ok">${esc(yes || "pass")}</span>`;
+    if (ok === false) return `<span class="vbadge bad">${esc(no || "fail")}</span>`;
+    return "";
+  }
+
+  function solveStatusClass(s) {
+    const v = String(s || "").toLowerCase();
+    if (v === "converged") return "ok";
+    if (v === "plateaued") return "warn";
+    if (v === "running") return "info";
+    if (v === "diverging" || v === "stopped" || v === "failed" || v.startsWith("exit")) return "bad";
+    return "muted";
+  }
+
+  /// failed_checks is the list of checkMesh tests a mesh failed; a count or an
+  /// object is read too, so a node that reports it differently still shows.
+  function failedChecks(f) {
+    if (Array.isArray(f)) return { n: f.length, names: f.map((x) => String(x)) };
+    if (isObj(f)) return { n: Object.keys(f).length, names: Object.keys(f) };
+    return { n: finite(f) ? Number(f) : 0, names: [] };
+  }
+
+  const natural = (a, b) => String(a).localeCompare(String(b), undefined, { numeric: true });
+
+  function meshSectionHtml(c, mesh, metrics) {
+    if (mesh) {
+      const meshes = isObj(mesh.meshes) ? mesh.meshes : {};
+      const names = Object.keys(meshes).sort(natural);
+      const allOk = typeof mesh.all_ok === "boolean" ? mesh.all_ok
+        : names.length ? names.every((k) => isObj(meshes[k]) && meshes[k].ok === true) : null;
+      const kv = [];
+      if (finite(mesh.total_cells)) {
+        kv.push(["Cells", `<span title="${Number(mesh.total_cells).toLocaleString()} cells">${formatCells(mesh.total_cells)}</span>`]);
+      }
+      if (finite(mesh.ranks) || finite(mesh.cells_per_rank)) {
+        const r = finite(mesh.ranks) ? `${Number(mesh.ranks).toLocaleString()} rank${Number(mesh.ranks) === 1 ? "" : "s"}` : "";
+        const per = finite(mesh.cells_per_rank) ? `${formatCells(mesh.cells_per_rank)} cells / rank` : "";
+        kv.push(["Decomposed", [r, per].filter(Boolean).join(" · ")]);
+      }
+      if (mesh.engine) kv.push(["Engine", `<span class="mono">${esc(mesh.engine)}</span>`]);
+      if (mesh.directions != null) {
+        const dirs = Array.isArray(mesh.directions) ? mesh.directions : null;
+        kv.push(["Directions", dirs
+          ? `<span title="${esc(dirs.join(", "))}">${Number(dirs.length).toLocaleString()}</span>`
+          : esc(mesh.directions)]);
+      }
+      if ("mesh_seconds" in mesh) {
+        kv.push(["Mesh time", finite(mesh.mesh_seconds) ? formatDuration(Math.round(Number(mesh.mesh_seconds)))
+          : `<span style="color:var(--text-muted)" title="a resumed case reuses the mesh it already had">— (resumed)</span>`]);
+      }
+      // Which build produced the mesh, and which is running now: they differ
+      // after a resume on a newer node, which is exactly when a mixed case
+      // needs spotting.
+      const meshedBy = mesh.meshed_by, running = mesh.build;
+      if (meshedBy && running && String(meshedBy) === String(running)) {
+        kv.push(["Build", `<span class="mono" title="meshed by and running on this build">${esc(running)}</span>`]);
+      } else {
+        if (meshedBy) kv.push(["Meshed by", `<span class="mono">${esc(meshedBy)}</span>`]);
+        if (running) {
+          kv.push(["Running build", `<span class="mono">${esc(running)}</span>`
+            + (meshedBy ? ` <span class="vbadge warn" title="the mesh was built by another build than the one solving it">differs</span>` : "")]);
+        }
+      }
+      if (mesh.recipe && String(mesh.recipe) !== String(c.recipe || "")) {
+        kv.push(["Recipe", `<span class="mono" title="the exact recipe this build matched">${esc(mesh.recipe)}</span>`]);
+      }
+      let table = "";
+      if (names.length) {
+        const rows = names.map((name) => {
+          const m = isObj(meshes[name]) ? meshes[name] : {};
+          const skewOver = finite(m.max_skewness) && Number(m.max_skewness) > SKEW_LIMIT;
+          const orthOver = finite(m.max_non_orthogonality) && Number(m.max_non_orthogonality) > NONORTH_LIMIT;
+          const fc = failedChecks(m.failed_checks);
+          const neg = finite(m.negative_volume_cells) ? Number(m.negative_volume_cells) : 0;
+          const notes = [];
+          if (fc.n) notes.push(`${Number(fc.n).toLocaleString()} failed check${fc.n === 1 ? "" : "s"}${fc.names.length ? ": " + esc(fc.names.join(", ")) : ""}`);
+          if (neg) notes.push(`${Number(neg).toLocaleString()} negative-volume cell${neg === 1 ? "" : "s"}`);
+          return `<tr${notes.length ? ' class="has-sub"' : ""}><td class="ms-name" title="${esc(name)}">${esc(name)}</td>`
+            + `<td>${verdictBadge(m.ok === true ? true : m.ok === false ? false : null) || "—"}</td>`
+            + `<td class="num" title="${finite(m.cells) ? Number(m.cells).toLocaleString() + " cells" : ""}">${formatCells(m.cells)}</td>`
+            + `<td class="num${skewOver ? " ms-over" : ""}" title="${skewOver ? "over checkMesh's limit of 4" : "max skewness"}">${finite(m.max_skewness) ? Number(m.max_skewness).toFixed(2) : "—"}</td>`
+            + `<td class="num${orthOver ? " ms-over" : ""}" title="${orthOver ? "over checkMesh's limit of 70°" : "max non-orthogonality"}">${finite(m.max_non_orthogonality) ? Number(m.max_non_orthogonality).toFixed(1) + "°" : "—"}</td></tr>`
+            + (notes.length ? `<tr><td class="ms-sub" colspan="5">${notes.join(" · ")}</td></tr>` : "");
+        }).join("");
+        table = `<div class="ms-scroll"><table class="ms-table"><thead><tr><th>Mesh</th><th>check</th><th class="num">Cells</th>`
+          + `<th class="num" title="max skewness; checkMesh flags over 4">Skew</th>`
+          + `<th class="num" title="max non-orthogonality; checkMesh flags over 70°">Non-orth</th></tr></thead>`
+          + `<tbody>${rows}</tbody></table></div>`;
+      }
+      return `<div class="ms-sec"><div class="ms-head"><span class="ms-title">Mesh</span>`
+        + verdictBadge(allOk, "checkMesh ok", "checkMesh failed") + reportedHtml(mesh) + `</div>`
+        + (kv.length ? `<dl class="kv-list">${kv.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${v}</dd>`).join("")}</dl>` : "")
+        + table + `</div>`;
+    }
+    // A node from before mesh telemetry: its completion metrics carry the
+    // mesh too, once the case has finished.
+    if (finite(metrics.mesh_cells) || typeof metrics.mesh_ok === "boolean" || finite(metrics.mesh_seconds)) {
+      const kv = [];
+      if (finite(metrics.mesh_cells)) {
+        kv.push(["Cells", `<span title="${Number(metrics.mesh_cells).toLocaleString()} cells">${formatCells(metrics.mesh_cells)}</span>`]);
+      }
+      if (finite(metrics.mesh_seconds)) kv.push(["Mesh time", formatDuration(Math.round(Number(metrics.mesh_seconds)))]);
+      return `<div class="ms-sec"><div class="ms-head"><span class="ms-title">Mesh</span>`
+        + verdictBadge(typeof metrics.mesh_ok === "boolean" ? metrics.mesh_ok : null, "checkMesh ok", "checkMesh failed")
+        + `<span class="ms-at">from the completion metrics</span></div>`
+        + `<dl class="kv-list">${kv.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${v}</dd>`).join("")}</dl>`
+        + `<div class="ms-note" style="margin-top:6px">The node that ran this predates mesh telemetry, so there is no per-mesh verdict.</div></div>`;
+    }
+    const why = c.state === "pending" ? " This case is waiting for a node."
+      : c.state === "leased" ? " A node reports it once checkMesh has run." : "";
+    return `<div class="ms-sec"><div class="ms-head"><span class="ms-title">Mesh</span></div>`
+      + `<div class="ms-note">The node has not reported its mesh yet.${esc(why)}</div></div>`;
+  }
+
+  /// What a solve report on a case no node holds is, as [badge, hover text].
+  /// Telemetry outlives the attempt that sent it (only a fresh claim clears
+  /// it: docs/protocol.md), so a pending or quarantined case still carries
+  /// its last attempt's report, which is not a solve in progress.
+  function endedReportText(state) {
+    return state === "done" ? ["final report", "the node's last report before the case completed"]
+      : state === "quarantined" ? ["attempt failed", "the last report of the attempt that failed; no node holds this case"]
+      : state === "pending" ? ["attempt ended", "the last report of an attempt that ended; the case is waiting for a node"]
+      : ["last report", "the last report of an attempt that ended"];
+  }
+
+  function solveSectionHtml(c, solve, metrics, meshShown) {
+    const solveSecs = finite(metrics.solve_seconds) ? formatDuration(Math.round(Number(metrics.solve_seconds))) : "";
+    const live = c.state === "leased";
+    if (!solve) {
+      if (solveSecs) {
+        return `<div class="ms-sec"><div class="ms-head"><span class="ms-title">Solve</span>`
+          + `<span class="ms-at">from the completion metrics</span></div>`
+          + `<dl class="kv-list"><dt>Solve time</dt><dd>${solveSecs}</dd></dl></div>`;
+      }
+      if (!live && !meshShown) return "";
+      // Only a leased case has a node that will report.
+      return `<div class="ms-sec"><div class="ms-head"><span class="ms-title">Solve</span></div>`
+        + `<div class="ms-note">${live
+          ? "No solve report yet. The node sends one when something changes, at most every 5 minutes, and once per finished direction."
+          : c.state === "done" ? "The node sent no solve report."
+          : "No solve report: the last attempt ended before its solve reported."}</div></div>`;
+    }
+    const total = finite(solve.directions_total) ? Number(solve.directions_total) : null;
+    const done = finite(solve.directions_done) ? Number(solve.directions_done) : null;
+    const kv = [];
+    if (total != null || done != null) {
+      // The bar is a running solve's progress; an ended attempt keeps the count.
+      const pct = total ? Math.max(0, Math.min(100, (done || 0) / total * 100)) : 0;
+      kv.push(["Directions", `<span style="display:block;width:100%">${done != null ? Number(done).toLocaleString() : "?"} / ${total != null ? Number(total).toLocaleString() : "?"} done`
+        + (total && live ? `<span class="ms-dirbar" style="display:block"><span style="width:${Number(pct).toFixed(1)}%"></span></span>` : "")
+        + `</span>`]);
+    }
+    if (solve.current != null && solve.current !== "") {
+      const it = finite(solve.iteration) ? `iteration ${Number(solve.iteration).toLocaleString()}` : "";
+      const end = finite(solve.end_time) ? ` / ${Number(solve.end_time).toLocaleString()}` : "";
+      kv.push([live ? "Current" : "Last direction", `<span><span class="mono">${esc(solve.current)}</span>${it ? " · " + it + end : ""}</span>`]);
+    } else if (finite(solve.iteration)) {
+      kv.push(["Iteration", `${Number(solve.iteration).toLocaleString()}${finite(solve.end_time) ? " / " + Number(solve.end_time).toLocaleString() : ""}`]);
+    }
+    if (solveSecs) kv.push(["Solve time", solveSecs]);
+    let residuals = "";
+    if (isObj(solve.residuals) && Object.keys(solve.residuals).length) {
+      const rows = Object.keys(solve.residuals).map((f) => {
+        const v = solve.residuals[f];
+        return `<tr><td class="ms-name" style="max-width:140px" title="${esc(f)}">${esc(f)}</td>`
+          + `<td class="num">${finite(v) ? Number(v).toExponential(2) : "—"}</td></tr>`;
+      }).join("");
+      residuals = `<div class="ms-sublabel">${live ? "Latest residuals" : "Residuals at the last report"}</div>`
+        + `<table class="ms-table" style="margin-top:2px"><tbody>${rows}</tbody></table>`;
+    }
+    let finished = "";
+    if (isObj(solve.finished) && Object.keys(solve.finished).length) {
+      const keys = Object.keys(solve.finished).sort(natural);
+      const rows = keys.map((dir) => {
+        const f = isObj(solve.finished[dir]) ? solve.finished[dir] : {};
+        const st = f.status != null ? String(f.status) : "finished";
+        return `<span class="mono" title="${esc(dir)}">${esc(dir)}</span>`
+          + `<span><span class="vbadge ${solveStatusClass(st)}">${esc(st)}</span></span>`
+          + `<span class="it">${finite(f.iterations) ? Number(f.iterations).toLocaleString() + " it" : ""}</span>`;
+      }).join("");
+      finished = `<div class="ms-sublabel">Finished directions (${Number(keys.length).toLocaleString()})</div>`
+        + `<div class="ms-finished">${rows}</div>`;
+    }
+    return `<div class="ms-sec"><div class="ms-head"><span class="ms-title">Solve</span>`
+      + (live ? "" : `<span class="vbadge muted" title="${esc(endedReportText(c.state)[1])}">${esc(endedReportText(c.state)[0])}</span>`)
+      + `${reportedHtml(solve)}</div>`
+      + (kv.length ? `<dl class="kv-list">${kv.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${v}</dd>`).join("")}</dl>` : "")
+      + residuals + finished + `</div>`;
+  }
+
+  /// The fourth card. `c` is the merged record; its telemetry exists only once
+  /// the full record (ensureCaseDetail) has landed -- the case page never
+  /// carries it -- so until then the card is a placeholder of its own shape.
+  function meshSolveCardHtml(c) {
+    const here = !!caseDetails.get(c.case_id);
+    if (!here && !caseDetailFailed.has(c.case_id)) {
+      return `<div class="detail-card" aria-busy="true"><h3>${MS_TITLE}</h3>`
+        + `<span class="sr-only">Loading the node's mesh and solve reports…</span>`
+        + `<div aria-hidden="true">${skelBar("60px")}<div class="kv-list" style="margin-top:6px">`
+        + [70, 50, 64, 58, 76].map((w, i) => `<div>${skelBar(w + "px")}</div><div>${skelBar(Math.round(80 * SKEL_VARY[i]) + "%")}</div>`).join("")
+        + `</div>${skelBar("100%", "70px", "skel-block", "margin-top:10px;")}</div></div>`;
+    }
+    if (!here) {
+      return `<div class="detail-card"><h3>${MS_TITLE}</h3><div class="ms-note">`
+        + `Could not load this case's full record. Close and reopen the row to try again.</div></div>`;
+    }
+    const tel = isObj(c.telemetry) ? c.telemetry : {};
+    const mesh = isObj(tel.mesh) ? tel.mesh : null;
+    const solve = isObj(tel.solve) ? tel.solve : null;
+    const metrics = parseMaybeJson(c.metrics) || {};
+    const meshHtml = meshSectionHtml(c, mesh, metrics);
+    return `<div class="detail-card"><h3>${MS_TITLE}</h3>${meshHtml}`
+      + solveSectionHtml(c, solve, metrics, !!mesh) + `</div>`;
+  }
+
+  // -- Where this case sits: its percentiles, on the campaign's histograms ------
+  const LS_PCT_REF = "casebroker.percentileRef";
+  let pctRefMem = null;                        // when localStorage cannot be read
+  function pctRef() {
+    try { const v = localStorage.getItem(LS_PCT_REF); if (v) return v === "all" ? "all" : "own"; } catch (e) {}
+    return pctRefMem || "own";
+  }
+
+  const METRIC_GROUPS = [["urban", "Urban form"], ["site", "Site"], ["mesh", "Mesh"], ["run", "Run"]];
+  // casebroker/dataset.py METRICS as [label, unit, group], in its order, for
+  // while /v1/dataset cannot be read: a case's ranks come with its own record,
+  // and without these they printed under their registry keys, with no units
+  // and durations in bare seconds. The dataset's own copy wins when there is
+  // one; tests/test_dataset_stats.py keeps this in step with the registry.
+  const METRIC_INFO = {
+    bcr: ["Built coverage ratio", null, "urban"],
+    bht_m: ["Mean building height (area-weighted)", "m", "urban"],
+    bdr_m: ["Built density (volume / plot area)", "m", "urban"],
+    vr_ring: ["Vertical area ratio (full perimeter)", null, "urban"],
+    vr_exposed: ["Vertical area ratio (exposed walls)", null, "urban"],
+    ar: ["Aspect ratio (height / open-space width)", null, "urban"],
+    open_space_width_m: ["Mean open-space width", "m", "urban"],
+    bht_sigma_m: ["Building height uncertainty (1 sigma)", "m", "urban"],
+    rar: ["Road area ratio", null, "urban"],
+    svf: ["Sky view factor (cosine-weighted)", null, "urban"],
+    svf_dome: ["Sky view factor (unweighted dome)", null, "urban"],
+    n_buildings: ["Buildings", null, "site"],
+    terrain_relief_m: ["Terrain relief", "m", "site"],
+    canopy_fraction: ["Tree canopy fraction", null, "site"],
+    total_cells: ["Mesh cells", "cells", "mesh"],
+    max_skewness: ["Max skewness (worst mesh)", null, "mesh"],
+    max_non_orthogonality: ["Max non-orthogonality (worst mesh)", "deg", "mesh"],
+    case_seconds: ["Case wall time", "s", "run"],
+    mesh_seconds: ["Mesh wall time", "s", "run"],
+    solve_seconds: ["Solve wall time", "s", "run"],
+  };
+
+  /// A metric's label, unit and group: from the dataset copy when it has the
+  /// metric, else from METRIC_INFO, else the bare key in "other".
+  function metricInfo(k, metricsMeta) {
+    const m = metricsMeta && isObj(metricsMeta[k]) ? metricsMeta[k] : null;
+    if (m) return { label: m.label || k, unit: m.unit, group: m.group };
+    const f = Object.prototype.hasOwnProperty.call(METRIC_INFO, k) ? METRIC_INFO[k] : null;
+    return f ? { label: f[0], unit: f[1], group: f[2] } : { label: k, unit: null, group: "other" };
+  }
+
+  /// The same shape as the tiles, for while the record or the dataset is on
+  /// its way: a group line and `n` tiles of label, figure and two text lines.
+  function pctSkeletonTiles(n) {
+    let tiles = `<div class="pct-group">${skelBar("70px")}</div>`;
+    for (let i = 0; i < n; i++) {
+      tiles += `<div class="pct-tile"><div class="pct-label">${skelBar(Math.round(150 * SKEL_VARY[i % SKEL_VARY.length]) + "px")}</div>`
+        + `<div class="pct-row">${skelFigure(120, 28)}<div style="flex:1;min-width:0">${skelBar("60%")}${skelBar("85%")}</div></div></div>`;
+    }
+    return `<div class="pct-grid" aria-hidden="true">${tiles}</div>`;
+  }
+
+  function pctCardInner(c) {
+    const own = c.lcz ? String(c.lcz) : "";
+    const here = !!caseDetails.get(c.case_id);
+    const pct = isObj(c.percentiles) ? c.percentiles : null;
+    const keys = pct ? Object.keys(pct).filter((k) => isObj(pct[k])) : [];
+    // Own LCZ unless asked for all cases -- or there is no LCZ to use: the case
+    // has none, or no other case of it had reported when the aggregate ran.
+    const ownUsable = !!own && keys.some((k) => finite(pct[k].lcz));
+    const useOwn = pctRef() === "own" && ownUsable;
+    const ownTip = !own ? "this case has no LCZ" : ownUsable ? "compare with the cases of this case's own LCZ"
+      : "no other case of this LCZ has been ranked yet";
+    const head = `<div class="pct-head"><h3>Where this case sits</h3>`
+      + `<div class="seg" role="group" aria-label="Compare with">`
+      + `<button type="button" data-pct-ref="own" aria-pressed="${useOwn}"${ownUsable ? "" : " disabled"} title="${esc(ownTip)}">${own ? esc(own) : "own LCZ"}</button>`
+      + `<button type="button" data-pct-ref="all" aria-pressed="${!useOwn}" title="compare with every case">All cases</button>`
+      + `</div></div>`;
+    if (!here && !caseDetailFailed.has(c.case_id)) {
+      return head + `<span class="sr-only">Loading…</span>` + pctSkeletonTiles(6);
+    }
+    if (!here) return head + `<div class="ms-note">Could not load this case's full record. Close and reopen the row to try again.</div>`;
+    if (!pct) return head + `<div class="ms-note">This broker does not rank cases (it predates dataset statistics).</div>`;
+    if (!keys.length) {
+      const hasData = caseHasData(c);
+      // Empty is final once the record was asked for after the page had a
+      // dataset copy: the broker had an aggregate then and ranked all it could
+      // (a node's own keys -- wall_seconds, fake -- are not registry metrics).
+      // Before that it may only mean "no aggregate yet", which asking for the
+      // dataset settles: its landing re-reads the record (datasetLanded).
+      const settled = (caseRankGen.get(c.case_id) || 0) > 0;
+      if (hasData && !settled) datasetPeek();
+      return head + `<div class="ms-note">${!hasData
+        ? "Nothing to place yet: no node has reported this site's form, mesh or run times."
+        : settled ? "Nothing to place: this case reported none of the metrics the dataset ranks."
+        : "Not ranked yet: the broker computes the campaign's statistics in the background after it starts. The ranks appear with the next refresh."}</div>`;
+    }
+    const ds = datasetPeek();
+    const metricsMeta = ds && isObj(ds.metrics) ? ds.metrics : null;
+    // Placeholders only for the first wait. After a failure the tiles are
+    // drawn from the record and METRIC_INFO, and a retry keeps them.
+    if (!metricsMeta && dataset.inFlight && !dataset.error) {
+      return head + `<span class="sr-only">Loading the campaign's distributions…</span>` + pctSkeletonTiles(Math.min(keys.length, 12));
+    }
+    const groups = new Map(METRIC_GROUPS.map(([g]) => [g, []]));
+    const order = Object.keys(metricsMeta || METRIC_INFO).filter((k) => keys.includes(k));
+    keys.forEach((k) => { if (!order.includes(k)) order.push(k); });
+    order.forEach((k) => {
+      const g = metricInfo(k, metricsMeta).group;
+      if (!groups.has(g)) groups.set(g, []);
+      groups.get(g).push(k);
+    });
+    const groupTitle = new Map(METRIC_GROUPS);
+    let tiles = "";
+    for (const [g, ks] of groups) {
+      if (!ks.length) continue;
+      tiles += `<div class="pct-group">${esc(groupTitle.get(g) || g)}</div>`;
+      for (const k of ks) {
+        const p = pct[k];
+        const m = metricsMeta && isObj(metricsMeta[k]) ? metricsMeta[k] : null;
+        const info = metricInfo(k, metricsMeta);
+        const unit = info.unit;
+        // Per tile: an LCZ reference this metric has no rank in (nothing else
+        // of that LCZ reported it) falls back to all cases, and says so.
+        const tileOwn = useOwn && finite(p.lcz);
+        const set = m ? (tileOwn ? (isObj(m.by_lcz) ? m.by_lcz[own] : null) : m.all) : null;
+        const n = set && finite(set.n) ? Number(set.n) : null;
+        const refText = tileOwn ? own : "all cases";
+        const rank = tileOwn ? p.lcz : p.all;
+        // A value posted after the aggregate ran, for a metric the aggregate
+        // had nothing of yet, has no rank until the next one.
+        const rankText = finite(rank) ? ordinal(rank) + " percentile" : "not ranked yet";
+        const fig = m
+          ? histSvg(m.bins, set ? set.hist : [], { w: 120, h: 28, mark: p.value,
+              tip: `${info.label}: ${formatMetric(p.value, unit)} (${rankText} of ${refText}); bars: ${refText} on the campaign's p1–p99 axis` })
+          : `<span style="width:120px;flex:none"></span>`;
+        tiles += `<div class="pct-tile"><div class="pct-label" title="${esc(info.label)}">${esc(info.label)}</div>`
+          + `<div class="pct-row">${fig}<div style="min-width:0">`
+          + `<div class="pct-val">${esc(formatMetric(p.value, unit))} · ${esc(rankText)}</div>`
+          + `<div class="pct-rank">of ${esc(refText)}${n != null ? " · n = " + Number(n).toLocaleString() : ""}</div>`
+          + `</div></div></div>`;
+      }
+    }
+    const site = isObj(c.telemetry) && isObj(c.telemetry.site) ? c.telemetry.site : null;
+    const foot = [];
+    if (site) {
+      const siteLine = [reportedHtml(site, "site reported", ""),
+        site.dem ? `terrain from <span class="mono">${esc(site.dem)}</span>` : ""].filter(Boolean).join(" · ");
+      if (siteLine) foot.push(siteLine);
+    }
+    if (ds && finite(ds.generated_at)) foot.push(`statistics computed ${esc(relTime(Number(ds.generated_at)))} from ${Number(ds.cases).toLocaleString()} cases`);
+    if (!metricsMeta && dataset.error) {
+      foot.push(`histograms unavailable (${esc(dataset.error.message)})${dataset.inFlight ? "; asking again…" : ""}`);
+    }
+    return head + `<div class="pct-grid">${tiles}</div>`
+      + `<div class="pct-foot">Percentile rank among the cases a node has reported so far: the share below this case plus half the ties. `
+      + `Bars: the reference distribution on the campaign-wide p1–p99 axis, shared by every LCZ; the line is this case.`
+      + (foot.length ? `<br>${foot.join(" · ")}` : "") + `</div>`;
+  }
+
+  /// Busy while it draws placeholders: the record is on its way, or the case
+  /// has ranks to show and the dataset they are drawn on is. Asked AFTER the
+  /// card is built, since building it is what starts the dataset fetch.
+  function pctCardBusy(el) {
+    return !!el && el.querySelector(".pct-grid[aria-hidden='true']") !== null;
+  }
+
+  function pctCardHtml(c) {
+    const inner = pctCardInner(c);
+    const busy = inner.includes(`class="pct-grid" aria-hidden="true"`);
+    return `<div class="detail-card pct-card" id="pctCard-${esc(c.case_id)}" data-pct-case="${esc(c.case_id)}"`
+      + ` style="margin-bottom:14px" aria-busy="${busy}">${inner}</div>`;
+  }
+
+  /// Redraw only the open case's "Where this case sits" card -- for a dataset
+  /// that landed, ranks re-read or a reference toggled -- rather than the
+  /// whole table. The toggle is rebuilt with it, so a toggle button that had
+  /// the focus (or `focusRef`, the one just pressed) hands it to its
+  /// replacement: a dataset landing after a press used to drop it to <body>.
+  function redrawPctCard(id, focusRef) {
+    const el = document.getElementById("pctCard-" + id);
+    const row = casesOnScreen.find((c) => c.case_id === id);
+    if (!el || !row) return;
+    const active = document.activeElement;
+    const had = focusRef || (active && el.contains(active) ? active.getAttribute("data-pct-ref") : null);
+    const merged = Object.assign({}, caseDetails.get(id) || {}, row);
+    el.innerHTML = pctCardInner(merged);
+    el.setAttribute("aria-busy", String(pctCardBusy(el)));
+    if (had) {
+      const btns = [...el.querySelectorAll("button[data-pct-ref]")].filter((b) => !b.disabled);
+      const nb = btns.find((b) => b.getAttribute("data-pct-ref") === had) || btns[0];
+      if (nb) nb.focus();
+    }
   }
 
   function caseDetailHtml(c) {
@@ -3781,7 +4660,12 @@
               </button>
             </div>
           </div>
+
+          <!-- Mesh & Solve: the node's own reports (telemetry.mesh / .solve) -->
+          ${meshSolveCardHtml(c)}
         </div>
+
+        ${pctCardHtml(c)}
 
         <div class="detail-card" style="margin-bottom:14px;">
           <h3>Site Geometry
@@ -4067,6 +4951,7 @@
     // "no coordinates") instead of the placeholder. Its callbacks are async,
     // so nothing redraws under this render.
     ensureCaseDetail(openDetailId);
+    refreshCaseDetail(openDetailId, cases.find((c) => c.case_id === openDetailId));
     renderCasesHead();
     $("casesEmpty").style.display = cases.length ? "none" : "block";
     $("casesEmpty").textContent = "No cases match this filter.";
@@ -4156,7 +5041,8 @@
   function startCases() {
     const gen = ++casesGen;
     if (caseList.singleId) {
-      return { gen, single: true, promise: api("/v1/cases/" + encodeURIComponent(caseList.singleId)) };
+      return { gen, single: true, dsGen: datasetGen(),
+               promise: api("/v1/cases/" + encodeURIComponent(caseList.singleId)) };
     }
     const q = new URLSearchParams({ limit: caseList.limit, offset: caseList.offset,
                                     sort: caseList.sort, direction: caseList.dir });
@@ -4197,7 +5083,7 @@
         if (res.e) throw res.e;
         const c = res.v;
         openDetailId = c.case_id;
-        caseDetails.set(c.case_id, c);   // already the full record, spec included
+        storeCaseDetail(c.case_id, c, req.dsGen);   // already the full record, spec included
         renderCasesTable([c]);
         caseList.total = 1;
       } catch (e) {
@@ -4266,7 +5152,8 @@
     setHtml("casesBody", `<tr><td colspan="9" class="sr-only">Loading cases…</td></tr>` + (single
       ? skelTableRows(1, CASE_SKEL)
         + `<tr class="caseDetailRow skel-row" aria-hidden="true"><td colspan="9"><div class="caseDetail">`
-        + `<div class="detail-grid">${skelDetailCard(9)}${skelDetailCard(8)}${skelDetailCard(3)}</div>`
+        + `<div class="detail-grid">${skelDetailCard(9)}${skelDetailCard(8)}${skelDetailCard(3)}${skelDetailCard(7)}</div>`
+        + `<div class="detail-card" style="margin-bottom:14px"><h3>${skelBar("140px")}</h3>${pctSkeletonTiles(6)}</div>`
         + `<div class="detail-card" style="margin-bottom:14px"><h3>${skelBar("110px")}</h3>`
         + `<div class="geo-fig">${skelFigure(300, 300)}${skelFigure(300, 300)}${skelFigure(300, 168)}`
         + `<div class="geo-legend" style="width:46ch;max-width:100%">`
@@ -5413,6 +6300,276 @@
         ${d.tables.some((t) => t.bytes == null) ? "Per-table sizes need SQLite's dbstat, which this build lacks." : ""}</div>`;
   }
 
+  // -- Dataset drawer -------------------------------------------------------------
+  // The campaign as a training set (GET /v1/dataset, through the page's one
+  // cached copy above): how many cases, how they split, and every metric's
+  // distribution over all cases or one LCZ. Same drawer pattern as storage.
+  function datasetOpen() { return $("datasetDrawer").classList.contains("open"); }
+
+  function openDataset() {
+    if (!datasetOpen()) returnFocusTo = document.activeElement;
+    $("datasetScrim").classList.add("open");
+    const d = $("datasetDrawer");
+    d.classList.add("open"); d.inert = false; d.setAttribute("aria-hidden", "false");
+    $("datasetBtn").setAttribute("aria-expanded", "true");
+    $("datasetClose").focus();
+    datasetDrawn = null;                       // draw from scratch: the copy may be newer
+    datasetPeek();                             // fetches a stale or missing copy
+    renderDataset();
+  }
+
+  function closeDataset() {
+    $("datasetScrim").classList.remove("open");
+    const d = $("datasetDrawer");
+    d.classList.remove("open"); d.inert = true; d.setAttribute("aria-hidden", "true");
+    $("datasetBtn").setAttribute("aria-expanded", "false");
+    clearTimeout(datasetTick);
+    if (returnFocusTo && returnFocusTo.focus) returnFocusTo.focus();
+    else $("datasetBtn").focus();
+  }
+
+  const LS_DATASET_REF = "casebroker.datasetRef";
+  let datasetRefMem = "";
+  function datasetRef() {
+    try { const v = localStorage.getItem(LS_DATASET_REF); if (v !== null) return v; } catch (e) {}
+    return datasetRefMem;
+  }
+
+  let datasetDrawn = null;       // the answer the body was last drawn from
+  let datasetDrawnRef = null;    // and the reference it was drawn for
+  let datasetDim = false;        // a Refresh someone pressed dims what is on screen
+  let datasetTick = null;        // the 503 message's countdown
+
+  /// The reference selector: every LCZ the campaign draws from (LCZ1..LCZ10
+  /// always, so the list does not reshape as they fill), plus any other the
+  /// data names, each with its case count. Built with Option(), not markup.
+  function fillDatasetRef(d) {
+    const sel = $("datasetRef");
+    const counts = d && d.counts && isObj(d.counts.lcz) ? d.counts.lcz : {};
+    const names = new Set(Array.from({ length: 10 }, (_, i) => "LCZ" + (i + 1)));
+    Object.keys(counts).forEach((k) => { if (k !== "unknown") names.add(k); });
+    if (d && isObj(d.metrics)) {
+      Object.values(d.metrics).forEach((m) => { if (m && isObj(m.by_lcz)) Object.keys(m.by_lcz).forEach((k) => names.add(k)); });
+    }
+    const want = datasetRef();
+    if (want) names.add(want);
+    const opts = [["", `All cases${d ? " · " + Number(d.cases || 0).toLocaleString() : ""}`]]
+      .concat([...names].sort(natural).map((k) => [k, `${k} · ${Number(counts[k] || 0).toLocaleString()}`]));
+    const sig = JSON.stringify(opts);
+    if (sel.dataset.sig !== sig) {
+      sel.replaceChildren(...opts.map(([v, t]) => new Option(t, v)));
+      sel.dataset.sig = sig;
+    }
+    sel.value = want;
+    if (sel.value !== want) sel.value = "";
+    const n = want ? Number(counts[want] || 0) : null;
+    $("datasetRefNote").textContent = want
+      ? (n ? "bins shared with all cases, so the axes compare" : "no case of this LCZ yet")
+      : "";
+  }
+
+  function datasetSkeleton() {
+    const row = (i) => `<span>${skelBar(Math.round(64 * SKEL_VARY[i % 8]) + "px")}</span>`
+      + `<span>${skelBar(Math.round(100 * SKEL_VARY[(i + 3) % 8]) + "%", "8px", "skel-block")}</span>`
+      + `<span>${skelBar("26px")}</span>`;
+    const block = (k, rows) => `<div><div class="ds-h">${skelBar(Math.round(60 * SKEL_VARY[k]) + "px")}</div>`
+      + `<div class="ds-bars">${Array.from({ length: rows }, (_, i) => row(i + k)).join("")}</div></div>`;
+    const metric = (i) => `<div class="ds-metric"><div class="main">`
+      + `<div class="lbl">${skelBar(Math.round(210 * SKEL_VARY[i % 8]) + "px")}</div>`
+      + `<div class="st">${skelBar(Math.round(260 * SKEL_VARY[(i + 2) % 8]) + "px")}</div></div>`
+      + `<div class="fig">${skelFigure(180, 38)}<div class="ds-axis">${skelBar("30px")}${skelBar("30px")}</div></div></div>`;
+    return `<span class="sr-only">Loading the dataset statistics…</span><div class="ds-skel" aria-hidden="true">`
+      + `<div class="ds-total">${skelBar("150px")}</div><div class="ds-sub">${skelBar("55%")}</div>`
+      + `<div class="ds-note">${skelBar("92%")}${skelBar("48%")}</div>`
+      + `<div class="drawer-section" style="margin-top:18px"><div class="ds-counts">`
+      + block(0, 4) + block(1, 3) + block(2, 6) + block(3, 6) + `</div></div>`
+      + `<div class="ds-group">${skelBar("90px")}</div>`
+      + Array.from({ length: 6 }, (_, i) => metric(i)).join("") + `</div>`;
+  }
+
+  /// A count list as label · bar · number rows. `top` cuts the list, the rest
+  /// behind a <details>; `state` colours the bars by the state scale.
+  /// `buckets` names keys that are not entries of the list but sums the
+  /// server appends after it (a country's "unknown" and "other"): kept out of
+  /// the cut and the "N more" count, and always shown, after the top rows,
+  /// under a label built from the named entries -- fn(namedCount) -> [label, tip].
+  function barListHtml(title, obj, opts) {
+    const o = opts || {};
+    let entries = Object.entries(isObj(obj) ? obj : {}).filter(([, n]) => finite(n));
+    if (o.natural) entries.sort((a, b) => natural(a[0], b[0]));
+    if (!entries.length) {
+      return `<div><div class="ds-h">${esc(title)}</div><div class="ds-note" style="margin:0">none yet</div></div>`;
+    }
+    const isBucket = (k) => !!o.buckets && Object.prototype.hasOwnProperty.call(o.buckets, k);
+    const tail = entries.filter(([k]) => isBucket(k));
+    entries = entries.filter(([k]) => !isBucket(k));
+    const peak = Math.max(1, ...entries.concat(tail).map(([, n]) => Number(n)));
+    const rowHtml = ([k, n], label, tip) => `<span class="k${label ? " bucket" : ""}" title="${esc(tip || k)}">${esc(label || k)}</span>`
+      + `<span class="t"><span class="${o.state ? esc(k) : ""}" style="width:${Number(Number(n) / peak * 100).toFixed(1)}%"></span></span>`
+      + `<span class="n">${Number(n).toLocaleString()}</span>`;
+    const shown = o.top ? entries.slice(0, o.top) : entries;
+    const rest = o.top ? entries.slice(o.top) : [];
+    const restN = rest.reduce((s, [, n]) => s + Number(n), 0);
+    const tailHtml = tail.map((e) => rowHtml(e, ...o.buckets[e[0]](entries.length))).join("");
+    return `<div><div class="ds-h">${esc(title)}</div><div class="ds-bars">${shown.map((e) => rowHtml(e)).join("")}${tailHtml}</div>`
+      + (rest.length ? `<details class="ds-more"><summary>${Number(rest.length).toLocaleString()} more (${Number(restN).toLocaleString()} cases)</summary>`
+        + `<div class="ds-bars" style="margin-top:4px">${rest.map((e) => rowHtml(e)).join("")}</div></details>` : "")
+      + `</div>`;
+  }
+
+  // dataset._top_countries: the largest countries by name, then these two,
+  // each appended whatever its size.
+  const COUNTRY_BUCKETS = {
+    unknown: () => ["unknown", "sites no country outline claims, or without coordinates"],
+    other: (named) => [`other (past the top ${named})`, `every country past the ${named} largest, summed`],
+  };
+
+  function datasetMetricRowHtml(m, ref) {
+    const set = ref ? (isObj(m.by_lcz) ? m.by_lcz[ref] : null) : m.all;
+    const n = set && finite(set.n) ? Number(set.n) : 0;
+    const unit = m.unit;
+    // Durations and cell counts print their own units ("7h 34m", "2.20 M").
+    const unitTxt = unit === "cells" || unit === "s" ? "" : unit === "deg" ? " (°)" : unit ? ` (${unit})` : "";
+    const who = ref ? `no ${ref} case` : "no case";
+    const stats = n > 0
+      ? `n = <b>${Number(n).toLocaleString()}</b> · median <b>${esc(formatMetric(set.median, unit, true))}</b>`
+        + ` · p10–p90 ${esc(formatMetric(set.p10, unit, true))} – ${esc(formatMetric(set.p90, unit, true))}`
+      : `n = 0 · ${esc(who)} has reported this yet`;
+    const bins = Array.isArray(m.bins) ? m.bins : [];
+    const lo = bins.length ? formatMetric(bins[0], unit, true) : "";
+    const hi = bins.length ? formatMetric(bins[bins.length - 1], unit, true) : "";
+    // The axis is the campaign's p1..p99, and the server counts what lies
+    // beyond it in the end bars: n is every case, not the ones between.
+    const tip = n > 0 ? `${m.label}: ${Number(n).toLocaleString()} cases, median ${formatMetric(set.median, unit, true)}; `
+      + `axis ${lo} – ${hi}, the p1–p99 of all cases (values beyond it are counted in the end bars)` : "";
+    const fig = histSvg(bins, n > 0 ? set.hist : [], { w: 180, h: 38, median: n > 0 ? set.median : null,
+      outline: ref && m.all && n > 0 ? m.all.hist : null, tip });
+    return `<div class="ds-metric"><div class="main">`
+      + `<div class="lbl">${esc(m.label || "")}<span class="unit">${esc(unitTxt)}</span></div>`
+      + `<div class="st">${stats}</div></div>`
+      + `<div class="fig">${fig}<div class="ds-axis" style="width:180px">`
+      + (bins.length ? `<span>${esc(lo)}</span><span>${esc(hi)}</span>` : "<span>&nbsp;</span>") + `</div></div></div>`;
+  }
+
+  function datasetMetricsHtml(d, ref) {
+    const ms = isObj(d.metrics) ? d.metrics : {};
+    const keys = Object.keys(ms).filter((k) => isObj(ms[k]));
+    const refName = ref ? ref : "all cases";
+    let html = `<div class="ds-legend" style="margin-top:20px">`
+      + `<span><i style="background:var(--primary);opacity:.72"></i>${esc(refName)}</span>`
+      + (ref ? `<span><i style="border:1px solid var(--text-muted);height:6px"></i>all cases (shape)</span>` : "")
+      + `<span><i style="border-top:1px dashed var(--text-secondary);height:0;border-radius:0"></i>median</span>`
+      + `<span>axis: the campaign's p1–p99, 24 bins shared by every LCZ</span></div>`;
+    const known = new Set(METRIC_GROUPS.map(([g]) => g));
+    const groups = METRIC_GROUPS.concat([...new Set(keys.map((k) => ms[k].group))]
+      .filter((g) => !known.has(g)).map((g) => [g, String(g || "Other")]));
+    for (const [g, title] of groups) {
+      const ks = keys.filter((k) => ms[k].group === g);
+      if (!ks.length) continue;
+      html += `<div class="ds-group">${esc(title)}</div>` + ks.map((k) => datasetMetricRowHtml(ms[k], ref)).join("");
+    }
+    return html;
+  }
+
+  function datasetMessageHtml() {
+    const e = dataset.error;
+    if (!e) return `<div class="ds-msg">No statistics yet.</div>`;
+    const again = dataset.inFlight ? "Asking again now…" : "";
+    if (e.status === 503) {
+      // The broker waits for its first pass rather than answer 503: a 503 is
+      // a pass that FAILED, with no earlier one to serve (app.py dataset_stats).
+      const secs = Math.max(0, Math.ceil((dataset.retryAt - Date.now()) / 1000));
+      return `<div class="ds-msg"><b>The broker could not compute the statistics.</b> It answered 503: its last pass over `
+        + `the campaign failed, and it has no earlier one to serve. It tries again at most once a minute. `
+        + (again || `Asking again in ${secs} s.`)
+        + `<div class="why">${esc(e.message)}</div></div>`;
+    }
+    if (e.status === 404) {
+      return `<div class="ds-msg">This broker has no dataset statistics (it predates <code class="inline">GET /v1/dataset</code>).</div>`;
+    }
+    if (e.status === 401) {
+      return `<div class="ds-msg"><b>Sign in to see the dataset statistics.</b> The broker asks for a credential for them, `
+        + `as for the cases; they load once you have signed in or entered a token. ${again}`
+        + `<div class="why">${esc(e.message)}</div></div>`;
+    }
+    return `<div class="ds-msg">Could not read the dataset statistics. ${again || "Press Refresh to try again."}`
+      + `<div class="why">${esc(e.message)}</div></div>`;
+  }
+
+  function renderDataset() {
+    if (!datasetOpen()) return;
+    const body = $("datasetBody");
+    const d = dataset.data;
+    const busy = !!dataset.inFlight;
+    setBusy(body, busy);
+    setPending($("datasetRefresh"), busy);
+    if (!busy) datasetDim = false;
+    body.classList.toggle("is-stale", !!(d && busy && datasetDim));
+    clearTimeout(datasetTick);
+    fillDatasetRef(d);
+    if (!d) {
+      datasetDrawn = null;
+      // The skeleton is the first wait's. A retry after a failure keeps the
+      // explanation up, which says it is asking again: a skeleton there
+      // promised data every minute that another failure then took back.
+      if (busy && !dataset.error) {
+        if (!body.querySelector(".ds-skel")) body.innerHTML = datasetSkeleton();
+        return;
+      }
+      body.innerHTML = datasetMessageHtml();
+      // The 503 message counts down to its own retry.
+      if (!busy && dataset.error && dataset.error.status === 503) datasetTick = setTimeout(renderDataset, 1000);
+      return;
+    }
+    const ref = $("datasetRef").value;
+    const warn = dataset.error && !busy
+      ? `<div class="warn-banner" style="display:block;margin:0 0 12px;font-size:12px">Could not refresh (${esc(dataset.error.message)}); `
+        + `showing the statistics read ${esc(relTime(Math.floor(dataset.at / 1000)))}.</div>` : "";
+    if (datasetDrawn === d && datasetDrawnRef === ref && !warn && !body.querySelector(".warn-banner")) return;
+    if (datasetDrawn === d && datasetDrawnRef !== ref && $("dsMetrics")) {
+      $("dsMetrics").innerHTML = datasetMetricsHtml(d, ref);     // the counts keep their open <details>
+      datasetDrawnRef = ref;
+      return;
+    }
+    datasetDrawn = d; datasetDrawnRef = ref;
+    const c = isObj(d.counts) ? d.counts : {};
+    // A newer answer redraws the body; a country list someone opened stays
+    // open, and one whose summary had the focus keeps it -- the drawer is
+    // aria-modal, and a background refresh used to drop it to <body>.
+    const opened = [...body.querySelectorAll("details.ds-more")].map((x) => x.open);
+    const focusedMore = [...body.querySelectorAll("details.ds-more > summary")].indexOf(document.activeElement);
+    const hadFocus = body.contains(document.activeElement);
+    body.innerHTML = warn
+      + `<div class="ds-total">${Number(d.cases || 0).toLocaleString()} cases</div>`
+      + `<div class="ds-sub" title="${finite(d.generated_at) ? esc(new Date(Number(d.generated_at) * 1000).toLocaleString()) : ""}">`
+      + `statistics computed ${finite(d.generated_at) ? esc(relTime(Number(d.generated_at))) : "—"}; the broker recomputes them at most once a minute</div>`
+      + `<div class="ds-note">Metrics grow as nodes run cases: <b>n</b> = cases a node has reported so far. `
+      + `Site, urban-form and mesh numbers arrive while a case runs; run times only once it is done.</div>`
+      + `<div class="drawer-section" style="margin-top:18px"><div class="ds-counts">`
+      + barListHtml("State", c.state, { state: true })
+      + barListHtml("Split", c.split)
+      + barListHtml("LCZ", c.lcz, { natural: true })
+      + barListHtml("Country", c.country, { top: 12, buckets: COUNTRY_BUCKETS })
+      + barListHtml("Recipe", c.recipe, { top: 8 })
+      + `</div></div>`
+      + `<div id="dsMetrics">${datasetMetricsHtml(d, ref)}</div>`;
+    body.querySelectorAll("details.ds-more").forEach((x, i) => { if (opened[i]) x.open = true; });
+    if (hadFocus) {
+      const s = body.querySelectorAll("details.ds-more > summary")[focusedMore];
+      (s || $("datasetClose")).focus();
+    }
+  }
+
+  /// Refresh, pressed: ask now (past any back-off), dimming what is on screen.
+  function datasetUserRefresh() {
+    if (dataset.inFlight) return;
+    datasetPeek();                             // settles which broker the copy is for
+    if (dataset.inFlight) { datasetDim = true; renderDataset(); return; }
+    dataset.retryAt = 0;
+    datasetDim = !!dataset.data;
+    datasetFetch();
+  }
+
   // -- The first-run wizard ----------------------------------------------------
   // docs/operations.md's "First run", answered from live state rather than from
   // checkboxes an operator ticks: a database, an admin account, a session, a
@@ -5797,6 +6954,10 @@
       const st = await statusP;
       lastStatus = st;
       statusBroker = broker;
+      // The same credential now reads this broker, so a dataset read refused
+      // for want of one (a drawer opened while signed out) is not its answer:
+      // forget it and its 30 s back-off, so the drawer asks again at once.
+      if (dataset.error && dataset.error.status === 401) { dataset.error = null; dataset.retryAt = 0; }
       setConn("ok", "connected");
       showErr(null);
       // Collapse the connect form and show summary bar
@@ -5822,6 +6983,10 @@
       renderWizard();
       await loadCases(casesReq);
       loadReleases();          // not awaited: the fleet table is already drawn without it
+      // An open Dataset drawer follows the refresh like the rest of the page;
+      // its copy is a minute old by now, so this re-asks, quietly (an open
+      // case already asked for it while the table was drawn).
+      if (datasetOpen()) datasetPeek();
       checkStarts(st);
       if (browserEvents().has("done")) await checkFinished(st.by_state?.["done"] ?? null);
       nextRefreshSeconds = 60;
@@ -5945,10 +7110,43 @@
   $("storageRefresh").addEventListener("click", (e) => {
     if (!isPending(e.currentTarget)) loadStorage();   // one measurement at a time
   });
+  $("datasetBtn").addEventListener("click", () => (datasetOpen() ? closeDataset() : openDataset()));
+  $("datasetClose").addEventListener("click", closeDataset);
+  $("datasetScrim").addEventListener("click", closeDataset);
+  $("datasetRefresh").addEventListener("click", (e) => {
+    if (!isPending(e.currentTarget)) datasetUserRefresh();   // one request at a time
+  });
+  $("datasetRef").addEventListener("change", (e) => {
+    const v = e.target.value;
+    datasetRefMem = v;
+    try { localStorage.setItem(LS_DATASET_REF, v); } catch (err) {}
+    renderDataset();
+  });
+  // "Where this case sits": its LCZ or all cases, remembered in this browser.
+  // Delegated, because the panel is rebuilt on every render; only that card is
+  // redrawn, and the pressed button's replacement gets the focus back (as it
+  // does on any later redraw of the card: redrawPctCard).
+  $("casesBody").addEventListener("click", (e) => {
+    const b = e.target.closest("button[data-pct-ref]");
+    if (!b || b.disabled) return;
+    const want = b.getAttribute("data-pct-ref") === "all" ? "all" : "own";
+    pctRefMem = want;
+    try { localStorage.setItem(LS_PCT_REF, want); } catch (err) {}
+    const card = b.closest("[data-pct-case]");
+    const id = card && card.getAttribute("data-pct-case");
+    if (!id) return;
+    redrawPctCard(id, want);
+  });
   $("settingsScrim").addEventListener("click", closeSettings);
   document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && storageOpen()) closeStorage();
-    if (e.key === "Escape" && settingsOpen()) closeSettings();
+    if (e.key !== "Escape") return;
+    const open = storageOpen() || settingsOpen() || datasetOpen();
+    if (storageOpen()) closeStorage();
+    if (settingsOpen()) closeSettings();
+    if (datasetOpen()) closeDataset();
+    // The Escape that closed a drawer is spent: the page's own Escape (below,
+    // on window) would otherwise also fold the open case away behind it.
+    if (open) e.stopPropagation();
   });
   // -- Campaign: sites that are not on land -----------------------------------
   // Two buttons on purpose. The scan is read-only and always runs first; the
@@ -6131,8 +7329,10 @@
   // Closed at load, and inert with it.
   $("settingsDrawer").inert = true;
   $("storageDrawer").inert = true;
+  $("datasetDrawer").inert = true;
   makeResizable($("settingsDrawer"));
   makeResizable($("storageDrawer"));
+  makeResizable($("datasetDrawer"));
 
   const autoSaved = localStorage.getItem(LS_AUTO);
   const autoOn = autoSaved === null ? true : autoSaved === "1";

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import re
 import sys
 import threading
 
@@ -590,3 +591,17 @@ def test_concurrent_requests_share_one_computation(tmp_path, monkeypatch):
     for t in threads:
         t.join()
     assert len(loads) == 1 and len({id(a) for a in out}) == 1
+
+
+def test_the_dashboard_s_fallback_labels_match_the_registry():
+    """The dashboard draws a case's ranks with its own copy of the registry's
+    labels, units and groups while /v1/dataset cannot be read (METRIC_INFO in
+    dashboard.html). A metric added here and not there prints under its bare
+    key; a unit changed here and not there prints wrong."""
+    src = (pathlib.Path(__file__).resolve().parents[1]
+           / "casebroker" / "static" / "dashboard.html").read_text()
+    block = src.split("const METRIC_INFO = {", 1)[1].split("\n  };", 1)[0]
+    rows = re.findall(r'^\s*(\w+): \["([^"]*)", (null|"[^"]*"), "(\w+)"\],$', block, re.M)
+    got = [(k, label, None if unit == "null" else unit.strip('"'), group)
+           for k, label, unit, group in rows]
+    assert got == [(m.key, m.label, m.unit, m.group) for m in dataset.METRICS]
