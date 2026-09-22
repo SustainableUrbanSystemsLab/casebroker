@@ -654,6 +654,11 @@
   .geo-wrap { min-height: 40px; }
   .geo-fig { display: flex; gap: 14px; align-items: flex-start; flex-wrap: wrap; }
   .geo-fig svg { background: var(--surface-elevated); border: 1px solid var(--border); border-radius: 6px; }
+  .geo-fig svg.geo-zoom { cursor: grab; touch-action: none; user-select: none; }
+  .geo-fig svg.geo-zoom.dragging { cursor: grabbing; }
+  /* Lines keep their width while the drawing is magnified; otherwise a footprint
+     outline at 8x is a thick band hiding the building it outlines. */
+  .geo-fig svg.geo-zoom * { vector-effect: non-scaling-stroke; }
   .geo-legend { font-size: 12px; color: var(--text-secondary); line-height: 1.9; }
   .geo-swatch { display: inline-block; width: 11px; height: 11px; border-radius: 2px; vertical-align: -1px; margin-right: 6px; }
   .geo-note { font-size: 11.5px; color: var(--text-muted); margin-top: 8px; max-width: 46ch; }
@@ -2399,7 +2404,7 @@
 
     wrap.innerHTML = `
       <div class="geo-fig">
-        <svg viewBox="0 0 ${S} ${S}" width="${S}" height="${S}" role="img"
+        <svg class="geo-zoom" viewBox="0 0 ${S} ${S}" width="${S}" height="${S}" role="img"
              aria-label="Plan view over the mesh domain: terrain relief shaded, tree canopy in green, building footprints in blue, with the sampled core and the domain edge.">
           ${groundLayer}${canopyLayer}
           <rect x="${S/2-dom}" y="${S/2-dom}" width="${2*dom}" height="${2*dom}"
@@ -2407,17 +2412,18 @@
           ${paths}
           <rect x="${S/2-core}" y="${S/2-core}" width="${2*core}" height="${2*core}"
                 fill="none" stroke="var(--bad)" stroke-width="1.2" stroke-dasharray="5 4"/>
-          <circle cx="${S/2}" cy="${S/2}" r="2.5" fill="var(--bad)"/>
+          <circle cx="${S/2}" cy="${S/2}" r="2.5" data-fixed-r="2.5" fill="var(--bad)"/>
         </svg>
-        <svg viewBox="0 0 ${ISO} ${ISO}" width="${ISO}" height="${ISO}" role="img"
+        <svg class="geo-zoom" viewBox="0 0 ${ISO} ${ISO}" width="${ISO}" height="${ISO}" role="img"
              aria-label="Isometric view at 45 degrees over the sampled core: buildings extruded from their roofs down through the terrain to a common slab, with see-through green crown volumes for trees. Blue blocks have ${gba ? "predicted" : "measured"} heights, grey blocks ${gba ? "have no height in GBA" : "were inferred"}.">
           ${isoGround}${iso}
         </svg>
-        <svg viewBox="0 0 ${EW} ${EH}" width="${EW}" height="${EH}" role="img"
+        <svg class="geo-zoom" viewBox="0 0 ${EW} ${EH}" width="${EW}" height="${EH}" role="img"
              aria-label="Side elevation looking north across the mesh domain: the terrain relief band, building roofs and tree canopy on one shared vertical scale in metres.">
           ${elev}
         </svg>
         <div class="geo-legend">
+          <div class="geo-note" style="margin-bottom:6px">Scroll to zoom · drag to pan · double-click to reset</div>
           ${buildingLines}
           ${terrLine}
           ${canLine}
@@ -2441,6 +2447,83 @@
         </div>
       </div>`;
   }
+  // -- Zoom and pan for the geometry views ------------------------------------
+  // On the viewBox, so every layer -- raster ground, footprints, section lines --
+  // stays exactly registered, and nothing is re-rendered. Delegated from the
+  // document because the figures are rebuilt whenever a case is re-opened.
+  const GEO_MAX_ZOOM = 40;
+  function geoBox(svg) {
+    if (!svg._vb0) svg._vb0 = svg.getAttribute("viewBox").split(/\s+/).map(Number);
+    if (!svg._vb) svg._vb = svg._vb0.slice();
+    return svg._vb;
+  }
+  function geoApply(svg, vb) {
+    const [x0, y0, w0, h0] = svg._vb0;
+    // Clamp: never smaller than 1/GEO_MAX_ZOOM of the original, never larger than
+    // it, and never panned off the drawing.
+    let [x, y, w, h] = vb;
+    w = Math.min(w0, Math.max(w0 / GEO_MAX_ZOOM, w)); h = w * (h0 / w0);
+    x = Math.min(x0 + w0 - w, Math.max(x0, x)); y = Math.min(y0 + h0 - h, Math.max(y0, y));
+    svg._vb = [x, y, w, h];
+    svg.setAttribute("viewBox", svg._vb.join(" "));
+    // Markers keep their on-screen size: the site-centre dot at 8x would cover
+    // the very buildings someone zoomed in to look at.
+    svg.querySelectorAll("[data-fixed-r]").forEach((c) => c.setAttribute("r", Number(c.dataset.fixedR) * w / w0));
+  }
+  function geoPoint(svg, clientX, clientY) {
+    const r = svg.getBoundingClientRect(), vb = geoBox(svg);
+    return [vb[0] + (clientX - r.left) / r.width * vb[2], vb[1] + (clientY - r.top) / r.height * vb[3]];
+  }
+  function geoZoomAt(svg, clientX, clientY, factor) {
+    const vb = geoBox(svg), [px, py] = geoPoint(svg, clientX, clientY);
+    const w = vb[2] / factor, h = vb[3] / factor;
+    // The point under the cursor stays under the cursor.
+    geoApply(svg, [px - (px - vb[0]) / factor, py - (py - vb[1]) / factor, w, h]);
+  }
+  document.addEventListener("wheel", (e) => {
+    const svg = e.target.closest && e.target.closest("svg.geo-zoom");
+    if (!svg) return;
+    e.preventDefault();
+    geoZoomAt(svg, e.clientX, e.clientY, Math.exp(-e.deltaY * (e.deltaMode === 1 ? 0.05 : 0.0015)));
+  }, { passive: false });
+  document.addEventListener("dblclick", (e) => {
+    const svg = e.target.closest && e.target.closest("svg.geo-zoom");
+    if (svg && svg._vb0) geoApply(svg, svg._vb0.slice());
+  });
+  const geoPointers = new Map();
+  document.addEventListener("pointerdown", (e) => {
+    const svg = e.target.closest && e.target.closest("svg.geo-zoom");
+    if (!svg || (e.pointerType === "mouse" && e.button !== 0)) return;
+    geoBox(svg);
+    svg.setPointerCapture(e.pointerId);
+    geoPointers.set(e.pointerId, { svg, x: e.clientX, y: e.clientY });
+    svg.classList.add("dragging");
+  });
+  document.addEventListener("pointermove", (e) => {
+    const p = geoPointers.get(e.pointerId);
+    if (!p) return;
+    const svg = p.svg;
+    const others = [...geoPointers.entries()].filter(([id, q]) => id !== e.pointerId && q.svg === svg);
+    if (others.length === 1) {
+      // Pinch: the change in finger distance is the zoom, about their midpoint.
+      const q = others[0][1];
+      const before = Math.hypot(p.x - q.x, p.y - q.y), after = Math.hypot(e.clientX - q.x, e.clientY - q.y);
+      if (before > 0) geoZoomAt(svg, (e.clientX + q.x) / 2, (e.clientY + q.y) / 2, after / before);
+    } else {
+      const r = svg.getBoundingClientRect(), vb = geoBox(svg);
+      geoApply(svg, [vb[0] - (e.clientX - p.x) / r.width * vb[2], vb[1] - (e.clientY - p.y) / r.height * vb[3], vb[2], vb[3]]);
+    }
+    p.x = e.clientX; p.y = e.clientY;
+  });
+  const geoRelease = (e) => {
+    const p = geoPointers.get(e.pointerId);
+    if (!p) return;
+    geoPointers.delete(e.pointerId);
+    if (![...geoPointers.values()].some((q) => q.svg === p.svg)) p.svg.classList.remove("dragging");
+  };
+  document.addEventListener("pointerup", geoRelease);
+  document.addEventListener("pointercancel", geoRelease);
+
   document.addEventListener("click", (e) => {
     const btn = e.target.closest(".geo-load");
     if (!btn) return;
@@ -3122,7 +3205,7 @@
     const map = Number.isFinite(lat) && Number.isFinite(lon)
       ? ` <a href="https://www.openstreetmap.org/?mlat=${lat.toFixed(5)}&mlon=${lon.toFixed(5)}#map=14/${lat.toFixed(5)}/${lon.toFixed(5)}"
              target="_blank" rel="noopener noreferrer" title="Open this site in OpenStreetMap">map ↗</a>` : "";
-    if (!p) return (Number.isFinite(lat) ? `${lat.toFixed(4)}, ${lon.toFixed(4)}` : "—") + map;
+    if (!p) return `<span style="display:block">${Number.isFinite(lat) ? `${lat.toFixed(4)}, ${lon.toFixed(4)}` : "—"}${map}</span>`;
     const country = p.country ? esc(p.country) + (p.country_source === "nearest town" ? " <span title=\"the site is just outside the 1:50m country outline (usually a coast); the country is the nearest town's\">(by nearest town)</span>" : "") : "no country (open water?)";
     let town = "";
     if (p.town) {
@@ -3131,7 +3214,9 @@
         ? ` · ${esc(p.town)}${p.region ? ", " + esc(p.region) : ""} <span style="color:var(--text-muted)">(${km.toFixed(1)} km)</span>`
         : ` · <span style="color:var(--text-muted)">nearest town ${esc(p.town)}, ${Math.round(km)} km away</span>`;
     }
-    return country + town + map;
+    // One wrapper: .kv-list dd is a flex row, and loose text beside inline spans
+    // becomes separate flex items, which wrapped "Munich" as "Mu / nich".
+    return `<span style="display:block;word-break:normal;overflow-wrap:anywhere">${country}${town}${map}</span>`;
   }
 
   function caseDetailHtml(c) {

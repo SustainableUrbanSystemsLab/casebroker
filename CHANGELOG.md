@@ -8,6 +8,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-09-21
+
+### Added
+- **Zoomable site geometry.** Plan, isometric and elevation views zoom with the
+  scroll wheel (toward the cursor) or a pinch, pan by dragging, and reset on
+  double-click. Lines keep their width and the site marker its size when zoomed.
+
+### Fixed
+- The Location row no longer wraps mid-word.
+
 ## [0.7.0] - 2026-09-21
 
 ### Added
