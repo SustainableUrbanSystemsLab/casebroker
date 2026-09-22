@@ -8,6 +8,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+### Added
+- **Push notifications (ntfy).** With `CASEBROKER_NOTIFY_URL` set to an ntfy
+  topic, the broker announces when a case starts, begins meshing, begins solving,
+  finishes, fails or is quarantined -- to a phone, with no dashboard open. One
+  batched message per 30 s poll; no replay on restart; failed deliveries retried.
+  See docs/operations.md, "Push notifications".
+
 ## [0.8.0] - 2026-09-21
 
 ### Added
