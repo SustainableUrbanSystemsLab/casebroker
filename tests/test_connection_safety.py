@@ -48,6 +48,8 @@ _ALLOWED_UNLOCKED = {
     "_set_target",         # inside set_target, promote_canary, roll_back
     "_live_workers",       # inside list_releases, platform_gaps, release_in_use
     "_note_build_change",  # inside lease(), in its transaction
+    "_attach_labels",      # inside list_cases and get_case
+    "_recipe_knowledge",   # inside list_releases and recipe_gaps
     "_existing_tables",    # schema bring-forward, under _LOCK in connect()
     "_existing_columns",
     "reconcile_columns",

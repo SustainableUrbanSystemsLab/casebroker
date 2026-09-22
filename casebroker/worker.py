@@ -358,7 +358,9 @@ class Worker:
                 retryable = not getattr(e, "fatal", False)
                 print(f"[error] {lease['case_id']}: {e}", file=sys.stderr)
                 try:
-                    self.fail(str(e)[:2000], retryable=retryable)
+                    # 3900 of the 4000 the broker keeps: the stage line and
+                    # both streams' tails are what a bug report needs.
+                    self.fail(str(e)[:3900], retryable=retryable)
                 except Exception as e2:
                     print(f"[warn] could not report failure: {e2}", file=sys.stderr)
             finally:
@@ -455,6 +457,19 @@ def _terminate_tree(proc) -> None:
             pass
 
 
+def _tails(err_lines, out, lines: int = 20, limit: int = 3600) -> str:
+    """The last lines of BOTH streams, each labelled: stderr is where a solver
+    says what went wrong, stdout is where the runner says what it was doing.
+    One or the other used to be kept, so a runner that logged its stages to
+    stdout and died with an empty stderr reported nothing but an exit code."""
+    parts = []
+    for name, buf in (("stderr", err_lines), ("stdout", out)):
+        kept = [ln for ln in list(buf)[-lines:] if ln.strip()]
+        if kept:
+            parts.append(f"--- {name}, last {len(kept)} lines ---\n" + "\n".join(kept))
+    return "\n".join(parts)[-limit:]
+
+
 def script_runner(script: str, timeout: int | None = None,
                   capture_lines: int | None = None) -> Runner:
     """Run an external script per case.
@@ -514,6 +529,14 @@ def script_runner(script: str, timeout: int | None = None,
                 proc.stdin.close()
             except Exception:                            # noqa: BLE001
                 pass
+        def during() -> str:
+            # The stage the runner was in, from the line it last wrote for the
+            # heartbeat: "during solve 3/8 dirs" is the first thing a reader of
+            # a failure wants, and the log tail below it the second.
+            read = getattr(worker, "progress_detail", None)
+            line = read() if callable(read) else "alive"
+            return f' during "{line}"' if line and line != "alive" else ""
+
         try:
             proc.wait(timeout=limit if limit > 0 else None)
         except subprocess.TimeoutExpired:
@@ -521,13 +544,12 @@ def script_runner(script: str, timeout: int | None = None,
             for t in pumps:
                 t.join(timeout=10)
             raise RuntimeError(
-                f"runner exceeded {limit}s and was killed; last stderr: "
-                + " | ".join(list(err_lines)[-5:])[:1000])
+                f"runner exceeded {limit}s and was killed{during()}\n" + _tails(err_lines, out))
         for t in pumps:
             t.join(timeout=30)
 
         if proc.returncode != 0:
-            tail = "\n".join(err_lines or out)[-2000:]
+            tail = _tails(err_lines, out)
             # 64 is the campaign's agreed "this case is broken, do not retry"
             # code, so a bad tile is quarantined on its first attempt.
             # 69 is sysexits' EX_UNAVAILABLE, and the runner uses it for "this
@@ -538,7 +560,7 @@ def script_runner(script: str, timeout: int | None = None,
             err = (FatalCaseError if proc.returncode == 64
                    else NodeUnfitError if proc.returncode == 69
                    else RuntimeError)
-            raise err(f"runner exited {proc.returncode}: {tail}")
+            raise err(f"runner exited {proc.returncode}:{during()}\n{tail}")
         lines = [ln for ln in out if ln.strip()]
         if not lines:
             raise RuntimeError("runner produced no output; expected a JSON result line")

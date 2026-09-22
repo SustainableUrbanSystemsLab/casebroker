@@ -8,6 +8,38 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-09-22
+
+### Added
+- **Five things a case page and the fleet panel say now**, taken from how the
+  Pollination cloud presents a run, in this broker's own words:
+  - **What a build knows.** Per build, the recipes its workers declared, against
+    what the queue holds (`knows`, `missing_recipes`, `queue_recipes` on
+    `GET /v1/releases`). A fleet target that does not know a queued recipe is
+    refused (409 naming the recipe and how many cases need it; `force` insists):
+    every node on it would have refused those cases at the lease. The panel and
+    `casebroker release list` say it per build.
+  - **Stages.** `GET /v1/cases/{id}` carries the case's stages, read off its
+    progress trail -- geometry, build-case, mesh, solve, gate, archive -- each
+    with how long it took and its last line, `current` for a running case and
+    `failed_in` for the stage the last failure landed in. The case page draws
+    them, one row per attempt, and the failure box says "failed during solve".
+  - **Pulling a case off its node.** `POST /v1/cases/{id}/cancel` (admin;
+    `reason`, `park`): the node hears at its next heartbeat and stops, a late
+    result is refused, the attempt is refunded, and the case is requeued or
+    parked in quarantine with the reason. Two buttons on a leased case's card.
+    The one deliberate release of a live worker's lease; who and why are in the
+    trail.
+  - **A failure names its stage and carries both streams.** The Python worker's
+    failure text starts `runner exited N: during "solve 3/8 dirs · iter 412/2000"`
+    and carries the last twenty lines of stderr AND stdout, labelled; it kept
+    one or the other, so a runner that logged its stages to stdout and died with
+    an empty stderr reported an exit code and nothing else.
+  - **Labels.** A case may be posted with up to sixteen key/values
+    (`"labels": {"campaign": "v2-pilot"}`); re-posting rewrites them. The browser
+    filters by `label=key:value` (or `key`), rows and the case page carry them,
+
+
 ## [0.14.1] - 2026-09-22
 
 ## [0.14.0] - 2026-09-22
