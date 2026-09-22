@@ -2044,50 +2044,6 @@
       <div id="notifyEvents" class="notify-events" style="margin:8px 0 0 26px;"></div>
       <div class="panel-subtitle" style="margin-top:6px;">
         Announces only what happens after you switch it on, and only while this tab is open.
-        For a phone, or with the browser closed, use push notifications below.
-      </div>
-
-      <!-- Broker-side push (ntfy): admin-only, stored on the broker, applies to
-           everyone subscribed to the topic -- hence not "kept in this browser". -->
-      <div style="margin-top:22px; padding-top:16px; border-top:1px solid var(--border);">
-        <div class="panel-title-group" style="margin-bottom:4px;"><h2>Push notifications</h2></div>
-        <div class="panel-subtitle" style="margin-bottom:10px;">
-          Sent by the broker to an <a href="https://ntfy.sh" target="_blank" rel="noopener noreferrer">ntfy</a>
-          topic -- reaches your phone with every browser closed. Stored on the broker.
-        </div>
-        <div id="pushPanel" style="display:none;">
-          <div id="pushStatus" class="panel-subtitle" style="margin-bottom:10px;"></div>
-          <div class="field">
-            <label for="pushUrl">Topic URL <span class="label-hint">(the topic name is the secret)</span></label>
-            <div class="row" style="gap:8px; align-items:center;">
-              <input type="text" id="pushUrl" autocomplete="off" spellcheck="false" style="flex:1; min-width:200px;"
-                     placeholder="https://ntfy.sh/casebroker-…" />
-              <button id="pushGenerate" type="button" class="subtle" title="A new random topic on ntfy.sh">New topic</button>
-            </div>
-          </div>
-          <div id="pushSubscribe" class="panel-subtitle" style="margin:6px 0 0; display:none;"></div>
-          <div class="field" style="margin-top:10px;">
-            <label>Tell me when a case</label>
-            <div id="pushEvents" class="notify-events"></div>
-          </div>
-          <details style="margin-top:8px;">
-            <summary style="cursor:pointer; font-size:12.5px; color:var(--text-secondary);">More</summary>
-            <div class="field" style="margin-top:8px;">
-              <label for="pushToken">Access token <span class="label-hint">(protected or self-hosted topics only)</span></label>
-              <input type="password" id="pushToken" autocomplete="new-password" placeholder="unchanged" />
-            </div>
-            <div class="field" style="margin-top:8px;">
-              <label for="pushPublicUrl">Dashboard address <span class="label-hint">(tapping a notification opens it)</span></label>
-              <input type="text" id="pushPublicUrl" autocomplete="off" spellcheck="false" placeholder="https://casebroker.onrender.com" />
-            </div>
-          </details>
-          <div class="row" style="gap:8px; margin-top:12px;">
-            <button id="pushSave" type="button">Save</button>
-            <button id="pushTest" type="button" class="subtle">Send test</button>
-            <button id="pushOff" type="button" class="subtle" title="Clear the topic set here (an environment variable, if any, applies again)">Turn off</button>
-          </div>
-        </div>
-        <div id="pushLocked" class="panel-subtitle">Sign in as an admin to configure push notifications.</div>
       </div>
     </section>
 
@@ -5317,72 +5273,6 @@
     } catch (e) { showToast(title); }
   }
 
-  // -- Push notifications (ntfy), admin ---------------------------------------
-  let pushState = null;
-  async function loadPush() {
-    try { pushState = await userCall("/v1/notify", { method: "GET" }); }
-    catch (e) { $("pushStatus").textContent = "Could not read the push settings: " + e.message; return; }
-    renderPush();
-  }
-  function renderPush() {
-    const p = pushState;
-    if (!p) return;
-    const from = (f) => p.source && p.source[f] === "env" ? " (from the server's environment)" : "";
-    $("pushStatus").innerHTML = p.enabled
-      ? `<b style="color:var(--accent)">On</b> — sending to <code class="inline">${esc(p.url)}</code>${esc(from("url"))}.`
-      : "<b>Off</b> — no topic configured.";
-    $("pushUrl").value = "";
-    $("pushUrl").placeholder = p.url || "https://ntfy.sh/casebroker-…";
-    $("pushToken").placeholder = p.token_set ? "set — leave empty to keep" : "none";
-    $("pushPublicUrl").value = p.public_url || "";
-    const on = new Set(p.events || []);
-    const labels = { started: "starts", meshing: "starts meshing", solving: "starts solving",
-                     done: "finishes", failed: "fails (will retry)", quarantined: "is quarantined" };
-    $("pushEvents").innerHTML = (p.all_events || []).map((k) =>
-      `<label><input type="checkbox" data-ev="${esc(k)}" ${on.has(k) ? "checked" : ""}/> ${esc(labels[k] || k)}</label>`).join("");
-    $("pushOff").disabled = !(p.source && p.source.url === "settings");
-  }
-  function wirePush() {
-    $("pushGenerate").onclick = () => {
-      const bytes = new Uint8Array(12);
-      crypto.getRandomValues(bytes);
-      const topic = "casebroker-" + [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
-      $("pushUrl").value = "https://ntfy.sh/" + topic;
-      // Shown in full ONCE, here: after saving, the broker only ever echoes it masked.
-      $("pushSubscribe").style.display = "";
-      $("pushSubscribe").innerHTML = `Subscribe to <code class="inline">${esc(topic)}</code> in the ntfy app
-        (or open <a href="https://ntfy.sh/${esc(topic)}" target="_blank" rel="noopener noreferrer">ntfy.sh/${esc(topic)}</a>), then Save.`;
-    };
-    $("pushSave").onclick = async () => {
-      const body = { events: [...$("pushEvents").querySelectorAll("input:checked")].map((x) => x.dataset.ev),
-                     public_url: $("pushPublicUrl").value.trim() };
-      if ($("pushUrl").value.trim()) body.url = $("pushUrl").value.trim();
-      if ($("pushToken").value) body.token = $("pushToken").value;
-      try {
-        pushState = await userCall("/v1/notify", jsonBody("PUT", body));
-        $("pushToken").value = "";
-        showToast("Push notifications saved");
-        renderPush();
-      } catch (e) { showToast(e.message); }
-    };
-    $("pushTest").onclick = async () => {
-      $("pushTest").disabled = true;
-      try {
-        const r = await userCall("/v1/notify/test", { method: "POST" });
-        showToast(r.ok ? "Test sent — check your phone" : "Not sent: " + r.error);
-      } catch (e) { showToast(e.message); }
-      finally { $("pushTest").disabled = false; }
-    };
-    $("pushOff").onclick = async () => {
-      try {
-        pushState = await userCall("/v1/notify", jsonBody("PUT", { url: "" }));
-        $("pushSubscribe").style.display = "none";
-        showToast(pushState.enabled ? "Cleared here; the server's environment still sets a topic" : "Push notifications off");
-        renderPush();
-      } catch (e) { showToast(e.message); }
-    };
-  }
-
   function fireNotification(newIds, doneCount) {
     const n = newIds.length;
     const title = n === 1 ? "Case finished" : `${n} cases finished`;
@@ -5539,9 +5429,7 @@
     // A signed-in human has no use for the bearer-token form; it stays in the
     // DOM because everything still reads $("token").value.
     $("connectForm").style.display = signedIn ? "none" : "";
-    $("pushPanel").style.display = isAdmin ? "" : "none";
-    $("pushLocked").style.display = isAdmin ? "none" : "";
-    if (isAdmin) { loadMachines(); loadPairings(); loadUsers(); loadPush(); } else machineCount = null;
+    if (isAdmin) { loadMachines(); loadPairings(); loadUsers(); } else machineCount = null;
     loadReleases();
     renderWizard();
   }
@@ -7371,7 +7259,6 @@
   }
 
   renderBrowserEvents();
-  wirePush();
   $("notifyDone").addEventListener("change", async (e) => {
     if (!e.target.checked) { setNotifyEnabled(false); return; }
     // requestPermission() must run inside this user gesture.

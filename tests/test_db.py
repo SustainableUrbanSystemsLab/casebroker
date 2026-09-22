@@ -96,6 +96,20 @@ def test_expired_lease_returns_to_the_pool(tmp_path):
     assert second[0].attempt == 2, "a reclaim consumes an attempt"
 
 
+def test_a_quarantine_found_at_lease_names_the_worker_whose_attempt_ran_out(tmp_path):
+    """Its last attempt expired on one node; another node asked next and found it
+    spent. The event belongs to the first -- the one whose attempt ran out -- and
+    the detail records who found it."""
+    conn = make_db(tmp_path, 1)
+    t0 = 1_000_000
+    for i, worker in enumerate(("w1", "w2", "w3")):
+        assert len(db.lease(conn, worker, lease_seconds=60, now=t0 + i * 61)) == 1
+    assert db.lease(conn, "finder", now=t0 + 3 * 61) == []
+    row = conn.execute("SELECT worker_id, detail FROM events WHERE event = 'quarantined'").fetchone()
+    assert row["worker_id"] == "w3"
+    assert row["detail"] == "attempts exhausted (3); found by finder"
+
+
 def test_release_refunds_the_attempt(tmp_path):
     """Phoenix preemption. The case was fine; the worker just lost its node, so
     the attempt must not count against max_attempts."""

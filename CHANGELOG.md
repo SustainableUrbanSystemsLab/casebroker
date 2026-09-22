@@ -8,6 +8,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-09-22
+
+### Removed
+- **Push notifications (ntfy)**, added in 0.9.0. The broker no longer runs a
+  notifier; `GET`/`PUT /v1/notify` and `POST /v1/notify/test` are gone (`404`),
+  as is the admin "Push notifications" panel in Settings -> Preferences and the
+  `CASEBROKER_NOTIFY_*` / `CASEBROKER_PUBLIC_URL` variables (now ignored). The
+  browser notifications in Preferences -- starts, meshing, solving, finishes,
+  while the tab is open -- stay. The settings rows 0.9.0 left behind
+  (`notify_cursor`, and any `notify_url`, `notify_token`, `notify_events`,
+  `notify_public_url` an admin saved) are deleted on the first connect, on
+  SQLite and Postgres, without an audit event. The audit line for a setting
+  change shows its value again, as before 0.9.0 (only the notify keys were
+  redacted).
+
 ## [0.9.0] - 2026-09-22
 
 ### Added

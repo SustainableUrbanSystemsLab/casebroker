@@ -544,36 +544,3 @@ longer than a redeploy. The one call that used to be at risk was `/v1/complete`
 — the case solved, the archive written, and only the broker not yet told — so
 it now retries across about four minutes rather than the ~30 s the other calls
 use. A definitive `409` is still never retried.
-
-## Push notifications
-
-The dashboard's own "notify on finished cases" works only while its tab is open. For
-notices on a phone, or with every browser closed, the broker pushes to an
-[ntfy](https://ntfy.sh) topic:
-
-Configure it in the dashboard -- **Settings -> Notifications** (admin only): the topic,
-which events, an optional token and the dashboard's address, and a **Send test** button.
-Changes apply on the next poll, no redeploy. Each field falls back to its environment
-variable while unset there, so the env-only setup below still works:
-
-1. Pick a long random topic name -- on ntfy.sh the name is the only secret.
-2. On Render, set `CASEBROKER_NOTIFY_URL=https://ntfy.sh/<topic>` (and
-   `CASEBROKER_PUBLIC_URL` to the dashboard's address so a tap opens it).
-3. Install the ntfy app (or open ntfy.sh) and subscribe to the same topic.
-
-A URL set from the dashboard may only point at ntfy.sh unless the server lists more
-hosts in `CASEBROKER_NOTIFY_ALLOWED_HOSTS` (a self-hosted ntfy); a token is only sent
-over https and only with the URL it was entered for, and neither the token nor the
-full topic ever appears in a response or the audit trail.
-
-It announces a case **started** (leased), **meshing**, **solving** (the first
-progress line of each phase), **finished**, **failed** (will retry) and
-**quarantined** -- all of them unless `CASEBROKER_NOTIFY_EVENTS` narrows it. It
-polls the events table every 30 s and sends ONE message per poll, so a fleet
-moving many cases at once does not spend ntfy.sh's daily allowance for a free
-topic one notice at a time. It starts from the newest event when the process
-resumes from where the last process stopped (its position is kept in the
-database and claimed before each batch, so a deploy's two overlapping instances
-never both send), a transient delivery failure is retried with backoff for up to
-30 minutes, and a permanent one (a 4xx, a redirect) is logged and dropped rather
-than blocking every later notice.

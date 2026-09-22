@@ -38,7 +38,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
-from . import __version__, auth, dataset, db, footprints, ids, notify, places
+from . import __version__, auth, dataset, db, footprints, ids, places
 
 MAX_LEASE_SECONDS = 24 * 3600
 
@@ -208,14 +208,6 @@ class LeaseOut(BaseModel):
     expires_at: int
     attempt: int
     spec: dict[str, Any]
-
-
-class NotifyIn(BaseModel):
-    """Settings -> Notifications. Every field optional: only the ones sent change."""
-    url: str | None = None
-    token: str | None = None
-    events: list[str] | None = None
-    public_url: str | None = None
 
 
 class HeartbeatIn(BaseModel):
@@ -452,16 +444,7 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
             dataset_cache.peek()
         except Exception as e:                           # noqa: BLE001
             print(f"[warn] could not start the dataset warm-up: {e}", file=sys.stderr)
-        # Push notifications (casebroker/notify.py). The poller always runs; it
-        # sends only when an ntfy topic is configured (Settings, else env), and
-        # re-reads that every poll. Started here, not at import, so a test client
-        # that never enters the lifespan never starts a thread.
-        notifier = notify.from_env(conn)
-        notifier.start()
-        try:
-            yield
-        finally:
-            notifier.stop()
+        yield
 
     app = FastAPI(title="E3D Simulation Broker", version=__version__,
                   lifespan=_lifespan)
@@ -1574,57 +1557,6 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
                 raise HTTPException(409, f"{body.build} has no published file; register it first")
             db.set_setting(conn, "target_build", body.build, by=user["username"])
         return db.list_releases(conn)
-
-    # -- push notifications (ntfy) ----------------------------------------
-    # Admin only: the topic URL is a secret (on ntfy.sh, anyone who knows it can
-    # read every notice), and pointing it elsewhere redirects the fleet's news.
-    def _notify_view() -> dict[str, Any]:
-        cfg = notify.resolve(db.get_settings(conn))
-        return {"enabled": bool(cfg["url"]), "url": notify.mask(cfg["url"]),
-                "token_set": bool(cfg["token"]), "events": cfg["events"],
-                "all_events": list(notify.ALL_EVENTS), "public_url": cfg["public_url"],
-                "source": cfg["source"]}
-
-    @app.get("/v1/notify")
-    def get_notify(user=AdminAuth) -> dict[str, Any]:
-        return _notify_view()
-
-    @app.put("/v1/notify")
-    def set_notify(body: NotifyIn, user=AdminAuth) -> dict[str, Any]:
-        """Only the fields SENT change. An empty string clears that field in the
-        settings table, which hands it back to its environment variable."""
-        by = user["username"]
-        current = db.get_settings(conn)
-        sent = {f: (getattr(body, f) or "").strip() or None
-                for f in ("url", "token", "public_url") if f in body.model_fields_set}
-        if sent.get("url"):
-            token_after = sent["token"] if "token" in sent else current.get(notify.KEYS["token"])
-            problem = notify.check_url(sent["url"], from_dashboard=True, with_token=bool(token_after))
-            if problem:
-                raise HTTPException(422, f"url {problem}")
-        if sent.get("public_url"):
-            problem = notify.check_url(sent["public_url"], from_dashboard=False)
-            if problem:
-                raise HTTPException(422, f"public_url {problem}")
-        # A token belongs to the topic it was issued for. Pointing the topic at a
-        # different host keeps no token that was not re-entered along with it,
-        # or the old secret would be sent to wherever the new URL points.
-        old_url = current.get(notify.KEYS["url"])
-        if ("url" in sent and "token" not in sent and current.get(notify.KEYS["token"])
-                and notify._origin(sent["url"]) != notify._origin(old_url)):
-            sent["token"] = None
-        for field, value in sent.items():
-            db.set_setting(conn, notify.KEYS[field], value, by=by)
-        if body.events is not None:
-            bad = [e for e in body.events if e not in notify.ALL_EVENTS]
-            if bad:
-                raise HTTPException(422, f"unknown event(s): {', '.join(bad)}")
-            db.set_setting(conn, notify.KEYS["events"], json.dumps(sorted(set(body.events))), by=by)
-        return _notify_view()
-
-    @app.post("/v1/notify/test")
-    def test_notify(user=AdminAuth) -> dict[str, Any]:
-        return notify.send_test(db.get_settings(conn))
 
     @app.put("/v1/releases/policy")
     def set_release_policy(body: PolicyIn, user=AdminAuth) -> dict[str, Any]:

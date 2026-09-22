@@ -824,3 +824,29 @@ def test_schema_meta_is_not_rewritten_on_every_connection():
     db.apply_schema(fresh_conn(), db.PG_SCHEMA, is_pg=True)
     assert db.schema_version(fresh_conn()) == db.SCHEMA_VERSION
     assert before is not None
+
+
+@scratch_only
+def test_settings_a_removed_feature_left_behind_are_deleted_on_postgres():
+    """The ntfy notifier's rows (``notify_cursor``, and whatever an admin saved)
+    are gone after the next connect, with no audit event and no other setting
+    touched. Scratch only: these keys are not per-run, and on the shared campaign
+    database the deploy itself is what should remove them."""
+    conn = fresh_conn()
+    keep = prefix("keep")
+    conn.execute("INSERT INTO settings(key, value, updated_at, updated_by) VALUES (?, 'v', 1, 't')",
+                 (keep,))
+    try:
+        for key in db.RETIRED_SETTINGS:
+            conn.execute("INSERT INTO settings(key, value, updated_at, updated_by)"
+                         " VALUES (?, 'x', 1, 'notifier') ON CONFLICT(key) DO NOTHING", (key,))
+        events = conn.execute("SELECT count(*) AS n FROM events").fetchone()["n"]
+
+        fresh_conn()                                         # connecting is the migration
+        left = {r["key"] for r in conn.execute("SELECT key FROM settings").fetchall()}
+        assert not left & set(db.RETIRED_SETTINGS)
+        assert keep in left
+        assert conn.execute("SELECT count(*) AS n FROM events").fetchone()["n"] == events
+        assert db.drop_retired_settings(fresh_conn()) == []  # idempotent
+    finally:
+        conn.execute("DELETE FROM settings WHERE key = ?", (keep,))
