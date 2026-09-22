@@ -537,6 +537,24 @@
     padding-bottom: env(safe-area-inset-bottom, 0px);
   }
   .drawer.open { transform: translateX(0); }
+  /* Drag the left edge to resize (the width is remembered per drawer). The
+     handle is wider than it looks so it is easy to catch, and it is a real
+     focusable separator so the arrow keys resize it too. */
+  .drawer-resize {
+    position: absolute; left: -4px; top: 0; bottom: 0; width: 9px; z-index: 2;
+    cursor: ew-resize; touch-action: none; background: transparent;
+  }
+  .drawer-resize::after {
+    content: ""; position: absolute; left: 3px; top: 0; bottom: 0; width: 2px;
+    background: transparent; transition: background 0.12s ease;
+  }
+  .drawer-resize:hover::after, .drawer-resize:focus-visible::after, .drawer-resize.dragging::after {
+    background: var(--brand);
+  }
+  .drawer-resize:focus-visible { outline: none; }
+  @media (max-width: 640px) { .drawer-resize { display: none; } }
+  .notify-events { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 12.5px; }
+  .notify-events label { display: flex; align-items: center; gap: 6px; margin: 0; font-weight: 500; cursor: pointer; }
   .storage-total { font-size: 28px; font-weight: 700; letter-spacing: -0.01em; }
   .storage-sub { color: var(--text-secondary); font-size: 12.5px; margin-top: 2px; }
   .storage-meter { height: 8px; border-radius: 4px; background: var(--surface-hover);
@@ -1824,12 +1842,57 @@
       </label>
 
       <label id="notifyLabel" style="display:flex; align-items:center; gap:8px; margin:0; font-weight:500; cursor:pointer;"
-             title="Desktop notification when a case finishes. Works while this tab stays open.">
+             title="Desktop notifications from this tab. Works while this tab stays open.">
         <input type="checkbox" id="notifyDone" style="cursor:pointer;" />
-        notify on finished cases
+        browser notifications
       </label>
+      <div id="notifyEvents" class="notify-events" style="margin:8px 0 0 26px;"></div>
       <div class="panel-subtitle" style="margin-top:6px;">
-        Announces only what finishes after you switch it on, and only while this tab is open.
+        Announces only what happens after you switch it on, and only while this tab is open.
+        For a phone, or with the browser closed, use push notifications below.
+      </div>
+
+      <!-- Broker-side push (ntfy): admin-only, stored on the broker, applies to
+           everyone subscribed to the topic -- hence not "kept in this browser". -->
+      <div style="margin-top:22px; padding-top:16px; border-top:1px solid var(--border);">
+        <div class="panel-title-group" style="margin-bottom:4px;"><h2>Push notifications</h2></div>
+        <div class="panel-subtitle" style="margin-bottom:10px;">
+          Sent by the broker to an <a href="https://ntfy.sh" target="_blank" rel="noopener noreferrer">ntfy</a>
+          topic -- reaches your phone with every browser closed. Stored on the broker.
+        </div>
+        <div id="pushPanel" style="display:none;">
+          <div id="pushStatus" class="panel-subtitle" style="margin-bottom:10px;"></div>
+          <div class="field">
+            <label for="pushUrl">Topic URL <span class="label-hint">(the topic name is the secret)</span></label>
+            <div class="row" style="gap:8px; align-items:center;">
+              <input type="text" id="pushUrl" autocomplete="off" spellcheck="false" style="flex:1; min-width:200px;"
+                     placeholder="https://ntfy.sh/casebroker-…" />
+              <button id="pushGenerate" type="button" class="subtle" title="A new random topic on ntfy.sh">New topic</button>
+            </div>
+          </div>
+          <div id="pushSubscribe" class="panel-subtitle" style="margin:6px 0 0; display:none;"></div>
+          <div class="field" style="margin-top:10px;">
+            <label>Tell me when a case</label>
+            <div id="pushEvents" class="notify-events"></div>
+          </div>
+          <details style="margin-top:8px;">
+            <summary style="cursor:pointer; font-size:12.5px; color:var(--text-secondary);">More</summary>
+            <div class="field" style="margin-top:8px;">
+              <label for="pushToken">Access token <span class="label-hint">(protected or self-hosted topics only)</span></label>
+              <input type="password" id="pushToken" autocomplete="new-password" placeholder="unchanged" />
+            </div>
+            <div class="field" style="margin-top:8px;">
+              <label for="pushPublicUrl">Dashboard address <span class="label-hint">(tapping a notification opens it)</span></label>
+              <input type="text" id="pushPublicUrl" autocomplete="off" spellcheck="false" placeholder="https://casebroker.onrender.com" />
+            </div>
+          </details>
+          <div class="row" style="gap:8px; margin-top:12px;">
+            <button id="pushSave" type="button">Save</button>
+            <button id="pushTest" type="button" class="subtle">Send test</button>
+            <button id="pushOff" type="button" class="subtle" title="Clear the topic set here (an environment variable, if any, applies again)">Turn off</button>
+          </div>
+        </div>
+        <div id="pushLocked" class="panel-subtitle">Sign in as an admin to configure push notifications.</div>
       </div>
     </section>
 
@@ -3534,11 +3597,40 @@
   // "Germany · Munich, Bavaria (0.1 km)". The distance stays in the text because
   // a quarter of this campaign's sites are more than 25 km from any town of that
   // size, and a bare town name would read as a claim that the site is IN it.
-  function placeHtml(p, spec) {
+  // The simulated area on a real map: geojson.io draws whatever GeoJSON its URL
+  // carries, on OSM or satellite imagery, with no account and no key. The shapes
+  // are built with the campaign's own local-frame constants (110,540 m per degree
+  // of latitude, 111,320·cos(lat) per degree of longitude -- the same ones the
+  // node meshes with), so what is drawn is what is meshed: the ±504 m sampled
+  // core, and the domain -- a 1,300 m radius CYLINDER for a cyl- recipe, a
+  // ±1,300 m box otherwise.
+  const CORE_HALF_M = 504, DOMAIN_HALF_M = 504 + 800 - 4;
+  function footprintMapUrl(lat, lon, cyl) {
+    const my = 110540, mx = 111320 * Math.cos(lat * Math.PI / 180);
+    const pt = (x, y) => [+(lon + x / mx).toFixed(6), +(lat + y / my).toFixed(6)];
+    const square = (h) => [[pt(-h, -h), pt(h, -h), pt(h, h), pt(-h, h), pt(-h, -h)]];
+    const circle = (r) => [Array.from({ length: 73 }, (_, i) => {
+      const a = (i % 72) / 72 * 2 * Math.PI; return pt(r * Math.cos(a), r * Math.sin(a)); })];
+    const feature = (coords, name, color, fill) => ({ type: "Feature",
+      properties: { name, stroke: color, "stroke-width": 2, fill: color, "fill-opacity": fill },
+      geometry: { type: "Polygon", coordinates: coords } });
+    const fc = { type: "FeatureCollection", features: [
+      feature(cyl ? circle(DOMAIN_HALF_M) : square(DOMAIN_HALF_M),
+              cyl ? "mesh domain (cylinder, r = 1,300 m)" : "mesh domain (±1,300 m)", "#d97706", 0.05),
+      feature(square(CORE_HALF_M), "sampled core (1,008 m)", "#dc2626", 0.12),
+      { type: "Feature", properties: { name: "site centre", "marker-color": "#dc2626" },
+        geometry: { type: "Point", coordinates: [+lon.toFixed(6), +lat.toFixed(6)] } },
+    ] };
+    return "https://geojson.io/#data=data:application/json," + encodeURIComponent(JSON.stringify(fc));
+  }
+
+  function placeHtml(p, spec, cylDomain) {
     const lat = Number(spec && spec.lat), lon = Number(spec && spec.lon);
     const map = Number.isFinite(lat) && Number.isFinite(lon)
       ? ` <a href="https://www.openstreetmap.org/?mlat=${lat.toFixed(5)}&mlon=${lon.toFixed(5)}#map=14/${lat.toFixed(5)}/${lon.toFixed(5)}"
-             target="_blank" rel="noopener noreferrer" title="Open this site in OpenStreetMap">map ↗</a>` : "";
+             target="_blank" rel="noopener noreferrer" title="Open this site in OpenStreetMap">map ↗</a>
+         · <a href="${esc(footprintMapUrl(lat, lon, cylDomain))}" target="_blank" rel="noopener noreferrer"
+             title="The sampled core and the mesh domain drawn on a map (geojson.io)">domain ↗</a>` : "";
     if (!p) return `<span style="display:block">${Number.isFinite(lat) ? `${lat.toFixed(4)}, ${lon.toFixed(4)}` : "—"}${map}</span>`;
     const country = p.country ? esc(p.country) + (p.country_source === "nearest town" ? " <span title=\"the site is just outside the 1:50m country outline (usually a coast); the country is the nearest town's\">(by nearest town)</span>" : "") : "no country (open water?)";
     let town = "";
@@ -3554,6 +3646,8 @@
   }
 
   function caseDetailHtml(c) {
+    // Which domain the map link draws; only the recipe's "cyl-" prefix is read.
+    const cylDomain = String(c.recipe || "").startsWith("cyl-");
     const metrics = parseMaybeJson(c.metrics);
     const spec = parseMaybeJson(c.spec);
     const curlSnippet = `curl -H "Authorization: Bearer ${esc($("token").value.trim() || "<TOKEN>")}" "${$("broker").value.replace(/\/+$/, "")}/v1/cases/${esc(c.case_id)}"`;
@@ -3589,7 +3683,7 @@
               <dt>LCZ</dt>
               <dd>${esc(c.lcz || "—")}</dd>
               <dt title="country from the polygon the site is in; nearest town of 15,000+ people (GeoNames) and how far it is">Location</dt>
-              <dd aria-busy="${placePending}">${placePending ? skelBar("78%") : placeHtml(c.place, spec)}</dd>
+              <dd aria-busy="${placePending}">${placePending ? skelBar("78%") : placeHtml(c.place, spec, cylDomain)}</dd>
               <dt>City Cluster</dt>
               <dd>${esc(c.city_cluster || "—")}</dd>
               <dt>Priority</dt>
@@ -4279,6 +4373,129 @@
     return true;
   }
 
+  // Which moments THIS TAB announces. Finished is the one it always had; the
+  // others come from the fleet table /v1/status already delivers every refresh
+  // (each worker's current case and progress line), so they cost no request.
+  const LS_NOTIFY_EVENTS = "casebroker.notifyEvents";
+  const BROWSER_EVENTS = [["started", "starts"], ["meshing", "starts meshing"],
+                          ["solving", "starts solving"], ["done", "finishes"]];
+  function browserEvents() {
+    try {
+      const v = JSON.parse(localStorage.getItem(LS_NOTIFY_EVENTS) || "null");
+      if (Array.isArray(v)) return new Set(v);
+    } catch (e) {}
+    return new Set(["done"]);                   // what the toggle always meant
+  }
+  function renderBrowserEvents() {
+    const on = browserEvents();
+    $("notifyEvents").innerHTML = BROWSER_EVENTS.map(([k, label]) =>
+      `<label><input type="checkbox" data-ev="${k}" ${on.has(k) ? "checked" : ""}/> ${label}</label>`).join("");
+    $("notifyEvents").querySelectorAll("input").forEach((i) => i.addEventListener("change", () => {
+      const next = [...$("notifyEvents").querySelectorAll("input:checked")].map((x) => x.dataset.ev);
+      try { localStorage.setItem(LS_NOTIFY_EVENTS, JSON.stringify(next)); } catch (e) {}
+    }));
+  }
+
+  // The node's own grammar starts every progress line with its phase word.
+  function progressPhase(line) {
+    const w = String(line || "").trim().split(" ")[0].toLowerCase();
+    return w === "mesh" ? "meshing" : w === "solve" ? "solving" : null;
+  }
+
+  let fleetSeen = null;       // worker_id -> {case, phase}; null = no baseline yet
+  function checkStarts(st) {
+    if (!$("notifyDone").checked || !notifySupported() || Notification.permission !== "granted") { fleetSeen = null; return; }
+    const want = browserEvents();
+    const now = new Map((st.workers || []).filter((w) => w.current_case)
+      .map((w) => [w.worker_id, { c: w.current_case, p: progressPhase(w.current_progress) }]));
+    if (fleetSeen === null) { fleetSeen = now; return; }      // baseline: announce only what changes from here
+    const items = [];
+    for (const [worker, cur] of now) {
+      const was = fleetSeen.get(worker);
+      if ((!was || was.c !== cur.c) && want.has("started")) items.push([cur.c, "started", worker]);
+      if (cur.p && (!was || was.c !== cur.c || was.p !== cur.p) && want.has(cur.p)) items.push([cur.c, cur.p, worker]);
+    }
+    fleetSeen = now;
+    if (!items.length) return;
+    const title = items.length === 1 ? `Case ${items[0][1]}` : `${items.length} case updates`;
+    const body = items.slice(0, 4).map(([c, what, w]) => `${c} ${what} · ${w}`).join("\n")
+      + (items.length > 4 ? `\n… and ${items.length - 4} more` : "");
+    try {
+      const note = new Notification(title, { body, tag: "casebroker-progress", renotify: true });
+      note.onclick = () => {
+        window.focus();
+        if (items.length === 1) { caseList.singleId = items[0][0]; openDetailId = items[0][0]; requeryCases(); }
+        note.close();
+      };
+    } catch (e) { showToast(title); }
+  }
+
+  // -- Push notifications (ntfy), admin ---------------------------------------
+  let pushState = null;
+  async function loadPush() {
+    try { pushState = await userCall("/v1/notify", { method: "GET" }); }
+    catch (e) { $("pushStatus").textContent = "Could not read the push settings: " + e.message; return; }
+    renderPush();
+  }
+  function renderPush() {
+    const p = pushState;
+    if (!p) return;
+    const from = (f) => p.source && p.source[f] === "env" ? " (from the server's environment)" : "";
+    $("pushStatus").innerHTML = p.enabled
+      ? `<b style="color:var(--accent)">On</b> — sending to <code class="inline">${esc(p.url)}</code>${esc(from("url"))}.`
+      : "<b>Off</b> — no topic configured.";
+    $("pushUrl").value = "";
+    $("pushUrl").placeholder = p.url || "https://ntfy.sh/casebroker-…";
+    $("pushToken").placeholder = p.token_set ? "set — leave empty to keep" : "none";
+    $("pushPublicUrl").value = p.public_url || "";
+    const on = new Set(p.events || []);
+    const labels = { started: "starts", meshing: "starts meshing", solving: "starts solving",
+                     done: "finishes", failed: "fails (will retry)", quarantined: "is quarantined" };
+    $("pushEvents").innerHTML = (p.all_events || []).map((k) =>
+      `<label><input type="checkbox" data-ev="${esc(k)}" ${on.has(k) ? "checked" : ""}/> ${esc(labels[k] || k)}</label>`).join("");
+    $("pushOff").disabled = !(p.source && p.source.url === "settings");
+  }
+  function wirePush() {
+    $("pushGenerate").onclick = () => {
+      const bytes = new Uint8Array(12);
+      crypto.getRandomValues(bytes);
+      const topic = "casebroker-" + [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
+      $("pushUrl").value = "https://ntfy.sh/" + topic;
+      // Shown in full ONCE, here: after saving, the broker only ever echoes it masked.
+      $("pushSubscribe").style.display = "";
+      $("pushSubscribe").innerHTML = `Subscribe to <code class="inline">${esc(topic)}</code> in the ntfy app
+        (or open <a href="https://ntfy.sh/${esc(topic)}" target="_blank" rel="noopener noreferrer">ntfy.sh/${esc(topic)}</a>), then Save.`;
+    };
+    $("pushSave").onclick = async () => {
+      const body = { events: [...$("pushEvents").querySelectorAll("input:checked")].map((x) => x.dataset.ev),
+                     public_url: $("pushPublicUrl").value.trim() };
+      if ($("pushUrl").value.trim()) body.url = $("pushUrl").value.trim();
+      if ($("pushToken").value) body.token = $("pushToken").value;
+      try {
+        pushState = await userCall("/v1/notify", jsonBody("PUT", body));
+        $("pushToken").value = "";
+        showToast("Push notifications saved");
+        renderPush();
+      } catch (e) { showToast(e.message); }
+    };
+    $("pushTest").onclick = async () => {
+      $("pushTest").disabled = true;
+      try {
+        const r = await userCall("/v1/notify/test", { method: "POST" });
+        showToast(r.ok ? "Test sent — check your phone" : "Not sent: " + r.error);
+      } catch (e) { showToast(e.message); }
+      finally { $("pushTest").disabled = false; }
+    };
+    $("pushOff").onclick = async () => {
+      try {
+        pushState = await userCall("/v1/notify", jsonBody("PUT", { url: "" }));
+        $("pushSubscribe").style.display = "none";
+        showToast(pushState.enabled ? "Cleared here; the server's environment still sets a topic" : "Push notifications off");
+        renderPush();
+      } catch (e) { showToast(e.message); }
+    };
+  }
+
   function fireNotification(newIds, doneCount) {
     const n = newIds.length;
     const title = n === 1 ? "Case finished" : `${n} cases finished`;
@@ -4435,7 +4652,9 @@
     // A signed-in human has no use for the bearer-token form; it stays in the
     // DOM because everything still reads $("token").value.
     $("connectForm").style.display = signedIn ? "none" : "";
-    if (isAdmin) { loadMachines(); loadPairings(); loadUsers(); } else machineCount = null;
+    $("pushPanel").style.display = isAdmin ? "" : "none";
+    $("pushLocked").style.display = isAdmin ? "none" : "";
+    if (isAdmin) { loadMachines(); loadPairings(); loadUsers(); loadPush(); } else machineCount = null;
     loadReleases();
     renderWizard();
   }
@@ -5014,6 +5233,64 @@
     else $("settingsBtn").focus();
   }
 
+  // -- Resizable drawers ----------------------------------------------------------
+  // The drawer is pinned to the right edge, so dragging its LEFT edge sets its
+  // width. Clamped to 360 px .. 92 % of the window; remembered per drawer in this
+  // browser. Phones keep the full-width drawer (the handle is hidden there).
+  function makeResizable(drawer) {
+    const key = "casebroker.drawerWidth." + drawer.id;
+    const clamp = (w) => Math.round(Math.max(360, Math.min(window.innerWidth * 0.92, w)));
+    const apply = (w, save) => {
+      drawer.style.width = clamp(w) + "px";
+      handle.setAttribute("aria-valuenow", String(clamp(w)));
+      if (save) { try { localStorage.setItem(key, String(clamp(w))); } catch (e) {} }
+    };
+    const handle = document.createElement("div");
+    handle.className = "drawer-resize";
+    handle.tabIndex = 0;
+    handle.setAttribute("role", "separator");
+    handle.setAttribute("aria-orientation", "vertical");
+    handle.setAttribute("aria-label", "Resize panel");
+    handle.setAttribute("aria-valuemin", "360");
+    handle.title = "Drag to resize · double-click to reset";
+    drawer.appendChild(handle);
+    try { const w = Number(localStorage.getItem(key)); if (w > 0 && window.innerWidth > 640) apply(w, false); } catch (e) {}
+
+    let startX = 0, startW = 0;
+    handle.addEventListener("pointerdown", (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      startX = e.clientX; startW = drawer.getBoundingClientRect().width;
+      handle.setPointerCapture(e.pointerId);
+      handle.classList.add("dragging");
+      drawer.style.transition = "none";          // follow the pointer, do not animate toward it
+    });
+    handle.addEventListener("pointermove", (e) => {
+      if (!handle.hasPointerCapture(e.pointerId)) return;
+      apply(startW + (startX - e.clientX), false);
+    });
+    const end = (e) => {
+      if (!handle.hasPointerCapture(e.pointerId)) return;
+      handle.releasePointerCapture(e.pointerId);
+      handle.classList.remove("dragging");
+      drawer.style.transition = "";
+      apply(drawer.getBoundingClientRect().width, true);
+    };
+    handle.addEventListener("pointerup", end);
+    handle.addEventListener("pointercancel", end);
+    handle.addEventListener("dblclick", () => {
+      drawer.style.width = "";
+      try { localStorage.removeItem(key); } catch (e) {}
+    });
+    handle.addEventListener("keydown", (e) => {
+      const step = e.shiftKey ? 80 : 20;
+      if (e.key === "ArrowLeft") { apply(drawer.getBoundingClientRect().width + step, true); e.preventDefault(); }
+      if (e.key === "ArrowRight") { apply(drawer.getBoundingClientRect().width - step, true); e.preventDefault(); }
+    });
+    // A window made smaller than the saved width must not push the drawer off-screen.
+    window.addEventListener("resize", () => { if (drawer.style.width) apply(parseFloat(drawer.style.width), false); });
+  }
+
   // -- Database storage ---------------------------------------------------------
   function storageOpen() { return $("storageDrawer").classList.contains("open"); }
 
@@ -5545,7 +5822,8 @@
       renderWizard();
       await loadCases(casesReq);
       loadReleases();          // not awaited: the fleet table is already drawn without it
-      await checkFinished(st.by_state?.["done"] ?? null);
+      checkStarts(st);
+      if (browserEvents().has("done")) await checkFinished(st.by_state?.["done"] ?? null);
       nextRefreshSeconds = 60;
     } catch (e) {
       // On error, re-show the connect form so the user can fix credentials
@@ -5853,6 +6131,8 @@
   // Closed at load, and inert with it.
   $("settingsDrawer").inert = true;
   $("storageDrawer").inert = true;
+  makeResizable($("settingsDrawer"));
+  makeResizable($("storageDrawer"));
 
   const autoSaved = localStorage.getItem(LS_AUTO);
   const autoOn = autoSaved === null ? true : autoSaved === "1";
@@ -5890,12 +6170,14 @@
     setNotifyEnabled(notifySaved && Notification.permission === "granted");
   }
 
+  renderBrowserEvents();
+  wirePush();
   $("notifyDone").addEventListener("change", async (e) => {
     if (!e.target.checked) { setNotifyEnabled(false); return; }
     // requestPermission() must run inside this user gesture.
     const ok = await requestNotifyPermission();
     setNotifyEnabled(ok);
-    if (ok) showToast("You will be notified as cases finish (while this tab is open)");
+    if (ok) showToast("Browser notifications on (while this tab is open)");
   });
 
   $("caseState").addEventListener("change", (e) => {
