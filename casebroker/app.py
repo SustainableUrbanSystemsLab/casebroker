@@ -38,7 +38,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
-from . import __version__, auth, db, footprints, ids, places
+from . import __version__, auth, db, footprints, ids, notify, places
 
 MAX_LEASE_SECONDS = 24 * 3600
 
@@ -426,7 +426,17 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
     @contextlib.asynccontextmanager
     async def _lifespan(_app: FastAPI):
         _apply_thread_limit()
-        yield
+        # Push notifications (casebroker/notify.py): off unless an ntfy topic is
+        # configured. Started here, not at import, so a test client that never
+        # enters the lifespan never starts a thread.
+        notifier = notify.from_env(conn)
+        if notifier:
+            notifier.start()
+        try:
+            yield
+        finally:
+            if notifier:
+                notifier.stop()
 
     app = FastAPI(title="E3D Simulation Broker", version=__version__,
                   lifespan=_lifespan)

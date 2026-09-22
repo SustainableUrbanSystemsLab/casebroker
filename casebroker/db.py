@@ -1567,6 +1567,33 @@ def heartbeat(conn, lease_id: str, lease_seconds: int = 3600,
     return True
 
 
+
+@_locked
+def max_event_id(conn) -> int:
+    """The newest event id, for a reader that should start from NOW rather than
+    replay history (the notifier, on startup)."""
+    row = conn.execute("SELECT MAX(id) AS n FROM events").fetchone()
+    return int(row["n"] or 0)
+
+
+@_locked
+def events_after(conn, after_id: int, limit: int = 500) -> list[dict[str, Any]]:
+    """Events newer than ``after_id``, oldest first, each with what a notice about
+    it needs: the case's coordinates and, for a progress line, the case's PREVIOUS
+    progress line -- so a phase change (meshing -> solving) is decided from the
+    database, not from a reader's memory that a restart would wipe."""
+    rows = [dict(r) for r in conn.execute(
+        "SELECT e.id, e.ts, e.case_id, e.worker_id, e.event, e.detail, c.spec, c.attempts,"
+        " c.max_attempts FROM events e LEFT JOIN cases c ON c.case_id = e.case_id"
+        " WHERE e.id > ? ORDER BY e.id LIMIT ?", (after_id, limit)).fetchall()]
+    for r in rows:
+        if r["event"] == "progress":
+            prev = conn.execute(
+                "SELECT detail FROM events WHERE case_id = ? AND event = 'progress' AND id < ?"
+                " ORDER BY id DESC LIMIT 1", (r["case_id"], r["id"])).fetchone()
+            r["previous_detail"] = prev["detail"] if prev else None
+    return rows
+
 @_locked
 def complete(conn, lease_id: str, result_uri: str,
              sha256: str | None = None, nbytes: int | None = None,
