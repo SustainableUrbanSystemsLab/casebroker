@@ -128,9 +128,10 @@ than silent. Creating the first account closes it.
 
 | Endpoint | Purpose |
 | --- | --- |
-| `POST /v1/cases` | Append cases. **Idempotent** — re-posting an existing id is a no-op, which is how the dataset grows |
-| `GET /v1/cases` | Paginated, filterable (`state`, `split`, `city_cluster`) list of cases, most recently touched first — what the dashboard's case browser calls |
-| `GET /v1/cases/{case_id}` | One case's full record by id |
+| `POST /v1/cases` | Append cases. **Idempotent** — re-posting an existing id is a no-op, which is how the dataset grows. A case may carry `labels` (up to 16 key/values, `campaign: v2-pilot`); re-posting a case rewrites them, which is how a campaign is labelled after the fact |
+| `GET /v1/cases` | Paginated, filterable (`state`, `split`, `city_cluster`, `label` as `key:value` or `key`) list of cases, most recently touched first — what the dashboard's case browser calls. Each row carries its `labels` |
+| `GET /v1/cases/{case_id}` | One case's full record by id, with its `labels` and its **stages**: the trail of progress lines grouped by the stage each names (geometry, build-case, mesh, solve, gate, archive), each with how long it took and its last line; `current` for a running case, `failed_in` for the stage the last failure landed in |
+| `POST /v1/cases/{case_id}/cancel` | **Pull a leased case off its node**, on purpose: the node hears at its next heartbeat (409, "stop") and a result it delivers after that is refused; the attempt is refunded. `{reason, park}` — requeued by default, or parked in quarantine carrying the reason, where reopen finds it. **Admin session**; who and why go in the trail |
 | `GET /v1/errors` | Every case that carries an error, in one answer: `last_error` in full, the site's coordinates, and each failed attempt with the worker, host and cluster it failed on. Quarantined first, then most recent; `limit` (default 2000, max 5000) and `truncated` says when it bit. What the dashboard's **Copy all errors** button turns into text for a bug report |
 | `POST /v1/lease` | Claim up to N cases. Empty list = drained, not an error. Workers report their `host`/`cluster` here (optional) so "what machine produced this" stays answerable later |
 | `GET /v1/node/release` | What this node should be running: the fleet's (or its canary) target, the file and sha256 for its platform, when to switch, whether it is draining. Asked before every lease and at every heartbeat; carries `build`, `platform`, `state` (what it is doing about the target) and `failed_build` (it tried and rolled back). See [releases.md](releases.md) |

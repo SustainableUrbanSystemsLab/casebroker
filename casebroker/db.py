@@ -94,6 +94,17 @@ CREATE INDEX IF NOT EXISTS idx_cases_lease ON cases(lease_id);
 -- "working on" lookup scans every case once per worker.
 CREATE INDEX IF NOT EXISTS idx_cases_lease_worker ON cases(lease_worker, state);
 CREATE INDEX IF NOT EXISTS idx_cases_split ON cases(split, state);
+-- Free key/value labels a case is posted with ("campaign": "v2-pilot",
+-- "batch": "2026-09-21"): what a browser filters by later, and what the fixed
+-- columns (recipe, split, city, LCZ) could not foresee. One row per key;
+-- re-posting a case rewrites its labels.
+CREATE TABLE IF NOT EXISTS case_labels (
+    case_id TEXT NOT NULL,
+    key     TEXT NOT NULL,
+    value   TEXT NOT NULL,
+    PRIMARY KEY (case_id, key)
+);
+CREATE INDEX IF NOT EXISTS idx_case_labels_kv ON case_labels(key, value, case_id);
 -- The dashboard's case list orders by updated_at DESC, and without this the
 -- plan is "SCAN cases" plus a temp B-tree: a full sort of the whole table for
 -- every page, on a timer, for every open dashboard. That is not merely slow --
@@ -348,6 +359,17 @@ CREATE INDEX IF NOT EXISTS idx_cases_lease ON cases(lease_id);
 -- "working on" lookup scans every case once per worker.
 CREATE INDEX IF NOT EXISTS idx_cases_lease_worker ON cases(lease_worker, state);
 CREATE INDEX IF NOT EXISTS idx_cases_split ON cases(split, state);
+-- Free key/value labels a case is posted with ("campaign": "v2-pilot",
+-- "batch": "2026-09-21"): what a browser filters by later, and what the fixed
+-- columns (recipe, split, city, LCZ) could not foresee. One row per key;
+-- re-posting a case rewrites its labels.
+CREATE TABLE IF NOT EXISTS case_labels (
+    case_id TEXT NOT NULL,
+    key     TEXT NOT NULL,
+    value   TEXT NOT NULL,
+    PRIMARY KEY (case_id, key)
+);
+CREATE INDEX IF NOT EXISTS idx_case_labels_kv ON case_labels(key, value, case_id);
 -- The dashboard's case list orders by updated_at DESC, and without this the
 -- plan is "SCAN cases" plus a temp B-tree: a full sort of the whole table for
 -- every page, on a timer, for every open dashboard. That is not merely slow --
@@ -574,7 +596,7 @@ CREATE TABLE IF NOT EXISTS build_stats (
 # already existed, and only then build the indexes -- an index is very often the
 # thing that references the newly added column.
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 # A column definition that cannot be bolted onto a table that already exists.
 # Detected and reported by name, because the alternative -- quietly adding the
@@ -1143,6 +1165,7 @@ def add_cases(conn, rows: Iterable[dict[str, Any]]) -> dict[str, int]:
         if isinstance(conn, PgConnection)
         else "INSERT OR IGNORE INTO cases" + columns
     )
+    labelled = 0
     conn.execute("BEGIN IMMEDIATE")
     try:
         for r in rows:
@@ -1157,11 +1180,37 @@ def add_cases(conn, rows: Iterable[dict[str, Any]]) -> dict[str, int]:
                 _event(conn, r["case_id"], None, "created", r["recipe"], now)
             else:
                 skipped += 1
+            # Labels are rewritten for an EXISTING case too: "post the list
+            # again, with labels" is then a way to label a campaign after the
+            # fact, without a second endpoint.
+            if r.get("labels"):
+                conn.execute("DELETE FROM case_labels WHERE case_id = ?", (r["case_id"],))
+                for key, value in r["labels"].items():
+                    conn.execute("INSERT INTO case_labels(case_id, key, value) VALUES (?,?,?)",
+                                 (r["case_id"], str(key), str(value)))
+                labelled += 1
         conn.execute("COMMIT")
     except Exception:
         conn.execute("ROLLBACK")
         raise
-    return {"added": added, "skipped": skipped}
+    return {"added": added, "skipped": skipped, "labelled": labelled}
+
+
+def _attach_labels(conn, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Fold each case's labels onto its row, in one query for the page."""
+    if not rows:
+        return rows
+    ids = [r["case_id"] for r in rows]
+    by_case: dict[str, dict[str, str]] = {i: {} for i in ids}
+    for chunk in range(0, len(ids), 200):
+        part = ids[chunk:chunk + 200]
+        for r in conn.execute(
+                "SELECT case_id, key, value FROM case_labels WHERE case_id IN ("
+                + ",".join("?" for _ in part) + ")", part).fetchall():
+            by_case[r["case_id"]][r["key"]] = r["value"]
+    for r in rows:
+        r["labels"] = by_case.get(r["case_id"], {})
+    return rows
 
 
 # -- lease / report -----------------------------------------------------------
@@ -1513,7 +1562,12 @@ def list_releases(conn, now: int | None = None) -> dict[str, Any]:
             b["active"] += 1 if r["last_seen"] > live else 0
     target = value("target_build")
     apply = value("target_apply", "case")
-    builds = sorted(set(stats) | set(running) | set(published))
+    # What each build KNOWS: the recipes its workers declared, ever -- a
+    # build's knowledge does not expire with a worker's last_seen -- against
+    # what the queue still needs. A target that does not know a queued recipe
+    # would have every node on it refuse those cases.
+    knows, queue = _recipe_knowledge(conn)
+    builds = sorted(set(stats) | set(running) | set(published) | set(knows))
 
     def row(b):
         s = stats.get(b, {})
@@ -1521,6 +1575,8 @@ def list_releases(conn, now: int | None = None) -> dict[str, Any]:
         return {
             "build": b, "done": done, "failed": failed, "unconverged": unconverged,
             **running.get(b, {"workers": 0, "active": 0}),
+            "knows": sorted(knows[b]) if b in knows else None,
+            "missing_recipes": sorted(r for r in queue if r not in knows[b]) if b in knows else [],
             "published": sorted(published.get(b, ())),
             # Live workers on a platform this build has no file for: told to move,
             # they could not, and nothing said so.
@@ -1565,10 +1621,41 @@ def list_releases(conn, now: int | None = None) -> dict[str, Any]:
         "blocked_builds": json.loads(value("blocked_builds") or "[]"),
         "release_repo": value("release_repo"),
         "stuck_after": STUCK_AFTER,
+        "queue_recipes": queue,
         "releases": releases,
         "builds": [row(b) for b in builds],
         "fleet": summary,
     }
+
+
+def _recipe_knowledge(conn) -> tuple[dict[str, set[str]], dict[str, int]]:
+    """Per build, the union of recipes its workers ever declared; and the
+    recipes the queue still holds (pending or leased) with their counts."""
+    knows: dict[str, set[str]] = {}
+    for r in conn.execute(
+            "SELECT build, recipes FROM workers WHERE build IS NOT NULL AND recipes IS NOT NULL"
+    ).fetchall():
+        try:
+            names = json.loads(r["recipes"])
+        except (TypeError, ValueError):
+            continue
+        if isinstance(names, list):
+            knows.setdefault(r["build"], set()).update(str(n) for n in names)
+    queue = {r["recipe"]: r["n"] for r in conn.execute(
+        "SELECT recipe, COUNT(*) AS n FROM cases WHERE state IN ('pending', 'leased')"
+        " GROUP BY recipe").fetchall()}
+    return knows, queue
+
+
+@_locked
+def recipe_gaps(conn, build: str) -> list[dict[str, Any]]:
+    """The queued recipes `build` is known NOT to know, with how many cases
+    need each; empty when nothing is known about the build (no worker on it
+    has declared recipes), which is not the same as knowing them all."""
+    knows, queue = _recipe_knowledge(conn)
+    if build not in knows:
+        return []
+    return [{"recipe": r, "cases": n} for r, n in sorted(queue.items()) if r not in knows[build]]
 
 
 @_locked
@@ -1959,6 +2046,53 @@ def release(conn, lease_id: str, reason: str = "released",
     return True
 
 
+@_locked
+def cancel_case(conn, case_id: str, by: str | None, reason: str | None = None,
+                park: bool = False, now: int | None = None) -> dict[str, Any]:
+    """Take a LEASED case off its node, on purpose.
+
+    The node hears at its next heartbeat -- 409, which every worker reads as
+    "stop" -- and a result it delivers after that is refused as a duplicate.
+    The attempt is refunded, nothing about the case was wrong, and the case goes
+    back to the pool; with `park` it goes to quarantine carrying the reason,
+    where reopen finds it. This is the one place a live worker's lease is
+    released deliberately (see AGENTS.md on why nothing else may), so the trail
+    records who, why, and which worker was holding it.
+
+    Raises KeyError for an unknown case, ValueError for one that is not leased.
+    """
+    now = now or _now()
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        row = conn.execute("SELECT state, lease_worker FROM cases WHERE case_id = ?",
+                           (case_id,)).fetchone()
+        # Raised inside the try: the one handler below rolls back, once.
+        if row is None:
+            raise KeyError(case_id)
+        if row["state"] != "leased":
+            raise ValueError("%s is %s, not leased: nothing to pull it off" % (case_id, row["state"]))
+        said = "pulled off %s by %s%s" % (row["lease_worker"], by or "?",
+                                          (": " + reason) if reason else "")
+        if park:
+            conn.execute(
+                "UPDATE cases SET state='quarantined', lease_id=NULL, lease_worker=NULL,"
+                " lease_expires=NULL, leased_at=NULL, attempts=MAX(attempts - 1, 0),"
+                " last_error=?, updated_at=? WHERE case_id=?", (said[:4000], now, case_id))
+        else:
+            conn.execute(
+                "UPDATE cases SET state='pending', lease_id=NULL, lease_worker=NULL,"
+                " lease_expires=NULL, leased_at=NULL, attempts=MAX(attempts - 1, 0),"
+                " updated_at=? WHERE case_id=?", (now, case_id))
+        _event(conn, case_id, row["lease_worker"], "cancelled",
+               said + (", parked" if park else ", requeued"), now)
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    return {"case_id": case_id, "worker_id": row["lease_worker"],
+            "state": "quarantined" if park else "pending"}
+
+
 # -- observability ------------------------------------------------------------
 
 @_locked
@@ -2103,7 +2237,8 @@ CASE_SORTS = {
 def list_cases(conn, state: str | None = None, split: str | None = None,
                city_cluster: str | None = None, limit: int = 50,
                offset: int = 0, sort: str | None = None,
-               direction: str = "desc", include_spec: bool = True) -> dict[str, Any]:
+               direction: str = "desc", include_spec: bool = True,
+               label: str | None = None) -> dict[str, Any]:
     """A page of cases for the dashboard's case browser, most-recently-touched
     first -- that ordering is what makes "what just happened" the default view
     rather than an arbitrary slice of a 40,000-row table.
@@ -2135,6 +2270,15 @@ def list_cases(conn, state: str | None = None, split: str | None = None,
         where.append("split = ?"); params.append(split)
     if city_cluster:
         where.append("city_cluster = ?"); params.append(city_cluster)
+    if label:
+        # "key:value" is one label; "key" alone is every case carrying the key.
+        key, _, value = label.partition(":")
+        if value:
+            where.append("cases.case_id IN (SELECT case_id FROM case_labels WHERE key = ? AND value = ?)")
+            params.extend([key.strip(), value.strip()])
+        else:
+            where.append("cases.case_id IN (SELECT case_id FROM case_labels WHERE key = ?)")
+            params.append(key.strip())
     clause = (" WHERE " + " AND ".join(where)) if where else ""
     total = conn.execute("SELECT COUNT(*) n FROM cases" + clause, params).fetchone()["n"]
     column = CASE_SORTS.get(sort or "", "cases.updated_at")
@@ -2145,7 +2289,8 @@ def list_cases(conn, state: str | None = None, split: str | None = None,
         "SELECT " + columns + " FROM cases" + clause +
         " ORDER BY " + order + " LIMIT ? OFFSET ?",
         params + [limit, offset]).fetchall()
-    return {"cases": [dict(r) for r in rows], "total": total, "limit": limit, "offset": offset}
+    return {"cases": _attach_labels(conn, [dict(r) for r in rows]), "total": total,
+            "limit": limit, "offset": offset}
 
 
 # A case row plus the newest thing its worker said about it. Workers ship a
@@ -2265,7 +2410,17 @@ def list_errors(conn, limit: int = 2000) -> dict[str, Any]:
 def get_case(conn, case_id: str) -> dict[str, Any] | None:
     row = conn.execute("SELECT " + _CASE_COLS + " FROM cases WHERE case_id=?",
                        (case_id,)).fetchone()
-    return dict(row) if row is not None else None
+    if row is None:
+        return None
+    out = _attach_labels(conn, [dict(row)])[0]
+    # The stages, read off the trail: how long each took, which one a failure
+    # landed in, and where a running case is now. One case at a time -- a page
+    # of cases carries the last line only.
+    from . import stages as _stages
+    trail = [dict(e) for e in conn.execute(
+        "SELECT ts, event, detail FROM events WHERE case_id = ? ORDER BY id", (case_id,)).fetchall()]
+    out.update(_stages.from_events(trail, _now()))
+    return out
 
 
 @_locked
@@ -2319,6 +2474,7 @@ def purge_cases(conn, recipe: str | None = None, state: str | None = None,
         sub = "SELECT case_id FROM cases" + clause
         conn.execute(f"DELETE FROM events WHERE case_id IN ({sub})", params)
         conn.execute(f"DELETE FROM footprints WHERE case_id IN ({sub})", params)
+        conn.execute(f"DELETE FROM case_labels WHERE case_id IN ({sub})", params)
         cur = conn.execute("DELETE FROM cases" + clause, params)
         out["deleted"] = int(cur.rowcount or 0)
         conn.execute("COMMIT")

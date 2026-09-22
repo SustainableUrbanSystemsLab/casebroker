@@ -69,6 +69,12 @@ against the hash it was given.
   for **every platform the live fleet runs on** — otherwise 409 naming the
   platform, and `force` to insist and leave those workers behind. The catalog
   lists `missing_platforms` per build.
+- A fleet target must **know the recipes the queue holds**. A build's
+  knowledge is what its workers declared with their leases (`knows` per build,
+  `queue_recipes` for the queue); a target that does not know a queued recipe
+  would have every node on it refuse those cases, so it is refused with 409
+  naming the recipe and how many cases need it, and `force` insists. A build
+  no worker has described is not refused: unknown is not ignorant.
 - A build cannot be **removed** from the catalog while it is the fleet's
   target, a canary's target, or what a live worker is running (409 says
   which).

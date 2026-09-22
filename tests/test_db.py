@@ -45,7 +45,7 @@ def test_add_cases_is_idempotent(tmp_path):
         "spec": {"lat": 34.0, "lon": -84.0}, "recipe": "r1",
         "city_cluster": "city0", "split": "train",
     }])
-    assert again == {"added": 0, "skipped": 1}
+    assert again == {"added": 0, "skipped": 1, "labelled": 0}
     assert db.status(conn)["by_state"]["pending"] == 5
 
 
