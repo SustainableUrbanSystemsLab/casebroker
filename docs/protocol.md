@@ -130,15 +130,17 @@ than silent. Creating the first account closes it.
 | --- | --- |
 | `POST /v1/cases` | Append cases. **Idempotent** — re-posting an existing id is a no-op, which is how the dataset grows |
 | `GET /v1/cases` | Paginated, filterable (`state`, `split`, `city_cluster`) list of cases, most recently touched first — what the dashboard's case browser calls |
-| `GET /v1/cases/{case_id}` | One case's full record by id |
+| `GET /v1/cases/{case_id}` | One case's full record by id, with `place` (country and nearest town), `telemetry` (parsed; `{}` when the node reported nothing) and `percentiles`: for every [dataset metric](#telemetry-and-the-dataset) the case has a value for, `{value, all, lcz}` -- its percentile rank 0..100 among every case, and among cases of its own LCZ (`null` without one). Ranked against the cached aggregate without ever waiting for it: a stale one is used while it refreshes in the background, and `percentiles` is `{}` until the first one after a broker start is ready (a few seconds). The page endpoint above never carries `telemetry` |
 | `GET /v1/notify`, `PUT /v1/notify`, `POST /v1/notify/test` | Push notifications (ntfy): read, change (only the fields sent; an empty string hands a field back to its env var) and test. **Admin session.** The topic URL is shown masked -- on ntfy.sh it is the only secret |
 | `GET /v1/storage` | How much space the database uses: the total, per table (rows, size, index share) largest first, bytes per case, and the plan's limit when known -- `CASEBROKER_DB_QUOTA_MB`, or for a Supabase DSN an assumed 500 MB free plan, labelled as the assumption it is. What the dashboard's header **storage** button shows |
+| `GET /v1/dataset` | The campaign as a dataset: `counts` by state, split, LCZ, recipe and country (the 40 largest listed by name, ties broken alphabetically, then `unknown` for sites no country claims and `other` for the rest), and per metric its distribution over every case and per LCZ -- see [Telemetry and the dataset](#telemetry-and-the-dataset). Computed from every case, read a page at a time, and cached 60 s; while one request recomputes it, others are served the previous answer rather than waiting. `503` with `Retry-After` when the computation failed and there is no earlier answer to serve (a failure is remembered for the 60 s too). **Read scope** |
 | `GET /v1/errors` | Every case that carries an error, in one answer: `last_error` in full, the site's coordinates, and each failed attempt with the worker, host and cluster it failed on. Quarantined first, then most recent; `limit` (default 2000, max 5000) and `truncated` says when it bit. What the dashboard's **Copy all errors** button turns into text for a bug report |
 | `POST /v1/lease` | Claim up to N cases. Empty list = drained, not an error. Workers report their `host`/`cluster` here (optional) so "what machine produced this" stays answerable later |
 | `POST /v1/heartbeat` | Extend the lease. **409 means stop working on that case**. Refused once the lease is older than `CASEBROKER_MAX_LEASE_AGE` (7 days), which releases the case: a heartbeat proves the worker is alive, not that it is progressing |
 | `POST /v1/complete` | Report a result pointer + metrics. Send `case_id` alongside `lease_id`: it scopes the retry-safety check to this case, so a runner whose `result_uri` is not unique per case cannot have one case's retry confirmed by another's row. Optional, so older workers keep working |
 | `POST /v1/fail` | Report a failure; `retryable=false` quarantines immediately |
 | `POST /v1/release` | Graceful preemption — requeues and **refunds the attempt** |
+| `POST /v1/telemetry` | `{lease_id, case_id, kind, data}`: the node's latest structured report of one `kind` for the case it holds, replacing that kind only. `200` stored; **`409` means stop sending telemetry for this case** (the lease is not current, or not this case's, or -- for a per-machine credential -- not held under that credential's name, the rule `/v1/lease` applies) and is never retried; `413` for `data` over 32 KiB or a 17th kind on one case, the size measured as stored: compact JSON with non-ASCII escaped as `\uXXXX`; `422` for a `kind` outside `^[a-z][a-z0-9_]{0,31}$`, or `data` nesting objects/arrays more than 16 levels deep (`data` itself is level 1). A NaN or infinity is stored as `null`, a lone UTF-16 surrogate as U+FFFD. A broker from before this route answers `404`, and the node then stops sending telemetry for the rest of its process -- so this route never answers 404. **Write auth** |
 | `DELETE /v1/cases` | Purge a superseded campaign, with its events and footprints. **Admin session** (a write bearer token also passes, as it always has; an `operator` session does not). `dry_run` defaults to **true**, so a half-remembered curl reports what it would have deleted instead of deleting it; `expect` is the real interlock — state the row count you believe you are removing, and a mismatch refuses |
 | `GET /v1/status` | Counts by state and split, expired leases, 24 h throughput, ETA |
 | `GET /healthz` | Liveness, plus the running `version`, auth posture (`token` / `accounts` / `OPEN`), per-scope token counts and redacted DB target. **Unauthenticated** — see Deploying |
@@ -160,6 +162,46 @@ pending --lease--> leased --complete--> done
    |                  +-- fail(fatal) | attempts > max ----> quarantined
    +-- release (preemption, attempt refunded) ---------------+
 ```
+
+### Telemetry and the dataset
+
+Completion metrics arrive once, at the end, and only for a case that finished.
+Telemetry is what the node learns on the way, posted as it happens and kept on
+the case (`cases.telemetry`, one JSON object keyed by kind). Each post replaces
+its kind and stamps `at` (when the broker heard it) and `worker` (who held the
+lease). It is kept through complete, fail and release -- it describes what
+happened -- and deleted with the case. It describes ONE attempt: a lease that
+starts the case over (any claim that is not a resume) clears it, so a done case
+is never described by an earlier, failed attempt's mesh when the attempt that
+finished reported less; a resume continues the same work and keeps it. The
+kinds the node sends:
+
+| Kind | When | `data` |
+| --- | --- | --- |
+| `site` | once the site geometry is built (a resumed case: from the site report on disk) | `urban_form` (the flat indices of the completion metrics: `bcr`, `bht_m`, `bdr_m`, `vr_ring`, `vr_exposed`, `ar`, `open_space_width_m`, `bht_sigma_m`, `rar`, `svf`, `svf_dome` -- whichever exist), `n_buildings`, `terrain_relief_m`, `canopy_fraction`, `dem` |
+| `mesh` | once the mesh verdict is in, fresh and resumed | `meshes` (per mesh: `ok`, `failed_checks`, `negative_volume_cells`, `max_skewness`, `max_non_orthogonality`, `cells`), `total_cells`, `all_ok`, `mesh_seconds` (null on resume), `ranks`, `cells_per_rank`, `engine`, `build`, `recipe`, `directions` |
+| `solve` | from the solve watcher, only on change and at most every 300 s, plus once per finished direction | `directions_total`, `directions_done`, `current`, `iteration`, `end_time`, `residuals`, `finished` (per direction: `iterations`, `status`) |
+
+`GET /v1/dataset` turns every case into distributions. Each metric has a
+`label`, `unit`, `group` and one set of 25 `bins` edges (24 bins) from the
+campaign-wide p1..p99 -- shared by `all` and every `by_lcz` entry, so the
+reference sets draw on one axis; values outside land in the end bins. Each set
+is `{n, min, p10, p25, median, p75, p90, max, mean, hist}` (quantiles by linear
+interpolation); a metric nothing has reported yet is listed with `n: 0` and an
+empty `hist`. A value is counted only when it is a JSON number (not a bool or a
+string) of magnitude at most 1e300; anything else is ignored rather than allowed
+to overflow the statistics. Where the values come from:
+
+| Group | Metrics | Source |
+| --- | --- | --- |
+| urban | the eleven `urban_form` indices | `telemetry.site.urban_form`, else the completion metrics' `urban_form` |
+| site | `n_buildings`, `terrain_relief_m`, `canopy_fraction` | `telemetry.site` |
+| mesh | `total_cells`, `max_skewness`, `max_non_orthogonality` | `telemetry.mesh` (the worst mesh of the case), else `mesh_cells` for `total_cells` |
+| run | `case_seconds`, `mesh_seconds`, `solve_seconds` | the completion metrics, `done` cases only |
+
+A case's `percentiles` are ranked against the same cached aggregate, exactly
+(from its sorted values): the share of cases below plus half the share equal,
+so the median of an odd set is 50 and the largest of 100 is 99.5.
 
 ## Three design decisions worth knowing
 

@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import functools
 import json
+import math
 import os
 import re
 import sqlite3
@@ -52,7 +53,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -82,6 +83,11 @@ CREATE TABLE IF NOT EXISTS cases (
     result_sha256  TEXT,
     result_bytes   INTEGER,
     metrics        TEXT,
+    -- What the node REPORTED while it worked, one JSON object keyed by kind
+    -- ("site", "mesh", "solve"): see post_telemetry. Kept through complete,
+    -- fail and release, because it describes what happened; NULL = nothing
+    -- reported, including every case from before it existed.
+    telemetry      TEXT,
     created_at     INTEGER NOT NULL,
     updated_at     INTEGER NOT NULL
 );
@@ -316,6 +322,11 @@ CREATE TABLE IF NOT EXISTS cases (
     -- SQLite's INTEGER is 64 bits, so the suite never saw it.
     result_bytes   BIGINT,
     metrics        TEXT,
+    -- What the node REPORTED while it worked, one JSON object keyed by kind
+    -- ("site", "mesh", "solve"): see post_telemetry. Kept through complete,
+    -- fail and release, because it describes what happened; NULL = nothing
+    -- reported, including every case from before it existed.
+    telemetry      TEXT,
     created_at     INTEGER NOT NULL,
     updated_at     INTEGER NOT NULL
 );
@@ -530,7 +541,7 @@ CREATE TABLE IF NOT EXISTS build_stats (
 # already existed, and only then build the indexes -- an index is very often the
 # thing that references the newly added column.
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 # A column definition that cannot be bolted onto a table that already exists.
 # Detected and reported by name, because the alternative -- quietly adding the
@@ -1192,9 +1203,18 @@ def lease(conn, worker_id: str, count: int = 1,
                 continue
 
             lease_id = uuid.uuid4().hex
+            # A FRESH claim starts the case over, so the telemetry of whatever
+            # attempt came before describes a site build, a mesh and a solve
+            # this attempt will not use. Kept, it would outlive the attempt that
+            # finishes the case whenever that one reports less -- a node from
+            # before telemetry, or one whose report was dropped -- and the
+            # dataset would rank a done case by a failed attempt's mesh. A
+            # RESUME continues the same work from the same disk, and the node
+            # re-reports from it, so what it said before still holds.
+            forget = "" if resumed else ", telemetry=NULL"
             conn.execute(
                 "UPDATE cases SET state='leased', lease_id=?, lease_worker=?,"
-                " lease_expires=?, leased_at=?, attempts=?, updated_at=?"
+                " lease_expires=?, leased_at=?, attempts=?, updated_at=?" + forget +
                 " WHERE case_id=?",
                 (lease_id, worker_id, expires, now, attempt, now, row["case_id"]))
             _event(conn, row["case_id"], worker_id, "resumed" if resumed else "leased",
@@ -1698,10 +1718,14 @@ def release(conn, lease_id: str, reason: str = "released",
         if row is None:
             conn.execute("ROLLBACK")
             return False
+        # CASE, not MAX(attempts - 1, 0): SQLite has a two-argument scalar MAX
+        # and Postgres does not ("function max(integer, integer) does not
+        # exist"), so on Postgres every release of a live lease answered 500
+        # and the case sat leased until its TTL ran out.
         conn.execute(
             "UPDATE cases SET state='pending', lease_id=NULL, lease_worker=NULL,"
             " lease_expires=NULL, leased_at=NULL,"
-            " attempts=MAX(attempts - 1, 0), updated_at=?"
+            " attempts=CASE WHEN attempts > 0 THEN attempts - 1 ELSE 0 END, updated_at=?"
             " WHERE case_id=?", (now, row["case_id"]))
         _event(conn, row["case_id"], row["lease_worker"], "released", reason, now)
         conn.execute("COMMIT")
@@ -1709,6 +1733,213 @@ def release(conn, lease_id: str, reason: str = "released",
         conn.execute("ROLLBACK")
         raise
     return True
+
+
+# -- telemetry: what the node measured while it worked -------------------------
+#
+# The completion metrics arrive once, at the end, and only for a case that
+# finished. Everything a node learns on the way -- the site's urban form the
+# moment the geometry exists, the mesh quality the moment checkMesh has spoken,
+# where the solve is -- was either lost or squeezed into a one-line progress
+# string. Telemetry is the structured channel for it: one small JSON object per
+# KIND, the latest one replacing the one before, on the case row itself.
+
+TELEMETRY_KIND = re.compile(r"[a-z][a-z0-9_]{0,31}")
+# Per post, of the node's `data` AS STORED (see telemetry_size). A kind is a
+# summary, not a log: the largest real one (a mesh report over several meshes)
+# is ~1 KB.
+TELEMETRY_MAX_BYTES = 32 * 1024
+# Per case. With the byte limit measured on the stored form, this bounds the
+# column at 16 x (32 KiB + the stamps) whatever a node does; the node sends 3.
+TELEMETRY_MAX_KINDS = 16
+# How deeply `data` may nest objects and arrays, `data` itself being level 1.
+# The node's deepest kind is 4 (mesh -> meshes -> <mesh> -> failed_checks).
+# The bound is what keeps the case's GET answerable: its response is rendered
+# by pydantic-core, which refuses past ~255 levels ("Circular reference
+# detected (depth exceeded)"), so a 300-level object -- 700 bytes, far inside
+# the size limit -- stored once made that case's record answer 500 for good.
+TELEMETRY_MAX_DEPTH = 16
+
+# A UTF-16 half with no other half. Python's JSON parser accepts "\ud83d", and
+# a .NET node that cuts a string mid-pair (a truncated path or host name) sends
+# exactly that -- but no response containing one can be encoded as UTF-8.
+_LONE_SURROGATE = re.compile("[\ud800-\udfff]")
+
+
+def nests_deeper(value: Any, limit: int) -> bool:
+    """Whether `value` holds objects/arrays nested more than `limit` deep.
+    Iterative, so the check cannot itself hit the recursion limit on the very
+    input it exists to refuse."""
+    stack = [(value, 1)]
+    while stack:
+        item, depth = stack.pop()
+        if isinstance(item, dict):
+            children: Any = item.values()
+        elif isinstance(item, (list, tuple)):
+            children = item
+        else:
+            continue
+        if depth > limit:
+            return True
+        stack.extend((child, depth + 1) for child in children)
+    return False
+
+
+def _text(s: str) -> str:
+    return s if s.isascii() else _LONE_SURROGATE.sub("�", s)
+
+
+def _clean(value: Any) -> Any:
+    """`value` as it can be stored AND served again: every NaN/Infinity
+    replaced by None, every lone surrogate (in keys too) by U+FFFD.
+
+    Both are values Python parses happily and the broker could then never
+    render: Starlette/pydantic refuse NaN (allow_nan=False) and cannot encode a
+    lone surrogate as UTF-8, so either one stored made the case's GET answer
+    500 for good. OpenFOAM prints `nan` for the residual of a diverging solve;
+    unknown is what that means, so that is what is stored. Callers bound the
+    depth first (TELEMETRY_MAX_DEPTH), which is what keeps this recursion
+    shallow.
+    """
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, str):
+        return _text(value)
+    if isinstance(value, dict):
+        return {_text(str(k)): _clean(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_clean(v) for v in value]
+    return value
+
+
+def _telemetry_json(value: Any) -> str:
+    """The one serialisation telemetry is stored in: compact, sorted keys, and
+    ASCII -- every non-ASCII character escaped as \\uXXXX, which is also what
+    keeps a NUL a six-character escape Postgres TEXT accepts."""
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def telemetry_size(data: dict[str, Any]) -> int:
+    """How large `data` is for the purpose of TELEMETRY_MAX_BYTES: its size as
+    STORED, after cleaning and in the stored serialisation.
+
+    Measuring anything else lets the column outgrow its bound. Counted as UTF-8
+    and stored escaped, a 4-byte emoji grew to 12 bytes on disk and a row of 16
+    kinds "within the limit" measured 1.5 MB, three times what
+    TELEMETRY_MAX_KINDS promises. Measuring the stored form is also why this
+    cannot raise on a lone surrogate the way encoding to UTF-8 did.
+    `data` must already be within TELEMETRY_MAX_DEPTH (see prepare_telemetry).
+    """
+    return len(_telemetry_json(_clean(data)))
+
+
+def prepare_telemetry(kind: Any, data: Any) -> tuple[str, dict[str, Any] | None]:
+    """Validate one post and clean its data, touching no database: the API
+    runs it BEFORE taking db._LOCK, so an oversized body is refused without
+    holding up anyone's heartbeat, and post_telemetry runs it again for
+    callers that did not.
+
+    Returns ``("ok", cleaned)``, or an outcome and None: ``"invalid"`` (a kind
+    outside TELEMETRY_KIND, or `data` that is not an object), ``"too_deep"``
+    (past TELEMETRY_MAX_DEPTH) or ``"too_large"`` (past TELEMETRY_MAX_BYTES).
+    """
+    if not isinstance(kind, str) or not TELEMETRY_KIND.fullmatch(kind) \
+            or not isinstance(data, dict):
+        return "invalid", None
+    if nests_deeper(data, TELEMETRY_MAX_DEPTH):
+        return "too_deep", None
+    cleaned = _clean(data)
+    if len(_telemetry_json(cleaned)) > TELEMETRY_MAX_BYTES:
+        return "too_large", None
+    return "ok", cleaned
+
+
+@_locked
+def post_telemetry(conn, lease_id: str, case_id: str, kind: str,
+                   data: dict[str, Any], now: int | None = None,
+                   worker_ok: Callable[[str | None], bool] | None = None) -> str:
+    """Record one kind of telemetry for the case a lease holds.
+
+    ``telemetry[kind] = {**data, "at": now, "worker": <lease_worker>}`` -- the
+    new object REPLACES that kind and leaves every other kind alone. ``at`` and
+    ``worker`` are stamped here rather than trusted from the body, and win over
+    keys of the same name in it: they say when the broker heard it and from
+    which lease holder, which a later attempt on another machine must not blur.
+
+    The ownership check is heartbeat's and complete's: the lease must be the
+    CURRENT one (``_by_lease``, row-locked under Postgres), and it must be the
+    lease of `case_id` -- a node that confused two of its cases must not write
+    one's mesh onto the other. `worker_ok`, when given, must also accept the
+    lease's worker: the API passes it for a per-machine credential, so the
+    `worker` stamp names the machine that actually sent the report (see the
+    route).
+
+    Returns ``"ok"``, ``"gone"`` (not this case's current lease, or not the
+    caller's: the node stops sending for the case), ``"too_many_kinds"`` (a
+    new kind past TELEMETRY_MAX_KINDS), or an outcome of prepare_telemetry.
+    Nothing here touches ``updated_at`` or the events trail: telemetry is not a
+    state change, and a solve reporting every five minutes must not become the
+    case browser's idea of "what just happened".
+    """
+    outcome, cleaned = prepare_telemetry(kind, data)
+    if outcome != "ok":
+        return outcome
+    now = now or _now()
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        row = _by_lease(conn, lease_id)
+        if row is None or row["case_id"] != case_id \
+                or (worker_ok is not None and not worker_ok(row["lease_worker"])):
+            conn.execute("ROLLBACK")
+            return "gone"
+        try:
+            current = json.loads(row["telemetry"] or "{}")
+        except (TypeError, ValueError):
+            current = {}
+        if not isinstance(current, dict):
+            current = {}
+        if kind not in current and len(current) >= TELEMETRY_MAX_KINDS:
+            conn.execute("ROLLBACK")
+            return "too_many_kinds"
+        current[kind] = {**cleaned, "at": now, "worker": row["lease_worker"]}
+        conn.execute("UPDATE cases SET telemetry=? WHERE case_id=? AND lease_id=?",
+                     (_telemetry_json(current), case_id, lease_id))
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    return "ok"
+
+
+# How many cases one dataset_rows() page holds: ~8 MB of JSON TEXT at the
+# campaign's ~4 KB per row, where reading the whole table at once measured
+# +300 MB on Postgres at 30,000 cases (psycopg keeps the libpq result alive
+# beside the Python rows) on a 512 MB instance.
+DATASET_PAGE_ROWS = 2000
+
+
+@_locked
+def dataset_rows(conn, after: str | None = None,
+                 limit: int = DATASET_PAGE_ROWS) -> list[dict[str, Any]]:
+    """One page of every case, in case_id order from just past `after`,
+    reduced to the columns the dataset statistics read.
+
+    A PAGE, by key, because the whole table at once is the campaign's entire
+    JSON in memory at once. Each page is its own short read under the lock;
+    casebroker/dataset.py reduces it to numbers and drops it before asking for
+    the next, so the peak is one page and db._LOCK is never held while
+    counting. A page is found by the primary key, not an OFFSET, so reading
+    page 15 costs what reading page 1 does. JSON stays as the TEXT it is stored
+    as, for the same reason: parsing is not the lock's business.
+    """
+    select = ("SELECT case_id, state, split, lcz, recipe, spec, telemetry, metrics"
+              " FROM cases")
+    if after is None:
+        rows = conn.execute(select + " ORDER BY case_id LIMIT ?", (limit,)).fetchall()
+    else:
+        rows = conn.execute(select + " WHERE case_id > ? ORDER BY case_id LIMIT ?",
+                            (after, limit)).fetchall()
+    return [dict(r) for r in rows]
 
 
 # -- observability ------------------------------------------------------------
@@ -1779,7 +2010,7 @@ def fleet(conn, now: int | None = None) -> list[dict[str, Any]]:
 # out to be the one filling the disk. Keyed by table name; a table this file
 # does not list still appears in the answer, just without a note.
 _TABLE_NOTES = {
-    "cases": "one row per case: spec, state, result pointer",
+    "cases": "one row per case: spec, state, result pointer, node telemetry",
     "events": "per-case history: every lease, heartbeat progress line, failure",
     "footprints": "cached site geometry for the dashboard preview (GeoJSON)",
     "workers": "one row per worker id ever seen",
@@ -2055,7 +2286,7 @@ def list_cases(conn, state: str | None = None, split: str | None = None,
     column = CASE_SORTS.get(sort or "", "cases.updated_at")
     descending = str(direction).lower() != "asc"
     order = f"{column} {'DESC' if descending else 'ASC'}, cases.case_id ASC"
-    columns = _CASE_COLS if include_spec else _CASE_COLS_NO_SPEC
+    columns = _CASE_LIST_COLS if include_spec else _CASE_COLS_NO_SPEC
     rows = conn.execute(
         "SELECT " + columns + " FROM cases" + clause +
         " ORDER BY " + order + " LIMIT ? OFFSET ?",
@@ -2069,11 +2300,15 @@ def list_cases(conn, state: str | None = None, split: str | None = None,
 # the latest one back onto the case so the dashboard can show where a solve is
 # without a second endpoint or an events API. Two columns: what was said, and
 # when, so a stale line reads as stale.
-# Every column of `cases` except `spec`, spelled out: "cases.*" cannot subtract
-# one, and a page of specs is most of the bytes the case browser transfers.
-# Listed rather than derived, so a column added to the schema is a deliberate
-# decision here too -- a reader that silently gained a field would be the same
-# accident in the other direction.
+# Every column of `cases` except `spec` and `telemetry`, spelled out: "cases.*"
+# cannot subtract one, and a page of specs is most of the bytes the case browser
+# transfers. Listed rather than derived, so a column added to the schema is a
+# deliberate decision here too -- a reader that silently gained a field would be
+# the same accident in the other direction.
+#
+# `telemetry` is never on a PAGE, with or without the spec: it is up to 16 kinds
+# per case, the solve's per-direction table among them, and the case browser
+# fetches the one case it opens in full (get_case, which keeps `cases.*`).
 _CASE_COLS_WITHOUT_SPEC = (
     "cases.case_id, cases.recipe, cases.split, cases.lcz, cases.city_cluster,"
     " cases.priority, cases.state, cases.attempts, cases.max_attempts,"
@@ -2114,6 +2349,7 @@ _CASE_COLS = (
 )
 
 _CASE_COLS_NO_SPEC = _CASE_COLS.replace("cases.*", _CASE_COLS_WITHOUT_SPEC, 1)
+_CASE_LIST_COLS = _CASE_COLS.replace("cases.*", _CASE_COLS_WITHOUT_SPEC + ", cases.spec", 1)
 
 
 @_locked

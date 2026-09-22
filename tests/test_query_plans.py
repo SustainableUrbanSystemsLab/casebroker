@@ -64,6 +64,19 @@ def test_a_lease_is_found_by_index_not_by_scan(big):
     assert "idx_cases_lease" in plan, plan
 
 
+def test_a_dataset_page_is_found_by_key_not_by_sorting_the_table(big):
+    """GET /v1/dataset reads the campaign a page at a time (db.dataset_rows),
+    every minute a dashboard is open. Each page must seek to its key in the
+    primary key's index: a full scan plus a sort per page, under db._LOCK,
+    would make the paging cost more than the one big read it replaced."""
+    _, path = big
+    plan = _plan(path, "SELECT case_id, state, split, lcz, recipe, spec, telemetry, metrics"
+                       " FROM cases WHERE case_id > 'v2-00000000000003e8'"
+                       " ORDER BY case_id LIMIT 2000")
+    assert "sqlite_autoindex_cases_1" in plan and "case_id>?" in plan.replace(" ", ""), plan
+    assert "TEMP B-TREE" not in plan.upper(), plan
+
+
 def test_every_index_the_schema_declares_actually_exists(big):
     """The schema is applied by a reconciler, not by hand.
 

@@ -38,7 +38,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
-from . import __version__, auth, db, footprints, ids, notify, places
+from . import __version__, auth, dataset, db, footprints, ids, notify, places
 
 MAX_LEASE_SECONDS = 24 * 3600
 
@@ -249,6 +249,17 @@ class ReleaseIn(BaseModel):
     reason: str = "released"
 
 
+class TelemetryIn(BaseModel):
+    """One kind of structured telemetry for the case a lease holds; see
+    db.post_telemetry. `case_id` is required, unlike CompleteIn's: telemetry is
+    new, so there is no older node to stay compatible with, and it is what stops
+    one case's report landing on another."""
+    lease_id: str = Field(min_length=1, max_length=128)
+    case_id: str = Field(min_length=1, max_length=128)
+    kind: str = Field(pattern=r"^[a-z][a-z0-9_]{0,31}$")
+    data: dict[str, Any]
+
+
 
 def _is_postgres_dsn(target: str) -> bool:
     return target.startswith(("postgres://", "postgresql://"))
@@ -434,6 +445,13 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
     @contextlib.asynccontextmanager
     async def _lifespan(_app: FastAPI):
         _apply_thread_limit()
+        # The first dataset aggregate after a start is the expensive one (every
+        # site's country is looked up once, then remembered), so it is started
+        # now, in the background, rather than by whoever first opens a case.
+        try:
+            dataset_cache.peek()
+        except Exception as e:                           # noqa: BLE001
+            print(f"[warn] could not start the dataset warm-up: {e}", file=sys.stderr)
         # Push notifications (casebroker/notify.py). The poller always runs; it
         # sends only when an ntfy topic is configured (Settings, else env), and
         # re-reads that every poll. Started here, not at import, so a test client
@@ -449,6 +467,11 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
                   lifespan=_lifespan)
     conn = db.connect(db_path)
     app.state.db_path = db_path
+    # Per app, not per module, for the reason this is a factory at all: a
+    # module-level cache would serve one test's campaign to the next test.
+    # Exposed on app.state so a test can drive its clock.
+    dataset_cache = dataset.DatasetCache(lambda: dataset.stream_rows(conn))
+    app.state.dataset = dataset_cache
 
     def _supplied_token(request: Request) -> str:
         header = request.headers.get("authorization", "")
@@ -1652,6 +1675,70 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         return {"ok": True}
 
 
+    @app.post("/v1/telemetry", dependencies=[WriteAuth])
+    def telemetry(body: TelemetryIn, request: Request) -> dict[str, bool]:
+        """Structured telemetry from the node: the latest `data` for one `kind`
+        of one case, replacing that kind only. See db.post_telemetry.
+
+        Never 404 from here, whatever is wrong: a node reads 404 as "this broker
+        predates telemetry" and stops sending it for the rest of its life, so a
+        stale lease or an unknown case is 409 -- stop for THIS case -- exactly
+        as a heartbeat would answer it."""
+        # Checked before db._LOCK is taken: a body that is too large or too
+        # deep is refused without holding up anyone's heartbeat.
+        outcome, _ = db.prepare_telemetry(body.kind, body.data)
+        if outcome == "ok":
+            # A per-machine credential may report only on a lease held under
+            # its own name, as /v1/lease lets it claim only under its own name.
+            # lease_id is no secret -- the case list shows it to any reader --
+            # so without this, one machine's credential could post invented
+            # mesh numbers into another machine's case, stamped with the OTHER
+            # machine's name, and into the dataset's statistics. 409, never
+            # 403 or 404: to the node it means "stop for this case", which is
+            # the only right reaction to a lease it does not hold.
+            machine = _machine_principal(request)
+            worker_ok = None
+            if machine:
+                name = machine["name"]
+                worker_ok = lambda worker: bool(worker) and _may_lease_as(name, worker)  # noqa: E731
+            outcome = db.post_telemetry(conn, body.lease_id, body.case_id, body.kind,
+                                        body.data, worker_ok=worker_ok)
+        if outcome == "ok":
+            return {"ok": True}
+        if outcome == "gone":
+            raise HTTPException(409, "lease expired or superseded, or not this case's, or "
+                                     "not this credential's; stop sending telemetry for "
+                                     "this case")
+        if outcome == "too_many_kinds":
+            raise HTTPException(413, f"a case holds at most {db.TELEMETRY_MAX_KINDS} "
+                                     "telemetry kinds")
+        if outcome == "too_large":
+            raise HTTPException(413, f"telemetry data is limited to "
+                                     f"{db.TELEMETRY_MAX_BYTES} bytes of JSON per post "
+                                     "(compact, non-ASCII escaped as \\uXXXX)")
+        if outcome == "too_deep":
+            raise HTTPException(422, f"telemetry data may nest objects and arrays at most "
+                                     f"{db.TELEMETRY_MAX_DEPTH} levels deep")
+        raise HTTPException(422, "kind must match ^[a-z][a-z0-9_]{0,31}$ and data must be an object")
+
+
+    @app.get("/v1/dataset", dependencies=[ReadAuth])
+    def dataset_stats() -> dict[str, Any]:
+        """The campaign as a dataset: counts by state, split, LCZ, recipe and
+        country, and per metric of casebroker.dataset.METRICS its distribution
+        over every case and per LCZ -- all on one set of histogram edges per
+        metric, so the reference sets can be drawn on one axis. Computed from
+        every case and cached for 60 s (casebroker/dataset.py)."""
+        try:
+            return dataset_cache.get().public
+        except dataset.Unavailable as exc:
+            # The last computation failed and there is no earlier one to serve.
+            # Remembered for the TTL, so this is one campaign read per minute,
+            # not one per request, until whatever broke it is fixed.
+            raise HTTPException(503, str(exc),
+                                headers={"Retry-After": str(int(dataset.TTL_SECONDS))}) from exc
+
+
     @app.post("/v1/fleet", dependencies=[WriteAuth])
     def report_fleet(body: FleetIn) -> dict[str, str]:
         """Tell the broker what a scheduler is holding that has not arrived yet.
@@ -1943,6 +2030,30 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
             row["place"] = places.locate(float(spec["lat"]), float(spec["lon"]))
         except (KeyError, TypeError, ValueError):
             row["place"] = None
+        # Parsed, unlike `metrics` and `spec` (which this endpoint has always
+        # returned as the TEXT they are stored as, and the dashboard parses):
+        # telemetry is new, so there is no reader to keep compatible, and {} is
+        # "nothing reported" without a null check.
+        row["telemetry"] = dataset.parse_obj(row.get("telemetry"))
+        if db.nests_deeper(row["telemetry"], db.TELEMETRY_MAX_DEPTH + 1):
+            # Deeper than post_telemetry now accepts (+1 for the kind level):
+            # a row written before that bound. pydantic-core cannot render it,
+            # and a record that answers 500 is worse than one without telemetry.
+            print(f"[telemetry] {case_id}: stored telemetry nests too deep to serve",
+                  file=sys.stderr)
+            row["telemetry"] = {}
+        # Where this case sits in the campaign, from the same cached aggregate
+        # /v1/dataset serves -- but never WAITING for it: the record does not
+        # depend on the aggregate, and a cold one is seconds of work at campaign
+        # scale. peek() serves what there is, even a minute stale, and refreshes
+        # it in the background; {} until the first one after a start is ready.
+        # Never fatal, like `place`: a ranking that cannot be had is absent.
+        try:
+            agg = dataset_cache.peek()
+            row["percentiles"] = agg.percentiles(row) if agg is not None else {}
+        except Exception as exc:                     # noqa: BLE001
+            print(f"[dataset] percentiles for {case_id} failed: {exc!r}", file=sys.stderr)
+            row["percentiles"] = {}
         return row
 
 

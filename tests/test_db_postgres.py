@@ -20,6 +20,7 @@ be left exactly as it was found, tables included but empty of test rows.
 
 from __future__ import annotations
 
+import json
 import os
 import pathlib
 import sys
@@ -30,7 +31,7 @@ import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
-from casebroker import db, ids  # noqa: E402
+from casebroker import dataset, db, ids  # noqa: E402
 
 DSN = os.environ.get("CASEBROKER_TEST_PG_DSN")
 pytestmark = pytest.mark.skipif(
@@ -209,7 +210,7 @@ def fresh_conn(attempts=5):
     raise last
 
 
-def seed(n: int, tag: str) -> list[str]:
+def seed(n: int, tag: str, recipe: str = "pgtest") -> list[str]:
     conn = fresh_conn()
     rows = []
     ids_out = []
@@ -217,7 +218,7 @@ def seed(n: int, tag: str) -> list[str]:
         lat, lon = 34.0 + i * 0.001, -84.0
         cid = prefix(f"{tag}-{i}")
         ids_out.append(cid)
-        rows.append({"case_id": cid, "spec": {"i": i}, "recipe": "pgtest",
+        rows.append({"case_id": cid, "spec": {"i": i}, "recipe": recipe,
                      "city_cluster": prefix(f"city{i % 5}"), "split": "train"})
     r = db.add_cases(conn, rows)
     assert r["added"] == n
@@ -520,6 +521,80 @@ def test_a_superseded_lease_cannot_write_across_real_connections():
     row = conn_b.execute("SELECT state, result_uri FROM cases WHERE case_id=?",
                          (cid,)).fetchone()
     assert (row["state"], row["result_uri"]) == ("done", "file:///real")
+
+
+@scratch_only
+def test_telemetry_round_trips_over_a_real_connection():
+    """post_telemetry is a read-modify-write of one JSON TEXT column under
+    FOR UPDATE; the SQLite suite cannot show the row lock or the dict rows
+    psycopg returns. Scratch-only: it leases, and the shared database's queue is
+    not a test fixture."""
+    recipe = prefix("r-telemetry")          # only these two are claimable by it
+    cid, other = seed(2, "telemetry", recipe=recipe)
+    conn = fresh_conn()
+    leases = {l.case_id: l for l in db.lease(conn, prefix("w-tel"), count=2, recipes=[recipe])}
+    lease = leases[cid]
+    assert db.post_telemetry(conn, lease.lease_id, cid, "site", {"n_buildings": 3}, now=100) == "ok"
+    assert db.post_telemetry(conn, lease.lease_id, cid, "mesh", {"total_cells": 9}) == "ok"
+    assert db.post_telemetry(conn, lease.lease_id, cid, "site", {"n_buildings": 4}, now=200) == "ok"
+    # Not this lease's case, and a lease that does not exist: both "stop".
+    assert db.post_telemetry(conn, lease.lease_id, other, "site", {"n_buildings": 1}) == "gone"
+    assert db.post_telemetry(conn, "no-such-lease", cid, "site", {"n_buildings": 1}) == "gone"
+    assert db.complete(fresh_conn(), lease.lease_id, "file:///pgtest-tel")
+    row = db.get_case(fresh_conn(), cid)
+    stored = json.loads(row["telemetry"])
+    assert stored["site"] == {"n_buildings": 4, "at": 200, "worker": prefix("w-tel")}
+    assert stored["mesh"]["total_cells"] == 9
+    mine = [r for r in dataset.stream_rows(fresh_conn()) if r["case_id"] == cid]
+    assert len(mine) == 1 and json.loads(mine[0]["telemetry"])["mesh"]["total_cells"] == 9
+    page = db.list_cases(fresh_conn(), limit=200)["cases"]
+    assert page and all("telemetry" not in r for r in page)
+
+
+@scratch_only
+def test_release_of_a_live_lease_over_a_real_connection():
+    """release() refunded the attempt with MAX(attempts - 1, 0), and Postgres
+    has no two-argument scalar MAX: every release of a LIVE lease raised
+    UndefinedFunction (a 500 at the API), leaving the case leased until its TTL.
+    Every other release call in this file hits a dead lease, which returns
+    before the UPDATE -- which is how it went unseen."""
+    recipe = prefix("r-release")
+    (cid,) = seed(1, "release", recipe=recipe)
+    lease = db.lease(fresh_conn(), prefix("w-rel"), recipes=[recipe])[0]
+    assert (lease.case_id, lease.attempt) == (cid, 1)
+    assert db.post_telemetry(fresh_conn(), lease.lease_id, cid, "mesh", {"total_cells": 5}) == "ok"
+    assert db.release(fresh_conn(), lease.lease_id) is True
+    row = db.get_case(fresh_conn(), cid)
+    assert (row["state"], row["attempts"], row["lease_id"]) == ("pending", 0, None)
+    # Telemetry survives the release: it describes what happened.
+    assert json.loads(row["telemetry"])["mesh"]["total_cells"] == 5
+
+
+@scratch_only
+def test_a_fresh_claim_forgets_the_last_attempt_s_telemetry_over_a_real_connection():
+    recipe = prefix("r-retry")
+    (cid,) = seed(1, "retry", recipe=recipe)
+    first = db.lease(fresh_conn(), prefix("w-a"), recipes=[recipe])[0]
+    assert db.post_telemetry(fresh_conn(), first.lease_id, cid, "mesh", {"total_cells": 9}) == "ok"
+    assert db.fail(fresh_conn(), first.lease_id, "diverged", retryable=True)
+    assert json.loads(db.get_case(fresh_conn(), cid)["telemetry"])["mesh"]["total_cells"] == 9
+    second = db.lease(fresh_conn(), prefix("w-b"), recipes=[recipe])[0]
+    assert (second.case_id, second.attempt) == (cid, 2)
+    assert db.get_case(fresh_conn(), cid)["telemetry"] is None
+
+
+@scratch_only
+def test_the_dataset_pages_cover_every_case_once_over_a_real_connection(monkeypatch):
+    """Keyset pages: `case_id > ?` and ORDER BY case_id under the SAME collation,
+    so no case is skipped or read twice whatever that collation is."""
+    mine = seed(5, "pages")
+    monkeypatch.setattr(db, "DATASET_PAGE_ROWS", 2)
+    conn = fresh_conn()
+    seen = [r["case_id"] for r in dataset.stream_rows(conn)]
+    assert len(seen) == len(set(seen))
+    assert set(mine) <= set(seen)
+    total = conn.execute("SELECT COUNT(*) AS n FROM cases").fetchone()["n"]
+    assert len(seen) == total
 
 
 def test_idempotent_add_cases_over_a_real_connection():
