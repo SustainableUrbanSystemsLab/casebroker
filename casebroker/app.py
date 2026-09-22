@@ -1614,6 +1614,30 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         db.report_fleet(conn, body.cluster, body.queued, body.running, body.detail)
         return {"cluster": body.cluster}
 
+    @app.get("/v1/storage", dependencies=[ReadAuth])
+    def storage() -> dict[str, Any]:
+        """How much space the database uses, per table, against the plan's limit
+        when one is known -- what the dashboard's Storage page shows.
+
+        The limit is not something the database can report about itself.
+        ``CASEBROKER_DB_QUOTA_MB`` sets it; unset, a Supabase DSN is assumed to be
+        on the free plan's 500 MB and the answer SAYS it is an assumption, and
+        anything else reports no limit rather than invent one."""
+        out = db.storage(conn)
+        raw = os.environ.get("CASEBROKER_DB_QUOTA_MB", "").strip()
+        if raw:
+            try:
+                out["quota_bytes"] = int(float(raw) * 1024 * 1024)
+                out["quota_source"] = "CASEBROKER_DB_QUOTA_MB"
+            except ValueError:
+                out["quota_bytes"], out["quota_source"] = None, f"CASEBROKER_DB_QUOTA_MB is not a number: {raw!r}"
+        elif _is_postgres_dsn(db_path) and "supabase" in db_path:
+            out["quota_bytes"] = 500 * 1024 * 1024
+            out["quota_source"] = "assumed: Supabase free plan (set CASEBROKER_DB_QUOTA_MB to override)"
+        else:
+            out["quota_bytes"], out["quota_source"] = None, None
+        return out
+
     @app.get("/v1/status", dependencies=[ReadAuth])
     def status() -> dict[str, Any]:
         # `version` and `db` are carried here as well as on /healthz so a client

@@ -1748,6 +1748,108 @@ def fleet(conn, now: int | None = None) -> list[dict[str, Any]]:
                 "SELECT * FROM fleet ORDER BY cluster")]
 
 
+# What each table is for, in the words an operator needs when one of them turns
+# out to be the one filling the disk. Keyed by table name; a table this file
+# does not list still appears in the answer, just without a note.
+_TABLE_NOTES = {
+    "cases": "one row per case: spec, state, result pointer",
+    "events": "per-case history: every lease, heartbeat progress line, failure",
+    "footprints": "cached site geometry for the dashboard preview (GeoJSON)",
+    "workers": "one row per worker id ever seen",
+    "fleet": "cluster queue snapshots",
+    "users": "dashboard accounts",
+    "sessions": "dashboard login sessions",
+    "worker_tokens": "machine credentials (hashes only)",
+    "pairings": "pending browser pairings",
+    "releases": "node builds the broker points at",
+    "build_stats": "per-build outcome counters",
+    "settings": "broker settings",
+    "schema_meta": "schema version",
+}
+
+
+@_locked
+def storage(conn) -> dict[str, Any]:
+    """How much space the database takes, and which tables take it.
+
+    Postgres answers from its own catalog (``pg_total_relation_size`` is the
+    table, its TOAST and its indexes together -- what a hosted plan counts).
+    SQLite answers from the page counts, and per table from the ``dbstat``
+    virtual table when this build of SQLite has it; when it does not, the table
+    sizes are null rather than guessed.
+
+    Row counts are exact (``COUNT(*)``): at this campaign's scale that is
+    milliseconds, and an estimate that says 0 rows for a table Postgres has not
+    analysed yet is exactly the wrong answer on this page.
+    """
+    tables: dict[str, dict[str, Any]] = {}
+    if isinstance(conn, PgConnection):
+        engine = "postgres"
+        total = conn.execute(
+            "SELECT pg_database_size(current_database()) AS n").fetchone()["n"]
+        for r in conn.execute(
+                "SELECT c.relname AS name, pg_total_relation_size(c.oid) AS total,"
+                " pg_relation_size(c.oid) AS heap, pg_indexes_size(c.oid) AS indexes"
+                " FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace"
+                " WHERE c.relkind = 'r' AND n.nspname = current_schema()").fetchall():
+            tables[r["name"]] = {"bytes": int(r["total"]), "data_bytes": int(r["heap"]),
+                                 "index_bytes": int(r["indexes"]),
+                                 # TOAST: large values stored out of line -- here,
+                                 # the footprint GeoJSON blobs, which is why it is
+                                 # reported rather than folded into "data".
+                                 "toast_bytes": int(r["total"]) - int(r["heap"]) - int(r["indexes"])}
+        files = None
+    else:
+        engine = "sqlite"
+        page = conn.execute("PRAGMA page_size").fetchone()[0]
+        pages = conn.execute("PRAGMA page_count").fetchone()[0]
+        free = conn.execute("PRAGMA freelist_count").fetchone()[0]
+        total = page * pages
+        names = [r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+            " AND name NOT LIKE 'sqlite_%'").fetchall()]
+        for name in names:
+            tables[name] = {"bytes": None, "data_bytes": None, "index_bytes": None, "toast_bytes": None}
+        try:
+            owner = {r[0]: r[1] for r in conn.execute(
+                "SELECT name, tbl_name FROM sqlite_master WHERE type IN ('table','index')").fetchall()}
+            for name, size in conn.execute(
+                    "SELECT name, SUM(pgsize) FROM dbstat GROUP BY name").fetchall():
+                table = owner.get(name, name)
+                if table not in tables:
+                    continue
+                t = tables[table]
+                key = "data_bytes" if name == table else "index_bytes"
+                t[key] = (t[key] or 0) + int(size)
+                t["bytes"] = (t["bytes"] or 0) + int(size)
+                t["toast_bytes"] = 0
+        except sqlite3.OperationalError:
+            pass                                  # no dbstat in this SQLite build
+        path = next((r[2] for r in conn.execute("PRAGMA database_list").fetchall()
+                     if r[1] == "main"), "")
+        files = {"free_bytes": page * free}
+        for suffix in ("", "-wal"):
+            try:
+                files["db_file_bytes" if not suffix else "wal_bytes"] = os.path.getsize(path + suffix)
+            except OSError:
+                pass
+    for name, t in tables.items():
+        t["rows"] = conn.execute(f'SELECT COUNT(*) AS n FROM "{name}"').fetchone()["n"] \
+            if isinstance(conn, PgConnection) else conn.execute(f'SELECT COUNT(*) FROM "{name}"').fetchone()[0]
+        t["note"] = _TABLE_NOTES.get(name)
+    ordered = sorted(tables.items(), key=lambda kv: -(kv[1]["bytes"] or 0))
+    cases = tables.get("cases", {}).get("rows") or 0
+    known = [t["bytes"] for t in tables.values()]
+    table_bytes = sum(known) if known and all(b is not None for b in known) else None
+    # Per case from the TABLES, not the database total: an empty Postgres is
+    # already ~8 MB of system catalogs, which would make 50 cases look like
+    # 160 KB each. The difference is reported on its own as overhead.
+    return {"engine": engine, "total_bytes": int(total), "table_bytes": table_bytes,
+            "overhead_bytes": int(total) - table_bytes if table_bytes is not None else None,
+            "bytes_per_case": round(table_bytes / cases) if cases and table_bytes is not None else None,
+            "cases": cases, "tables": [{"name": k, **v} for k, v in ordered], "files": files}
+
+
 @_locked
 def status(conn, now: int | None = None) -> dict[str, Any]:
     now = now or _now()

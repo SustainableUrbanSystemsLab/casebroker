@@ -8,7 +8,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-09-21
+
 ### Added
+- **Database storage page.** A header button opens how much space the database
+  uses -- total, per table with rows and index share, largest first, bytes per
+  case -- against the plan's limit when known (`CASEBROKER_DB_QUOTA_MB`; a
+  Supabase DSN is assumed to be the 500 MB free plan and labelled as such).
+  Backed by `GET /v1/storage` (read scope).
 - **Nodes can be updated while a campaign runs.** The broker now knows WHICH
   BUILD every worker is (`build` = version+commit, sent with each lease -- the
   product version is the same for every push, so it could not tell two nodes

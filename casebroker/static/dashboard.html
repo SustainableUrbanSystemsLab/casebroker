@@ -525,6 +525,19 @@
     padding-bottom: env(safe-area-inset-bottom, 0px);
   }
   .drawer.open { transform: translateX(0); }
+  .storage-total { font-size: 28px; font-weight: 700; letter-spacing: -0.01em; }
+  .storage-sub { color: var(--text-secondary); font-size: 12.5px; margin-top: 2px; }
+  .storage-meter { height: 8px; border-radius: 4px; background: var(--surface-hover);
+                   overflow: hidden; margin: 12px 0 4px; }
+  .storage-meter > span { display: block; height: 100%; background: var(--brand); }
+  .storage-meter.warn > span { background: #d97706; }
+  .storage-meter.full > span { background: #dc2626; }
+  .storage-bar { height: 4px; border-radius: 2px; background: var(--brand); opacity: 0.55; min-width: 1px; }
+  #storageBody table { width: 100%; border-collapse: collapse; font-size: 12.5px; margin-top: 18px; }
+  #storageBody th, #storageBody td { text-align: left; padding: 7px 6px; border-bottom: 1px solid var(--border);
+                                     vertical-align: top; }
+  #storageBody td.num, #storageBody th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  #storageBody .note { color: var(--text-muted); font-size: 11.5px; margin-top: 2px; }
   @media (prefers-reduced-motion: reduce) {
     .drawer, .drawer-scrim { transition: none; }
   }
@@ -1054,6 +1067,14 @@
       </span>
 
       <div class="header-actions">
+        <button id="storageBtn" class="subtle icon-btn" title="Database storage"
+                aria-label="Database storage" aria-haspopup="dialog" aria-expanded="false">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <ellipse cx="12" cy="5" rx="8" ry="3"></ellipse>
+            <path d="M4 5v6c0 1.66 3.58 3 8 3s8-1.34 8-3V5"></path>
+            <path d="M4 11v6c0 1.66 3.58 3 8 3s8-1.34 8-3v-6"></path>
+          </svg>
+        </button>
         <span class="gear-wrap">
           <button id="settingsBtn" class="subtle icon-btn" title="Settings"
                   aria-label="Settings" aria-haspopup="dialog" aria-expanded="false">
@@ -1376,6 +1397,23 @@
 <!-- Settings: the connection, the machine credentials, the preferences, and
      the first-run wizard. Everything here is set once and then wants to be out
      of the way. -->
+<!-- Storage: how much of the database's space the campaign has used, and
+     which table used it. Read-only; opened from the header. -->
+<div id="storageScrim" class="drawer-scrim"></div>
+<aside id="storageDrawer" class="drawer" role="dialog" aria-modal="true"
+       aria-labelledby="storageTitle" aria-hidden="true">
+  <div class="drawer-head">
+    <h2 id="storageTitle">Database storage</h2>
+    <button id="storageRefresh" class="subtle" style="margin-left:auto" type="button">Refresh</button>
+    <button id="storageClose" class="subtle icon-btn" aria-label="Close storage" title="Close (Esc)">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+        <line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line>
+      </svg>
+    </button>
+  </div>
+  <div class="drawer-body" id="storageBody"></div>
+</aside>
+
 <div id="settingsScrim" class="drawer-scrim"></div>
 <aside id="settingsDrawer" class="drawer" role="dialog" aria-modal="true"
        aria-labelledby="settingsTitle" aria-hidden="true">
@@ -4265,6 +4303,72 @@
     else $("settingsBtn").focus();
   }
 
+  // -- Database storage ---------------------------------------------------------
+  function storageOpen() { return $("storageDrawer").classList.contains("open"); }
+
+  function openStorage() {
+    if (!storageOpen()) returnFocusTo = document.activeElement;
+    $("storageScrim").classList.add("open");
+    const d = $("storageDrawer");
+    d.classList.add("open"); d.inert = false; d.setAttribute("aria-hidden", "false");
+    $("storageBtn").setAttribute("aria-expanded", "true");
+    $("storageClose").focus();
+    loadStorage();
+  }
+
+  function closeStorage() {
+    $("storageScrim").classList.remove("open");
+    const d = $("storageDrawer");
+    d.classList.remove("open"); d.inert = true; d.setAttribute("aria-hidden", "true");
+    $("storageBtn").setAttribute("aria-expanded", "false");
+    if (returnFocusTo && returnFocusTo.focus) returnFocusTo.focus();
+    else $("storageBtn").focus();
+  }
+
+  async function loadStorage() {
+    const body = $("storageBody");
+    body.innerHTML = `<div class="storage-sub">Measuring…</div>`;
+    let d;
+    try { d = await api("/v1/storage"); }
+    catch (e) {
+      body.innerHTML = `<div class="storage-sub">Could not read storage: ${esc(e.message)}</div>`;
+      return;
+    }
+    const pct = d.quota_bytes ? d.total_bytes / d.quota_bytes * 100 : null;
+    const meterClass = pct == null ? "" : pct >= 90 ? "full" : pct >= 70 ? "warn" : "";
+    const biggest = Math.max(1, ...d.tables.map((t) => t.bytes || 0));
+    const rows = d.tables.map((t) => `
+      <tr>
+        <td><code>${esc(t.name)}</code>${t.note ? `<div class="note">${esc(t.note)}</div>` : ""}</td>
+        <td class="num">${Number(t.rows).toLocaleString()}</td>
+        <td class="num">${formatBytes(t.bytes)}
+          ${t.bytes != null ? `<div class="storage-bar" style="width:${Number(t.bytes / biggest * 100).toFixed(1)}%;margin-left:auto"></div>` : ""}</td>
+        <td class="num">${formatBytes(t.index_bytes)}</td>
+      </tr>`).join("");
+    const f = d.files;
+    const fileLine = f ? [
+        f.db_file_bytes != null ? `file ${formatBytes(f.db_file_bytes)}` : "",
+        f.wal_bytes != null ? `WAL ${formatBytes(f.wal_bytes)}` : "",
+        `free pages ${formatBytes(f.free_bytes)}`].filter(Boolean).join(" · ") : "";
+    body.innerHTML = `
+      <div class="storage-total">${formatBytes(d.total_bytes)}</div>
+      <div class="storage-sub">${esc(d.engine === "postgres" ? "Postgres database" : "SQLite database")}
+        ${d.quota_bytes ? ` · ${Number(pct).toFixed(1)}% of the ${formatBytes(d.quota_bytes)} limit` : " · no limit configured"}</div>
+      ${d.quota_bytes ? `<div class="storage-meter ${meterClass}"><span style="width:${Number(Math.min(pct, 100)).toFixed(1)}%"></span></div>` : ""}
+      ${d.quota_source ? `<div class="note" style="color:var(--text-muted);font-size:11.5px">limit: ${esc(d.quota_source)}</div>` : ""}
+      <div class="storage-sub" style="margin-top:10px">
+        ${Number(d.cases).toLocaleString()} cases${d.bytes_per_case ? ` · about ${formatBytes(d.bytes_per_case)} per case` : ""}
+        ${d.overhead_bytes ? ` · ${formatBytes(d.overhead_bytes)} ${d.engine === "postgres" ? "system catalogs and overhead" : "schema and free pages"}` : ""}
+        ${fileLine ? ` · ${esc(fileLine)}` : ""}</div>
+      <table>
+        <thead><tr><th>Table</th><th class="num">Rows</th><th class="num">Size</th><th class="num">of which indexes</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+      <div class="note" style="color:var(--text-muted);font-size:11.5px;margin-top:10px">
+        Size includes indexes${d.engine === "postgres" ? " and out-of-line (TOAST) data" : ""}.
+        ${d.tables.some((t) => t.bytes == null) ? "Per-table sizes need SQLite's dbstat, which this build lacks." : ""}</div>`;
+  }
+
   // -- The first-run wizard ----------------------------------------------------
   // docs/operations.md's "First run", answered from live state rather than from
   // checkboxes an operator ticks: a database, an admin account, a session, a
@@ -4597,8 +4701,13 @@
     if (settingsOpen()) closeSettings(); else openSettings();
   });
   $("settingsClose").addEventListener("click", closeSettings);
+  $("storageBtn").addEventListener("click", () => (storageOpen() ? closeStorage() : openStorage()));
+  $("storageClose").addEventListener("click", closeStorage);
+  $("storageScrim").addEventListener("click", closeStorage);
+  $("storageRefresh").addEventListener("click", loadStorage);
   $("settingsScrim").addEventListener("click", closeSettings);
   document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && storageOpen()) closeStorage();
     if (e.key === "Escape" && settingsOpen()) closeSettings();
   });
   // -- Campaign: sites that are not on land -----------------------------------
@@ -4759,6 +4868,7 @@
   });
   // Closed at load, and inert with it.
   $("settingsDrawer").inert = true;
+  $("storageDrawer").inert = true;
 
   const autoSaved = localStorage.getItem(LS_AUTO);
   const autoOn = autoSaved === null ? true : autoSaved === "1";
