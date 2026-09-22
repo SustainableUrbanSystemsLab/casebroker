@@ -38,7 +38,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
-from . import __version__, auth, db, footprints, ids, places
+from . import __version__, auth, db, footprints, ids, notify, places
 
 MAX_LEASE_SECONDS = 24 * 3600
 
@@ -208,6 +208,14 @@ class LeaseOut(BaseModel):
     expires_at: int
     attempt: int
     spec: dict[str, Any]
+
+
+class NotifyIn(BaseModel):
+    """Settings -> Notifications. Every field optional: only the ones sent change."""
+    url: str | None = None
+    token: str | None = None
+    events: list[str] | None = None
+    public_url: str | None = None
 
 
 class HeartbeatIn(BaseModel):
@@ -426,7 +434,16 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
     @contextlib.asynccontextmanager
     async def _lifespan(_app: FastAPI):
         _apply_thread_limit()
-        yield
+        # Push notifications (casebroker/notify.py). The poller always runs; it
+        # sends only when an ntfy topic is configured (Settings, else env), and
+        # re-reads that every poll. Started here, not at import, so a test client
+        # that never enters the lifespan never starts a thread.
+        notifier = notify.from_env(conn)
+        notifier.start()
+        try:
+            yield
+        finally:
+            notifier.stop()
 
     app = FastAPI(title="E3D Simulation Broker", version=__version__,
                   lifespan=_lifespan)
@@ -1534,6 +1551,43 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
                 raise HTTPException(409, f"{body.build} has no published file; register it first")
             db.set_setting(conn, "target_build", body.build, by=user["username"])
         return db.list_releases(conn)
+
+    # -- push notifications (ntfy) ----------------------------------------
+    # Admin only: the topic URL is a secret (on ntfy.sh, anyone who knows it can
+    # read every notice), and pointing it elsewhere redirects the fleet's news.
+    def _notify_view() -> dict[str, Any]:
+        cfg = notify.resolve(db.get_settings(conn))
+        return {"enabled": bool(cfg["url"]), "url": notify.mask(cfg["url"]),
+                "token_set": bool(cfg["token"]), "events": cfg["events"],
+                "all_events": list(notify.ALL_EVENTS), "public_url": cfg["public_url"],
+                "source": cfg["source"]}
+
+    @app.get("/v1/notify")
+    def get_notify(user=AdminAuth) -> dict[str, Any]:
+        return _notify_view()
+
+    @app.put("/v1/notify")
+    def set_notify(body: NotifyIn, user=AdminAuth) -> dict[str, Any]:
+        """Only the fields SENT change. An empty string clears that field in the
+        settings table, which hands it back to its environment variable."""
+        by = user["username"]
+        for field in ("url", "token", "public_url"):
+            if field not in body.model_fields_set:
+                continue
+            value = (getattr(body, field) or "").strip() or None
+            if value and field in ("url", "public_url") and not notify.valid_url(value):
+                raise HTTPException(422, f"{field} must be an http(s) URL")
+            db.set_setting(conn, notify.KEYS[field], value, by=by)
+        if body.events is not None:
+            bad = [e for e in body.events if e not in notify.ALL_EVENTS]
+            if bad:
+                raise HTTPException(422, f"unknown event(s): {', '.join(bad)}")
+            db.set_setting(conn, notify.KEYS["events"], json.dumps(sorted(set(body.events))), by=by)
+        return _notify_view()
+
+    @app.post("/v1/notify/test")
+    def test_notify(user=AdminAuth) -> dict[str, Any]:
+        return notify.send_test(db.get_settings(conn))
 
     @app.put("/v1/releases/policy")
     def set_release_policy(body: PolicyIn, user=AdminAuth) -> dict[str, Any]:
