@@ -526,8 +526,8 @@ def test_idempotent_add_cases_over_a_real_connection():
     rows = [{"case_id": prefix("idem-0"), "spec": {}, "recipe": "pgtest",
              "city_cluster": prefix("idem-city"), "split": "train"}]
     conn = fresh_conn()
-    assert db.add_cases(conn, rows) == {"added": 1, "skipped": 0}
-    assert db.add_cases(conn, rows) == {"added": 0, "skipped": 1}
+    assert db.add_cases(conn, rows) == {"added": 1, "skipped": 0, "labelled": 0}
+    assert db.add_cases(conn, rows) == {"added": 0, "skipped": 1, "labelled": 0}
 
 
 def test_splits_still_assigned_by_city_against_postgres():
