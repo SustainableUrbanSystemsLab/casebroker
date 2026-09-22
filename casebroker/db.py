@@ -775,6 +775,32 @@ def widen_columns(conn, script: str, is_pg: bool) -> list[str]:
     return widened
 
 
+#: Settings rows a removed feature left behind. The ntfy push notifier (shipped
+#: in one release, then removed) wrote ``notify_cursor`` at every start, and an
+#: admin may have set the others from Settings -- a topic URL and a token among
+#: them, which are secrets. Nothing reads any of them now, so they are deleted
+#: when a database is opened rather than left in the table for good.
+RETIRED_SETTINGS = ("notify_cursor", "notify_url", "notify_token",
+                    "notify_events", "notify_public_url")
+
+
+def drop_retired_settings(conn) -> list[str]:
+    """Delete whichever RETIRED_SETTINGS rows exist; returns their keys.
+
+    Read before writing, because this runs on every connect and opening a
+    connection should not be a write: once the rows are gone, a connect pays
+    one primary-key lookup and nothing else. Idempotent, and two processes
+    starting at once cannot hurt each other -- the second deletes nothing.
+    Not audited: nobody changed a setting, a release retired it.
+    """
+    marks = ",".join("?" * len(RETIRED_SETTINGS))
+    found = [r["key"] for r in conn.execute(
+        "SELECT key FROM settings WHERE key IN (%s)" % marks, RETIRED_SETTINGS).fetchall()]
+    if found:
+        conn.execute("DELETE FROM settings WHERE key IN (%s)" % marks, RETIRED_SETTINGS)
+    return sorted(found)
+
+
 def apply_schema(conn, script: str, is_pg: bool) -> list[str]:
     """Create the tables, reconcile the ones that predate this version, then
     build the indexes. Returns the columns added, so a caller can log that an
@@ -799,6 +825,9 @@ def apply_schema(conn, script: str, is_pg: bool) -> list[str]:
         # unattended on the first connection after a deploy.
         print("[schema] brought this database forward: added " + ", ".join(added),
               file=sys.stderr)
+    dropped = drop_retired_settings(conn)
+    if dropped:
+        print("[schema] removed retired settings: " + ", ".join(dropped), file=sys.stderr)
     # Only when it actually changed. This runs on EVERY connection, and on a
     # transaction pooler every connection is a new backend -- an unconditional
     # upsert would make opening a connection a write.
@@ -1371,24 +1400,7 @@ def set_setting(conn, key: str, value: str | None, by: str | None = None,
             " ON CONFLICT(key) DO UPDATE SET value = excluded.value,"
             " updated_at = excluded.updated_at, updated_by = excluded.updated_by",
             (key, value, now, by))
-    _event(conn, None, by, "setting", "%s = %s" % (key, _audit_value(key, value)), now)
-
-
-#: Settings whose VALUE is a secret. The audit trail says that they changed and
-#: who changed them -- never what to. The events table is append-only and read
-#: by every dashboard viewer's case history; a topic URL there is a leaked topic.
-_SECRET_SETTINGS = {"notify_token", "notify_url"}
-
-
-def _audit_value(key: str, value: str | None) -> str:
-    if value is None:
-        return "(cleared)"
-    if key not in _SECRET_SETTINGS:
-        return value
-    if key == "notify_url":
-        head, _, topic = value.rstrip("/").rpartition("/")
-        return f"{head}/{topic[:4]}…"
-    return "(set)"
+    _event(conn, None, by, "setting", "%s = %s" % (key, value if value is not None else "(cleared)"), now)
 
 
 @_locked
@@ -1606,85 +1618,6 @@ def heartbeat(conn, lease_id: str, lease_seconds: int = 3600,
             _event(conn, row["case_id"], row["lease_worker"], "progress", detail, now)
     return True
 
-
-
-@_locked
-def max_event_id(conn) -> int:
-    """The newest event id, for a reader that should start from NOW rather than
-    replay history (the notifier, on startup)."""
-    row = conn.execute("SELECT MAX(id) AS n FROM events").fetchone()
-    return int(row["n"] or 0)
-
-
-@_locked
-def events_after(conn, after_id: int, before_ts: int | None = None,
-                 limit: int = 500) -> list[dict[str, Any]]:
-    """Events newer than ``after_id`` and (when given) older than ``before_ts``,
-    oldest first, each with what a notice about it needs: the case's coordinates,
-    the case's current lease holder, and for a progress line the previous
-    PHASED progress line of the same attempt -- so "solving" is announced once
-    per attempt, not again at every direction boundary where the node writes a
-    free-text line, and a retry's first meshing line counts as a new phase.
-
-    ``before_ts`` is a small lag: ids come from a sequence, and in the seconds
-    two broker instances overlap during a deploy, a row with a lower id can
-    commit after one with a higher id. Reading only rows a few seconds old lets
-    those commits land first."""
-    sql = ("SELECT e.id, e.ts, e.case_id, e.worker_id, e.event, e.detail, c.spec"
-           " FROM events e LEFT JOIN cases c ON c.case_id = e.case_id WHERE e.id > ?")
-    params: list[Any] = [after_id]
-    if before_ts is not None:
-        sql += " AND e.ts < ?"
-        params.append(before_ts)
-    sql += " ORDER BY e.id LIMIT ?"
-    params.append(limit)
-    rows = [dict(r) for r in conn.execute(sql, params).fetchall()]
-    for r in rows:
-        if r["event"] == "progress" and r["case_id"]:
-            start = conn.execute(
-                "SELECT MAX(id) AS n FROM events WHERE case_id = ? AND event IN ('leased','resumed')"
-                " AND id < ?", (r["case_id"], r["id"])).fetchone()
-            prev = conn.execute(
-                "SELECT detail FROM events WHERE case_id = ? AND event = 'progress'"
-                # substr, not LIKE 'mesh %': a literal % reaches psycopg as a
-                # placeholder on Postgres ("only '%s' ... are allowed").
-                " AND id < ? AND id > ? AND (substr(detail, 1, 5) = 'mesh ' OR substr(detail, 1, 6) = 'solve ')"
-                " ORDER BY id DESC LIMIT 1",
-                (r["case_id"], r["id"], (start["n"] if start else None) or 0)).fetchone()
-            r["previous_detail"] = prev["detail"] if prev else None
-    return rows
-
-
-#: The notifier's position in the events table, in the settings table so that a
-#: restart resumes where the last process stopped instead of dropping what
-#: happened in between -- and so two instances overlapping in a deploy cannot
-#: both send the same range: each claims it with a compare-and-set first.
-NOTIFY_CURSOR = "notify_cursor"
-
-
-@_locked
-def notify_cursor(conn) -> int | None:
-    v = _setting(conn, NOTIFY_CURSOR)
-    try:
-        return int(v) if v is not None else None
-    except ValueError:
-        return None
-
-
-@_locked
-def claim_notify_cursor(conn, old: int | None, new: int, now: int | None = None) -> bool:
-    """Move the cursor from ``old`` to ``new`` if nobody else moved it first.
-    Not audited: it moves every poll, and the audit trail is for people."""
-    now = now or _now()
-    if old is None:
-        cur = conn.execute(
-            "INSERT INTO settings(key, value, updated_at, updated_by) VALUES (?,?,?,?)"
-            " ON CONFLICT(key) DO NOTHING", (NOTIFY_CURSOR, str(new), now, "notifier"))
-    else:
-        cur = conn.execute(
-            "UPDATE settings SET value = ?, updated_at = ? WHERE key = ? AND value = ?",
-            (str(new), now, NOTIFY_CURSOR, str(old)))
-    return bool(cur.rowcount)
 
 @_locked
 def complete(conn, lease_id: str, result_uri: str,

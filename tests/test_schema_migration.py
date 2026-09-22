@@ -168,6 +168,30 @@ def test_a_database_predating_the_identity_tables_gains_them(tmp_path):
     assert db.count_users(upgraded) == 0
 
 
+def test_settings_a_removed_feature_left_behind_are_deleted_once_and_not_audited(tmp_path):
+    """0.9.0's ntfy notifier wrote ``notify_cursor`` at every start, and an admin
+    may have stored a topic URL and a token. The feature is gone; its rows go
+    with it on the next connect -- without an audit event (nobody changed a
+    setting) and without touching any other setting."""
+    path = str(tmp_path / "v090.sqlite")
+    conn = db.connect(path)
+    db.set_setting(conn, "target_build", "b1", by="admin")
+    for key in db.RETIRED_SETTINGS:
+        conn.execute("INSERT INTO settings(key, value, updated_at, updated_by)"
+                     " VALUES (?, 'x', 1, 'notifier')", (key,))
+    events = conn.execute("SELECT count(*) AS n FROM events").fetchone()["n"]
+    conn.close()
+
+    upgraded = db.connect(path)
+    assert db.get_settings(upgraded) == {"target_build": "b1"}
+    assert upgraded.execute("SELECT count(*) AS n FROM events").fetchone()["n"] == events
+    upgraded.close()
+
+    again = db.connect(path)                                 # idempotent
+    assert db.get_settings(again) == {"target_build": "b1"}
+    assert db.drop_retired_settings(again) == []
+
+
 def test_a_column_the_schema_no_longer_has_is_left_alone(tmp_path):
     """Only ever ADD. Dropping a column to match the code would destroy data for
     a version that may be about to be rolled back."""
