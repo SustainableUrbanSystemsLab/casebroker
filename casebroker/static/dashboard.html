@@ -3844,7 +3844,13 @@
       { type: "Feature", properties: { name: "site centre", "marker-color": "#dc2626" },
         geometry: { type: "Point", coordinates: [+lon.toFixed(6), +lat.toFixed(6)] } },
     ] };
-    return "https://geojson.io/#data=data:application/json," + encodeURIComponent(JSON.stringify(fc));
+    // geojson.io decodes the fragment TWICE, and treats a "#" that appears after the first
+    // pass as the end of its data: "stroke":"#d97706" arrived as "stroke":" and the page
+    // said "Unterminated string in JSON at position 127" (the position of that "#"). So the
+    // hash of every simplestyle colour is encoded once more -- %2523 -> %23 -> # -- which is
+    // what the page reads back as "#d97706" (checked in a browser, 2026-09-22).
+    return "https://geojson.io/#data=data:application/json,"
+      + encodeURIComponent(JSON.stringify(fc)).replace(/%23/g, "%2523");
   }
 
   function placeHtml(p, spec, cylDomain) {
