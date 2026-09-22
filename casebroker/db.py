@@ -1187,8 +1187,11 @@ def lease(conn, worker_id: str, count: int = 1,
                     " lease_worker=NULL, lease_expires=NULL, leased_at=NULL,"
                     " updated_at=?"
                     " WHERE case_id=?", (now, row["case_id"]))
-                _event(conn, row["case_id"], worker_id, "quarantined",
-                       "attempts exhausted (%d)" % row["max_attempts"], now)
+                # Named after the worker whose attempt ran out -- the previous
+                # holder, whose lease expired -- not the one that happened to ask
+                # next and found it spent; that one is recorded in the detail.
+                _event(conn, row["case_id"], row["lease_worker"] or None, "quarantined",
+                       "attempts exhausted (%d); found by %s" % (row["max_attempts"], worker_id), now)
                 continue
 
             lease_id = uuid.uuid4().hex
@@ -1348,7 +1351,24 @@ def set_setting(conn, key: str, value: str | None, by: str | None = None,
             " ON CONFLICT(key) DO UPDATE SET value = excluded.value,"
             " updated_at = excluded.updated_at, updated_by = excluded.updated_by",
             (key, value, now, by))
-    _event(conn, None, by, "setting", "%s = %s" % (key, value if value is not None else "(cleared)"), now)
+    _event(conn, None, by, "setting", "%s = %s" % (key, _audit_value(key, value)), now)
+
+
+#: Settings whose VALUE is a secret. The audit trail says that they changed and
+#: who changed them -- never what to. The events table is append-only and read
+#: by every dashboard viewer's case history; a topic URL there is a leaked topic.
+_SECRET_SETTINGS = {"notify_token", "notify_url"}
+
+
+def _audit_value(key: str, value: str | None) -> str:
+    if value is None:
+        return "(cleared)"
+    if key not in _SECRET_SETTINGS:
+        return value
+    if key == "notify_url":
+        head, _, topic = value.rstrip("/").rpartition("/")
+        return f"{head}/{topic[:4]}…"
+    return "(set)"
 
 
 @_locked
@@ -1577,22 +1597,74 @@ def max_event_id(conn) -> int:
 
 
 @_locked
-def events_after(conn, after_id: int, limit: int = 500) -> list[dict[str, Any]]:
-    """Events newer than ``after_id``, oldest first, each with what a notice about
-    it needs: the case's coordinates and, for a progress line, the case's PREVIOUS
-    progress line -- so a phase change (meshing -> solving) is decided from the
-    database, not from a reader's memory that a restart would wipe."""
-    rows = [dict(r) for r in conn.execute(
-        "SELECT e.id, e.ts, e.case_id, e.worker_id, e.event, e.detail, c.spec, c.attempts,"
-        " c.max_attempts FROM events e LEFT JOIN cases c ON c.case_id = e.case_id"
-        " WHERE e.id > ? ORDER BY e.id LIMIT ?", (after_id, limit)).fetchall()]
+def events_after(conn, after_id: int, before_ts: int | None = None,
+                 limit: int = 500) -> list[dict[str, Any]]:
+    """Events newer than ``after_id`` and (when given) older than ``before_ts``,
+    oldest first, each with what a notice about it needs: the case's coordinates,
+    the case's current lease holder, and for a progress line the previous
+    PHASED progress line of the same attempt -- so "solving" is announced once
+    per attempt, not again at every direction boundary where the node writes a
+    free-text line, and a retry's first meshing line counts as a new phase.
+
+    ``before_ts`` is a small lag: ids come from a sequence, and in the seconds
+    two broker instances overlap during a deploy, a row with a lower id can
+    commit after one with a higher id. Reading only rows a few seconds old lets
+    those commits land first."""
+    sql = ("SELECT e.id, e.ts, e.case_id, e.worker_id, e.event, e.detail, c.spec"
+           " FROM events e LEFT JOIN cases c ON c.case_id = e.case_id WHERE e.id > ?")
+    params: list[Any] = [after_id]
+    if before_ts is not None:
+        sql += " AND e.ts < ?"
+        params.append(before_ts)
+    sql += " ORDER BY e.id LIMIT ?"
+    params.append(limit)
+    rows = [dict(r) for r in conn.execute(sql, params).fetchall()]
     for r in rows:
-        if r["event"] == "progress":
+        if r["event"] == "progress" and r["case_id"]:
+            start = conn.execute(
+                "SELECT MAX(id) AS n FROM events WHERE case_id = ? AND event IN ('leased','resumed')"
+                " AND id < ?", (r["case_id"], r["id"])).fetchone()
             prev = conn.execute(
-                "SELECT detail FROM events WHERE case_id = ? AND event = 'progress' AND id < ?"
-                " ORDER BY id DESC LIMIT 1", (r["case_id"], r["id"])).fetchone()
+                "SELECT detail FROM events WHERE case_id = ? AND event = 'progress'"
+                # substr, not LIKE 'mesh %': a literal % reaches psycopg as a
+                # placeholder on Postgres ("only '%s' ... are allowed").
+                " AND id < ? AND id > ? AND (substr(detail, 1, 5) = 'mesh ' OR substr(detail, 1, 6) = 'solve ')"
+                " ORDER BY id DESC LIMIT 1",
+                (r["case_id"], r["id"], (start["n"] if start else None) or 0)).fetchone()
             r["previous_detail"] = prev["detail"] if prev else None
     return rows
+
+
+#: The notifier's position in the events table, in the settings table so that a
+#: restart resumes where the last process stopped instead of dropping what
+#: happened in between -- and so two instances overlapping in a deploy cannot
+#: both send the same range: each claims it with a compare-and-set first.
+NOTIFY_CURSOR = "notify_cursor"
+
+
+@_locked
+def notify_cursor(conn) -> int | None:
+    v = _setting(conn, NOTIFY_CURSOR)
+    try:
+        return int(v) if v is not None else None
+    except ValueError:
+        return None
+
+
+@_locked
+def claim_notify_cursor(conn, old: int | None, new: int, now: int | None = None) -> bool:
+    """Move the cursor from ``old`` to ``new`` if nobody else moved it first.
+    Not audited: it moves every poll, and the audit trail is for people."""
+    now = now or _now()
+    if old is None:
+        cur = conn.execute(
+            "INSERT INTO settings(key, value, updated_at, updated_by) VALUES (?,?,?,?)"
+            " ON CONFLICT(key) DO NOTHING", (NOTIFY_CURSOR, str(new), now, "notifier"))
+    else:
+        cur = conn.execute(
+            "UPDATE settings SET value = ?, updated_at = ? WHERE key = ? AND value = ?",
+            (str(new), now, NOTIFY_CURSOR, str(old)))
+    return bool(cur.rowcount)
 
 @_locked
 def complete(conn, lease_id: str, result_uri: str,
