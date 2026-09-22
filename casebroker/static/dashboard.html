@@ -72,6 +72,12 @@
     --ring: rgba(236, 72, 153, 0.4);          /* ring-brand-500 */
     --btn-bg: #f9fafb;
     --btn-border: #d1d5db;                    /* ring-gray-300 */
+    /* Skeleton placeholders: a gray-200 bar with a gray-50 sweep. Its own pair
+       rather than --border/--surface-hover, because a skeleton sits on BOTH
+       grounds -- white panels and the gray-100 stat cards and table heads --
+       and gray-100 bars vanish on the second. */
+    --skel: #e5e7eb;                          /* gray-200 */
+    --skel-shine: #f9fafb;                    /* gray-50 */
   }
 
   /* The RhinoPackages dark scale, pinned verbatim from its tailwind.config.ts
@@ -131,6 +137,10 @@
        behind it. zinc-700 gives 2.09; zinc-500 gives 3.58. Dividers stay at
        zinc-700 below -- they carry no identification duty. */
     --btn-border: #71717a;                    /* zinc-500 */
+    /* zinc-800 reads on both the zinc-900 panels and the zinc-950 wells; the
+       sweep is one step lighter, zinc-700, so it is visible without glaring. */
+    --skel: #30363d;                          /* zinc-800 */
+    --skel-shine: #484f58;                    /* zinc-700 */
   }
 
 
@@ -433,7 +443,9 @@
     border-color: var(--text-muted);
   }
   button:active { transform: translateY(1px); }
-  button:disabled {
+  /* aria-disabled: a button whose request is in flight (setPending). It looks
+     disabled and ignores a press, but keeps its focus -- see setPending. */
+  button:disabled, button[aria-disabled="true"] {
     opacity: 0.5;
     cursor: not-allowed;
     transform: none;
@@ -1013,6 +1025,85 @@
   .spin { animation: spin 0.8s linear infinite; }
   @keyframes spin { 100% { transform: rotate(360deg); } }
 
+  /* -- Skeletons --------------------------------------------------------------
+     Grey shapes of the content that is coming, shown while a region has
+     nothing to draw and a request is on its way. `.skel` only PAINTS -- colour
+     and sweep -- so it can also be put on an element that already has a shape
+     (the campaign bar, a chip) without flattening its radius or height; the
+     shape classes below size the free-standing ones.
+
+     The sweep is painted against the viewport (background-attachment: fixed),
+     so every bar on the page shows a slice of ONE band passing over it, the
+     way Facebook's and LinkedIn's placeholders do, instead of each bar
+     flashing at its own speed. --skel-phase starts a bar part-way through the
+     cycle; skelPhase() in the script sets it from the page clock, which keeps
+     a skeleton inserted later (or rebuilt mid-load) in step with the rest.
+     Inside a transformed ancestor (the drawers slide in with one) a fixed
+     background falls back to scroll, per the transforms spec: each bar then
+     sweeps on its own, which still reads as loading.
+
+     A soft sweep, deliberately not stripes: the barber-pole band on a leased
+     case's bar means "a worker is on this now", and a placeholder must not be
+     mistaken for work in progress. */
+  .skel {
+    background-color: var(--skel);
+    background-image: linear-gradient(100deg, transparent 40%, var(--skel-shine) 50%, transparent 60%);
+    background-size: 200% 100%;
+    background-repeat: no-repeat;
+    background-attachment: fixed;
+    animation: skel-sweep 1.5s ease-in-out infinite;
+    animation-delay: var(--skel-phase, 0s);
+  }
+  @keyframes skel-sweep { from { background-position: 130% 0; } to { background-position: -30% 0; } }
+  /* A line of text: 0.75em of ink in a 1.5em box, the page's own line-height,
+     so a column of these is as tall as the lines that replace it. */
+  .skel-text { display: block; height: 0.75em; margin: 0.375em 0; max-width: 100%; border-radius: 4px; }
+  .skel-block { display: block; max-width: 100%; border-radius: 6px; }
+  .skel-pill { display: block; max-width: 100%; border-radius: 999px; }
+  .skel-circle { display: inline-block; flex: none; border-radius: 50%; }
+  .skel-w-30 { width: 30%; }
+  .skel-w-45 { width: 45%; }
+  .skel-w-60 { width: 60%; }
+  .skel-w-75 { width: 75%; }
+  .skel-w-90 { width: 90%; }
+  /* An existing element worn as its own placeholder: it keeps its box, its
+     text goes. For a chip whose words are wrong until data arrives ("0
+     active" before anyone has asked how many are). */
+  .skel-mask { color: transparent !important; border-color: transparent !important; user-select: none; }
+  .skel-mask * { visibility: hidden; }
+  /* The generic row hover is --surface-hover, which in the dark theme IS the
+     bar colour: a hovered skeleton row would go blank under the cursor. */
+  tr.skel-row:hover td { background: none; }
+  /* Motion is decoration: the grey shape already says "coming". */
+  @media (prefers-reduced-motion: reduce) {
+    .skel { animation: none; background-image: none; }
+  }
+  /* Forced colours (Windows High Contrast) repaint a background as Canvas and
+     drop a gradient, so every bar was Canvas on Canvas -- gone -- and they force
+     `color` too, which put the masked words ("0 active", the badge's
+     "version • database • auth") back on screen. A skeleton is a shape, not
+     a colour scheme: it keeps a system colour that reads as one. */
+  @media (forced-colors: active) {
+    .skel { forced-color-adjust: none; background-color: GrayText; background-image: none; }
+    .skel-mask { forced-color-adjust: none; color: transparent !important; }
+  }
+
+  /* Rows that answer the PREVIOUS question while the next one is on its way (a
+     filter, a sort, another page). Dimmed, not replaced: they are still true of
+     what they say, and blanking a table for a round trip makes the pager jump
+     under the cursor. The delay is on the way IN only, so a fast broker never
+     dims at all and the answer lands at full strength at once. */
+  #casesBody, #storageBody > *, .geo-wrap .geo-fig { transition: opacity 0.12s ease; }
+  #casesTableWrap.is-stale #casesBody,
+  #storageBody.is-stale > *,
+  .geo-wrap.geo-stale .geo-fig { opacity: 0.5; transition-delay: 0.2s; }
+
+  /* Text for assistive tech only: the words a skeleton stands in for. */
+  .sr-only {
+    position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+    overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+  }
+
   /* Toast */
   #toast {
     position: fixed;
@@ -1152,7 +1243,7 @@
   </div>
 
   <!-- Campaign Status Panel -->
-  <section class="panel">
+  <section class="panel" id="statusPanel">
     <div class="panel-header">
       <div class="panel-title-group">
         <h2>
@@ -1249,7 +1340,7 @@
   </section>
 
   <!-- Workers Panel -->
-  <section class="panel">
+  <section class="panel" id="workersPanel">
     <div class="panel-header">
       <div class="panel-title-group">
         <h2>
@@ -1290,7 +1381,7 @@
   </section>
 
   <!-- Cases Browser Panel -->
-  <section class="panel">
+  <section class="panel" id="casesPanel">
     <div class="panel-header">
       <div class="panel-title-group">
         <h2>
@@ -1689,7 +1780,10 @@
               <option value="now">now (the case is given back)</option>
             </select>
           </div>
-          <div><button id="relTargetBtn" type="button">Set target</button></div>
+          <!-- Disabled until the catalog has been read (renderReleases enables
+               them): before that every field here holds a DEFAULT, and "Save
+               policy" would PUT those defaults over the real policy. -->
+          <div><button id="relTargetBtn" type="button" disabled>Set target</button></div>
         </div>
         <div class="row" style="margin-top:10px; align-items:flex-end;">
           <div class="field" style="flex:1; min-width:260px;">
@@ -1701,7 +1795,7 @@
           <label style="display:flex; align-items:center; gap:6px; font-size:12px; padding-bottom:8px;">
             <input type="checkbox" id="relRequire" /> only lease to nodes that declare a build
           </label>
-          <div><button id="relPolicyBtn" type="button">Save policy</button></div>
+          <div><button id="relPolicyBtn" type="button" disabled>Save policy</button></div>
         </div>
         <div id="relBuilds" style="margin-top:12px;"></div>
         <div id="relWorkers" style="margin-top:12px;"></div>
@@ -1855,13 +1949,48 @@
     return g;
   }
 
+  /// The newest drawing already fetched for this case at ANOTHER state, if any.
+  function settledGeometry(caseId) {
+    let found = null;
+    for (const [key, g] of geoLoads) {
+      if (g.data && key.slice(0, key.lastIndexOf("@")) === caseId) found = g.data;
+    }
+    return found;
+  }
+
   async function loadFootprints(caseId, state, wrap, retry) {
     const g = footprintsFor(caseId, state, retry);
     if (!g.data && !g.error) {
       const secs = () => ((performance.now() - g.t0) / 1000).toFixed(1) + "s";
-      wrap.innerHTML = '<span class="geo-tick" style="font-size:12px;color:var(--text-muted)">'
-        + `querying the building atlas, GEDTM30 and the canopy model… <span style="font-family:var(--font-mono)">${secs()}</span>`
-        + '<span style="display:block;margin-top:3px;font-size:11px">the first look at a case reads three remote datasets, the buildings from the source its mesh was built from, then it is cached; later opens are instant</span></span>';
+      // The first span inside .geo-tick is the counter; the interval below finds
+      // it by that position.
+      const tickHtml = (what, why) => '<span class="geo-tick" style="display:block;font-size:12px;color:var(--text-muted)">'
+        + `${what}… <span style="font-family:var(--font-mono)">${secs()}</span>`
+        + `<span style="display:block;margin-top:3px;font-size:11px">${why}</span></span>`;
+      const prev = settledGeometry(caseId);
+      if (prev) {
+        // The case changed state while open (leased -> done), and the key is per
+        // state because the source a case is drawn from follows its mesh. The
+        // drawing it had stays up, dimmed and labelled, instead of a skeleton
+        // over it: it is still the same site, and the new answer usually agrees.
+        drawGeometry(prev, wrap);
+        wrap.classList.add("geo-stale");
+        wrap.insertAdjacentHTML("afterbegin", tickHtml("re-reading the site for this case's new state",
+          "the source a case is drawn from follows its mesh, which is settled when it finishes"));
+      } else {
+        // The first look: three figure-sized blocks where the plan, the
+        // isometric and the elevation will be (drawGeometry's S, ISO and EW x
+        // EH), and the legend column holding what is actually happening. The
+        // wording and the count stay: they are why a wait of several seconds
+        // does not read as a hang.
+        wrap.innerHTML = '<div class="geo-fig">'
+          + skelFigure(300, 300) + skelFigure(300, 300) + skelFigure(300, 168)
+          + '<div class="geo-legend" style="max-width:46ch">'
+          + tickHtml("querying the building atlas, GEDTM30 and the canopy model",
+                     "the first look at a case reads three remote datasets, the buildings from the source its mesh was built from, then it is cached; later opens are instant")
+          + '<div style="margin-top:10px">' + skelLines(5, 80) + '</div></div></div>';
+      }
+      setBusy(wrap, true);
       // Silence for ten seconds reads as a hang, and these are three genuine
       // remote queries -- so it counts up. From when the LOAD started, not this
       // panel: a panel rebuilt mid-query carries on from the count it replaced,
@@ -1878,6 +2007,8 @@
       // same load and draws it, and this one is no longer on the page.
       if (!wrap.isConnected) return;
     }
+    wrap.classList.remove("geo-stale");
+    setBusy(wrap, false);
     if (g.error) {
       // Not retried on the next refresh: a broken upstream would otherwise be
       // queried again every minute for as long as the case stays open.
@@ -2697,6 +2828,150 @@
     }[c]));
   }
 
+  // -- Skeletons ---------------------------------------------------------------
+  // Grey shapes of what is coming, for the moments a region has NOTHING to show
+  // and a request is genuinely on its way: the page's first load, a drawer or a
+  // list opened for the first time, a case opened for the first time. Never
+  // over data already on screen -- the 60 s refresh, paging and every re-render
+  // keep what they have (a re-query dims it instead), because a table that
+  // blanks once a minute reads as a table that keeps failing. And never for a
+  // state that is an answer rather than a wait: "Enter your bearer token" is
+  // not loading, and a skeleton over it would promise data that is not coming.
+  //
+  // Decorative, so every skeleton is aria-hidden and the REGION carries
+  // aria-busy while it waits. They interpolate nothing but sizes this file
+  // chose -- no server field ever reaches one.
+  const SKEL_MS = 1500;          // the .skel sweep's duration; skelPhase locks to it
+
+  // Every bar shows a slice of one band painted against the viewport, which only
+  // reads as one band if they are in step. An animation starts when its element
+  // is inserted, so each skeleton starts part-way through, at the page clock's
+  // position in the cycle: a panel rebuilt mid-load (the geometry panel is
+  // rebuilt on every refresh) carries on instead of jumping back to the start.
+  function skelDelay() {
+    return `-${Math.round(performance.now() % SKEL_MS)}ms`;
+  }
+  function skelPhase() {
+    return `--skel-phase:${skelDelay()}`;
+  }
+
+  /// An element that already has the right shape -- a chip, a bar track -- worn
+  /// as its own placeholder, and given back.
+  function skelOnto(el, on, mask) {
+    if (!el) return;
+    el.classList.toggle("skel", on);
+    // Masked text is a width, not words: it must not be read out either. The
+    // value is spelled out: an empty aria-hidden counts as not hidden.
+    if (mask) {
+      el.classList.toggle("skel-mask", on);
+      if (on) el.setAttribute("aria-hidden", "true"); else el.removeAttribute("aria-hidden");
+    }
+    if (on) el.style.setProperty("--skel-phase", skelDelay());
+    else el.style.removeProperty("--skel-phase");
+  }
+
+  // Row-to-row variation, so a column of placeholders does not look ruled.
+  const SKEL_VARY = [1, 0.78, 0.92, 0.66, 0.85, 0.72, 0.96, 0.6];
+
+  /// One bar. `width`/`height` are CSS lengths; `shape` a .skel-* class.
+  function skelBar(width, height, shape, extra) {
+    return `<span class="skel ${shape || "skel-text"}" aria-hidden="true" style="width:${width};`
+      + (height ? `height:${height};` : "") + (extra || "") + `${skelPhase()}"></span>`;
+  }
+
+  /// `n` lines of prose, the last one short the way a paragraph's is.
+  function skelLines(n, widthPct) {
+    let html = "";
+    for (let i = 0; i < n; i++) {
+      const w = i === n - 1 && n > 1 ? 45 : Math.round((widthPct || 90) * SKEL_VARY[i % SKEL_VARY.length]);
+      html += skelBar(w + "%");
+    }
+    return `<div aria-hidden="true">${html}</div>`;
+  }
+
+  /// Table rows of bars. `cols` is a count, or one spec per column:
+  /// { w: width in px (varied row to row) or a CSS length string (used as is),
+  ///   h: px height, for a code chip or a badge rather than a line of text,
+  ///   num: right-aligned like a .num cell }.
+  /// Widths are px because a table sizes its columns from their content, and a
+  /// percentage of a cell that is sizing itself from that percentage is zero.
+  /// A cell's tallest bar sets the row, so a column of 18-20 px chips makes the
+  /// ~40 px rows the real table draws and the swap does not jump.
+  function skelTableRows(rows, cols, tdStyle) {
+    const spec = typeof cols === "number" ? Array.from({ length: cols }, () => ({ w: 80 })) : cols;
+    let html = "";
+    for (let r = 0; r < rows; r++) {
+      html += `<tr class="skel-row" aria-hidden="true">` + spec.map((c, i) => {
+        const w = typeof c.w === "string" ? c.w
+          : Math.max(12, Math.round(c.w * SKEL_VARY[(r + i) % SKEL_VARY.length])) + "px";
+        const bar = c.h
+          ? skelBar(w, c.h + "px", c.h < 10 ? "skel-pill" : "skel-block", c.num ? "margin-left:auto;" : "")
+          : skelBar(w, "", "skel-text", c.num ? "margin-left:auto;" : "");
+        return `<td${c.num ? ' class="num"' : ""}${tdStyle ? ` style="${tdStyle}"` : ""}>${bar}</td>`;
+      }).join("") + `</tr>`;
+    }
+    return html;
+  }
+
+  /// Stat cards, in the real card's chrome: its label dot and its border are
+  /// drawn for real, only the words and the number are bars.
+  function skelCards(n) {
+    let html = "";
+    for (let i = 0; i < n; i++) {
+      const v = SKEL_VARY[i % SKEL_VARY.length];
+      html += `<div class="stat-card" aria-hidden="true">`
+        + `<div class="label">${skelBar(Math.round(70 * v) + "px")}</div>`
+        + `<div class="value">${skelBar(Math.round(64 * v) + "px")}</div>`
+        + `<div class="subtext">${skelBar(Math.round(110 * v) + "px")}</div></div>`;
+    }
+    return html;
+  }
+
+  /// A figure's footprint: the exact box the drawing will occupy.
+  function skelFigure(w, h) {
+    return skelBar(w + "px", h + "px", "skel-block", "flex:none;");
+  }
+
+  /// A kv-list card, for a detail panel that has not arrived: a heading bar,
+  /// then `rows` label/value pairs in the real grid.
+  function skelDetailCard(rows) {
+    let kv = "";
+    for (let i = 0; i < rows; i++) {
+      kv += `<div>${skelBar(Math.round(70 * SKEL_VARY[i % SKEL_VARY.length]) + "px")}</div>`
+        + `<div>${skelBar(Math.round(85 * SKEL_VARY[(i + 3) % SKEL_VARY.length]) + "%")}</div>`;
+    }
+    return `<div class="detail-card" aria-hidden="true"><h3>${skelBar("140px")}</h3>`
+      + `<div class="kv-list">${kv}</div></div>`;
+  }
+
+  /// A region is waiting (true) or has its answer (false). On the element the
+  /// user's attention is on -- a panel, a drawer body -- so assistive tech hears
+  /// "busy" instead of walking a row of grey boxes.
+  function setBusy(el, on) {
+    if (el) el.setAttribute("aria-busy", on ? "true" : "false");
+  }
+
+  /// A button whose request is in flight: it looks disabled and its handler
+  /// ignores a second press (isPending), but it is NOT `disabled`. Disabling the
+  /// button that has focus -- the one just pressed -- blurs it to <body>, and
+  /// re-enabling it does not give it back: a keyboard user's second Enter on
+  /// "Next →" did nothing, and a screen reader lost its place.
+  function setPending(btn, on) {
+    if (!btn) return;
+    if (on) btn.setAttribute("aria-disabled", "true"); else btn.removeAttribute("aria-disabled");
+  }
+  function isPending(btn) {
+    return !!btn && btn.getAttribute("aria-disabled") === "true";
+  }
+
+  /// innerHTML by id. The workers tbody in particular is written through this:
+  /// tests/test_progress_grammar.py reads the FIRST literal write to that
+  /// element as the real row, and counts its cells against WORKER_COLUMNS.
+  function setHtml(id, html) {
+    const el = document.getElementById(id);
+    if (el) el.innerHTML = html;
+  }
+
   function relTime(unixSeconds) {
     if (!unixSeconds) return "—";
     const s = Math.floor(Date.now() / 1000) - unixSeconds;
@@ -2835,6 +3110,7 @@
       return await healthInFlight;
     } finally {
       healthInFlight = null;
+      badgeSkeleton(false);
       // The wizard judges its first step from this, and nothing else redraws it
       // until refresh() has finished several more requests. Telling it here is
       // what makes the answer land as soon as it is known.
@@ -2855,8 +3131,26 @@
     // secured entirely by accounts as "open", which is the opposite of true.
     if (h.auth) parts.push(h.auth === "OPEN" ? "open" : "auth required");
     if (parts.length) {
+      skelOnto(badge, false, true);
       badge.textContent = parts.join(" • ");
       badge.hidden = false;
+    }
+  }
+
+  // The badge's placeholder, for the FIRST probe only -- while it has never been
+  // filled. Every later probe re-sets a badge that is already showing, and one
+  // that failed stays hidden rather than shimmering until the next minute.
+  function badgeSkeleton(on) {
+    const badge = $("brokerDbBadge");
+    if (on) {
+      if (!badge.hidden) return;
+      badge.textContent = "version • database • auth";   // masked: a width, not words
+      skelOnto(badge, true, true);
+      badge.hidden = false;
+    } else if (badge.classList.contains("skel")) {
+      skelOnto(badge, false, true);
+      badge.textContent = "";
+      badge.hidden = true;
     }
   }
 
@@ -2864,6 +3158,7 @@
   const STATE_LABEL = { pending: "Pending", leased: "Leased", done: "Done", quarantined: "Quarantined" };
 
   function renderStatus(st) {
+    statusSkeletonDone(true);          // every slot the skeleton used is overwritten below
     $("statusEmpty").style.display = "none";
     $("statusBody").style.display = "block";
 
@@ -3021,6 +3316,7 @@
     // "nothing is coming". Every card carries its age, because a snapshot nobody
     // has refreshed describes a queue that has moved on, and showing that as
     // current is the one way this panel could mislead.
+    workersSkeletonDone(true);         // the strip and the table below replace it
     const cards = fleetCards(st.workers || [], st.fleet || [], Math.floor(Date.now() / 1000));
     const fq = $("fleetQueue");
     if (cards.length) {
@@ -3132,7 +3428,11 @@
       }).join("");
     } else {
       $("workersEmpty").style.display = "block";
-      $("workersEmpty").textContent = fleet.some((f) => f.queued > 0)
+      // `st.fleet`, not a bare `fleet`: that local was removed when the strip
+      // moved to fleetCards(), and the bare name threw a ReferenceError on
+      // every campaign with no worker yet -- which aborted refresh() before the
+      // case table loaded and reported the broker as unreachable.
+      $("workersEmpty").textContent = (st.fleet || []).some((f) => f.queued > 0)
         ? "No worker has leased a case yet — the queue above is still waiting for the scheduler."
         : "No workers have leased cases yet.";
       $("workersTableWrap").style.display = "none";
@@ -3176,15 +3476,49 @@
   // for the life of the page: an auto-refresh re-renders the table every 60 s
   // and re-fetching then would make the panel flicker once a minute.
   const caseDetails = new Map();
+  // When a record's last fetch FAILED. The Location row shows a placeholder
+  // while its record is on the way, and this is what lets it stop: without it a
+  // failed fetch looked exactly like a pending one, and the bar would shimmer
+  // until the next refresh -- forever, if the endpoint kept failing. It also
+  // spaces the retries: the failure re-renders the panel, and a render that
+  // retried at once would hammer a failing endpoint in a loop. Reopening the
+  // row clears it (the row click below), which is the retry a person asks for.
+  const caseDetailFailed = new Map();          // case_id -> ms when it failed
+  const CASE_DETAIL_RETRY_MS = 30000;
 
-  function ensureCaseDetail(id, rows) {
+  // The rows the table is drawing NOW. A record that lands redraws from these,
+  // not from the rows its fetch started under: paging, a sort, a lookup and the
+  // 60 s refresh all keep the open row open, so by the time a slow record
+  // answered those were another page -- and drawing them put page 1's rows
+  // back under a pager reading "26–50", until the next refresh.
+  let casesOnScreen = [];
+
+  /// Redraw the open case's panel from what is on screen, if it still is:
+  /// open, among the rows drawn, and not under a skeleton or a question the
+  /// user has asked since (whose answer draws the record itself).
+  function redrawOpenCase(id) {
+    if (openDetailId !== id || skelOn.cases !== null || casesShownGen < casesWantGen) return;
+    if ($("casesTableWrap").style.display === "none") return;
+    if (!casesOnScreen.some((c) => c.case_id === id)) return;
+    renderCasesTable(casesOnScreen);
+  }
+
+  function ensureCaseDetail(id) {
     if (!id || caseDetails.has(id)) return;
+    if (Date.now() - (caseDetailFailed.get(id) || 0) < CASE_DETAIL_RETRY_MS) return;
+    caseDetailFailed.delete(id);
     caseDetails.set(id, null);                 // in flight: one request, not one per render
     api("/v1/cases/" + encodeURIComponent(id)).then((full) => {
       caseDetails.set(id, full);
-      if (openDetailId === id) renderCasesTable(rows);
+      redrawOpenCase(id);
     }).catch(() => {
+      // Only if it is still THIS fetch's placeholder: a lookup of the same id
+      // may have stored the full record meanwhile, and throwing that away
+      // turned a good answer's Location into "—".
+      if (caseDetails.get(id) !== null) return;
       caseDetails.delete(id);                  // a failed fetch may be retried by reopening
+      caseDetailFailed.set(id, Date.now());
+      redrawOpenCase(id);                      // the placeholder becomes "—"
     });
   }
 
@@ -3223,6 +3557,14 @@
     const metrics = parseMaybeJson(c.metrics);
     const spec = parseMaybeJson(c.spec);
     const curlSnippet = `curl -H "Authorization: Bearer ${esc($("token").value.trim() || "<TOKEN>")}" "${$("broker").value.replace(/\/+$/, "")}/v1/cases/${esc(c.case_id)}"`;
+    // Location is the one row the list page cannot fill: `place` is computed
+    // only by GET /v1/cases/{id}, which ensureCaseDetail is fetching. A list row
+    // has NO place key and the full record always has one (null when the spec
+    // has no coordinates), so `undefined` is "not here yet" and never "none".
+    // The fetch starts right after the first render, so "not in the cache and
+    // not failed" is pending too.
+    const placePending = c.place === undefined && !caseDetails.get(c.case_id)
+      && !caseDetailFailed.has(c.case_id);
 
     return `
       <div class="caseDetail">
@@ -3247,7 +3589,7 @@
               <dt>LCZ</dt>
               <dd>${esc(c.lcz || "—")}</dd>
               <dt title="country from the polygon the site is in; nearest town of 15,000+ people (GeoNames) and how far it is">Location</dt>
-              <dd>${placeHtml(c.place, spec)}</dd>
+              <dd aria-busy="${placePending}">${placePending ? skelBar("78%") : placeHtml(c.place, spec)}</dd>
               <dt>City Cluster</dt>
               <dd>${esc(c.city_cluster || "—")}</dd>
               <dt>Priority</dt>
@@ -3614,11 +3956,23 @@
       if (caseList.sort === key) caseList.dir = caseList.dir === "asc" ? "desc" : "asc";
       else { caseList.sort = key; caseList.dir = "desc"; }
       caseList.offset = 0;              // a different order means a different page 1
-      loadCases();
+      // The arrow moves NOW. It used to move only with the answer, because the
+      // head is drawn by renderCasesTable -- so the click looked dead for a
+      // round trip while the old order sat there unmarked.
+      renderCasesHead();
+      requeryCases();
     });
   }
 
   function renderCasesTable(cases) {
+    casesSkeletonDone(true);           // the rows below replace it
+    casesOnScreen = cases;
+    // BEFORE the rows are built: a retry clears the failure mark and marks the
+    // fetch in flight, and the Location row reads both. Called after, a retry
+    // spent its whole round trip showing the failure's "—" (which also means
+    // "no coordinates") instead of the placeholder. Its callbacks are async,
+    // so nothing redraws under this render.
+    ensureCaseDetail(openDetailId);
     renderCasesHead();
     $("casesEmpty").style.display = cases.length ? "none" : "block";
     $("casesEmpty").textContent = "No cases match this filter.";
@@ -3673,12 +4027,12 @@
     // which looked like the fetch had failed; with the per-case cache in
     // loadFootprints it costs no request.
     autoLoadGeometry();
-    ensureCaseDetail(openDetailId, cases);
 
     $("casesBody").querySelectorAll("tr.caseRow").forEach((tr) => {
       tr.addEventListener("click", () => {
         const id = tr.dataset.id;
         openDetailId = (openDetailId === id) ? null : id;
+        if (openDetailId) caseDetailFailed.delete(id);   // opening it again IS the retry
         renderCasesTable(cases);
       });
     });
@@ -3706,8 +4060,9 @@
   /// tick as /healthz and /v1/status instead of after both have answered. What
   /// it returns is a promise and the shape to expect back, nothing more.
   function startCases() {
+    const gen = ++casesGen;
     if (caseList.singleId) {
-      return { single: true, promise: api("/v1/cases/" + encodeURIComponent(caseList.singleId)) };
+      return { gen, single: true, promise: api("/v1/cases/" + encodeURIComponent(caseList.singleId)) };
     }
     const q = new URLSearchParams({ limit: caseList.limit, offset: caseList.offset,
                                     sort: caseList.sort, direction: caseList.dir });
@@ -3719,19 +4074,40 @@
     // the ONE expanded row needs it, and that row fetches its own full record.
     // Measured on a 4,000-case campaign: 61.6 KB a page, 25.0 KB without it.
     q.set("include_spec", "false");
-    return { single: false, promise: api("/v1/cases?" + q.toString()) };
+    return { gen, single: false, promise: api("/v1/cases?" + q.toString()) };
   }
+
+  // Which answer the table may draw. Case requests overlap: the 60 s refresh
+  // re-asks the current query while a filter change, a sort or a page click
+  // asks another, and whichever landed LAST used to be drawn -- a slow answer
+  // to the old filter could paint over the new one. Every request is stamped
+  // as it STARTS (not when it is awaited: refresh() awaits its own a whole
+  // /v1/status later), and an answer older than what is on screen, or older
+  // than the last one the user asked for, is dropped. The user's own request is
+  // always awaited by its own loadCases, so dropping the others for it can never
+  // leave the table waiting on nothing.
+  let casesGen = 0;          // the newest request started
+  let casesShownGen = 0;     // the newest request whose answer (or failure) is on screen
+  let casesWantGen = 0;      // the newest request the user asked for
 
   async function loadCases(started) {
     const req = started || startCases();
+    // Settled either way before anything is drawn, so a stale failure is
+    // dropped as quietly as a stale answer.
+    const res = await req.promise.then((v) => ({ v }), (e) => ({ e }));
+    if (req.gen < casesShownGen || req.gen < casesWantGen) return;
+    casesShownGen = req.gen;
+    casesBusy(false);
     if (req.single) {
       try {
-        const c = await req.promise;
+        if (res.e) throw res.e;
+        const c = res.v;
         openDetailId = c.case_id;
         caseDetails.set(c.case_id, c);   // already the full record, spec included
         renderCasesTable([c]);
         caseList.total = 1;
       } catch (e) {
+        casesSkeletonDone(false);
         $("casesEmpty").style.display = "block";
         $("casesEmpty").textContent = "Case not found: " + e.message;
         $("casesTableWrap").style.display = "none";
@@ -3742,16 +4118,117 @@
     }
 
     try {
-      const page = await req.promise;
+      if (res.e) throw res.e;
+      const page = res.v;
       caseList.total = page.total;
       renderCasesTable(page.cases);
       renderPager();
     } catch (e) {
+      casesSkeletonDone(false);
       $("casesEmpty").style.display = "block";
       $("casesEmpty").textContent = "Failed to load cases: " + e.message;
       $("casesTableWrap").style.display = "none";
       $("casesTable").style.display = "none";
+      // The pager belongs to the table it pages. Left up, it went on offering
+      // "1–25 of 4,000 cases" and a live Next beside a failure message.
+      $("casesPager").style.display = "none";
     }
+  }
+
+  // -- Case-table loading states -------------------------------------------------
+  // Two, because there are two situations. With rows on screen that answer the
+  // PREVIOUS question (a filter, a sort, a page, a lookup), those rows stay and
+  // are dimmed until the answer lands -- replacing them with grey bars for a
+  // round trip would make the pager jump under the cursor between clicks. With
+  // nothing on screen (the first load, or after "No cases match"), there is
+  // nothing to keep, and the shape of the page that is coming goes there.
+  // The skeleton's owner is "refresh" (the first load, which refresh() may
+  // abandon before it ever reaches the case request) or the stamp of the user
+  // request that put it up, which always settles through loadCases.
+  const CASE_SKEL = [
+    { w: 150, h: 20 }, { w: 64, h: 18 }, { w: 48, h: 18 }, { w: 36 }, { w: 84 },
+    { w: 110 }, { w: 36 }, { w: 90 }, { w: 50 },
+  ];
+
+  function casesSkeleton(owner) {
+    skelOn.cases = owner;
+    const single = !!caseList.singleId;
+    $("casesEmpty").style.display = "none";
+    $("casesTableWrap").classList.remove("is-stale");
+    $("casesTableWrap").style.display = "block";
+    $("casesTable").style.display = "table";
+    // A lookup answers with ONE row, already expanded -- so that is the shape,
+    // not a page of 25: the three cards (nine, eight and three pairs), the
+    // full-width Site Geometry card as loadFootprints' first look draws it the
+    // moment the answer lands (three figures, then its legend column of words
+    // and lines, 46ch wide, which wraps under them), and the raw-JSON summary
+    // line. Without the last two the panel grew by ~385 px on arrival.
+    // The legend's words are six lines in a flex column, where a bar's margins
+    // (half its line box) do not collapse into its neighbour's; the flow-root
+    // keeps the summary bar's from collapsing into the card's above it.
+    // The first row is words, for assistive tech: every bar is aria-hidden, and
+    // a table of column headers with no rows under them reads as "no cases".
+    const words = SKEL_VARY.slice(0, 6).map((v) => skelBar(Math.round(95 * v) + "%")).join("");
+    setHtml("casesBody", `<tr><td colspan="9" class="sr-only">Loading cases…</td></tr>` + (single
+      ? skelTableRows(1, CASE_SKEL)
+        + `<tr class="caseDetailRow skel-row" aria-hidden="true"><td colspan="9"><div class="caseDetail">`
+        + `<div class="detail-grid">${skelDetailCard(9)}${skelDetailCard(8)}${skelDetailCard(3)}</div>`
+        + `<div class="detail-card" style="margin-bottom:14px"><h3>${skelBar("110px")}</h3>`
+        + `<div class="geo-fig">${skelFigure(300, 300)}${skelFigure(300, 300)}${skelFigure(300, 168)}`
+        + `<div class="geo-legend" style="width:46ch;max-width:100%">`
+        + `<div style="display:flex;flex-direction:column">${words}</div>`
+        + `<div style="margin-top:10px">${skelLines(5, 80)}</div></div></div></div>`
+        + `<div style="display:flow-root;font-size:12px">${skelBar("260px")}</div>`
+        + `</div></td></tr>`
+      : skelTableRows(caseList.limit, CASE_SKEL)));
+    if (single) {
+      $("casesPager").style.display = "none";
+    } else {
+      $("casesPager").style.display = "flex";
+      $("casesRange").innerHTML = skelBar("130px");
+      $("casesPrev").disabled = true;
+      $("casesNext").disabled = true;
+    }
+    setBusy($("casesPanel"), true);
+  }
+
+  /// `drawn`: an answer is replacing the skeleton (renderCasesTable, then
+  /// renderPager). Otherwise the region goes back to its message, whatever the
+  /// caller has just written into #casesEmpty.
+  function casesSkeletonDone(drawn) {
+    if (skelOn.cases === null) return;
+    skelOn.cases = null;
+    setBusy($("casesPanel"), false);
+    if (drawn) return;
+    setHtml("casesBody", "");
+    $("casesRange").textContent = "";
+    $("casesTableWrap").style.display = "none";
+    $("casesTable").style.display = "none";
+    $("casesPager").style.display = "none";
+    $("casesEmpty").style.display = "block";
+  }
+
+  function casesBusy(on) {
+    $("casesTableWrap").classList.toggle("is-stale", on);
+    if (skelOn.cases === null) setBusy($("casesPanel"), on);
+    // One click, one page: Next pressed twice during a round trip advanced the
+    // offset twice and sent two requests. Pending, not disabled (setPending):
+    // the button just pressed has the focus. Released with the answer, whose
+    // renderPager then disables the ends of the range; a failure hides the
+    // pager altogether.
+    setPending($("casesPrev"), on);
+    setPending($("casesNext"), on);
+  }
+
+  /// A query the USER changed: a filter, a sort, a page, a lookup, a reset.
+  /// (The refresh, Escape and the housekeeping fixes re-ask the same question
+  /// with its answer already on screen, and go straight to loadCases.)
+  function requeryCases() {
+    const req = startCases();
+    casesWantGen = req.gen;
+    if (skelOn.cases === null && $("casesTableWrap").style.display !== "none") casesBusy(true);
+    else casesSkeleton(req.gen);
+    return loadCases(req);
   }
 
   // -- Finished-case notifications ---------------------------------------------
@@ -3814,7 +4291,7 @@
       const note = new Notification(title, { body, tag: "casebroker-done", renotify: true });
       note.onclick = () => {
         window.focus();
-        if (n === 1) { caseList.singleId = newIds[0]; openDetailId = newIds[0]; loadCases(); }
+        if (n === 1) { caseList.singleId = newIds[0]; openDetailId = newIds[0]; requeryCases(); }
         note.close();
       };
     } catch (e) {
@@ -3863,18 +4340,65 @@
   // yet", which is a different thing from zero and is rendered differently.
   let lastStatus = null;
   let machineCount = null;
+  // null is two states here too: /v1/workers/tokens not answered yet, and
+  // answered with a failure. Step 4 said "Checking…" forever after the second.
+  let machinesProbe = "none";      // none | pending | ok | failed
+
+  // Until the FIRST /v1/auth/state answers, nobody knows which of Setup's forms
+  // is drawn -- sign in, set up, or the signed-in line -- or whether the Users,
+  // Machines and Campaign tabs open at all. Their markup defaults to LOCKED, so
+  // an admin who opened one during that round trip was told "Sign in as an
+  // admin" while already signed in as one. A neutral shape instead: a heading,
+  // a subtitle and a few lines, since what arrives depends on the role.
+  // Re-runs (sign-in, logout) keep the previous state on screen until their
+  // answer, and get none of this.
+  let authSkelOn = false;
+  function authSkeleton(on) {
+    if (on === authSkelOn) return;
+    authSkelOn = on;
+    document.querySelectorAll(".auth-skel").forEach((el) => el.remove());
+    // The words stay readable: the shapes are aria-hidden, and a pane holding
+    // nothing else is, to a screen reader, an empty pane.
+    const shape = (lines) => `<div class="auth-skel"><span class="sr-only">Checking your session…</span>`
+      + `<div aria-hidden="true">`
+      + `<div style="font-size:13px">${skelBar("96px")}</div>`
+      + `<div class="panel-subtitle">${skelBar("68%")}</div>`
+      + `<div style="margin-top:12px">${skelLines(lines, 80)}</div></div></div>`;
+    for (const id of ["usersLocked", "machinesLocked", "campaignLocked"]) {
+      const locked = $(id);
+      // Back to the markup's default; loadAuthState sets the real answer next.
+      locked.style.display = on ? "none" : "";
+      if (on) locked.insertAdjacentHTML("afterend", shape(3));
+      setBusy(locked.parentElement, on);
+    }
+    if (on) {
+      $("authPanel").insertAdjacentHTML("beforebegin",
+        `<div class="auth-skel" style="margin-top:14px"><span class="sr-only">Checking your session…</span>`
+        + `<div aria-hidden="true">`
+        + `<div style="font-size:13px">${skelBar("72px")}</div>`
+        + `<div class="panel-subtitle">${skelBar("64%")}</div>`
+        + `<div class="row" style="margin-top:10px">`
+        + skelBar("auto", "34px", "skel-block", "flex:1;min-width:200px;")
+        + skelBar("auto", "34px", "skel-block", "flex:1;min-width:200px;")
+        + skelBar("90px", "34px", "skel-block") + `</div></div></div>`);
+    }
+    setBusy($("tab-setup"), on);
+  }
 
   async function loadAuthState() {
     authProbe = "pending";
+    if (!authState) authSkeleton(true);
     try {
       authState = await api("/v1/auth/state");
       authProbe = "ok";
     } catch (e) {
       authProbe = "failed";
+      authSkeleton(false);
       $("authPanel").style.display = "none";
       renderWizard();
       return;
     }
+    authSkeleton(false);
     const panel = $("authPanel");
     panel.style.display = "";
     const signedIn = !!authState.user;
@@ -3936,8 +4460,13 @@
       $("authPassword").value = "";
       $("authSetupToken").value = "";
       showToast("Signed in as " + data.username + " (" + data.role + ")");
+      // The campaign is what signing in was for: from an empty page, its shape
+      // goes up now and covers the auth round trip as well as the load -- and
+      // userRefresh's refresh claims it, so a timer refresh already on its way
+      // with the old session cannot take it down (see skelOwner).
+      firstLoadSkeletons();
       await loadAuthState();
-      refresh();
+      userRefresh();
     } catch (err) {
       showToast("Could not reach the broker: " + err.message);
     }
@@ -3971,13 +4500,25 @@
       + esc(r) + "</option>").join("");
   }
 
+  // As for machines: placeholder rows only before the list's first drawing.
+  // Each is a select's and a button's height, so the real rows land in place.
+  let userListDrawn = false;
+  const USER_SKEL = [{ w: 90 }, { w: 84, h: 26 }, { w: 52 }, { w: 170, h: 26, num: true }];
+
   async function loadUsers() {
     $("newUserRole").innerHTML = roleOptions("viewer");
     const roles = (authState && authState.roles) || [];
     $("rolesHint").textContent = roles
       .map((r) => ROLE_BLURB[r] ? r + " \u2014 " + ROLE_BLURB[r] : r).join(" \u00b7 ");
+    if (!userListDrawn) {
+      setHtml("userList", `<table style="width:100%; border-collapse:collapse;" aria-hidden="true"><tbody>`
+        + skelTableRows(3, USER_SKEL, "padding:6px 8px;") + `</tbody></table>`);
+      setBusy($("userList"), true);
+    }
     try {
       const rows = (await api("/v1/users")).users || [];
+      userListDrawn = true;
+      setBusy($("userList"), false);
       $("userList").innerHTML =
         '<table style="width:100%; border-collapse:collapse;">' +
         '<thead><tr>' +
@@ -4012,6 +4553,8 @@
         b.addEventListener("click", () => deleteUser(b.getAttribute("data-del-for")));
       });
     } catch (e) {
+      userListDrawn = false;
+      setBusy($("userList"), false);
       $("userList").innerHTML =
         '<div class="panel-subtitle">Could not list accounts: ' + esc(e.message) + "</div>";
     }
@@ -4040,9 +4583,38 @@
   }
 
   let lastReleasesText = "";
+  // Whether the catalog has EVER been drawn. Not `lastReleases`: a failed fetch
+  // resets that to null while the previous drawing stays on screen, and a
+  // placeholder keyed on it would flash over that drawing every minute.
+  let releasesDrawn = false;
+  // Whether the panel has ever shown an ANSWER, the drawing or its failure.
+  // The skeleton is for before that only: keyed on releasesDrawn, it came back
+  // over "Could not read the release catalog" on every 60 s refresh against a
+  // broker whose /v1/releases keeps failing, and said the answer was coming.
+  let releasesAnswered = false;
+  const RELEASE_SKEL = [{ w: 150, h: 20 }, { w: 110 }, { w: 30, num: true }, { w: 36, num: true },
+                        { w: 24, num: true }, { w: 24, num: true }, { w: 60, h: 26 }];
+  const REL_WORKER_SKEL = [{ w: 140, h: 20 }, { w: 130, h: 20 }, { w: 150, h: 26 }, { w: 60, h: 26 }];
+  const relWorkersSkeleton = () => `<div class="table-wrap" aria-hidden="true"><table><tbody>`
+    + skelTableRows(2, REL_WORKER_SKEL) + `</tbody></table></div>`;
+
   async function loadReleases() {
+    if (!releasesAnswered) {
+      setHtml("relBuilds", `<div class="table-wrap" aria-hidden="true"><table><tbody>`
+        + skelTableRows(2, RELEASE_SKEL) + `</tbody></table></div>`);
+      setHtml("relWorkers", relWorkersSkeleton());
+      setBusy($("relBuilds"), true);
+    }
     let next = null;
-    try { next = await api("/v1/releases"); } catch (e) { next = null; }
+    let failure = null;
+    try { next = await api("/v1/releases"); } catch (e) { next = null; failure = e; }
+    releasesAnswered = true;
+    if (failure && !releasesDrawn) {
+      // Said, rather than left blank: an empty panel here reads as "no builds".
+      setBusy($("relBuilds"), false);
+      setHtml("relBuilds", `<div class="panel-subtitle">Could not read the release catalog: ${esc(failure.message)}</div>`);
+      setHtml("relWorkers", "");
+    }
     // Re-render only when something CHANGED: this runs on every refresh, and the
     // catalog changes a few times in a campaign, not every thirty seconds.
     const text = JSON.stringify(next);
@@ -4062,6 +4634,12 @@
     $("relApply").value = r.target_apply || "case";
     $("relRequire").checked = !!r.require_build;
     $("relBlocked").value = (r.blocked_builds || []).join(", ");
+    // The fields now hold the broker's policy rather than the markup's
+    // defaults, so saving them can no longer overwrite it with those defaults.
+    releasesDrawn = true;
+    setBusy($("relBuilds"), false);
+    $("relTargetBtn").disabled = false;
+    $("relPolicyBtn").disabled = false;
 
     const platforms = (b) => (r.releases || []).filter((x) => x.build === b).map((x) => x.platform).sort().join(" ");
     $("relBuilds").innerHTML = (r.builds || []).length === 0
@@ -4080,7 +4658,12 @@
           </tr>`).join("") + `</tbody></table></div>`;
 
     const workers = (lastStatus && lastStatus.workers) || [];
-    $("relWorkers").innerHTML = workers.length === 0 ? "" :
+    // The worker list comes from /v1/status, which on the first load is still
+    // on its way when the catalog lands; the placeholder stays until it does
+    // (workersSkeletonDone redraws this), rather than collapsing to nothing and
+    // growing back. [] from an ANSWERED status is "no workers", and draws that.
+    $("relWorkers").innerHTML = (!lastStatus && skelOn.workers) ? relWorkersSkeleton() :
+      workers.length === 0 ? "" :
       `<div class="table-wrap"><table><thead><tr><th>Worker</th><th>Runs</th><th>Canary target</th><th>New cases</th></tr></thead><tbody>`
       + workers.map((w) => `<tr>
           <td><code class="inline">${esc(w.worker_id)}</code></td>
@@ -4289,13 +4872,27 @@
     loadMachines();
   });
 
+  // Placeholder rows only while the list has never been drawn: after an issue,
+  // a revoke or an approval the old list stays until the new one replaces it.
+  let machineListDrawn = false;
+  const MACHINE_SKEL = [{ w: 110 }, { w: 60 }, { w: 52 }, { w: 64, h: 26, num: true }];
+
   async function loadMachines() {
+    machinesProbe = "pending";
+    if (!machineListDrawn) {
+      setHtml("machineList", `<table style="width:100%; border-collapse:collapse;" aria-hidden="true"><tbody>`
+        + skelTableRows(3, MACHINE_SKEL, "padding:6px 8px;") + `</tbody></table>`);
+      setBusy($("machineList"), true);
+    }
     try {
       const data = await api("/v1/workers/tokens");
       const rows = data.tokens || [];
       // A revoked credential cannot lease, so it is not a machine the wizard
       // may count as done.
       machineCount = rows.filter((t) => !t.revoked_at).length;
+      machinesProbe = "ok";
+      machineListDrawn = true;
+      setBusy($("machineList"), false);
       renderWizard();
       if (!rows.length) {
         $("machineList").innerHTML =
@@ -4325,8 +4922,12 @@
             '</td></tr>';
         }).join("") + '</tbody></table>';
     } catch (e) {
+      machinesProbe = "failed";
+      machineListDrawn = false;
+      setBusy($("machineList"), false);
       $("machineList").innerHTML =
         '<div class="panel-subtitle">Could not list machines: ' + esc(e.message) + '</div>';
+      renderWizard();
     }
   }
 
@@ -4435,15 +5036,71 @@
     else $("storageBtn").focus();
   }
 
+  // The drawer's first measurement has nothing to keep, and gets the shape of
+  // the answer; a re-open or Refresh has the last numbers, which stay (dimmed)
+  // until the new ones land -- they were wiped to "Measuring…" on every click,
+  // for a read that can take a while (the row counts are exact COUNT(*)s).
+  // Stamped, because two quick opens start two measurements and the slower one
+  // used to win whether or not it was the newer.
+  let storageGen = 0;
+  let storageDrawn = false;
+  // The schema's tables, every one of which the answer lists, each with its
+  // note (db.py _TABLE_NOTES): 13 rows of two lines. The 9 one-line rows this
+  // drew were less than half the table's height, and the footnote dropped
+  // ~385 px when the numbers landed.
+  const STORAGE_TABLES = 13;
+
+  function storageSkeleton() {
+    const px = (w, r, i) => Math.round(w * SKEL_VARY[(r + i) % SKEL_VARY.length]) + "px";
+    const num = (w) => skelBar(w, "", "skel-text", "margin-left:auto;");
+    let rows = "";
+    // Each line is its own flow root: a bar's margins are half its line box,
+    // and between two bars (and through .note's own 2 px) they collapsed into
+    // one, which drew the two-line cell 6 px short -- 80 px over the table.
+    for (let r = 0; r < STORAGE_TABLES; r++) {
+      rows += `<tr class="skel-row">`
+        + `<td><div style="display:flow-root">${skelBar(px(96, r, 0))}</div>`
+        + `<div class="note" style="display:flow-root">${skelBar(px(230, r, 3))}</div></td>`
+        + `<td class="num">${num(px(44, r, 1))}</td>`
+        // The number and, under it, the thin bar that ranks the table by size.
+        + `<td class="num">${num(px(56, r, 2))}${skelBar(px(80, r, 5), "4px", "skel-pill", "margin-left:auto;")}</td>`
+        + `<td class="num">${num(px(44, r, 4))}</td></tr>`;
+    }
+    // No quota meter: the answer draws one only when a limit is configured,
+    // and a shape that may not come is a promise the page cannot keep.
+    return `<span class="sr-only">Measuring…</span><div aria-hidden="true">`
+      + `<div class="storage-total">${skelBar("132px")}</div>`
+      + `<div class="storage-sub">${skelBar("62%")}</div>`
+      + `<div class="storage-sub" style="margin-top:10px">${skelBar("94%")}${skelBar("52%")}</div>`
+      + `<table><thead><tr><th>Table</th><th class="num">Rows</th><th class="num">Size</th>`
+      + `<th class="num">of which indexes</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+  }
+
   async function loadStorage() {
     const body = $("storageBody");
-    body.innerHTML = `<div class="storage-sub">Measuring…</div>`;
+    const gen = ++storageGen;
+    if (storageDrawn) body.classList.add("is-stale");
+    else body.innerHTML = storageSkeleton();
+    setBusy(body, true);
+    // Pending, not disabled: it is usually the button just pressed, and inside
+    // an aria-modal drawer a disabled one dropped the focus behind the modal.
+    setPending($("storageRefresh"), true);
     let d;
     try { d = await api("/v1/storage"); }
     catch (e) {
+      if (gen !== storageGen) return;          // a newer measurement owns the drawer
+      storageDrawn = false;
+      body.classList.remove("is-stale");
+      setBusy(body, false);
+      setPending($("storageRefresh"), false);
       body.innerHTML = `<div class="storage-sub">Could not read storage: ${esc(e.message)}</div>`;
       return;
     }
+    if (gen !== storageGen) return;
+    storageDrawn = true;
+    body.classList.remove("is-stale");
+    setBusy(body, false);
+    setPending($("storageRefresh"), false);
     const pct = d.quota_bytes ? d.total_bytes / d.quota_bytes * 100 : null;
     const meterClass = pct == null ? "" : pct >= 90 ? "full" : pct >= 70 ? "warn" : "";
     const biggest = Math.max(1, ...d.tables.map((t) => t.bytes || 0));
@@ -4489,6 +5146,15 @@
   // unfinished one expands -- the alternative, five forms at once, is what the
   // single connection panel used to be, and it was noise on every run after
   // the first.
+  /// A note whose answer is on its way: a bar where the sentence will be, and
+  /// the words kept for assistive tech. Only for a probe that is genuinely in
+  /// flight -- "pending" and "failed" are kept apart above for exactly this.
+  /// "Waiting for the broker to answer /healthz." stays as text: it names what
+  /// is being waited on, which a grey bar cannot.
+  function pendingNote(words) {
+    return '<span class="sr-only">' + words + "</span>" + skelBar("min(260px, 70%)");
+  }
+
   function wizardSteps() {
     const h = lastHealth;
     const signedIn = !!(authState && authState.user);
@@ -4536,7 +5202,7 @@
         title: "Admin account",
         done: !!(authState && !authState.needs_setup),
         note: !authState
-            ? (authProbe === "failed" ? "Could not read /v1/auth/state." : "Checking\u2026")
+            ? (authProbe === "failed" ? "Could not read /v1/auth/state." : pendingNote("Checking\u2026"))
             : authState.needs_setup
               ? "None yet. The first account created below becomes the admin, and "
                 + "that form then closes for good."
@@ -4559,7 +5225,9 @@
         title: "A credential per machine",
         done: machineCount !== null && machineCount > 0,
         note: !isAdmin ? "Needs an admin session."
-            : machineCount === null ? "Checking\u2026"
+            : machineCount === null
+              ? (machinesProbe === "failed" ? "Could not list this broker's machine credentials."
+                 : pendingNote("Checking\u2026"))
             : machineCount > 0
               ? machineCount + (machineCount === 1 ? " machine has" : " machines have")
                 + " a credential of their own."
@@ -4573,7 +5241,11 @@
       {
         title: "A worker has leased a case",
         done: !!workers,
-        note: workers === null ? "Connect to see the campaign."
+        // skelOn.status is exactly "the first /v1/status is on its way": an
+        // admin whose machine list answered first was told to connect while
+        // the page was doing just that.
+        note: workers === null
+            ? (skelOn.status ? pendingNote("Checking…") : "Connect to see the campaign.")
             : workers > 0
               ? workers + (workers === 1 ? " worker" : " workers") + " known, "
                 + (cases || 0).toLocaleString() + " cases in the campaign."
@@ -4626,8 +5298,175 @@
       (authState && authState.needs_setup) ? "flex" : "none";
   }
 
+  // -- First-load skeletons ------------------------------------------------------
+  // The three panels on the page are drawn by refresh(), and until its first
+  // answer each one said something untrue while waiting: "Connect to a broker
+  // to see campaign status." to a page that was connecting, a lone "—" for the
+  // fleet, "0 active" for a count nobody had asked for yet. The skeleton goes
+  // up once, when the load starts from an empty page, and comes down on EVERY
+  // way out of the refresh() that claimed it (skelOwner): the answer
+  // (renderStatus / renderCasesTable replace it), the auth gate, a failure.
+  // Never on the 60 s timer: a page stuck at
+  // "Enter your bearer token" retries every minute, and a skeleton flashing
+  // over that message once a minute would claim the answer was on its way.
+  const skelOn = { status: false, workers: false, cases: null };   // cases: null | "refresh" | a request stamp
+
+  // Split, progress, then five counts: the static head's seven columns.
+  const SPLIT_SKEL = [{ w: 52, h: 18 }, { w: "100%", h: 6 }, { w: 34, num: true }, { w: 30, num: true },
+                      { w: 38, num: true }, { w: 22, num: true }, { w: 40, num: true }];
+  // WORKER_COLUMNS, in order: id, host, cluster, build, status, first seen,
+  // last seen, working on, done, failed.
+  const WORKER_SKEL = [{ w: 150, h: 20 }, { w: 84, h: 18 }, { w: 64, h: 18 }, { w: 120, h: 20 },
+                       { w: 52, h: 18 }, { w: 44 }, { w: 44 }, { w: 150, h: 20 },
+                       { w: 24, num: true }, { w: 14, num: true }];
+
+  function statusSkeleton() {
+    skelOn.status = true;
+    // The body's own chrome -- the card, the legend, the table head -- is real
+    // and is shown; only the slots renderStatus fills are placeholders, and it
+    // overwrites every one of them.
+    $("statusEmpty").style.display = "none";
+    $("statusBody").style.display = "block";
+    // Capped by the viewport: on a phone a fixed 220 px squeezed the title
+    // beside it into three lines. The words beside it are for assistive tech:
+    // the bars are aria-hidden, and what is left is a heading over nothing.
+    $("progressPct").innerHTML = `<span class="sr-only">Loading campaign status…</span>`
+      + skelBar("min(220px, 30vw)");
+    skelOnto($("campaignProgressBar"), true);
+    // Nothing of an earlier campaign shows through: after Connect to another
+    // broker these still hold the previous one's (a first load's are empty).
+    for (const id of ["progDone", "progLeased", "progPending", "progQuarantined"]) $(id).style.width = "0%";
+    $("expiredText").textContent = "";
+    $("expiredBannerWrap").innerHTML = "";
+    setHtml("stateStats", skelCards(7));
+    setHtml("splitBody", skelTableRows(3, SPLIT_SKEL));
+    $("etaText").innerHTML = skelBar("min(340px, 60vw)");
+    setBusy($("statusPanel"), true);
+  }
+
+  /// `drawn`: renderStatus is replacing it. Otherwise back to the message,
+  /// whatever the exit wrote into #statusEmpty.
+  function statusSkeletonDone(drawn) {
+    if (!skelOn.status) return;
+    skelOn.status = false;
+    skelOnto($("campaignProgressBar"), false);
+    setBusy($("statusPanel"), false);
+    if (drawn) return;
+    $("progressPct").textContent = "0%";
+    setHtml("stateStats", "");
+    setHtml("splitBody", "");
+    $("etaText").textContent = "";
+    $("statusBody").style.display = "none";
+    $("statusEmpty").style.display = "";
+  }
+
+  function workersSkeleton() {
+    skelOn.workers = true;
+    const fq = $("fleetQueue");
+    fq.style.display = "flex";
+    // Words first, for assistive tech: otherwise the panel is ten column
+    // headers over no rows, which reads as "no workers".
+    fq.innerHTML = `<span class="sr-only">Loading workers…</span>`
+      + [1, 0.8].map((v) => `<div class="fleet-card" aria-hidden="true">`
+      + `<div class="fc-name">${skelBar(Math.round(96 * v) + "px")}${skelBar("40px")}</div>`
+      + `<div class="fc-nums">${skelBar("70px", "22px", "skel-block")}${skelBar("62px", "22px", "skel-block")}</div>`
+      + `</div>`).join("");
+    $("workersEmpty").style.display = "none";
+    $("workersTableWrap").style.display = "block";
+    // renderStatus hides the table itself for a campaign with no workers, and
+    // after Connect to another broker that may be the one on screen.
+    $("workersTable").style.display = "";
+    // Through setHtml: see its note on the workers tbody.
+    setHtml("workersBody", skelTableRows(4, WORKER_SKEL));
+    skelOnto($("workerCountBadge"), true, true);
+    setBusy($("workersPanel"), true);
+  }
+
+  function workersSkeletonDone(drawn) {
+    if (!skelOn.workers) return;
+    skelOn.workers = false;
+    skelOnto($("workerCountBadge"), false, true);
+    setBusy($("workersPanel"), false);
+    setHtml("workersBody", "");
+    if (!drawn) {
+      $("fleetQueue").style.display = "none";
+      setHtml("fleetQueue", "");
+      $("workersTableWrap").style.display = "none";
+      $("workersEmpty").style.display = "";
+    }
+    // The Machines tab's per-worker table waits on the same payload.
+    if (releasesDrawn) {
+      if (lastReleases) renderReleases();
+      else setHtml("relWorkers", "");
+    }
+  }
+
+  // WHICH refresh() takes the skeletons down on its way out. They go up before
+  // the refresh that answers them starts -- signing in puts them up, then waits
+  // on /v1/auth/state -- and refreshes overlap: the 60 s timer's may be in
+  // flight, started with the old session, token or URL, and ITS way out (the
+  // auth gate, a 401) is not the end of this wait. Any refresh used to take
+  // them down, and told someone who had just signed in to "Sign in above". So
+  // the refresh started to answer them claims them (userRefresh), and only it
+  // takes them down; an answer from any refresh still replaces them
+  // (renderStatus, renderCasesTable). 0: nobody has claimed them yet.
+  let refreshGen = 0;        // the newest refresh() started
+  let skelOwner = 0;         // the refresh() the skeletons wait on
+  let skelClaim = false;     // the next refresh() to start claims them
+
+  /// A load is starting and the region has nothing from it yet: the status
+  /// and the fleet before the first /v1/status, the case table whenever it
+  /// holds no rows -- a message ("Failed to load cases: …", "Case not found")
+  /// at full strength while its retry runs said nothing was happening.
+  /// Whatever refresh had them no longer answers this wait.
+  function firstLoadSkeletons() {
+    skelOwner = 0;
+    if (!lastStatus && !skelOn.status) { statusSkeleton(); workersSkeleton(); }
+    if (skelOn.cases === null && $("casesTableWrap").style.display === "none") casesSkeleton("refresh");
+  }
+
+  /// Every way out of the refresh that owns them. What an answer drew has
+  /// already ended its own skeleton; what is left goes back to its message.
+  function firstLoadSkeletonsDone() {
+    statusSkeletonDone(false);
+    workersSkeletonDone(false);
+    if (skelOn.cases === "refresh") casesSkeletonDone(false);
+  }
+
+  /// A refresh that is WAITED ON: the page's first load, or one a person asked
+  /// for (Refresh, R, Connect, signing in). What it has nothing of yet shows
+  /// the shape that is coming; with data on screen it is the ordinary refresh,
+  /// whose spinning icon and "refreshing…" pill are the whole of its
+  /// indication. It claims the skeletons, so only it takes them down.
+  function userRefresh() {
+    firstLoadSkeletons();
+    skelClaim = true;
+    return refresh();
+  }
+
+  // The broker the campaign on screen came from. api() reads the broker field
+  // on every request, so this is stamped as a refresh starts, not saved with
+  // the form.
+  let statusBroker = null;
+  const brokerBase = (u) => String(u).trim().replace(/\/+$/, "");
+
+  /// Connect to ANOTHER broker: the campaign on screen is the old one's, and
+  /// it stayed up at full strength while the new one loaded -- read as the new
+  /// one's answer, or sat beside its error. Forgotten, the load is a first load
+  /// (userRefresh puts the shapes up), and every way out of it goes to the empty
+  /// states rather than back to the old numbers.
+  function forgetCampaign() {
+    lastStatus = null;
+    $("workersEmpty").textContent = "—";
+    $("casesEmpty").textContent = "Connect to a broker to browse cases.";
+    if (skelOn.cases === null) casesSkeleton("refresh");
+  }
+
   // -- Main Refresh Loop -------------------------------------------------------
   async function refresh() {
+    const rid = ++refreshGen;
+    if (skelClaim) { skelClaim = false; skelOwner = rid; }
+    const broker = brokerBase($("broker").value);
     const refreshIcon = $("refreshIcon");
     if (refreshIcon) refreshIcon.classList.add("spin");
     setConn("working", "refreshing…");
@@ -4680,6 +5519,7 @@
       $("authNotice").style.display = "none";
       const st = await statusP;
       lastStatus = st;
+      statusBroker = broker;
       setConn("ok", "connected");
       showErr(null);
       // Collapse the connect form and show summary bar
@@ -4700,6 +5540,9 @@
       $("connectedDb").title = (health && health.db) || "";
       $("connectedSummary").style.display = "flex";
       renderStatus(st);
+      // Now, not only in the finally: step 5 waits on this payload, and the
+      // finally is a case page and a notification poll away.
+      renderWizard();
       await loadCases(casesReq);
       loadReleases();          // not awaited: the fleet table is already drawn without it
       await checkFinished(st.by_state?.["done"] ?? null);
@@ -4718,6 +5561,12 @@
       }
     } finally {
       if (refreshIcon) refreshIcon.classList.remove("spin");
+      // The auth gate returns, the catch touches none of the panels, and a
+      // throw inside renderStatus skips the case table: each would have left a
+      // skeleton shimmering over a load that is no longer happening. Only the
+      // refresh that claimed them, though (skelOwner): another one's exit is
+      // not the end of their wait.
+      if (rid === skelOwner) firstLoadSkeletonsDone();
       // Every exit renders, including the catch. The catch used to leave the
       // wizard on whatever had been drawn before /healthz answered, so a 401
       // from /v1/status left step 1 saying "Waiting for the broker to answer
@@ -4756,9 +5605,10 @@
   // Event Listeners
   $("connectForm").addEventListener("submit", (e) => {
     e.preventDefault();
+    if (lastStatus && brokerBase($("broker").value) !== statusBroker) forgetCampaign();
     localStorage.setItem(LS_URL, $("broker").value.trim());
     localStorage.setItem(LS_TOK, $("token").value.trim());
-    refresh();
+    userRefresh();
   });
 
   $("editConnection").addEventListener("click", () => {
@@ -4769,7 +5619,7 @@
 
   $("refresh").addEventListener("click", () => {
     nextRefreshSeconds = 60;
-    refresh();
+    userRefresh();
   });
 
   $("clearToken").addEventListener("click", () => {
@@ -4814,7 +5664,9 @@
   $("storageBtn").addEventListener("click", () => (storageOpen() ? closeStorage() : openStorage()));
   $("storageClose").addEventListener("click", closeStorage);
   $("storageScrim").addEventListener("click", closeStorage);
-  $("storageRefresh").addEventListener("click", loadStorage);
+  $("storageRefresh").addEventListener("click", (e) => {
+    if (!isPending(e.currentTarget)) loadStorage();   // one measurement at a time
+  });
   $("settingsScrim").addEventListener("click", closeSettings);
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape" && storageOpen()) closeStorage();
@@ -4827,6 +5679,8 @@
   // endpoint for the same reason -- finding out how bad it is must not be the
   // same keystroke as changing production.
   let landFound = 0;
+  // Case, "lat, lon", cluster, LCZ, state: renderLandResult's five columns.
+  const LAND_SKEL = [{ w: 150, h: 20 }, { w: 96 }, { w: 70 }, { w: 40 }, { w: 60, h: 18 }];
 
   // Both credentials, because either is legitimate here: the broker gates this
   // with _may_write_as(("admin", "operator")), which accepts a logged-in human
@@ -4886,7 +5740,15 @@
   $("landScanBtn").addEventListener("click", async () => {
     const b = $("landScanBtn");
     b.disabled = true;
-    $("landResult").innerHTML = `<span style="font-size:12px;color:var(--text-muted)">scanning the case pool…</span>`;
+    // A new question, so the previous answer goes -- and the shape of a likely
+    // one takes its place under the words: the summary line and a few example
+    // rows. The count is unknown until the pass over the pool is done, which on
+    // a big pool takes seconds; the sentence says that it is scanning.
+    $("landResult").innerHTML = `<span style="font-size:12px;color:var(--text-muted)">scanning the case pool…</span>`
+      + `<div aria-hidden="true" style="margin-top:8px">${skelBar("min(360px, 80%)")}</div>`
+      + `<div class="table-wrap" aria-hidden="true" style="margin-top:8px"><table><tbody>`
+      + skelTableRows(5, LAND_SKEL) + `</tbody></table></div>`;
+    setBusy($("landResult"), true);
     $("landFixBtn").style.display = "none";
     try {
       const d = await campaignCall("/v1/cases/land-audit");
@@ -4899,6 +5761,7 @@
     } catch (e) {
       $("landResult").innerHTML = `<span style="font-size:12px;color:var(--bad)">scan failed: ${esc(e.message || e.status || e)}</span>`;
     } finally {
+      setBusy($("landResult"), false);
       b.disabled = false;
     }
   });
@@ -4939,7 +5802,17 @@
   $("reopenScanBtn").addEventListener("click", async () => {
     const b = $("reopenScanBtn");
     b.disabled = true;
-    $("reopenResult").innerHTML = `<span style="font-size:12px;color:var(--text-muted)">scanning…</span>`;
+    // The answer is a sentence and a list of lines (a case id, then what it
+    // last failed with), not a table -- so that is the shape that waits.
+    let lines = "";
+    for (let i = 0; i < 4; i++) {
+      lines += `<div style="display:flex;align-items:center;gap:6px;margin-top:4px">`
+        + skelBar("150px", "18px", "skel-block", "flex:none;")
+        + skelBar(Math.round(55 * SKEL_VARY[i]) + "%") + `</div>`;
+    }
+    $("reopenResult").innerHTML = `<span style="font-size:12px;color:var(--text-muted)">scanning…</span>`
+      + `<div aria-hidden="true" style="margin-top:6px">${skelBar("min(300px, 70%)")}${lines}</div>`;
+    setBusy($("reopenResult"), true);
     $("reopenFixBtn").style.display = "none";
     try {
       const q = encodeURIComponent($("reopenMatch").value.trim());
@@ -4952,6 +5825,7 @@
     } catch (e) {
       $("reopenResult").innerHTML = `<span style="font-size:12px;color:var(--bad)">scan failed: ${esc(e.message || e.status || e)}</span>`;
     } finally {
+      setBusy($("reopenResult"), false);
       b.disabled = false;
     }
   });
@@ -5029,7 +5903,7 @@
     caseList.offset = 0;
     caseList.singleId = null;
     openDetailId = null;
-    loadCases();
+    requeryCases();
   });
 
   $("caseSplitFilter").addEventListener("change", (e) => {
@@ -5037,18 +5911,20 @@
     caseList.offset = 0;
     caseList.singleId = null;
     openDetailId = null;
-    loadCases();
+    requeryCases();
   });
 
   let cityTimer = null;
   $("caseCityFilter").addEventListener("input", (e) => {
     if (cityTimer) clearTimeout(cityTimer);
+    // The loading state starts inside the timeout, with the request: a
+    // keystroke is not a query yet, and dimming on every one would flicker.
     cityTimer = setTimeout(() => {
       caseList.city = e.target.value.trim();
       caseList.offset = 0;
       caseList.singleId = null;
       openDetailId = null;
-      loadCases();
+      requeryCases();
     }, 300);
   });
 
@@ -5064,24 +5940,26 @@
     caseList.singleId = null;
     caseList.offset = 0;
     openDetailId = null;
-    loadCases();
+    requeryCases();
   });
 
-  $("casesPrev").addEventListener("click", () => {
+  $("casesPrev").addEventListener("click", (e) => {
+    if (isPending(e.currentTarget)) return;     // a page is already on its way
     caseList.offset = Math.max(0, caseList.offset - caseList.limit);
-    loadCases();
+    requeryCases();
   });
 
-  $("casesNext").addEventListener("click", () => {
+  $("casesNext").addEventListener("click", (e) => {
+    if (isPending(e.currentTarget)) return;
     caseList.offset += caseList.limit;
-    loadCases();
+    requeryCases();
   });
 
   function doLookup() {
     const id = $("caseId").value.trim();
     caseList.singleId = id || null;
     caseList.offset = 0;
-    loadCases();
+    requeryCases();
   }
   $("lookup").addEventListener("click", doLookup);
   $("caseId").addEventListener("keydown", (e) => { if (e.key === "Enter") doLookup(); });
@@ -5090,7 +5968,7 @@
   window.addEventListener("keydown", (e) => {
     if (e.target.tagName === "INPUT" || e.target.tagName === "SELECT") return;
     if (e.key === "r" || e.key === "R") {
-      refresh();
+      userRefresh();
     } else if (e.key === "/") {
       e.preventDefault();
       $("caseId").focus();
@@ -5107,9 +5985,16 @@
   // auth mode). Leaving that to refresh() alone meant any path that did not
   // reach refresh -- or reached it and threw -- left the badge hidden and the
   // running version invisible, which is exactly what happened.
+  badgeSkeleton(true);
   checkHealth();
+  // Drawn now rather than when the first probe answers: the Setup tab is the
+  // drawer's default, and it was an empty pane until then. checkHealth() has
+  // just marked /healthz pending, so step 1 says what it is waiting for.
+  renderWizard();
   if (localStorage.getItem(LS_TOK) !== null || $("broker").value) {
-    authReady.catch(() => {}).then(refresh);
+    // From the first paint: the auth round trip is part of this wait too.
+    firstLoadSkeletons();
+    authReady.catch(() => {}).then(() => userRefresh());   // claims them: see skelOwner
   }
 })();
 </script>
