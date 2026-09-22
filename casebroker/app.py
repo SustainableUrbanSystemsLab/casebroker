@@ -38,7 +38,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
-from . import __version__, auth, db, footprints, ids
+from . import __version__, auth, db, footprints, ids, places
 
 MAX_LEASE_SECONDS = 24 * 3600
 
@@ -1880,6 +1880,15 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         row = db.get_case(conn, case_id)
         if row is None:
             raise HTTPException(404, "no such case")
+        # Where it is -- country, nearest town and how far -- answered offline
+        # (casebroker/places.py). Computed on read, so every case has it,
+        # including the ones posted before this existed. Never fatal: a case
+        # whose spec has no usable coordinates simply has no place.
+        try:
+            spec = json.loads(row.get("spec") or "{}") if isinstance(row.get("spec"), str) else (row.get("spec") or {})
+            row["place"] = places.locate(float(spec["lat"]), float(spec["lon"]))
+        except (KeyError, TypeError, ValueError):
+            row["place"] = None
         return row
 
 
