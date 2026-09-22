@@ -54,6 +54,56 @@ def test_no_server_supplied_field_reaches_the_dom_unescaped():
     assert not bad, "unescaped server data in markup:\n  " + "\n  ".join(bad)
 
 
+
+# The renderers of what a NODE reports (POST /v1/telemetry, stored verbatim
+# under a worker credential): mesh names, engine, build, meshed_by, the
+# failed-check names, the direction a solve is on, residual fields, finished
+# directions and their status, the worker, the DEM. Those names are too
+# generic ("status", "current", "build") to sweep the whole file for, so the
+# sweep above sees none of them. Inside these functions, then, EVERY
+# interpolation goes through a safe call, unless it is one of the locals below
+# -- markup this file builds from checked parts, or a choice between literals.
+TELEMETRY_RENDERERS = ("reportedHtml", "meshSectionHtml", "solveSectionHtml", "pctCardInner")
+# solveStatusClass answers one of five class names this file chose.
+TELEMETRY_SAFE = SAFE_CALLS + ("formatCells(", "formatMetric(", "formatDuration(",
+                               "verdictBadge(", "reportedHtml(", "histSvg(", "solveStatusClass(")
+BUILT_LOCALS = {"by", "rows", "v", "solveSecs", "fig", "tiles", "useOwn", "!useOwn",
+                'notes.join(" · ")', 'foot.join(" · ")', 'it ? " · " + it + end : ""'}
+_LITERAL = r"""(?:"[^"]*"|'[^']*')"""
+
+
+def _function_body(src, name):
+    m = re.search(rf"\n  function {name}\([^)]*\)\s*\{{(.+?)\n  \}}\n", src, re.S)
+    assert m, f"{name}() not found"
+    return m.group(1)
+
+
+def test_telemetry_renderers_escape_every_node_string():
+    src = DASH.read_text()
+    bad = []
+    for name in TELEMETRY_RENDERERS:
+        for line in _function_body(src, name).splitlines():
+            # A histogram's tip is text: histSvg escapes it where it becomes
+            # markup (pinned below).
+            if re.search(r"\btip\s*[:=]", line):
+                continue
+            for expr in (e.strip() for e in re.findall(r"\$\{([^{}]*)\}", line)):
+                if any(c in expr for c in TELEMETRY_SAFE) or expr in BUILT_LOCALS:
+                    continue
+                if re.fullmatch(rf"[^?]+\?\s*{_LITERAL}\s*:\s*{_LITERAL}", expr):
+                    continue
+                bad.append(f"{name}: ${{{expr[:80]}}}")
+            # Concatenated rather than interpolated: `" by " + k.worker`.
+            for m in re.finditer(r"\+\s*[A-Za-z_]\w*(?:\.\w+|\[[^\]]+\])+(?!\s*\()"
+                                 r"|(?<![\w.(])[A-Za-z_]\w*(?:\.\w+)+\s*\+(?!\+)", line):
+                bad.append(f"{name}: {m.group(0).strip()} (concatenated unescaped)")
+    assert not bad, "a node's string reaches the DOM unescaped:\n  " + "\n  ".join(bad)
+
+
+def test_hist_svg_escapes_its_tip():
+    body = _function_body(DASH.read_text(), "histSvg")
+    assert "esc(o.tip)" in body, "histSvg() must escape the tip it puts in <title>"
+
 def test_badge_escapes_both_positions():
     """`state` lands in a class attribute as well as in text."""
     src = DASH.read_text()
