@@ -23,6 +23,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
   change shows its value again, as before 0.9.0 (only the notify keys were
   redacted).
 
+### Fixed
+- The case card's **domain ↗** link opened geojson.io on "Unterminated string
+  in JSON at position 127": the page decodes its URL fragment twice and reads
+  the `#` of a simplestyle colour (`"stroke":"#d97706"`) as the end of its
+  data. The colours' `#` is now encoded once more (`%2523`), which is what the
+  page reads back as `#d97706`; the domain, the sampled core and the centre
+  marker draw as intended.
+
 ## [0.9.0] - 2026-09-22
 
 ### Added
