@@ -8,7 +8,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-09-22
+
 ### Added
+- **Dashboard: mesh & solve, the dataset, where each case sits.** A 4th card in an
+  opened case shows the node's mesh (checkMesh per mesh, cells, ranks, skewness and
+  non-orthogonality flagged, the build that meshed it) and solve (directions,
+  iteration, residuals). A header drawer shows the campaign as a dataset -- counts
+  and, per metric, histograms for all cases or one LCZ -- and every opened case marks
+  where it falls on each metric's distribution, against its own LCZ or all cases.
+- **Dashboard: skeleton loading.** Regions waiting for data show the shape of what is
+  coming (shimmering placeholder bars) instead of blanks and dashes; never over data
+  already on screen.
+- **Dashboard: notification settings.** Browser notifications per event (starts,
+  meshing, solving, finishes) and, for admins, the broker's ntfy push configuration
+  with a random-topic generator and a test button.
+- **Dashboard: resizable drawers** (drag the left edge; remembered) and a
+  **"domain ↗"** link drawing the sampled core and the mesh domain on geojson.io.
 - **Push notifications (ntfy).** With `CASEBROKER_NOTIFY_URL` set to an ntfy
   topic, the broker announces when a case starts, begins meshing, begins solving,
   finishes, fails or is quarantined -- to a phone, with no dashboard open. One
