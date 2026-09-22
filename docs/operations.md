@@ -551,6 +551,11 @@ The dashboard's own "notify on finished cases" works only while its tab is open.
 notices on a phone, or with every browser closed, the broker pushes to an
 [ntfy](https://ntfy.sh) topic:
 
+Configure it in the dashboard -- **Settings -> Notifications** (admin only): the topic,
+which events, an optional token and the dashboard's address, and a **Send test** button.
+Changes apply on the next poll, no redeploy. Each field falls back to its environment
+variable while unset there, so the env-only setup below still works:
+
 1. Pick a long random topic name -- on ntfy.sh the name is the only secret.
 2. On Render, set `CASEBROKER_NOTIFY_URL=https://ntfy.sh/<topic>` (and
    `CASEBROKER_PUBLIC_URL` to the dashboard's address so a tap opens it).

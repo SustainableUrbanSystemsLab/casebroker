@@ -133,15 +133,44 @@ def test_a_phase_change_survives_a_restart_between_the_two_lines(tmp_path):
     assert [m["title"] for m in sink.sent] == ["Case solving"]
 
 
-def test_off_unless_configured_and_the_env_is_read(monkeypatch, tmp_path):
+def test_nothing_is_sent_until_a_topic_is_configured_and_the_backlog_is_skipped(monkeypatch, tmp_path):
     conn = db.connect(str(tmp_path / "n.sqlite"))
-    monkeypatch.delenv("CASEBROKER_NOTIFY_URL", raising=False)
-    assert notify.from_env(conn) is None
-    monkeypatch.setenv("CASEBROKER_NOTIFY_URL", "https://ntfy.sh/secret-topic")
-    monkeypatch.setenv("CASEBROKER_NOTIFY_EVENTS", "done, quarantined, bogus")
-    monkeypatch.setenv("CASEBROKER_NOTIFY_INTERVAL", "1")
+    for k in notify.ENV.values():
+        monkeypatch.delenv(k, raising=False)
+    _case(conn)
+    sink = Sink()
     n = notify.from_env(conn)
-    assert n.events == {"done", "quarantined"} and n.interval == 5.0
+    n.sender = sink
+    db.lease(conn, "node-1", 1)
+    n.poll_once()
+    assert sink.sent == [], "no topic: silent"
+    # Switched on in Settings: applies on the next poll, and does not announce
+    # what happened while it was off.
+    db.set_setting(conn, "notify_url", "https://ntfy.sh/topic")
+    n.poll_once()
+    assert sink.sent == []
+    _case(conn, "B", lat=48.2)
+    db.lease(conn, "node-1", 1)
+    n.poll_once()
+    assert [m["title"] for m in sink.sent] == ["Case started"]
+    assert sink.sent[0]["url"] == "https://ntfy.sh/topic"
+
+
+def test_settings_win_over_the_environment_field_by_field(monkeypatch):
+    monkeypatch.setenv("CASEBROKER_NOTIFY_URL", "https://ntfy.sh/from-env")
+    monkeypatch.setenv("CASEBROKER_NOTIFY_EVENTS", "done, quarantined, bogus")
+    monkeypatch.delenv("CASEBROKER_NOTIFY_TOKEN", raising=False)
+    cfg = notify.resolve({})
+    assert cfg["url"] == "https://ntfy.sh/from-env" and cfg["source"]["url"] == "env"
+    assert cfg["events"] == ["done", "quarantined"]
+    cfg = notify.resolve({"notify_url": "https://ntfy.sh/from-ui", "notify_events": '["started"]'})
+    assert cfg["url"] == "https://ntfy.sh/from-ui" and cfg["source"]["url"] == "settings"
+    assert cfg["events"] == ["started"] and cfg["source"]["token"] is None
+
+
+def test_the_topic_is_masked_for_display():
+    assert notify.mask("https://ntfy.sh/casebroker-9f3a2b7c1d") == "https://ntfy.sh/case…"
+    assert notify.mask(None) is None
 
 
 @pytest.mark.parametrize("line, phase", [
