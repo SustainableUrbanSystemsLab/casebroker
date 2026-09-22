@@ -8,6 +8,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-09-21
+
 ### Added
 - **Nodes can be updated while a campaign runs.** The broker now knows WHICH
   BUILD every worker is (`build` = version+commit, sent with each lease -- the
@@ -47,6 +49,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
   Backed by `GET /v1/errors` (read scope).
 
 ### Fixed
+- **The Python worker declares its build.** Every lease now carries `build`,
+  `version` and `platform`, read once at start-up from `e3d version --json`
+  (`--e3d`, default `$EDDY3D_CLI`), so a machine driven by `casebroker.worker`
+  shows on the fleet table as what it runs and whether it is behind the target
+  -- rather than as "undeclared", which was every one of them: the broker
+  recorded a build with each lease and only the E3D node ever sent one. An e3d
+  too old to answer (it prints a bare version and ignores the flag), or no
+  `EDDY3D_CLI`, leases exactly as before and stays undeclared, which is the
+  truth. Recipes are declared only by hand (`--recipes` / `CASEBROKER_RECIPES`):
+  `run_case.sh` is its own contract, and a worker that took e3d's word for v4
+  would carry v4 cases into a runner that builds v3 boxes -- the mislabelled
+  archive, back again. A 426 (the campaign insists on a build, or blocked this
+  one) now stops the worker with exit code 3 and the broker's reason, where it
+  retried every `idle_backoff` seconds for the whole walltime and never logged
+  what was wrong. On Windows the worker translates machine.env's MSYS spelling
+  of `EDDY3D_CLI` (`/e/wind/bin/e3d.exe`, what run_case.sh wants) itself.
 - **An archive over 2 GiB can be completed.** `cases.result_bytes` was `INTEGER`,
   which on Postgres is 32 bits, so any `/v1/complete` reporting more than
   2,147,483,647 bytes dies with "integer out of range" -- an unhandled 500. The
