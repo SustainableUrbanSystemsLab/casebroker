@@ -561,11 +561,19 @@ variable while unset there, so the env-only setup below still works:
    `CASEBROKER_PUBLIC_URL` to the dashboard's address so a tap opens it).
 3. Install the ntfy app (or open ntfy.sh) and subscribe to the same topic.
 
+A URL set from the dashboard may only point at ntfy.sh unless the server lists more
+hosts in `CASEBROKER_NOTIFY_ALLOWED_HOSTS` (a self-hosted ntfy); a token is only sent
+over https and only with the URL it was entered for, and neither the token nor the
+full topic ever appears in a response or the audit trail.
+
 It announces a case **started** (leased), **meshing**, **solving** (the first
 progress line of each phase), **finished**, **failed** (will retry) and
 **quarantined** -- all of them unless `CASEBROKER_NOTIFY_EVENTS` narrows it. It
 polls the events table every 30 s and sends ONE message per poll, so a fleet
 moving many cases at once does not spend ntfy.sh's daily allowance for a free
 topic one notice at a time. It starts from the newest event when the process
-starts (a redeploy does not replay history), and a delivery that fails is
-retried on the next poll rather than dropped.
+resumes from where the last process stopped (its position is kept in the
+database and claimed before each batch, so a deploy's two overlapping instances
+never both send), a transient delivery failure is retried with backoff for up to
+30 minutes, and a permanent one (a 4xx, a redirect) is logged and dropped rather
+than blocking every later notice.

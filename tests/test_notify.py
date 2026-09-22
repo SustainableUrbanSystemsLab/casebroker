@@ -19,12 +19,23 @@ class Sink:
 
     def __call__(self, url, title, body, tags, token=None, click=None):
         if self.fail:
-            raise OSError("ntfy unreachable")
+            raise notify.SendError("connection refused", transient=True)
         self.sent.append({"url": url, "title": title, "body": body, "tags": tags,
                           "token": token, "click": click})
 
 
+class Clock:
+    """Wall time plus an offset the test moves: rows are read with a few seconds'
+    lag, so a poll 'now' must be a little after the events it should see."""
+    def __init__(self):
+        self.offset = notify.LAG_SECONDS + 1
+
+    def __call__(self):
+        return time.time() + self.offset
+
+
 def _notifier(conn, sink, **kw):
+    kw.setdefault("clock", Clock())
     return notify.Notifier(conn, "https://ntfy.sh/topic", sender=sink, **kw)
 
 
@@ -106,19 +117,91 @@ def test_a_restart_does_not_replay_history(tmp_path):
     assert sink.sent == []
 
 
-def test_a_failed_delivery_is_retried_not_lost(tmp_path):
+def test_a_transient_failure_is_retried_and_a_permanent_one_dropped(tmp_path):
     conn = db.connect(str(tmp_path / "n.sqlite"))
     _case(conn)
-    sink = Sink(fail=True)
-    n = _notifier(conn, sink)
+    sink, clock = Sink(fail=True), Clock()
+    n = _notifier(conn, sink, clock=clock)
     db.lease(conn, "node-1", 1)
-    assert n.poll_once() == 0
+    assert n.poll_once() == 1 and sink.sent == [] and len(n.pending) == 1
     sink.fail = False
     n.poll_once()
-    assert [m["title"] for m in sink.sent] == ["Case started"]
+    assert sink.sent == [], "not before its backoff"
+    clock.offset += 31
+    n.poll_once()
+    assert [m["title"] for m in sink.sent] == ["Case started"] and n.pending == []
+
+    class Refused(Sink):
+        def __call__(self, *a, **k):
+            raise notify.SendError("ntfy answered 400", transient=False)
+    _case(conn, "B", lat=48.2)
+    n.sender = Refused()
+    db.lease(conn, "node-1", 1)
+    clock.offset += 10
+    n.poll_once()
+    assert n.pending == [], "a permanent failure is dropped, not retried forever"
 
 
-def test_a_phase_change_survives_a_restart_between_the_two_lines(tmp_path):
+def test_the_cursor_survives_a_restart_and_two_instances_never_both_send(tmp_path):
+    conn = db.connect(str(tmp_path / "n.sqlite"))
+    for i in range(2):
+        _case(conn, f"C{i}", lat=48.1 + i * 0.01)
+    a_sink, b_sink = Sink(), Sink()
+    a = _notifier(conn, a_sink)
+    db.lease(conn, "node-1", 1)
+    a.poll_once()
+    db.lease(conn, "node-1", 1)          # happens while "a" is being replaced
+    b = _notifier(conn, b_sink)          # the new process: resumes from the saved cursor
+    b.poll_once(); a.poll_once()
+    assert len(a_sink.sent) == 1 and len(b_sink.sent) == 1, "the second lease announced once, by one of them"
+
+
+def test_a_long_absence_starts_from_now_instead_of_replaying(tmp_path, monkeypatch):
+    conn = db.connect(str(tmp_path / "n.sqlite"))
+    _case(conn)
+    _notifier(conn, Sink())
+    monkeypatch.setattr(notify, "REPLAY_MAX_ROWS", 0)
+    db.lease(conn, "node-1", 1)
+    sink = Sink()
+    _notifier(conn, sink).poll_once()
+    assert sink.sent == []
+
+
+def test_a_big_batch_stays_under_ntfys_message_limit(tmp_path):
+    conn = db.connect(str(tmp_path / "n.sqlite"))
+    for i in range(40):
+        _case(conn, f"C{i:02d}", lat=48.0 + i * 0.01, max_attempts=1)
+    sink = Sink()
+    n = _notifier(conn, sink)
+    for lease in db.lease(conn, "COD-PKAST-7865", 40):
+        db.fail(conn, lease.lease_id, "solve exited 1: " + "FOAM FATAL ERROR " * 40, retryable=True)
+    n.poll_once()
+    body = sink.sent[-1]["body"]
+    assert len(body.encode("utf-8")) <= notify.BODY_LIMIT
+    assert "more" in body.splitlines()[-1]
+
+
+def test_solving_is_announced_once_per_attempt_despite_free_text_lines(tmp_path):
+    conn = db.connect(str(tmp_path / "n.sqlite"))
+    _case(conn)
+    sink = Sink()
+    n = _notifier(conn, sink)
+    lease = db.lease(conn, "node-1", 1)[0]
+    for line in ("mesh 1/5 · 01_blockMesh", "solve 0/8 dirs · starting", "convergence gate",
+                 "solve 1/8 dirs · iter 3/2000"):
+        db.heartbeat(conn, lease.lease_id, 3600, line)
+    n.poll_once()
+    assert sink.sent[-1]["title"] == "1 started, 1 meshing, 1 solving" or \
+        sorted(l.split(" ")[1] for l in sink.sent[-1]["body"].splitlines()) == ["meshing", "solving", "started"]
+    # A retry meshes again: that is a new phase start, not a repeat.
+    db.fail(conn, lease.lease_id, "boom", retryable=True)
+    lease = db.lease(conn, "node-2", 1)[0]
+    db.heartbeat(conn, lease.lease_id, 3600, "mesh 1/5 · 01_blockMesh")
+    n.poll_once()
+    assert "A meshing" in sink.sent[-1]["body"]
+
+
+def test_a_phase_change_is_decided_from_the_database(tmp_path):
     """The previous phase comes from the database, so a notifier that never saw the
     meshing line still knows solving is new -- and does not re-announce meshing."""
     conn = db.connect(str(tmp_path / "n.sqlite"))
@@ -126,7 +209,9 @@ def test_a_phase_change_survives_a_restart_between_the_two_lines(tmp_path):
     lease = db.lease(conn, "node-1", 1)[0]
     db.heartbeat(conn, lease.lease_id, 3600, "mesh 5/5 · 06_checkMesh")
     sink = Sink()
-    n = _notifier(conn, sink)                   # "restarted" here
+    n = _notifier(conn, sink)
+    n.poll_once()
+    sink.sent.clear()
     db.heartbeat(conn, lease.lease_id, 3600, "mesh 5/5 · 06_checkMesh (resumed)")
     db.heartbeat(conn, lease.lease_id, 3600, "solve 0/8 dirs · starting")
     n.poll_once()
@@ -140,7 +225,7 @@ def test_nothing_is_sent_until_a_topic_is_configured_and_the_backlog_is_skipped(
     _case(conn)
     sink = Sink()
     n = notify.from_env(conn)
-    n.sender = sink
+    n.sender, n.clock = sink, Clock()
     db.lease(conn, "node-1", 1)
     n.poll_once()
     assert sink.sent == [], "no topic: silent"
@@ -202,3 +287,24 @@ def test_the_real_sender_speaks_ntfy(tmp_path):
     assert got["body"] == "A finished · Munich"
     assert got["headers"]["Title"] == "Case finished" and got["headers"]["Tags"] == "white_check_mark"
     assert got["headers"]["Authorization"] == "Bearer tok" and got["headers"]["Click"] == "https://b"
+
+
+def test_a_redirect_is_not_followed_and_the_body_is_not_read_unbounded():
+    import http.server
+    hits = []
+
+    class H(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            hits.append(self.path)
+            self.rfile.read(int(self.headers["Content-Length"]))
+            self.send_response(302); self.send_header("Location", "http://127.0.0.1:1/elsewhere"); self.end_headers()
+
+        def log_message(self, *a):
+            pass
+
+    srv = http.server.HTTPServer(("127.0.0.1", 0), H)
+    t = threading.Thread(target=srv.handle_request, daemon=True); t.start()
+    with pytest.raises(notify.SendError) as e:
+        notify.send_ntfy(f"http://127.0.0.1:{srv.server_port}/topic", "t", "b", "x", token="secret")
+    t.join(5); srv.server_close()
+    assert hits == ["/topic"] and not e.value.transient and "redirect" in str(e.value)

@@ -1594,12 +1594,26 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         """Only the fields SENT change. An empty string clears that field in the
         settings table, which hands it back to its environment variable."""
         by = user["username"]
-        for field in ("url", "token", "public_url"):
-            if field not in body.model_fields_set:
-                continue
-            value = (getattr(body, field) or "").strip() or None
-            if value and field in ("url", "public_url") and not notify.valid_url(value):
-                raise HTTPException(422, f"{field} must be an http(s) URL")
+        current = db.get_settings(conn)
+        sent = {f: (getattr(body, f) or "").strip() or None
+                for f in ("url", "token", "public_url") if f in body.model_fields_set}
+        if sent.get("url"):
+            token_after = sent["token"] if "token" in sent else current.get(notify.KEYS["token"])
+            problem = notify.check_url(sent["url"], from_dashboard=True, with_token=bool(token_after))
+            if problem:
+                raise HTTPException(422, f"url {problem}")
+        if sent.get("public_url"):
+            problem = notify.check_url(sent["public_url"], from_dashboard=False)
+            if problem:
+                raise HTTPException(422, f"public_url {problem}")
+        # A token belongs to the topic it was issued for. Pointing the topic at a
+        # different host keeps no token that was not re-entered along with it,
+        # or the old secret would be sent to wherever the new URL points.
+        old_url = current.get(notify.KEYS["url"])
+        if ("url" in sent and "token" not in sent and current.get(notify.KEYS["token"])
+                and notify._origin(sent["url"]) != notify._origin(old_url)):
+            sent["token"] = None
+        for field, value in sent.items():
             db.set_setting(conn, notify.KEYS[field], value, by=by)
         if body.events is not None:
             bad = [e for e in body.events if e not in notify.ALL_EVENTS]
