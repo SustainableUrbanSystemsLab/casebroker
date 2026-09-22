@@ -14,6 +14,45 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
   finishes, fails or is quarantined -- to a phone, with no dashboard open. One
   batched message per 30 s poll; no replay on restart; failed deliveries retried.
   See docs/operations.md, "Push notifications".
+- **Telemetry from the node while it works.** `POST /v1/telemetry`
+  (`{lease_id, case_id, kind, data}`, write scope) stores the node's latest
+  structured report of one kind -- `site` (urban form, buildings, terrain relief,
+  canopy), `mesh` (per-mesh quality, cells, ranks), `solve` (directions, iteration,
+  residuals) -- on the case, replacing that kind only and stamped with when and by
+  which worker. `409` when the lease is not the case's current one (the node stops
+  sending for that case); `413` past 32 KiB of `data` or 16 kinds per case; `422`
+  for a kind outside `^[a-z][a-z0-9_]{0,31}$`. Never `404`, which a node reads as
+  a broker from before telemetry. A NaN (a diverging residual) is stored as null.
+  Kept through complete, fail and release; deleted with the case.
+  `GET /v1/cases/{id}` carries it parsed as `telemetry`; the case list does not.
+  The 32 KiB is measured as stored (non-ASCII escaped), `data` may nest at most
+  16 levels (`422` past that), a lone UTF-16 surrogate is stored as U+FFFD, and a
+  per-machine credential may report only on a lease held under its own name
+  (`409` otherwise). A lease that starts the case over clears the previous
+  attempt's telemetry; a resume keeps it.
+- **The campaign as a dataset.** `GET /v1/dataset` (read scope): counts by state,
+  split, LCZ, recipe and country (the 40 largest listed by name, ties broken
+  alphabetically, then `unknown` and `other`), and for 20 metrics --
+  urban form, site, mesh, run times -- the distribution over every case and per
+  LCZ on one shared set of p1..p99 histogram edges. From telemetry first and the
+  completion metrics second; run times from `done` cases only. Read a page of
+  2,000 cases at a time (one short locked read each; +65 MB peak at 30,000 cases
+  on Postgres where one whole read measured +346 MB) and cached for 60 s, a
+  failed computation included; a stale answer is served while one request
+  refreshes it, and `503` only when there is no answer at all. Numbers beyond
+  1e300 (or too large for a float) are ignored. `GET /v1/cases/{id}` adds
+  `percentiles`: each value's exact rank among all cases and within its LCZ,
+  never waiting for the aggregate (`{}` until the first one after a start is
+  ready; it is started in the background at startup).
+- New nullable column `cases.telemetry`, added in place by the schema reconciler
+  on SQLite and Postgres. Schema version 5.
+
+### Fixed
+- **`POST /v1/release` answered 500 on Postgres for every live lease.** Refunding
+  the attempt used `MAX(attempts - 1, 0)`, and Postgres has no two-argument scalar
+  `MAX` (`function max(integer, integer) does not exist`), so a SIGTERM'd worker's
+  graceful release failed and the case stayed leased until its TTL. Now a portable
+  `CASE`; SQLite, which accepted it, never showed the bug.
 
 ## [0.8.0] - 2026-09-21
 
