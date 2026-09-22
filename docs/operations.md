@@ -350,18 +350,31 @@ through `casebroker.__version__`. `tests/test_version.py` asserts they all agree
 and **fails if a version literal is ever pasted into a source file again**, which
 is how the three copies that used to exist got out of step in the first place.
 
-**Every change that lands on `main` moves the version.** Not "should" — CI
-fails a pull request that does not, so there is nothing to remember. One
-command does the whole bump:
+**Every commit moves the version.** Not "should": a pre-commit hook moves
+PATCH on any commit that does not move it itself, and CI refuses a push to
+`main` whose commits did not, commit by commit, before anything deploys.
+Install the hook once per clone:
 
 ```bash
-python3 scripts/bump_version.py --level minor    # or --patch / --major
+git config core.hooksPath .githooks
 ```
 
-It edits the three files that have to agree — `pyproject.toml`, `uv.lock`, and
-a dated `## [x.y.z]` heading in `CHANGELOG.md` with the `Unreleased` entries
-now beneath it. Unsure which level? `--suggest` reads the conventional-commit
-subjects and tells you what they argue for:
+From then on `git commit` runs `scripts/bump_version.py --auto`, which edits
+the three files that have to agree — `pyproject.toml`, `uv.lock`, and a dated
+`## [x.y.z]` heading in `CHANGELOG.md` with the `Unreleased` entries now
+beneath it — and stages them into the commit being made. A MINOR or MAJOR
+change is bumped by hand in the same commit, and the hook leaves it alone:
+
+```bash
+python3 scripts/bump_version.py --level minor    # or --major
+```
+
+`SKIP_VERSION_BUMP=1 git commit` leaves the number where it is; CI still
+refuses that on `main`. `/healthz` and the header badge carry the deployed
+commit beside the version (`RENDER_GIT_COMMIT` on Render), so a number can
+always be matched to the code that is live. Unsure which level a change is?
+`--suggest` reads the conventional-commit subjects and tells you what they
+argue for:
 
 ```bash
 python3 scripts/bump_version.py --suggest --since origin/main
@@ -382,7 +395,10 @@ creates the tag and publishes the GitHub Release. Nothing else is needed.
 > agreed perfectly. The first repair automated the tagging and left the bump a
 > step someone had to remember at the end of finished-feeling work, which is
 > why it failed again immediately. A step nobody is compelled to take is not a
-> process.
+> process. It stalled a third time all the same, at `0.5.0` with a whole
+> `Unreleased` section behind it, because the check ran on pull requests and
+> this repo pushes straight to `main` — so the bump is now made by a hook at
+> the one moment it cannot be skipped, and the check runs on every push.
 >
 > And the bump has to be *in* the change rather than a commit CI pushes
 > afterwards: a commit pushed with `GITHUB_TOKEN` does not re-trigger
