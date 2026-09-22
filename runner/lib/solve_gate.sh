@@ -25,8 +25,48 @@
 # anywhere else reproduces the identical outcome, since convergence is a
 # property of the recipe -- iteration budget, geometry, mesh -- not the
 # machine).
+
+# A solve that DIVERGED, named as such. Prints the reason and returns 0 when the
+# log carries the signature, returns 1 when it does not.
+#
+# This exists because of what a divergence LOOKS like from the outside. When the
+# solution blows up, FOAM_SIGFPE traps the overflow, one rank dies, and MPI tears
+# down every other rank -- so the loudest lines in the log are a stack trace and
+# an MPI abort, and the quiet cause scrolled past hundreds of lines earlier.
+# Case v2-000c178c579bf034 (Shanghai, 2026-09-21) was read that way: rank 15 hit
+# the trap, MS-MPI killed the other 35, the failure stored for the campaign said
+# "MPI ABORT: Parallel job was aborted", and the investigation went to MS-MPI.
+# MPI was fine. The mesh had 165 highly skew faces where two unmerged buildings
+# shared a party wall at a gap of 0.000 m, and the solve never had a chance.
+#
+# Two signatures, either one enough:
+#   * OpenFOAM's own SIGFPE handler in a backtrace (sigFpeHandler). Note this is
+#     NOT the banner every log opens with -- "sigFpe : Enabling floating point
+#     exception trapping" announces that FPEs will be fatal and appears in every
+#     healthy run; the handler frame appears only when one actually fired.
+#   * a continuity error past 1e15. Healthy sums are O(1e-6 .. 1e2); a diverging
+#     one roughly doubles its exponent per step (2.6e-4 -> 3.6e30 in eight steps,
+#     measured on the case above), so the threshold has no near-misses either way
+#     and a large-but-finite sum on a big mesh is not mistaken for one.
+solve_diverged() {
+  local log="$1" big
+  if grep -aq 'sigFpeHandler' "$log" 2>/dev/null; then
+    echo "the solution diverged and the solver hit its floating-point trap (SIGFPE)"
+    return 0
+  fi
+  # awk, not sort -n: it converts "e+09" to 9 without bash's leading-zero pitfalls.
+  big=$(grep -aoE 'continuity errors : sum local = [0-9.]+e\+[0-9]+' "$log" 2>/dev/null \
+        | awk -F'e\\+' '{ if ($2 + 0 > m) m = $2 + 0 } END { if (m > 0) print m }')
+  if [ -n "$big" ] && [ "$big" -ge 15 ]; then
+    echo "the solution diverged (continuity error reached 1e+${big})"
+    return 0
+  fi
+  return 1
+}
+
 check_solve_converged() {
   local rc="$1" log="$2" proc0="$3" latest="$4"
+  local reason
   local fatal_rx='FOAM FATAL ERROR|[Ff]loating point exception|[Ss]egmentation fault|core dumped|std::bad_alloc|MPI_ABORT|double free or corruption'
   # Every OpenFOAM log opens with "sigFpe : Enabling floating point exception
   # trapping (FOAM_SIGFPE)" -- the announcement that FPEs WILL be fatal, not
@@ -36,7 +76,13 @@ check_solve_converged() {
   # on its own, with a stack trace after it, and still matches.
   local benign_rx='Enabling floating point exception trapping'
 
+  # The exit code first, but not the exit code ALONE: mpirun reports the death of
+  # the rank, never why it died, and "mpirun exited 1" is the same line whether the
+  # node ran out of memory or the solution blew up. When the log says which, say it.
   if [ "$rc" -ne 0 ]; then
+    if [ -f "$log" ] && reason=$(solve_diverged "$log"); then
+      echo "SOLVE_FAIL $reason -- mpirun exited $rc"; return 1
+    fi
     echo "SOLVE_FAIL mpirun exited $rc"; return 1
   fi
   if [ ! -f "$log" ]; then
@@ -44,6 +90,11 @@ check_solve_converged() {
   fi
   if grep -avE "$benign_rx" "$log" | grep -aqE "$fatal_rx"; then
     local ctx
+    # Same reasoning as above: MPI_ABORT and a stack trace are both in fatal_rx and
+    # both are what a diverged rank leaves behind, so the cause is named over them.
+    if reason=$(solve_diverged "$log"); then
+      echo "SOLVE_FAIL $reason (in $(basename "$log"))"; return 1
+    fi
     # -A3: the matched line plus a few after it, since the pattern itself
     # (e.g. "FOAM FATAL ERROR") rarely carries the actual explanation --
     # that is almost always the line right after it. Squashed onto one line
