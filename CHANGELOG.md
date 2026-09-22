@@ -8,6 +8,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-09-21
+
+### Added
+- **Where a case is.** The case inspector's new Location row gives the country
+  (Natural Earth polygon the site is in) and the nearest town of 15,000+ people
+  (GeoNames) with its distance, plus a map link. Offline -- two bundled files,
+  no geocoding API. `GET /v1/cases/{id}` carries it as `place`.
+- **Solve ETA.** A worker's current case shows when its solve should end,
+  extrapolated from that lease's own progress lines (`current_eta` in
+  `/v1/status`). An upper estimate: a direction that converges early stops
+  before its iteration cap.
+
+### Changed
+- The workers table no longer has a Reliability column (Done and Failed say it).
+- The site geometry caption is one line.
+
 ## [0.6.0] - 2026-09-21
 
 ### Added

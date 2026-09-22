@@ -1850,6 +1850,61 @@ def storage(conn) -> dict[str, Any]:
             "cases": cases, "tables": [{"name": k, **v} for k, v in ordered], "files": files}
 
 
+
+_PAIR = re.compile(r"(\d+(?:\.\d+)?)/(\d+(?:\.\d+)?)")
+
+
+def _solve_fraction(line: str | None) -> float | None:
+    """How far through its SOLVE a node's progress line says the case is, 0..1.
+
+    The node's grammar (Eddy3D ``NodeProgress.Solve``): ``solve 3/8 dirs · iter
+    412/2000`` -- directions FINISHED, then the iteration within the current
+    one. Anything that is not a solve line (meshing, archiving, a free-text
+    line) is None: those phases are not what an ETA extrapolates.
+    """
+    if not line:
+        return None
+    head, _, rest = line.partition("\u00b7")
+    if not head.strip().lower().startswith("solve"):
+        return None
+    outer = _PAIR.search(head)
+    if not outer:
+        return None
+    done, total = float(outer.group(1)), float(outer.group(2))
+    if total <= 0:
+        return None
+    inner = _PAIR.search(rest)
+    part = 0.0
+    if inner and float(inner.group(2)) > 0:
+        part = min(1.0, float(inner.group(1)) / float(inner.group(2)))
+    return max(0.0, min(1.0, (done + part) / total))
+
+
+@_locked
+def _solve_eta(conn, case_id: str, since: int | None) -> dict[str, Any] | None:
+    """When the solve of the case a worker holds should end, from its own pace.
+
+    The rate is measured across THIS lease's solve lines only -- first to latest
+    -- so meshing time, and an earlier attempt on another machine, do not skew
+    it. Needs two readings at least ten minutes apart that moved: before that
+    the answer is None rather than a number from one data point. It is an
+    UPPER estimate by construction: a direction that meets its tolerances stops
+    before its iteration cap, which the rate cannot see coming.
+    """
+    rows = conn.execute(
+        "SELECT ts, detail FROM events WHERE case_id=? AND event='progress' AND ts >= ?"
+        " ORDER BY id LIMIT 5000", (case_id, since or 0)).fetchall()
+    points = [(r["ts"], f) for r in rows if (f := _solve_fraction(r["detail"])) is not None]
+    if len(points) < 2:
+        return None
+    (t0, f0), (t1, f1) = points[0], points[-1]
+    if t1 - t0 < 600 or f1 <= f0:
+        return None
+    rate = (f1 - f0) / (t1 - t0)
+    return {"at": int(t1 + (1.0 - f1) / rate), "fraction": round(f1, 4),
+            "measured_over_s": int(t1 - t0)}
+
+
 @_locked
 def status(conn, now: int | None = None) -> dict[str, Any]:
     now = now or _now()
@@ -1864,6 +1919,28 @@ def status(conn, now: int | None = None) -> dict[str, Any]:
         "SELECT COUNT(*) n FROM events WHERE event='done' AND ts > ?",
         (now - 86400,)).fetchone()["n"]
     remaining = by_state.get("pending", 0) + by_state.get("leased", 0)
+    workers = [dict(r) for r in conn.execute(
+            "SELECT w.*,"
+            " (SELECT c.case_id FROM cases c WHERE c.lease_worker = w.worker_id"
+            "    AND c.state = 'leased' ORDER BY c.leased_at DESC LIMIT 1) AS current_case,"
+            " (SELECT c.leased_at FROM cases c WHERE c.lease_worker = w.worker_id"
+            "    AND c.state = 'leased' ORDER BY c.leased_at DESC LIMIT 1) AS current_leased_at,"
+            " (SELECT e.detail FROM events e WHERE e.event = 'progress'"
+            "    AND e.case_id = (SELECT c.case_id FROM cases c WHERE c.lease_worker = w.worker_id"
+            "                       AND c.state = 'leased' ORDER BY c.leased_at DESC LIMIT 1)"
+            "    ORDER BY e.id DESC LIMIT 1) AS current_progress,"
+            # ...and WHEN it said so. The case row folds both detail and ts; this
+            # query folded only the detail, so the workers table drew a moving
+            # progress bar with nothing beside it to say the line was hours old.
+            " (SELECT e.ts FROM events e WHERE e.event = 'progress'"
+            "    AND e.case_id = (SELECT c.case_id FROM cases c WHERE c.lease_worker = w.worker_id"
+            "                       AND c.state = 'leased' ORDER BY c.leased_at DESC LIMIT 1)"
+            "    ORDER BY e.id DESC LIMIT 1) AS current_progress_at"
+            " FROM workers w WHERE w.last_seen > ? ORDER BY w.last_seen DESC LIMIT 500",
+            (_now() - 86400,))]
+    for w in workers:
+        w["current_eta"] = _solve_eta(conn, w["current_case"], w["current_leased_at"]) \
+            if w.get("current_case") else None
     return {
         "fleet": fleet(conn, now),
         "by_state": by_state,
@@ -1881,23 +1958,7 @@ def status(conn, now: int | None = None) -> dict[str, Any]:
         # campaign is running. Two correlated subqueries rather than a join: a
         # worker with no case must still appear, and the progress line is the same
         # one _CASE_COLS folds onto a case.
-        "workers": [dict(r) for r in conn.execute(
-            "SELECT w.*,"
-            " (SELECT c.case_id FROM cases c WHERE c.lease_worker = w.worker_id"
-            "    AND c.state = 'leased' ORDER BY c.leased_at DESC LIMIT 1) AS current_case,"
-            " (SELECT e.detail FROM events e WHERE e.event = 'progress'"
-            "    AND e.case_id = (SELECT c.case_id FROM cases c WHERE c.lease_worker = w.worker_id"
-            "                       AND c.state = 'leased' ORDER BY c.leased_at DESC LIMIT 1)"
-            "    ORDER BY e.id DESC LIMIT 1) AS current_progress,"
-            # ...and WHEN it said so. The case row folds both detail and ts; this
-            # query folded only the detail, so the workers table drew a moving
-            # progress bar with nothing beside it to say the line was hours old.
-            " (SELECT e.ts FROM events e WHERE e.event = 'progress'"
-            "    AND e.case_id = (SELECT c.case_id FROM cases c WHERE c.lease_worker = w.worker_id"
-            "                       AND c.state = 'leased' ORDER BY c.leased_at DESC LIMIT 1)"
-            "    ORDER BY e.id DESC LIMIT 1) AS current_progress_at"
-            " FROM workers w WHERE w.last_seen > ? ORDER BY w.last_seen DESC LIMIT 500",
-            (_now() - 86400,))],
+        "workers": workers,
     }
 
 

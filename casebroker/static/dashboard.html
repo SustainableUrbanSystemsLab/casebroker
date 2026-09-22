@@ -1277,7 +1277,6 @@
             <th>Working on</th>
             <th class="num">Done</th>
             <th class="num">Failed</th>
-            <th class="num">Reliability</th>
           </tr>
         </thead>
         <tbody id="workersBody"></tbody>
@@ -1905,9 +1904,11 @@
     const basis = GEO_BASIS[d.mesh_source_basis] || ["the source the runner meshes", ""];
     const isMesh = !d.mesh_source || d.mesh_source === d.source;
     const hint = wrap.parentElement && wrap.parentElement.querySelector(".geo-src");
-    if (hint) hint.textContent = isMesh
-      ? `(${name}, ${basis[0]}, with terrain and trees)`
-      : `(${name}, NOT the source this case's mesh was built from — see below)`;
+    // Short: the sources are named again under the drawing. Only the two cases
+    // where the heading is not simply "what gets meshed" say anything more.
+    if (hint) hint.textContent = !isMesh
+      ? `(${name}, NOT what this case was meshed from — see below)`
+      : (d.mesh_source_basis === "not_done" || !d.mesh_source_basis) ? "" : `(${name}, ${basis[0]})`;
     // The drawing extends to the DOMAIN, not the footprint query. The buildings
     // are queried over 520 m; the mesh box is 1304 m a side (504 m core + 800 m
     // buffer), and the buffer is most of the domain -- so a picture scaled to
@@ -2393,7 +2394,7 @@
     const atSea = d.tile_published === false && terr.source === "flat"
                   && (can.source === "none" || can.frac_canopy === 0);
     const provenance = gba
-      ? `<b>GBA LoD1</b> (TUM) · <b>GEDTM30</b> · <b>Meta/WRI</b>, the sources the runner meshes. Every GBA height is predicted, not surveyed — RMSE 1.5–8.9 m by continent, which is what to judge the case on.`
+      ? `<b>GBA LoD1</b> (TUM) · <b>GEDTM30</b> · <b>Meta/WRI</b>, heights predicted (RMSE 1.5–8.9 m).`
       : `Drawn from <b>Overture ${esc(d.release || "")}</b>${d.fallback_from ? ` — ${esc(d.fallback_from)}` : ""}. Overture tags a height on only a few buildings; the rest are extruded from the LCZ class constant, so ${withH === 0 ? "this tile's massing is entirely synthetic" : `only ${pct(withH / Math.max(1, withH + noH))}% of this massing is real`}.`;
 
     wrap.innerHTML = `
@@ -2968,7 +2969,6 @@
     ["Worker ID", "worker_id"], ["Host", "host"], ["Cluster", "cluster"],
     ["Build", "build"], ["Status", "last_seen"], ["First seen", "first_seen"], ["Last seen", "last_seen"],
     ["Working on", "current_case"], ["Done", "cases_done"], ["Failed", "cases_failed"],
-    ["Reliability", "reliability"],
   ];
 
   /// Sorts the WHOLE fleet: /v1/status hands over every worker seen in 24 h, so
@@ -2977,12 +2977,6 @@
     const key = workerSort.key;
     const sign = workerSort.dir === "asc" ? 1 : -1;
     const value = (w) => {
-      if (key === "reliability") {
-        const total = (w.cases_done || 0) + (w.cases_failed || 0);
-        // A worker with no finished cases has no reliability. Sorting it as 0
-        // would rank it below one that has genuinely failed everything.
-        return total > 0 ? w.cases_done / total : -1;
-      }
       const v = w[key];
       return v === null || v === undefined ? "" : v;
     };
@@ -3015,8 +3009,6 @@
       renderWorkersHead();
       $("workersBody").innerHTML = workers.map((w) => {
         const isRecent = (Math.floor(Date.now() / 1000) - w.last_seen) < 300;
-        const totalW = (w.cases_done || 0) + (w.cases_failed || 0);
-        const reliability = totalW > 0 ? ((w.cases_done / totalW) * 100).toFixed(1) + "%" : "—";
 
         return `
           <tr>
@@ -3048,11 +3040,11 @@
                     // this line says when that worker last actually said anything.
                     + (w.current_progress && w.current_progress_at
                         ? `<span style="color:var(--text-muted);font-size:10px;">last line ${esc(relTime(w.current_progress_at))}</span>` : "")
+                    + etaLine(w.current_eta)
                     + `</div>`
                   : "—"}</td>
             <td class="num" style="font-weight:600;">${(w.cases_done || 0).toLocaleString()}</td>
             <td class="num${(w.cases_failed || 0) > 0 ? ' alert' : ''}">${(w.cases_failed || 0).toLocaleString()}</td>
-            <td class="num" style="font-family:var(--font-mono); font-size:12px;">${reliability}</td>
           </tr>`;
       }).join("");
     } else {
@@ -3122,6 +3114,26 @@
     return `<span class="badge ${esc(state)}">${esc(state)}</span>`;
   }
 
+  // "Germany · Munich, Bavaria (0.1 km)". The distance stays in the text because
+  // a quarter of this campaign's sites are more than 25 km from any town of that
+  // size, and a bare town name would read as a claim that the site is IN it.
+  function placeHtml(p, spec) {
+    const lat = Number(spec && spec.lat), lon = Number(spec && spec.lon);
+    const map = Number.isFinite(lat) && Number.isFinite(lon)
+      ? ` <a href="https://www.openstreetmap.org/?mlat=${lat.toFixed(5)}&mlon=${lon.toFixed(5)}#map=14/${lat.toFixed(5)}/${lon.toFixed(5)}"
+             target="_blank" rel="noopener noreferrer" title="Open this site in OpenStreetMap">map ↗</a>` : "";
+    if (!p) return (Number.isFinite(lat) ? `${lat.toFixed(4)}, ${lon.toFixed(4)}` : "—") + map;
+    const country = p.country ? esc(p.country) + (p.country_source === "nearest town" ? " <span title=\"the site is just outside the 1:50m country outline (usually a coast); the country is the nearest town's\">(by nearest town)</span>" : "") : "no country (open water?)";
+    let town = "";
+    if (p.town) {
+      const km = Number(p.town_km);
+      town = km <= 25
+        ? ` · ${esc(p.town)}${p.region ? ", " + esc(p.region) : ""} <span style="color:var(--text-muted)">(${km.toFixed(1)} km)</span>`
+        : ` · <span style="color:var(--text-muted)">nearest town ${esc(p.town)}, ${Math.round(km)} km away</span>`;
+    }
+    return country + town + map;
+  }
+
   function caseDetailHtml(c) {
     const metrics = parseMaybeJson(c.metrics);
     const spec = parseMaybeJson(c.spec);
@@ -3149,6 +3161,8 @@
               <dd>${esc(c.recipe || "—")}</dd>
               <dt>LCZ</dt>
               <dd>${esc(c.lcz || "—")}</dd>
+              <dt title="country from the polygon the site is in; nearest town of 15,000+ people (GeoNames) and how far it is">Location</dt>
+              <dd>${placeHtml(c.place, spec)}</dd>
               <dt>City Cluster</dt>
               <dd>${esc(c.city_cluster || "—")}</dd>
               <dt>Priority</dt>
@@ -3250,7 +3264,7 @@
 
         <div class="detail-card" style="margin-bottom:14px;">
           <h3>Site Geometry
-            <span class="label-hint geo-src" style="font-weight:400;">(buildings, terrain and trees — the same sources the runner meshes)</span>
+            <span class="label-hint geo-src" style="font-weight:400;"></span>
           </h3>
           <div id="geoWrap-${esc(c.case_id)}" class="geo-wrap">
             <button class="subtle geo-load" data-case="${esc(c.case_id)}" data-state="${esc(c.state)}"
@@ -3452,6 +3466,17 @@
     if (!line) return "\u2014";
     return `<div class="mono" style="font-size:11px;color:var(--text-muted);`
       + `overflow:hidden;text-overflow:ellipsis" title="${esc(line)}">${esc(line)}</div>`;
+  }
+
+  // The broker's estimate of when the solve ends, from this lease's own pace
+  // (db._solve_eta). An upper bound: a direction that converges early finishes
+  // before its iteration cap, which a rate cannot foresee -- hence the "~".
+  function etaLine(eta) {
+    if (!eta || !eta.at) return "";
+    const left = eta.at - Math.floor(Date.now() / 1000);
+    const clock = new Date(eta.at * 1000).toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit" });
+    const text = left > 0 ? `ETA ~${formatDuration(left)} (${clock})` : "past its estimate";
+    return `<span style="color:var(--text-muted);font-size:10px;" title="solve end, extrapolated from ${Math.round(eta.measured_over_s / 60)} min of this lease's progress; an upper estimate, since a direction that converges stops early">${esc(text)}</span>`;
   }
 
   function progressCell(line) {
