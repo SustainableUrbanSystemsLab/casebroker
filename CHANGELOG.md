@@ -8,6 +8,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-09-21
+
+### Added
+- **Every commit advances the version.** It had stalled a third time, at 0.5.0
+  with a whole Unreleased section behind it: the CI check ran on pull requests
+  only and this repo pushes to main. A pre-commit hook (`.githooks/pre-commit`;
+  `git config core.hooksPath .githooks` once per clone) runs
+  `scripts/bump_version.py --auto`, which moves PATCH unless the commit moves
+  the version itself; CI checks a push commit by commit and the deploy waits
+  for it. `/healthz`, `/v1/status` and the header badge carry the deployed
+  commit (`RENDER_GIT_COMMIT`), so the number and the code can be matched.
+
 ## [0.5.2] - 2026-09-21
 
 ### Added

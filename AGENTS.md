@@ -23,6 +23,12 @@ why the suite runs in seconds with zero external dependencies.
   `CASEBROKER_TEST_PG_DSN` is set; skipped otherwise.
 - Don't hardcode the version anywhere. `tests/test_version.py` fails if you do,
   including a `v`-prefixed literal.
+- **Every commit advances the version.** Run `git config core.hooksPath .githooks`
+  once per clone; the pre-commit hook then moves PATCH and stages it (a MINOR or
+  MAJOR bump is made by hand in the commit that earns it, and the hook leaves it
+  alone). Without the hook, `python3 scripts/bump_version.py --auto` before each
+  commit. CI refuses a push to `main` whose commits did not move it, commit by
+  commit, and the deploy waits for that check.
 
 ## Things that have actually gone wrong here
 
@@ -125,9 +131,9 @@ The Postgres CI job gates deploys. If Supabase trips its circuit breaker
 connections in a short window), that job fails and nothing deploys even though
 the code is fine.
 
-Releases: bump `version` in `pyproject.toml`, move `CHANGELOG.md`'s `Unreleased`
-under the new number, tag `vX.Y.Z`. `release.yml` refuses to publish if the tag
-disagrees with `pyproject.toml`. **MAJOR** is a breaking change to the
+Releases: every commit on `main` is a version (the hook bumps PATCH and moves
+`CHANGELOG.md`'s `Unreleased` entries under it), and `release.yml` tags and
+publishes each. It refuses to publish if a tag disagrees with `pyproject.toml`. **MAJOR** is a breaking change to the
 worker-facing protocol — workers are long-lived and can be mid-lease for an hour,
 so a broker that stops speaking the old protocol strands them.
 
