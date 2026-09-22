@@ -264,9 +264,14 @@ def test_the_fleet_summary_counts_what_the_panels_first_line_says(admin):
 
 
 def test_the_deployed_commit_is_reported_beside_the_version(tmp_path, monkeypatch):
-    monkeypatch.setenv("RENDER_GIT_COMMIT", "e044a1470f0f4c2b")
+    # Every source is cleared first: Actions sets GITHUB_SHA on the runner, and
+    # this test once read that as "still reported after Render's was removed".
+    for var in ("CASEBROKER_COMMIT", "RENDER_GIT_COMMIT", "GITHUB_SHA"):
+        monkeypatch.delenv(var, raising=False)
     c = TestClient(create_app(db_path=str(tmp_path / "c.sqlite"), tokens=["w"], readonly_tokens=[]))
+    assert c.get("/healthz").json()["commit"] is None
+    monkeypatch.setenv("RENDER_GIT_COMMIT", "e044a1470f0f4c2b")
     assert c.get("/healthz").json()["commit"] == "e044a147"
     assert c.get("/v1/status", headers=W).json()["commit"] == "e044a147"
-    monkeypatch.delenv("RENDER_GIT_COMMIT")
-    assert c.get("/healthz").json()["commit"] is None
+    monkeypatch.setenv("CASEBROKER_COMMIT", "abcdef0123")
+    assert c.get("/healthz").json()["commit"] == "abcdef01", "an explicit setting outranks the platform's"
