@@ -1,0 +1,7 @@
+#!/bin/sh
+# Every commit advances the version (docs/operations.md, "Versioning").
+# Installed once per clone with:  git config core.hooksPath .githooks
+# Moves PATCH and stages pyproject.toml, uv.lock and CHANGELOG.md, unless the
+# commit already moves the version (a MINOR or MAJOR bump made by hand), or
+# SKIP_VERSION_BUMP=1 -- which CI then refuses on main.
+exec python3 "$(git rev-parse --show-toplevel)/scripts/bump_version.py" --auto
