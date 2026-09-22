@@ -683,7 +683,15 @@
 
   .geo-wrap { min-height: 40px; }
   .geo-fig { display: flex; gap: 14px; align-items: flex-start; flex-wrap: wrap; }
-  .geo-fig svg { background: var(--surface-elevated); border: 1px solid var(--border); border-radius: 6px; }
+  .geo-fig svg.geo-zoom { background: var(--surface-elevated); border: 1px solid var(--border); border-radius: 6px; }
+  /* One view: its drawing, and the zoom buttons over its top-right corner. */
+  .geo-view { position: relative; flex: none; line-height: 0; }
+  .geo-ctl { position: absolute; top: 6px; right: 6px; display: flex; flex-direction: column; gap: 4px; }
+  .geo-btn { width: 26px; height: 26px; padding: 0; display: grid; place-items: center; cursor: pointer;
+             border: 1px solid var(--border); border-radius: 5px; background: var(--surface);
+             color: var(--text-secondary); opacity: 0.92; }
+  .geo-btn:hover:not(:disabled) { color: var(--text); background: var(--surface-hover); opacity: 1; }
+  .geo-btn:disabled { opacity: 0.35; cursor: default; }
   .geo-fig svg.geo-zoom { cursor: grab; touch-action: none; user-select: none; }
   .geo-fig svg.geo-zoom.dragging { cursor: grabbing; }
   /* Lines keep their width while the drawing is magnified; otherwise a footprint
@@ -2198,7 +2206,7 @@
         // wording and the count stay: they are why a wait of several seconds
         // does not read as a hang.
         wrap.innerHTML = '<div class="geo-fig">'
-          + skelFigure(300, 300) + skelFigure(300, 300) + skelFigure(300, 168)
+          + skelFigure(300, 300) + skelFigure(300, 300) + skelFigure(300, 300)
           + '<div class="geo-legend" style="max-width:46ch">'
           + tickHtml("querying the building atlas, GEDTM30 and the canopy model",
                      "the first look at a case reads three remote datasets, the buildings from the source its mesh was built from, then it is cached; later opens are instant")
@@ -2511,7 +2519,12 @@
     // exaggerates height against plan distance so the comparison there is
     // rigged by construction. Here both are the same axis at the same scale,
     // and 57 m of hill under 20 m of houses looks like what it is.
-    const EW = S, EH = 168, EPAD = 16;
+    //
+    // Square, like the other two: three views of one site read as a set when they
+    // are one size, and the height is where this one's detail is. It used to be
+    // 168 px tall; the vertical exaggeration below follows from the box and the
+    // caption quotes it, so the taller box reads as what it is.
+    const EW = S, EH = S, EPAD = 16;
     const NCOL = 90, colW = EW / NCOL;
     // Terrain as a BAND, not a line: this is a projection of a 2608 m square
     // onto one plane, so each column spans 2608 m of north-south ground. The
@@ -2749,28 +2762,40 @@
       ? `<b>GBA LoD1</b> (TUM) · <b>GEDTM30</b> · <b>Meta/WRI</b>, heights predicted (RMSE 1.5–8.9 m).`
       : `Drawn from <b>Overture ${esc(d.release || "")}</b>${d.fallback_from ? ` — ${esc(d.fallback_from)}` : ""}. Overture tags a height on only a few buildings; the rest are extruded from the LCZ class constant, so ${withH === 0 ? "this tile's massing is entirely synthetic" : `only ${pct(withH / Math.max(1, withH + noH))}% of this massing is real`}.`;
 
+    // Each view is keyed by its case and its name, so a zoom survives the rebuild
+    // the minute's refresh does (geoViews).
+    const viewKey = wrap.id || "";
     wrap.innerHTML = `
       <div class="geo-fig">
-        <svg class="geo-zoom" viewBox="0 0 ${S} ${S}" width="${S}" height="${S}" role="img"
-             aria-label="Plan view over the mesh domain: terrain relief shaded, tree canopy in green, building footprints in blue, with the sampled core and the domain edge.">
-          ${groundLayer}${canopyLayer}
-          <rect x="${S/2-dom}" y="${S/2-dom}" width="${2*dom}" height="${2*dom}"
-                fill="none" stroke="var(--warn)" stroke-width="1.2"/>
-          ${paths}
-          <rect x="${S/2-core}" y="${S/2-core}" width="${2*core}" height="${2*core}"
-                fill="none" stroke="var(--bad)" stroke-width="1.2" stroke-dasharray="5 4"/>
-          <circle cx="${S/2}" cy="${S/2}" r="2.5" data-fixed-r="2.5" fill="var(--bad)"/>
-        </svg>
-        <svg class="geo-zoom" viewBox="0 0 ${ISO} ${ISO}" width="${ISO}" height="${ISO}" role="img"
-             aria-label="Isometric view at 45 degrees over the sampled core: buildings extruded from their roofs down through the terrain to a common slab, with see-through green crown volumes for trees. Blue blocks have ${gba ? "predicted" : "measured"} heights, grey blocks ${gba ? "have no height in GBA" : "were inferred"}.">
-          ${isoGround}${iso}
-        </svg>
-        <svg class="geo-zoom" viewBox="0 0 ${EW} ${EH}" width="${EW}" height="${EH}" role="img"
-             aria-label="Side elevation looking north across the mesh domain: the terrain relief band, building roofs and tree canopy on one shared vertical scale in metres.">
-          ${elev}
-        </svg>
+        <div class="geo-view">
+          <svg class="geo-zoom" data-view="${esc(viewKey)}:plan" viewBox="0 0 ${S} ${S}" width="${S}" height="${S}" role="img"
+               aria-label="Plan view over the mesh domain: terrain relief shaded, tree canopy in green, building footprints in blue, with the sampled core and the domain edge.">
+            ${groundLayer}${canopyLayer}
+            <rect x="${S/2-dom}" y="${S/2-dom}" width="${2*dom}" height="${2*dom}"
+                  fill="none" stroke="var(--warn)" stroke-width="1.2"/>
+            ${paths}
+            <rect x="${S/2-core}" y="${S/2-core}" width="${2*core}" height="${2*core}"
+                  fill="none" stroke="var(--bad)" stroke-width="1.2" stroke-dasharray="5 4"/>
+            <circle cx="${S/2}" cy="${S/2}" r="2.5" data-fixed-r="2.5" fill="var(--bad)"/>
+          </svg>
+          ${geoControls("plan view")}
+        </div>
+        <div class="geo-view">
+          <svg class="geo-zoom" data-view="${esc(viewKey)}:iso" viewBox="0 0 ${ISO} ${ISO}" width="${ISO}" height="${ISO}" role="img"
+               aria-label="Isometric view at 45 degrees over the sampled core: buildings extruded from their roofs down through the terrain to a common slab, with see-through green crown volumes for trees. Blue blocks have ${gba ? "predicted" : "measured"} heights, grey blocks ${gba ? "have no height in GBA" : "were inferred"}.">
+            ${isoGround}${iso}
+          </svg>
+          ${geoControls("isometric view")}
+        </div>
+        <div class="geo-view">
+          <svg class="geo-zoom" data-view="${esc(viewKey)}:elev" viewBox="0 0 ${EW} ${EH}" width="${EW}" height="${EH}" role="img"
+               aria-label="Side elevation looking north across the mesh domain: the terrain relief band, building roofs and tree canopy on one shared vertical scale in metres.">
+            ${elev}
+          </svg>
+          ${geoControls("elevation")}
+        </div>
         <div class="geo-legend">
-          <div class="geo-note" style="margin-bottom:6px">Scroll to zoom · drag to pan · double-click to reset</div>
+          <div class="geo-note" style="margin-bottom:6px">+ / − or scroll to zoom · drag to pan · reset or double-click for the whole view</div>
           ${buildingLines}
           ${terrLine}
           ${canLine}
@@ -2793,12 +2818,20 @@
           <div class="geo-note">${provenance}</div>
         </div>
       </div>`;
+    wrap.querySelectorAll("svg.geo-zoom").forEach(geoRestore);
   }
   // -- Zoom and pan for the geometry views ------------------------------------
   // On the viewBox, so every layer -- raster ground, footprints, section lines --
   // stays exactly registered, and nothing is re-rendered. Delegated from the
   // document because the figures are rebuilt whenever a case is re-opened.
   const GEO_MAX_ZOOM = 40;
+  // One press of + or −: three presses are roughly the 4x a footprint check needs.
+  const GEO_STEP = 1.6;
+  // The zoomed views, by case and view (data-view), so the rebuild the minute's
+  // refresh does -- the whole case panel, this drawing included -- puts each one back
+  // where it was. Without it every zoom reverted within a minute, which the buttons
+  // would have made look like a button that undoes itself.
+  const geoViews = new Map();   // "<geoWrap id>:<view>" -> [x, y, w, h]
   function geoBox(svg) {
     if (!svg._vb0) svg._vb0 = svg.getAttribute("viewBox").split(/\s+/).map(Number);
     if (!svg._vb) svg._vb = svg._vb0.slice();
@@ -2816,7 +2849,59 @@
     // Markers keep their on-screen size: the site-centre dot at 8x would cover
     // the very buildings someone zoomed in to look at.
     svg.querySelectorAll("[data-fixed-r]").forEach((c) => c.setAttribute("r", Number(c.dataset.fixedR) * w / w0));
+    const whole = w >= w0 * 0.999;
+    const key = svg.dataset.view;
+    if (key) {
+      geoViews.delete(key);
+      if (!whole) geoViews.set(key, svg._vb.slice());
+      if (geoViews.size > 48) geoViews.delete(geoViews.keys().next().value);
+    }
+    // The buttons say what they can still do: − and reset do nothing on the whole
+    // drawing, + nothing at the zoom limit.
+    const ctl = svg.parentElement && svg.parentElement.querySelector(".geo-ctl");
+    if (ctl) {
+      ctl.querySelector('[data-geo="in"]').disabled = w <= (w0 / GEO_MAX_ZOOM) * 1.001;
+      ctl.querySelector('[data-geo="out"]').disabled = whole;
+      ctl.querySelector('[data-geo="reset"]').disabled = whole;
+    }
   }
+  /// A freshly drawn view takes back the zoom it had before the panel was rebuilt.
+  function geoRestore(svg) {
+    const saved = svg.dataset.view && geoViews.get(svg.dataset.view);
+    if (!saved) return;
+    geoBox(svg);
+    geoApply(svg, saved.slice());
+  }
+  // + / − / reset over each view's top-right corner. Buttons, not only a hint: a
+  // wheel zoom is invisible until someone tries it, and a trackpad without a
+  // scroll gesture, or a phone, has no wheel at all.
+  const GEO_ICONS = {
+    in: '<line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>',
+    out: '<line x1="5" y1="12" x2="19" y2="12"/>',
+    reset: '<polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/>',
+  };
+  function geoControls(what) {
+    const button = (act, label, disabled) =>
+      `<button type="button" class="geo-btn" data-geo="${act}" title="${label}" aria-label="${label} (${what})"${disabled ? " disabled" : ""}>`
+      + `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"`
+      + ` stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">${GEO_ICONS[act]}</svg></button>`;
+    return `<div class="geo-ctl">${button("in", "Zoom in", false)}${button("out", "Zoom out", true)}`
+      + `${button("reset", "Reset view", true)}</div>`;
+  }
+  document.addEventListener("click", (e) => {
+    const btn = e.target.closest && e.target.closest(".geo-btn");
+    if (!btn) return;
+    const svg = btn.closest(".geo-view") && btn.closest(".geo-view").querySelector("svg.geo-zoom");
+    if (!svg) return;
+    geoBox(svg);
+    if (btn.dataset.geo === "reset") {
+      geoApply(svg, svg._vb0.slice());
+      return;
+    }
+    // About the middle of what is on screen, which is where the eye already is.
+    const r = svg.getBoundingClientRect();
+    geoZoomAt(svg, r.left + r.width / 2, r.top + r.height / 2, btn.dataset.geo === "in" ? GEO_STEP : 1 / GEO_STEP);
+  });
   function geoPoint(svg, clientX, clientY) {
     const r = svg.getBoundingClientRect(), vb = geoBox(svg);
     return [vb[0] + (clientX - r.left) / r.width * vb[2], vb[1] + (clientY - r.top) / r.height * vb[3]];
@@ -5275,7 +5360,7 @@
         + `<div class="detail-grid">${skelDetailCard(9)}${skelDetailCard(8)}${skelDetailCard(3)}${skelDetailCard(7)}</div>`
         + `<div class="detail-card" style="margin-bottom:14px"><h3>${skelBar("140px")}</h3>${pctSkeletonTiles(6)}</div>`
         + `<div class="detail-card" style="margin-bottom:14px"><h3>${skelBar("110px")}</h3>`
-        + `<div class="geo-fig">${skelFigure(300, 300)}${skelFigure(300, 300)}${skelFigure(300, 168)}`
+        + `<div class="geo-fig">${skelFigure(300, 300)}${skelFigure(300, 300)}${skelFigure(300, 300)}`
         + `<div class="geo-legend" style="width:46ch;max-width:100%">`
         + `<div style="display:flex;flex-direction:column">${words}</div>`
         + `<div style="margin-top:10px">${skelLines(5, 80)}</div></div></div></div>`
