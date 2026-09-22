@@ -129,18 +129,72 @@ def send_ntfy(url: str, title: str, body: str, tags: str, token: str | None = No
         r.read()
 
 
+#: Settings-table keys (casebroker/db.py ``settings``). Set from the dashboard's
+#: Settings -> Notifications by an admin; each falls back to its environment
+#: variable when unset, so an existing env-only deployment keeps working.
+KEYS = {"url": "notify_url", "token": "notify_token", "events": "notify_events",
+        "public_url": "notify_public_url"}
+ENV = {"url": "CASEBROKER_NOTIFY_URL", "token": "CASEBROKER_NOTIFY_TOKEN",
+       "events": "CASEBROKER_NOTIFY_EVENTS", "public_url": "CASEBROKER_PUBLIC_URL"}
+
+
+def parse_events(raw: str | None) -> set[str]:
+    if not raw:
+        return set(ALL_EVENTS)
+    try:
+        items = json.loads(raw) if raw.strip().startswith("[") else raw.split(",")
+    except ValueError:
+        items = raw.split(",")
+    return {str(e).strip() for e in items if str(e).strip() in ALL_EVENTS}
+
+
+def resolve(settings: dict[str, str]) -> dict[str, Any]:
+    """The configuration in force: each field from the settings table when an
+    admin set it there, else from the environment. ``source`` says which, per
+    field, because "why is it still sending" is answered by where it is set."""
+    out: dict[str, Any] = {"source": {}}
+    for field in KEYS:
+        value = settings.get(KEYS[field])
+        src = "settings"
+        if value is None:
+            value = os.environ.get(ENV[field], "").strip() or None
+            src = "env" if value else None
+        out[field] = value
+        out["source"][field] = src
+    out["events"] = sorted(parse_events(out["events"]), key=ALL_EVENTS.index)
+    return out
+
+
+def mask(url: str | None) -> str | None:
+    """A topic URL for display: on ntfy.sh the topic name is the only secret."""
+    if not url:
+        return None
+    head, _, topic = url.rstrip("/").rpartition("/")
+    return f"{head}/{topic[:4]}…" if len(topic) > 4 else f"{head}/…"
+
+
+def valid_url(url: str) -> bool:
+    return url.startswith(("https://", "http://")) and " " not in url and len(url) <= 500
+
+
 class Notifier:
     """One poll loop per broker process. ``poll_once`` is the whole behaviour and
     is what the tests drive; ``start`` only runs it on a timer in a daemon thread."""
 
-    def __init__(self, conn, url: str, *, token: str | None = None, events: set[str] | None = None,
-                 interval: float = 30.0, public_url: str | None = None,
-                 sender: Callable[..., None] = send_ntfy):
+    def __init__(self, conn, url: str | None = None, *, token: str | None = None,
+                 events: set[str] | None = None, interval: float = 30.0,
+                 public_url: str | None = None, sender: Callable[..., None] = send_ntfy,
+                 live_config: bool = False):
+        """With ``live_config`` the settings table (then the environment) is
+        re-read on every poll, so a change made in the dashboard applies within
+        one interval and needs no redeploy; the explicit arguments are then only
+        what the tests pin."""
         self.conn, self.url, self.token = conn, url, token
         self.events = set(events or ALL_EVENTS)
         self.interval = max(5.0, interval)
         self.public_url = (public_url or "").rstrip("/") or None
         self.sender = sender
+        self.live_config = live_config
         self.last_id = db.max_event_id(conn)
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -149,9 +203,19 @@ class Notifier:
         """Announce everything since the last poll; returns how many rows were read.
         The position only advances past what was SENT: a failed delivery is tried
         again next poll rather than lost."""
+        if self.live_config:
+            cfg = resolve(db.get_settings(self.conn))
+            self.url, self.token = cfg["url"], cfg["token"]
+            self.events = set(cfg["events"])
+            self.public_url = (cfg["public_url"] or "").rstrip("/") or None
         rows = db.events_after(self.conn, self.last_id)
         if not rows:
             return 0
+        if not self.url:
+            # Switched off: move past what happened, so switching it on later
+            # announces from THEN rather than the whole backlog at once.
+            self.last_id = rows[-1]["id"]
+            return len(rows)
         msg = compose(rows, self.events)
         if msg:
             title, body, tags = msg
@@ -179,16 +243,28 @@ class Notifier:
         self._stop.set()
 
 
-def from_env(conn) -> Notifier | None:
-    url = os.environ.get("CASEBROKER_NOTIFY_URL", "").strip()
-    if not url:
-        return None
-    raw = os.environ.get("CASEBROKER_NOTIFY_EVENTS", "").strip()
-    events = {e.strip() for e in raw.split(",") if e.strip() in ALL_EVENTS} if raw else set(ALL_EVENTS)
+def from_env(conn) -> Notifier:
+    """The process's notifier. Always created: whether it SENDS is decided per
+    poll from the settings table and the environment, so an admin can switch it
+    on from the dashboard without a redeploy."""
     try:
         interval = float(os.environ.get("CASEBROKER_NOTIFY_INTERVAL", "30"))
     except ValueError:
         interval = 30.0
-    return Notifier(conn, url, token=os.environ.get("CASEBROKER_NOTIFY_TOKEN", "").strip() or None,
-                    events=events, interval=interval,
-                    public_url=os.environ.get("CASEBROKER_PUBLIC_URL", "").strip() or None)
+    return Notifier(conn, interval=interval, live_config=True)
+
+
+def send_test(settings: dict[str, str], sender: Callable[..., None] = send_ntfy) -> dict[str, Any]:
+    """One message now, with the configuration in force -- what the dashboard's
+    "Send test" button calls, so a wrong topic is found in seconds rather than
+    at the first finished case."""
+    cfg = resolve(settings)
+    if not cfg["url"]:
+        return {"ok": False, "error": "no ntfy topic configured"}
+    try:
+        sender(cfg["url"], "Test from the case broker",
+               "Notifications work. You will be told: " + ", ".join(cfg["events"]) + ".",
+               "bell", token=cfg["token"], click=(cfg["public_url"] or "").rstrip("/") or None)
+    except Exception as e:                    # noqa: BLE001 -- reported to the admin, verbatim
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"[:300]}
+    return {"ok": True}
