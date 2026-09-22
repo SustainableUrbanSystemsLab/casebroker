@@ -25,6 +25,7 @@ import argparse
 import glob
 import json
 import os
+import re
 import signal
 import socket
 import subprocess
@@ -53,12 +54,25 @@ class CredentialRefused(RuntimeError):
     """
 
 
+class BuildRefused(RuntimeError):
+    """The broker refused this worker's BUILD (426), not its credential.
+
+    The campaign insists on a declared build, or has blocked this one. Only an
+    update answers that, and this worker cannot perform one: `e3d` is a file an
+    operator copies onto the box. Waiting does not change the answer either, so
+    main() turns it into exit code 3 -- distinct from the credential's 2, because
+    the fix is a different person's -- and says which build was refused.
+    """
+
+
 class Worker:
     def __init__(self, broker: str, token: str | None, worker_id: str | None = None,
                  lease_seconds: int = 900, heartbeat_seconds: int = 300,
                  timeout: float = 30.0, host: str | None = None,
                  cluster: str | None = None, progress_file: str | None = None,
-                 cases_dir: str | None = None):
+                 cases_dir: str | None = None, build: str | None = None,
+                 version: str | None = None, platform: str | None = None,
+                 recipes: list[str] | None = None):
         self.broker = broker.rstrip("/")
         self.worker_id = worker_id or f"{socket.gethostname()}-{os.getpid()}-{uuid.uuid4().hex[:6]}"
         self.lease_seconds = lease_seconds
@@ -79,6 +93,17 @@ class Worker:
         self.host = host or socket.gethostname()
         self.cluster = cluster or os.environ.get("CASEBROKER_CLUSTER") \
             or os.environ.get("SLURM_CLUSTER_NAME") or None
+        # WHICH CODE this is, sent with every lease: it is how the fleet table
+        # says what build each machine runs and whether it is behind the
+        # campaign's target. Every row read "undeclared" before this, because
+        # the broker recorded a build and only the E3D node ever sent one. All
+        # optional: a broker older than build identity ignores the keys, and a
+        # worker that knows nothing (no EDDY3D_CLI, or an e3d too old to answer
+        # `version --json`) leases exactly as it always did.
+        self.build = build
+        self.version = version
+        self.platform = platform
+        self.recipes = list(recipes) if recipes else None
         self.heartbeat_seconds = heartbeat_seconds
         headers = {"Authorization": f"Bearer {token}"} if token else {}
         self.http = httpx.Client(base_url=self.broker, headers=headers, timeout=timeout)
@@ -138,7 +163,9 @@ class Worker:
             "worker_id": self.worker_id, "count": count,
             "lease_seconds": self.lease_seconds, "splits": splits,
             "host": self.host, "cluster": self.cluster,
-            "resume_case_ids": self.resume_case_ids() or None})
+            "resume_case_ids": self.resume_case_ids() or None,
+            "build": self.build, "version": self.version, "platform": self.platform,
+            "recipes": self.recipes})
         r.raise_for_status()
         return r.json()
 
@@ -256,6 +283,14 @@ class Worker:
                     raise CredentialRefused(
                         f"broker refused this credential ({status}): "
                         f"{e.response.text[:300]}") from e
+                if status == 426:
+                    # The credential is fine and the BUILD is not. The retry
+                    # below would log one warning per idle_backoff for the whole
+                    # walltime and never once say what was wrong with the node.
+                    self._stop.set()
+                    raise BuildRefused(
+                        f"broker refused this worker's build "
+                        f"({self.build or 'undeclared'}): {e.response.text[:300]}") from e
                 print(f"[warn] lease failed: {e}", file=sys.stderr)
                 time.sleep(idle_backoff)
                 continue
@@ -514,6 +549,56 @@ def script_runner(script: str, timeout: int | None = None,
     return run
 
 
+# -- identity -----------------------------------------------------------------
+
+def msys_to_windows(path: str) -> str:
+    """``/e/wind/bin/e3d.exe`` -> ``E:/wind/bin/e3d.exe``.
+
+    machine.env spells EDDY3D_CLI the way run_case.sh wants it, as an MSYS path,
+    because the runner is a bash script. This worker is native Python, for
+    which that spelling names nothing. Anything else comes back unchanged.
+    """
+    m = re.match(r"^/([A-Za-z])/(.*)$", path)
+    return f"{m.group(1).upper()}:/{m.group(2)}" if m else path
+
+
+def e3d_identity(cli: str | None, timeout: float = 30.0) -> dict[str, Any] | None:
+    """What `e3d` says it is -- ``build``, ``version``, ``platform``,
+    ``recipes`` from ``e3d version --json`` -- or None when there is nothing to
+    declare.
+
+    None is the backwards-compatible answer, never an error: no EDDY3D_CLI, an
+    e3d from before ``--json`` (it prints a bare ``1.14.0`` and ignores the
+    flag), a file that will not start. The worker then leases as it always did
+    and the fleet table shows it as undeclared, which is the truth.
+    """
+    if not cli:
+        return None
+    exe = cli
+    if os.name == "nt" and not os.path.exists(exe):
+        exe = msys_to_windows(exe)
+    try:
+        proc = subprocess.run([exe, "version", "--json"], capture_output=True,
+                              text=True, timeout=timeout)
+        # The LAST line: a build that logs before it answers has still answered.
+        lines = [ln for ln in proc.stdout.splitlines() if ln.strip()]
+        got = json.loads(lines[-1]) if lines else {}
+        build = got.get("build") if isinstance(got, dict) else None
+        if proc.returncode != 0 or not isinstance(build, str) or not build:
+            raise ValueError(f"exit {proc.returncode}, stdout {proc.stdout[-200:]!r}")
+    except (OSError, subprocess.SubprocessError, ValueError) as e:
+        print(f"[warn] {cli} did not answer `version --json` ({e}); "
+              "this worker declares no build", file=sys.stderr)
+        return None
+    recipes = got.get("recipes")
+    return {
+        "build": build[:96],
+        "version": str(got.get("version") or "")[:64] or None,
+        "platform": str(got.get("platform") or "")[:32] or None,
+        "recipes": [str(r) for r in recipes][:64] if isinstance(recipes, list) else None,
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="Case-broker worker")
     p.add_argument("--broker", default=os.environ.get("CASEBROKER_URL", "http://127.0.0.1:8000"))
@@ -537,10 +622,29 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--cases-dir", default=os.environ.get("WIND_CASES"),
                    help="local checkpoint directory; cases with a resume.json here are "
                         "asked for first so they continue instead of restarting")
+    p.add_argument("--e3d", default=os.environ.get("EDDY3D_CLI"),
+                   help="the e3d executable the runner drives, asked `version --json` once "
+                        "so every lease says which build this machine runs (default: "
+                        "$EDDY3D_CLI; unset, or an e3d too old to answer, declares none)")
+    p.add_argument("--recipes", default=os.environ.get("CASEBROKER_RECIPES"),
+                   help="comma-separated recipes this runner produces EXACTLY; the broker "
+                        "then hands it only those. Omitted, it may be handed any: the "
+                        "runner script is its own contract, and nothing here can vouch "
+                        "for it (default: $CASEBROKER_RECIPES)")
     a = p.parse_args(argv)
 
+    ident = e3d_identity(a.e3d) or {}
+    recipes = [r.strip() for r in (a.recipes or "").split(",") if r.strip()] or None
     w = Worker(a.broker, a.token, a.worker_id, a.lease_seconds, a.heartbeat_seconds,
-               cases_dir=a.cases_dir)
+               cases_dir=a.cases_dir, build=ident.get("build"), version=ident.get("version"),
+               platform=ident.get("platform"), recipes=recipes)
+    if w.build:
+        print(f"[info] build {w.build} ({w.platform or 'platform unknown'}); "
+              + (f"recipes {', '.join(recipes)}" if recipes
+                 else "no recipes declared, so any case may be handed to this worker"))
+    else:
+        print("[info] no build declared (set EDDY3D_CLI to an e3d that answers "
+              "`version --json`); the fleet table will show this worker as undeclared")
     w.progress_file = a.progress_file or os.path.join(
         tempfile.gettempdir(), f"casebroker-progress-{w.worker_id}.txt")
     runner = (script_runner(a.runner, timeout=a.case_timeout,
@@ -555,6 +659,11 @@ def main(argv: list[str] | None = None) -> int:
         # holding its nodes to the wall clock.
         print(f"[fatal] {e}", file=sys.stderr)
         return 2
+    except BuildRefused as e:
+        print(f"[fatal] {e}", file=sys.stderr)
+        print("[fatal] update e3d on this machine (and EDDY3D_CLI, if it moved), "
+              "then start the worker again", file=sys.stderr)
+        return 3
     print(f"[info] worker {w.worker_id} finished {n} case(s)")
     return 0
 
