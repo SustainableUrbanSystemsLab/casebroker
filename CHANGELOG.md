@@ -8,6 +8,25 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-09-22
+
+### Added
+- The case card's **domain ↗** link draws the site too: the buildings and the
+  tree canopy from the same `/footprints` payload the Site Geometry panel
+  draws, over geojson.io's street or satellite map, beside the domain, the
+  core and the centre. Buildings are grouped into height classes (under 10 m,
+  10-20, 20-40, 40 m and taller; blue, darker is taller) and footprints
+  without a height are outlines; the canopy is the 2 m-and-taller cells of the
+  canopy height raster, merged into rectangles, in three green height classes
+  that carry the vegetation class the runner applies. The link is upgraded in
+  place when the site geometry lands, so it never waits for the next refresh.
+  The whole drawing travels in the URL: 83-144 KB for three measured campaign
+  sites, loaded by geojson.io in Chromium and in WebKit (Safari's engine) up
+  to a 743 KB, 4,950-building test. Past 900 KB the buildings are left out
+  and the link says so, rather than handing the browser a URL it refuses. The
+  JSON punctuation is no longer percent-encoded, which made each link about
+  40 % shorter.
+
 ## [0.10.0] - 2026-09-22
 
 ### Removed

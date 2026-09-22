@@ -2231,6 +2231,8 @@
       return;
     }
     drawGeometry(g.data, wrap);
+    // The same buildings and canopy, on a real map behind the case's "domain" link.
+    refreshMapLinks(caseId);
   }
 
   // How the broker knows which source a case's mesh was built from (its
@@ -3827,39 +3829,192 @@
   // node meshes with), so what is drawn is what is meshed: the ±504 m sampled
   // core, and the domain -- a 1,300 m radius CYLINDER for a cyl- recipe, a
   // ±1,300 m box otherwise.
+  //
+  // The site itself rides along once this page has read it: the buildings and the
+  // tree canopy from the same /footprints payload the Site Geometry panel draws, so
+  // the map shows what the panel shows, over real imagery. The footprints are
+  // already lon/lat; the canopy is a height raster over the core, turned into cell
+  // rectangles in the same local frame as the domain.
+  //
+  // Grouped into height classes rather than one feature per building. geojson.io
+  // styles each feature from its own properties, so 566 buildings each carrying a
+  // colour cost more than their outlines -- and a class per feature is what a map
+  // can actually show: darker blue is a taller building, darker green a taller
+  // canopy, the reading the panel's isometric gives.
   const CORE_HALF_M = 504, DOMAIN_HALF_M = 504 + 800 - 4;
-  function footprintMapUrl(lat, lon, cyl) {
+  const MAP_BUILDING_BANDS = [[0, 10, "under 10 m", "#93c5fd"], [10, 20, "10-20 m", "#60a5fa"],
+                              [20, 40, "20-40 m", "#2563eb"], [40, Infinity, "40 m and taller", "#1e3a8a"]];
+  const MAP_CANOPY_BANDS = [[2, 10, "2-10 m", "#86efac"], [10, 20, "10-20 m", "#22c55e"],
+                            [20, Infinity, "20 m and taller", "#15803d"]];
+  // The whole drawing travels in the URL, so its length is the limit. Chrome takes 2 MiB
+  // and Firefox 1 MiB; a campaign site measured 80-140 KB with everything in it
+  // (412-825 buildings, 2026-09-22). Past this the buildings are left out -- and the
+  // link says so -- rather than handing the browser a URL it refuses.
+  const MAP_URL_BUDGET = 900000;
+
+  /// The site's buildings and canopy as a few styled GeoJSON features, from a
+  /// /footprints payload; empty lists for a payload that has neither.
+  function siteMapFeatures(geo) {
+    const out = { buildings: [], canopy: [], nBuildings: 0 };
+    const gba = geo.source === "globalbuildingatlas";
+    const heights = gba ? "GlobalBuildingAtlas LoD1, predicted" : "Overture, as tagged";
+    const bands = MAP_BUILDING_BANDS.map(() => []), untagged = [];
+    for (const f of Array.isArray(geo.features) ? geo.features : []) {
+      const g = f && f.geometry;
+      if (!g || (g.type !== "Polygon" && g.type !== "MultiPolygon")) continue;
+      const h = Number(f.properties && f.properties.h);
+      // Holes stay: a courtyard is part of what the flow meets.
+      const polys = g.type === "Polygon" ? [g.coordinates] : g.coordinates;
+      const i = h > 0 ? MAP_BUILDING_BANDS.findIndex(([lo, hi]) => h >= lo && h < hi) : -1;
+      (i >= 0 ? bands[i] : untagged).push(...polys);
+      out.nBuildings++;
+    }
+    const group = (polys, name, colour, fill) => ({ type: "Feature",
+      properties: { name: `${name} (${polys.length})`, heights,
+                    stroke: colour, "stroke-width": 1, fill: colour, "fill-opacity": fill },
+      geometry: { type: "MultiPolygon", coordinates: polys } });
+    MAP_BUILDING_BANDS.forEach(([, , label, colour], i) => {
+      if (bands[i].length) out.buildings.push(group(bands[i], `buildings ${label}`, colour, 0.5));
+    });
+    // An Overture footprint with no height tag, drawn as an outline -- as the panel draws it.
+    if (untagged.length) out.buildings.push(group(untagged, "buildings without a height", "#6b7280", 0));
+
+    const can = geo.canopy || {};
+    if (can.source === "meta-wri-chm-v1" && Array.isArray(can.grid) && can.n > 0 && Array.isArray(geo.centre)) {
+      const n = can.n, half = can.half_m || CORE_HALF_M, step = 2 * half / n;
+      const [lat0, lon0] = geo.centre;
+      const my = 110540, mx = 111320 * Math.cos(lat0 * Math.PI / 180);
+      const pt = (x, y) => [+(lon0 + x / mx).toFixed(6), +(lat0 + y / my).toFixed(6)];
+      const min = can.min_canopy_m || 2;
+      const v = can.vegetation;
+      MAP_CANOPY_BANDS.forEach(([lo, hi, label, colour]) => {
+        const inBand = (r, c) => { const h = can.grid[r * n + c] || 0; return h >= Math.max(lo, min) && h < hi; };
+        // Row runs, and a run stacked on the same run of the row above grows into one
+        // rectangle: 320 cells of this campaign's first Indian site became 116 polygons.
+        const rects = [];
+        let above = new Map();
+        for (let r = 0; r < n; r++) {
+          const here = new Map();
+          for (let c = 0; c < n; c++) {
+            if (!inBand(r, c)) continue;
+            const c0 = c;
+            while (c + 1 < n && inBand(r, c + 1)) c++;
+            const key = c0 + ":" + (c + 1);
+            const rect = above.get(key) || (rects.push({ c0, c1: c + 1, r0: r, r1: r }), rects[rects.length - 1]);
+            rect.r1 = r + 1;
+            here.set(key, rect);
+          }
+          above = here;
+        }
+        if (!rects.length) return;
+        let cells = 0;
+        const polys = rects.map(({ c0, c1, r0, r1 }) => {
+          cells += (c1 - c0) * (r1 - r0);
+          // Row 0 is the NORTH edge of the raster: y falls as r grows.
+          const x0 = -half + c0 * step, x1 = -half + c1 * step;
+          const y1 = half - r0 * step, y0 = half - r1 * step;
+          return [[pt(x0, y0), pt(x1, y0), pt(x1, y1), pt(x0, y1), pt(x0, y0)]];
+        });
+        out.canopy.push({ type: "Feature",
+          properties: { name: `tree canopy ${label} (${cells} cell${cells === 1 ? "" : "s"})`,
+                        canopy: `Meta/WRI canopy height, ${Math.round(step)} m cells averaged`,
+                        ...(v && v.label ? { vegetation: `${v.label}, f = 2 Cd LAD = ${v.f_per_m} per m` } : {}),
+                        stroke: colour, "stroke-width": 0.5, fill: colour, "fill-opacity": 0.45 },
+          geometry: { type: "MultiPolygon", coordinates: polys } });
+      });
+    }
+    return out;
+  }
+
+  /// { url, title }: the domain, the core and the centre, and the site's buildings
+  /// and canopy when `geo` (a /footprints payload) is given.
+  function footprintMapUrl(lat, lon, cyl, geo) {
     const my = 110540, mx = 111320 * Math.cos(lat * Math.PI / 180);
     const pt = (x, y) => [+(lon + x / mx).toFixed(6), +(lat + y / my).toFixed(6)];
     const square = (h) => [[pt(-h, -h), pt(h, -h), pt(h, h), pt(-h, h), pt(-h, -h)]];
     const circle = (r) => [Array.from({ length: 73 }, (_, i) => {
       const a = (i % 72) / 72 * 2 * Math.PI; return pt(r * Math.cos(a), r * Math.sin(a)); })];
-    const feature = (coords, name, color, fill) => ({ type: "Feature",
-      properties: { name, stroke: color, "stroke-width": 2, fill: color, "fill-opacity": fill },
+    const feature = (coords, name, color, fill, extra) => ({ type: "Feature",
+      properties: { name, ...extra, stroke: color, "stroke-width": 2, fill: color, "fill-opacity": fill },
       geometry: { type: "Polygon", coordinates: coords } });
-    const fc = { type: "FeatureCollection", features: [
+    const site = geo ? siteMapFeatures(geo) : null;
+    const draw = (layers, note) => ({ type: "FeatureCollection", features: [
       feature(cyl ? circle(DOMAIN_HALF_M) : square(DOMAIN_HALF_M),
-              cyl ? "mesh domain (cylinder, r = 1,300 m)" : "mesh domain (±1,300 m)", "#d97706", 0.05),
-      feature(square(CORE_HALF_M), "sampled core (1,008 m)", "#dc2626", 0.12),
+              cyl ? "mesh domain (cylinder, r = 1,300 m)" : "mesh domain (±1,300 m)", "#d97706", 0.05,
+              note ? { note } : undefined),
+      ...layers,
+      // An outline once there is something inside it: a red wash over the buildings
+      // would tint every one of them.
+      feature(square(CORE_HALF_M), "sampled core (1,008 m)", "#dc2626", layers.length ? 0 : 0.12),
       { type: "Feature", properties: { name: "site centre", "marker-color": "#dc2626" },
         geometry: { type: "Point", coordinates: [+lon.toFixed(6), +lat.toFixed(6)] } },
-    ] };
-    // geojson.io decodes the fragment TWICE, and treats a "#" that appears after the first
-    // pass as the end of its data: "stroke":"#d97706" arrived as "stroke":" and the page
-    // said "Unterminated string in JSON at position 127" (the position of that "#"). So the
-    // hash of every simplestyle colour is encoded once more -- %2523 -> %23 -> # -- which is
-    // what the page reads back as "#d97706" (checked in a browser, 2026-09-22).
-    return "https://geojson.io/#data=data:application/json,"
-      + encodeURIComponent(JSON.stringify(fc)).replace(/%23/g, "%2523");
+    ] });
+    const base = "The sampled core and the mesh domain";
+    if (!site || (!site.buildings.length && !site.canopy.length)) {
+      return { url: mapUrl(draw([])), title: `${base} drawn on a map (geojson.io)` };
+    }
+    const what = [site.nBuildings ? `${site.nBuildings} buildings` : "",
+                  site.canopy.length ? "the tree canopy" : ""].filter(Boolean).join(" and ");
+    const url = mapUrl(draw([...site.canopy, ...site.buildings]));
+    if (url.length <= MAP_URL_BUDGET) return { url, title: `${base}, with ${what}, drawn on a map (geojson.io)` };
+    const left = `${site.nBuildings} buildings left out: more than a link can carry. The Site Geometry panel draws them.`;
+    return { url: mapUrl(draw(site.canopy, left)),
+             title: `${base}${site.canopy.length ? ", with the tree canopy," : ""} drawn on a map (geojson.io). ${left}` };
   }
 
-  function placeHtml(p, spec, cylDomain) {
+  // geojson.io decodes the fragment TWICE: once as a query string, once as the data:
+  // URL inside it, where a "#" ends the data. "stroke":"#d97706" arrived as "stroke":"
+  // and the page said "Unterminated string in JSON at position 127" -- the position of
+  // that "#". So "#" and "%" are encoded twice (%2523 -> %23 -> #), and so is anything
+  // outside ASCII; "&" and "+" once, or the query-string pass splits or blanks them.
+  // The JSON's own punctuation -- brackets, braces, commas, colons -- goes through as
+  // it is: a browser leaves it alone in a fragment, and encoding it made a site's link
+  // 40 % longer, all of it spent on the coordinate arrays (checked in a browser with
+  // the real payload of a 566-building site, 2026-09-22).
+  function mapUrl(fc) {
+    // /u: a character outside the BMP is one match, not two lone surrogates, which
+    // encodeURIComponent would throw on.
+    return "https://geojson.io/#data=data:application/json," + JSON.stringify(fc).replace(
+      /[^A-Za-z0-9.,:\[\]\{\}\-_]/gu,
+      (ch) => /[#%]|[^\x00-\x7e]/u.test(ch) ? encodeURIComponent(encodeURIComponent(ch)) : encodeURIComponent(ch));
+  }
+
+  // One link per case, rebuilt only when what it draws changes: the table re-renders
+  // every minute, and a site's link is some 100 KB of JSON.
+  const mapLinks = new Map();   // case_id -> { lat, lon, cyl, geo, link }
+  function domainMapLink(caseId, lat, lon, cyl) {
+    const geo = caseId ? settledGeometry(caseId) : null;
+    const was = caseId && mapLinks.get(caseId);
+    if (was && was.lat === lat && was.lon === lon && was.cyl === cyl && was.geo === geo) return was.link;
+    const link = footprintMapUrl(lat, lon, cyl, geo);
+    if (caseId) {
+      mapLinks.delete(caseId);
+      mapLinks.set(caseId, { lat, lon, cyl, geo, link });
+      if (mapLinks.size > GEO_KEEP) mapLinks.delete(mapLinks.keys().next().value);
+    }
+    return link;
+  }
+
+  /// The site geometry for `caseId` has landed: the open case's "domain" link starts
+  /// drawing it too, without waiting for the next refresh.
+  function refreshMapLinks(caseId) {
+    const was = mapLinks.get(caseId);
+    if (!was) return;
+    const link = domainMapLink(caseId, was.lat, was.lon, was.cyl);
+    document.querySelectorAll(`a.domain-map[data-case="${CSS.escape(caseId)}"]`).forEach((a) => {
+      a.href = link.url;
+      a.title = link.title;
+    });
+  }
+
+  function placeHtml(p, spec, cylDomain, caseId) {
     const lat = Number(spec && spec.lat), lon = Number(spec && spec.lon);
-    const map = Number.isFinite(lat) && Number.isFinite(lon)
+    const domain = Number.isFinite(lat) && Number.isFinite(lon) ? domainMapLink(caseId, lat, lon, cylDomain) : null;
+    const map = domain
       ? ` <a href="https://www.openstreetmap.org/?mlat=${lat.toFixed(5)}&mlon=${lon.toFixed(5)}#map=14/${lat.toFixed(5)}/${lon.toFixed(5)}"
              target="_blank" rel="noopener noreferrer" title="Open this site in OpenStreetMap">map ↗</a>
-         · <a href="${esc(footprintMapUrl(lat, lon, cylDomain))}" target="_blank" rel="noopener noreferrer"
-             title="The sampled core and the mesh domain drawn on a map (geojson.io)">domain ↗</a>` : "";
+         · <a class="domain-map" data-case="${esc(caseId || "")}" href="${esc(domain.url)}" target="_blank"
+             rel="noopener noreferrer" title="${esc(domain.title)}">domain ↗</a>` : "";
     if (!p) return `<span style="display:block">${Number.isFinite(lat) ? `${lat.toFixed(4)}, ${lon.toFixed(4)}` : "—"}${map}</span>`;
     const country = p.country ? esc(p.country) + (p.country_source === "nearest town" ? " <span title=\"the site is just outside the 1:50m country outline (usually a coast); the country is the nearest town's\">(by nearest town)</span>" : "") : "no country (open water?)";
     let town = "";
@@ -4500,6 +4655,9 @@
     // not failed" is pending too.
     const placePending = c.place === undefined && !caseDetails.get(c.case_id)
       && !caseDetailFailed.has(c.case_id);
+    // Built here rather than inside the template: placeHtml escapes what it draws,
+    // including the case id its map link is keyed on.
+    const placeCell = placePending ? skelBar("78%") : placeHtml(c.place, spec, cylDomain, c.case_id);
 
     return `
       <div class="caseDetail">
@@ -4524,7 +4682,7 @@
               <dt>LCZ</dt>
               <dd>${esc(c.lcz || "—")}</dd>
               <dt title="country from the polygon the site is in; nearest town of 15,000+ people (GeoNames) and how far it is">Location</dt>
-              <dd aria-busy="${placePending}">${placePending ? skelBar("78%") : placeHtml(c.place, spec, cylDomain)}</dd>
+              <dd aria-busy="${placePending}">${placeCell}</dd>
               <dt>City Cluster</dt>
               <dd>${esc(c.city_cluster || "—")}</dd>
               <dt>Priority</dt>
