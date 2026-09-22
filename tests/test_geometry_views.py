@@ -44,6 +44,31 @@ def test_each_view_carries_its_own_buttons_outside_the_drawing():
         assert f'button("{act}"' in DASH
 
 
+def test_the_caption_sits_directly_under_the_views_and_names_them():
+    """Under the three views, not in the legend beside them, and by name: in a row
+    of three, "middle" and "bottom" no longer pointed at anything."""
+    body = _draw_geometry()
+    views_end = body.rindex('${geoControls("elevation")}')
+    caption = body.index('<div class="geo-caption">${caption}</div>')
+    legend = body.index('<div class="geo-legend">')
+    assert views_end < caption < legend
+    for name in ("Plan:", "Isometric:", "Elevation:"):
+        assert name in body
+    assert "Middle: isometric" not in DASH and "Bottom: elevation" not in DASH
+
+
+def test_the_legend_says_each_thing_once():
+    """The building source was named twice, the RMSE sat apart from the uncertainty
+    it qualifies, a crown-cell count described the preview grid rather than the
+    mesh, and a usage hint repeated what the buttons now show."""
+    body = _draw_geometry()
+    assert body.count("GlobalBuildingAtlas LoD1") == 1, "one sources line"
+    assert "GBA LoD1</b>" not in body
+    assert "exceed the published RMSE (1.5–8.9 m)" in body
+    for gone in ("porous crown cell", "scroll to zoom", "Height variance median"):
+        assert gone not in DASH, gone
+
+
 def test_a_zoom_survives_the_rebuild_the_refresh_does():
     """Auto-refresh is on by default and rebuilds the open case's panel every
     minute; without the restore every zoom reverted within a minute."""

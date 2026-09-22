@@ -683,6 +683,13 @@
 
   .geo-wrap { min-height: 40px; }
   .geo-fig { display: flex; gap: 14px; align-items: flex-start; flex-wrap: wrap; }
+  /* The three views and, directly under them, the caption that names them; the
+     legend sits beside this block when there is room and below it when not. */
+  .geo-main { display: flex; flex-direction: column; gap: 6px; flex: 0 1 auto; min-width: 0; }
+  .geo-views { display: flex; gap: 14px; align-items: flex-start; flex-wrap: wrap; }
+  /* width 0 + min-width 100%: the caption takes the views' width without adding
+     its own, so it wraps under them instead of stretching the column past them. */
+  .geo-caption { width: 0; min-width: 100%; font-size: 11.5px; line-height: 1.5; color: var(--text-muted); }
   .geo-fig svg.geo-zoom { background: var(--surface-elevated); border: 1px solid var(--border); border-radius: 6px; }
   /* One view: its drawing, and the zoom buttons over its top-right corner. */
   .geo-view { position: relative; flex: none; line-height: 0; }
@@ -697,7 +704,9 @@
   /* Lines keep their width while the drawing is magnified; otherwise a footprint
      outline at 8x is a thick band hiding the building it outlines. */
   .geo-fig svg.geo-zoom * { vector-effect: non-scaling-stroke; }
-  .geo-legend { font-size: 12px; color: var(--text-secondary); line-height: 1.9; }
+  /* Beside the views when a 300 px column fits next to them, below them when not;
+     sized by its basis rather than its longest line, which alone would push it under. */
+  .geo-legend { font-size: 12px; color: var(--text-secondary); line-height: 1.9; flex: 1 1 300px; min-width: 260px; }
   .geo-swatch { display: inline-block; width: 11px; height: 11px; border-radius: 2px; vertical-align: -1px; margin-right: 6px; }
   .geo-note { font-size: 11.5px; color: var(--text-muted); margin-top: 8px; max-width: 46ch; }
 
@@ -2205,8 +2214,9 @@
         // EH), and the legend column holding what is actually happening. The
         // wording and the count stay: they are why a wait of several seconds
         // does not read as a hang.
-        wrap.innerHTML = '<div class="geo-fig">'
+        wrap.innerHTML = '<div class="geo-fig"><div class="geo-main"><div class="geo-views">'
           + skelFigure(300, 300) + skelFigure(300, 300) + skelFigure(300, 300)
+          + '</div>' + skelBar("70%") + '</div>'
           + '<div class="geo-legend" style="max-width:46ch">'
           + tickHtml("querying the building atlas, GEDTM30 and the canopy model",
                      "the first look at a case reads three remote datasets, the buildings from the source its mesh was built from, then it is cached; later opens are instant")
@@ -2349,11 +2359,7 @@
     // deviation is the same number in the units the legend quotes.
     sds.sort((a, b) => a - b);
     const medSd = sds.length ? sds[Math.floor(sds.length / 2)] : null;
-    const vs = gba ? d.features.map((f) => f.properties && f.properties.v)
-      .filter((v) => v != null).sort((a, b) => a - b) : [];
-    const vMid = vs.length >> 1;
-    const vMed = !vs.length ? null : vs.length % 2 ? vs[vMid] : (vs[vMid - 1] + vs[vMid]) / 2;
-    const vHigh = vs.filter((v) => v > 25).length;
+    const vHigh = gba ? d.features.filter((f) => f.properties && f.properties.v > 25).length : 0;
     const core = CORE_M * k, dom = DOM_M * k;
 
     // -- 45 degree isometric ------------------------------------------------
@@ -2461,7 +2467,6 @@
     // all below it. Drawing a trunk, or a solid block, would be drawing
     // something the solve does not contain -- these are see-through for the same
     // reason. Only the core is drawn; the buffer is off-frame here.
-    let crowns = 0;
     if (hasCan) {
       const cn = can.n, chalf = can.half_m || DOM_M, cstep = 2 * chalf / cn;
       for (let r = 0; r < cn; r++) {
@@ -2473,7 +2478,6 @@
           // reason: it costs nothing and it is what stops a wider canopy grid
           // from quietly drawing crowns into the buffer if the extent changes.
           if (Math.abs(x) > CORE_M || Math.abs(y) > CORE_M) continue;
-          crowns++;
           const s = cstep * 0.5;
           solids.push({
             kind: "t",
@@ -2730,7 +2734,7 @@
     const canLine = (() => {
       if (hasCan && can.frac_canopy > 0) {
         const v = can.vegetation;
-        return `<div><span class="geo-swatch" style="background:var(--accent)"></span>trees — <b>${pct(can.frac_canopy)}%</b> under canopy, tallest <b>${can.max_height_m} m</b></div>`
+        return `<div><span class="geo-swatch" style="background:var(--accent)"></span>trees — <b>${pct(can.frac_canopy)}%</b> under canopy, tallest <b>${can.max_height_m} m</b>, meshed as porous crowns, not solids</div>`
           + (v ? `<div><span class="geo-swatch" style="background:var(--accent);opacity:0.45"></span>all crowns as <b>${esc(v.label)}</b> — f = 2·Cd·LAD = <b>${v.f_per_m}</b> m⁻¹<div class="geo-note" style="margin-top:2px">One class for every tree here, by latitude alone (${esc(v.provenance)}).</div></div>` : "");
       }
       if (hasCan) return `<div><span class="geo-swatch" style="background:var(--accent);opacity:0.35"></span><b>no trees</b> — treeless site, no canopy zone</div>`;
@@ -2750,7 +2754,7 @@
       ? `<div><span class="geo-swatch" style="background:var(--text-muted)"></span><b>no buildings</b> — the atlas publishes no tile here<div class="geo-note" style="margin-top:2px">GlobalBuildingAtlas covers 922 tiles of a possible 2,592; the rest are ocean and ice. Tile <code class="inline">${esc(d.tile || "")}</code> is not one of them.</div></div>`
       : gba
       ? `<div><span class="geo-swatch" style="background:var(--primary)"></span><b>${withH}</b> buildings, height predicted</div>`
-        + (medSd != null ? `<div><span class="geo-swatch" style="background:var(--text-muted)"></span>median uncertainty <b>±${medSd.toFixed(1)} m</b> (GBA σ; grey blocks exceed the published RMSE)</div>` : "")
+        + (medSd != null ? `<div><span class="geo-swatch" style="background:var(--text-muted)"></span>median uncertainty <b>±${medSd.toFixed(1)} m</b> (GBA σ)${vHigh ? `, <b>${vHigh}</b> beyond ±5 m` : ""}; grey blocks exceed the published RMSE (1.5–8.9 m)</div>` : "")
       : `<div><span class="geo-swatch" style="background:var(--primary)"></span><b>${withH}</b> measured height</div>`
         + `<div><span class="geo-swatch" style="border:1px solid var(--text-muted)"></span><b>${noH}</b> height inferred</div>`;
     // All three sources agreeing on "nothing here" is the single most useful
@@ -2758,15 +2762,26 @@
     // rather than leaving to be inferred from three separate grey lines.
     const atSea = d.tile_published === false && terr.source === "flat"
                   && (can.source === "none" || can.frac_canopy === 0);
-    const provenance = gba
-      ? `<b>GBA LoD1</b> (TUM) · <b>GEDTM30</b> · <b>Meta/WRI</b>, heights predicted (RMSE 1.5–8.9 m).`
-      : `Drawn from <b>Overture ${esc(d.release || "")}</b>${d.fallback_from ? ` — ${esc(d.fallback_from)}` : ""}. Overture tags a height on only a few buildings; the rest are extruded from the LCZ class constant, so ${withH === 0 ? "this tile's massing is entirely synthetic" : `only ${pct(withH / Math.max(1, withH + noH))}% of this massing is real`}.`;
+    // One line for where all three layers come from. The building source used to be
+    // named twice -- once as a bare label, once in a provenance sentence -- and the
+    // RMSE it quoted now sits on the uncertainty line it qualifies.
+    const sources = `Sources: ${gba ? "GlobalBuildingAtlas LoD1 (TUM)" : `Overture ${esc(d.release || "")}`}`
+      + ` · GEDTM30 · Meta/WRI canopy${d.cached ? " · cached" : ""}${d.truncated ? ` · truncated at ${d.n}` : ""}`;
+    const overtureNote = gba ? ""
+      : `Overture tags a height on only a few buildings; the rest are extruded from the LCZ class constant, so ${withH === 0 ? "this tile's massing is entirely synthetic" : `only ${pct(withH / Math.max(1, withH + noH))}% of this massing is real`}.`;
+    // Under the views, naming them: in a row of three, "middle" and "bottom" no longer
+    // pointed at anything.
+    const caption = `Plan: the whole ${2 * DOM_M} m domain, north up · `
+      + `Isometric: the core, heights ×${HEX}, relief ×${TEX === HEX ? HEX : TEX.toFixed(1)} · `
+      + `Elevation: looking north, true metres, vertical ×${vExag.toFixed(0)}`;
 
     // Each view is keyed by its case and its name, so a zoom survives the rebuild
     // the minute's refresh does (geoViews).
     const viewKey = wrap.id || "";
     wrap.innerHTML = `
       <div class="geo-fig">
+       <div class="geo-main">
+        <div class="geo-views">
         <div class="geo-view">
           <svg class="geo-zoom" data-view="${esc(viewKey)}:plan" viewBox="0 0 ${S} ${S}" width="${S}" height="${S}" role="img"
                aria-label="Plan view over the mesh domain: terrain relief shaded, tree canopy in green, building footprints in blue, with the sampled core and the domain edge.">
@@ -2794,28 +2809,27 @@
           </svg>
           ${geoControls("elevation")}
         </div>
+        </div>
+        <div class="geo-caption">${caption}</div>
+       </div>
         <div class="geo-legend">
-          <div class="geo-note" style="margin-bottom:6px">+ / − or scroll to zoom · drag to pan · reset or double-click for the whole view</div>
           ${buildingLines}
           ${terrLine}
           ${canLine}
           <div><span class="geo-swatch" style="border:1px dashed var(--bad)"></span>${2*CORE_M} m sampled core</div>
           <div><span class="geo-swatch" style="border:1px solid var(--warn)"></span>${2*DOM_M} m mesh domain</div>
-          <div style="margin-top:6px;color:var(--text-muted)">${gba ? "GlobalBuildingAtlas LoD1" : `Overture ${esc(d.release || "")}`}${d.cached ? " · cached" : ""}${d.truncated ? ` · truncated at ${d.n}` : ""}</div>
+          <div class="geo-note" style="margin-top:6px">${sources}</div>
+          ${overtureNote ? `<div class="geo-note" style="margin-top:2px">${overtureNote}</div>` : ""}
           ${d.fallback_from ? `<div class="geo-note" style="color:var(--warn)">${d.mesh_source === "overture" ? "Overture" : "GBA"} could not be drawn (${esc(d.fallback_from)}), so this is ${name}'s picture, which need not match this case's mesh.</div>` : ""}
           ${isMesh && basis[1] ? `<div class="geo-note">${basis[1]}</div>` : ""}
-          <div class="geo-note" style="margin-top:4px">Middle: isometric over the core, heights ×${HEX}, relief ×${TEX === HEX ? HEX : TEX.toFixed(1)}. Bottom: elevation looking north, true metres, vertical ×${vExag.toFixed(0)}.</div>
-          ${crowns ? `<div class="geo-note">${crowns} porous crown cell${crowns === 1 ? "" : "s"} — trees are cellZones in the solve, not solids.</div>` : ""}
           <details class="geo-note" style="margin-top:2px">
             <summary style="cursor:pointer">How to read these</summary>
             <div style="margin-top:4px">Only the ${2 * CORE_M} m core carries buildings and trees; the buffer is terrain and inlet roughness.</div>
             <div>The amber ground line is a section: solid for the highest ground in each column, dashed for the lowest, because a column spans ${2 * DOM_M} m north–south and one line would claim a cross-section it never took.</div>
             <div>Buildings run from roof to a slab ${SLAB_M} m below the lowest ground, as <code class="inline">watertight.py</code> extrudes them — the elevation shows all of it, the isometric the first ${ISO_PIERCE_M} m.</div>
             <div>Crowns are see-through because the upper 59% of each tree is a porous cellZone, f = 2·Cd·LAD.</div>
-            ${gba && vMed != null ? `<div>Height variance median ${vMed.toFixed(1)}; ${vHigh} above 25.</div>` : ""}
           </details>
           ${atSea ? `<div class="geo-note" style="color:var(--bad)"><b>This case is not on land.</b> No building tile, no bare-earth terrain and no canopy tile, from three independent sources that disagree about almost everything else. The runner would mesh an empty flat plane here and solve it for 66 core-hours.</div>` : ""}
-          <div class="geo-note">${provenance}</div>
         </div>
       </div>`;
     wrap.querySelectorAll("svg.geo-zoom").forEach(geoRestore);
@@ -5360,7 +5374,8 @@
         + `<div class="detail-grid">${skelDetailCard(9)}${skelDetailCard(8)}${skelDetailCard(3)}${skelDetailCard(7)}</div>`
         + `<div class="detail-card" style="margin-bottom:14px"><h3>${skelBar("140px")}</h3>${pctSkeletonTiles(6)}</div>`
         + `<div class="detail-card" style="margin-bottom:14px"><h3>${skelBar("110px")}</h3>`
-        + `<div class="geo-fig">${skelFigure(300, 300)}${skelFigure(300, 300)}${skelFigure(300, 300)}`
+        + `<div class="geo-fig"><div class="geo-main"><div class="geo-views">`
+        + `${skelFigure(300, 300)}${skelFigure(300, 300)}${skelFigure(300, 300)}</div>${skelBar("70%")}</div>`
         + `<div class="geo-legend" style="width:46ch;max-width:100%">`
         + `<div style="display:flex;flex-direction:column">${words}</div>`
         + `<div style="margin-top:10px">${skelLines(5, 80)}</div></div></div></div>`
