@@ -8,6 +8,25 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.12.1] - 2026-09-22
+
+### Changed
+- **Site Geometry: the views' caption sits directly under the three views**
+  and names them -- "Plan: the whole 2608 m domain, north up · Isometric: the
+  core, heights ×3, relief ×3 · Elevation: looking north, true metres, vertical
+  ×59" -- instead of "Middle ... Bottom ..." in the legend, which no longer
+  pointed at anything once the views sat in a row.
+- **The legend says each thing once.** One sources line (GlobalBuildingAtlas
+  LoD1 (TUM) · GEDTM30 · Meta/WRI canopy · cached) replaces the bare source
+  label and the provenance sentence that repeated it; the RMSE (1.5-8.9 m) sits
+  on the uncertainty line it qualifies, with the count of buildings beyond ±5 m;
+  "meshed as porous crowns, not solids" joins the trees line. Removed: the
+  "N porous crown cells" note (a count of the 21 m preview grid, not of what is
+  meshed), the "Height variance median" line (the σ median already says it) and
+  the zoom hint (the buttons show it).
+- The legend sits beside the views whenever a 300 px column fits next to them,
+  and below them otherwise.
+
 ## [0.12.0] - 2026-09-22
 
 ### Changed
