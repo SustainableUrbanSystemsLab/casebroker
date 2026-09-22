@@ -736,6 +736,148 @@ def cmd_worker_setup(args) -> int:
     return 0
 
 
+# -- releases: the catalog from a terminal or a CI step ------------------------
+#
+# The E3D node build writes release.json ([{build, platform, file, sha256}]);
+# until now the only way to register it was to paste it into the dashboard,
+# which is a step someone has to remember after every build. These make it a
+# line in a workflow, behind the same admin login the dashboard uses.
+
+def _admin_session(args):
+    """Log in as an admin and return the opener, or None after saying why not.
+
+    The password comes from --password-stdin (a CI secret piped in) or a
+    prompt; it is never taken from an argument, where `ps` would show it."""
+    opener = _cookie_opener()
+    status, body = _call(opener, args.broker, "GET", "/v1/auth/state")
+    if status != 200:
+        print("cannot reach %s (%s)" % (args.broker, status), file=sys.stderr)
+        return None
+    if body.get("needs_setup"):
+        print("this broker has no account yet -- create the admin account first "
+              "(`casebroker account create`, or the dashboard).", file=sys.stderr)
+        return None
+    username = args.username or input("broker username: ").strip()
+    if getattr(args, "password_stdin", False):
+        password = sys.stdin.readline().rstrip("\r\n")
+    else:
+        import getpass
+        password = getpass.getpass("password for %s: " % username)
+    status, body = _call(opener, args.broker, "POST", "/v1/auth/login",
+                         {"username": username, "password": password})
+    if status != 200:
+        print("login failed: %s" % body.get("detail", status), file=sys.stderr)
+        return None
+    if body.get("role") != "admin":
+        print("%r is a %s; changing what the fleet runs needs an admin."
+              % (username, body.get("role")), file=sys.stderr)
+        return None
+    return opener
+
+
+def _print_catalog(r: dict) -> None:
+    f = r.get("fleet") or {}
+    target = r.get("target_build")
+    print("target   : %s%s" % (target or "(none)",
+                               "  (nodes switch: %s)" % r.get("target_apply") if target else ""))
+    if r.get("previous_target"):
+        print("previous : %s" % r["previous_target"])
+    if r.get("blocked_builds"):
+        print("blocked  : %s" % ", ".join(r["blocked_builds"]))
+    if f:
+        print("fleet    : %d worker(s) in 24 h, %d on target, %d behind (%d stuck, %d cannot "
+              "update by themselves), %d undeclared, %d rolled back from an update"
+              % (f.get("workers", 0), f.get("on_target", 0), f.get("behind", 0), f.get("stuck", 0),
+                 f.get("cannot_update", 0), f.get("undeclared", 0), f.get("update_failed", 0)))
+    for b in r.get("builds") or []:
+        print("  %-30s %-22s workers %d/%d  done %d  unconverged %d  failed %d%s" % (
+            b["build"], " ".join(b.get("published") or []) or "(not published)",
+            b.get("active", 0), b.get("workers", 0), b.get("done", 0), b.get("unconverged", 0),
+            b.get("failed", 0),
+            "  no file for %s" % ", ".join(b["missing_platforms"]) if b.get("missing_platforms") else ""))
+
+
+def _admin_call(args, method: str, path: str, payload, said: str) -> int:
+    """One admin call, printed as the catalog it returns. Logs out whatever
+    happens: no fortnight-long admin session left on a CI runner."""
+    opener = _admin_session(args)
+    if opener is None:
+        return 1
+    try:
+        status, got = _call(opener, args.broker, method, path, payload)
+        if status != 200:
+            print("refused: %s" % got.get("detail", status), file=sys.stderr)
+            return 1
+        print(said)
+        _print_catalog(got)
+    finally:
+        _call(opener, args.broker, "POST", "/v1/auth/logout")
+    return 0
+
+
+def cmd_release_list(args) -> int:
+    opener = urllib.request.build_opener()
+    token = _resolve_token(args.token, "read")
+    if token:
+        opener.addheaders = [("Authorization", "Bearer " + token)]
+    status, body = _call(opener, args.broker, "GET", "/v1/releases")
+    if status != 200:
+        print("%s: %s" % (status, body.get("detail", "")), file=sys.stderr)
+        return 1
+    _print_catalog(body)
+    return 0
+
+
+def cmd_release_register(args) -> int:
+    """Register what a build workflow wrote: [{build, platform, file, sha256}]."""
+    text = sys.stdin.read() if args.file == "-" else pathlib.Path(args.file).read_text(encoding="utf-8")
+    try:
+        rows = json.loads(text)
+    except ValueError as e:
+        print("%s is not JSON: %s" % (args.file, e), file=sys.stderr)
+        return 2
+    if isinstance(rows, dict):
+        rows = [rows]
+    if not isinstance(rows, list) or not rows:
+        print("%s holds no release rows" % args.file, file=sys.stderr)
+        return 2
+    opener = _admin_session(args)
+    if opener is None:
+        return 1
+    try:
+        for row in rows:
+            payload = {k: row.get(k) for k in ("build", "platform", "file", "sha256", "notes")}
+            if args.notes:
+                payload["notes"] = args.notes
+            status, body = _call(opener, args.broker, "POST", "/v1/releases", payload)
+            if status != 200:
+                print("%s %s: %s" % (row.get("build"), row.get("platform"), body.get("detail", status)),
+                      file=sys.stderr)
+                return 1
+            print("registered %s for %s (%s)" % (payload["build"], payload["platform"], payload["file"]))
+    finally:
+        _call(opener, args.broker, "POST", "/v1/auth/logout")
+    return 0
+
+
+def cmd_release_target(args) -> int:
+    body = {"build": None if args.build in ("none", "-", "") else args.build, "force": args.force}
+    if args.apply:
+        body["apply"] = args.apply
+    return _admin_call(args, "PUT", "/v1/releases/target", body,
+                       "fleet target: %s" % (body["build"] or "(none)"))
+
+
+def cmd_release_promote(args) -> int:
+    return _admin_call(args, "POST", "/v1/releases/promote", {"worker_id": args.worker_id},
+                       "promoted %s's build to the fleet" % args.worker_id)
+
+
+def cmd_release_rollback(args) -> int:
+    return _admin_call(args, "POST", "/v1/releases/rollback", {"block": args.block},
+                       "rolled back" + (", and blocked the build left" if args.block else ""))
+
+
 def cmd_doctor(args) -> int:
     """Check the database, the broker and the token, and name the broken one.
 
@@ -927,6 +1069,48 @@ def main(argv: list[str] | None = None) -> int:
     ws.add_argument("--rotate", action="store_true",
                     help="revoke this machine's existing credential and issue a new one")
     ws.set_defaults(func=cmd_worker_setup)
+
+    rl = sub.add_parser("release", help="the builds the fleet runs: register, target, "
+                                        "promote a canary, roll back").add_subparsers(
+        dest="subcmd", required=True)
+
+    def _release_admin(p):
+        p.add_argument("--broker", required=True)
+        p.add_argument("--username", default=None, help="broker admin (default: prompt)")
+        p.add_argument("--password-stdin", action="store_true",
+                       help="read the password from stdin (for a CI step)")
+        return p
+
+    rr = _release_admin(rl.add_parser(
+        "register", help="register published builds from release.json "
+                         "([{build, platform, file, sha256}], as the E3D node build writes it)"))
+    rr.add_argument("file", help="release.json; '-' reads stdin")
+    rr.add_argument("--notes", default=None, help="a line shown beside the build on the dashboard")
+    rr.set_defaults(func=cmd_release_register)
+
+    rt = _release_admin(rl.add_parser("target", help="point the fleet at a build ('none' clears it)"))
+    rt.add_argument("build")
+    rt.add_argument("--apply", choices=("case", "direction", "now"), default=None,
+                    help="when nodes switch: after the case in flight, after the wind "
+                         "direction being solved, or now")
+    rt.add_argument("--force", action="store_true",
+                    help="even if a live platform has no file for it (those workers stay behind)")
+    rt.set_defaults(func=cmd_release_target)
+
+    rp = _release_admin(rl.add_parser("promote", help="a canary's build becomes the fleet's target"))
+    rp.add_argument("worker_id")
+    rp.set_defaults(func=cmd_release_promote)
+
+    rb = _release_admin(rl.add_parser("rollback", help="back to the target before this one"))
+    rb.add_argument("--block", action="store_true",
+                    help="also refuse the current target to every node at once (the kill switch)")
+    rb.set_defaults(func=cmd_release_rollback)
+
+    rls = rl.add_parser("list", help="the catalog, the target and where the fleet is")
+    rls.add_argument("--broker", required=True)
+    rls.add_argument("--token", default=None,
+                     help="read token; '-' reads stdin; omitted reads the environment")
+    rls.set_defaults(func=cmd_release_list)
 
     idb = sub.add_parser("init-db", help="create or bring forward the schema without "
                                          "starting the service")

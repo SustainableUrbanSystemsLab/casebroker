@@ -1648,7 +1648,12 @@
             </select>
           </div>
           <div><button id="relTargetBtn" type="button">Set target</button></div>
+          <div><button id="relRollbackBtn" type="button" class="ghost" hidden>Roll back</button></div>
+          <div><button id="relKillBtn" type="button" class="ghost" hidden
+                       title="Refuse the current target to every node at its next lease, and point the fleet back at the build before it. For a build that has to stop now, not at each node's next ask.">Kill switch</button></div>
         </div>
+        <!-- The fleet in one line: what everything below is about. -->
+        <div id="relSummary" class="panel-subtitle" style="margin-top:10px;"></div>
         <div class="row" style="margin-top:10px; align-items:flex-end;">
           <div class="field" style="flex:1; min-width:260px;">
             <label for="relBlocked">Blocked builds
@@ -1658,14 +1663,21 @@
           </div>
           <label style="display:flex; align-items:center; gap:6px; font-size:12px; padding-bottom:8px;">
             <input type="checkbox" id="relRequire" /> only lease to nodes that declare a build
+            <span id="relRequireHint" class="label-hint"></span>
           </label>
+          <div class="field" style="min-width:220px;">
+            <label for="relRepo">GitHub repo for commit links
+              <span class="label-hint">(owner/name; a build's name carries its commit)</span>
+            </label>
+            <input type="text" id="relRepo" placeholder="Eddy3D-Dev/Eddy3D" />
+          </div>
           <div><button id="relPolicyBtn" type="button">Save policy</button></div>
         </div>
         <div id="relBuilds" style="margin-top:12px;"></div>
         <div id="relWorkers" style="margin-top:12px;"></div>
         <div class="field" style="margin-top:12px;">
           <label for="relPaste">Register a published build
-            <span class="label-hint">(paste what <code class="inline">E3D node-release publish</code> printed)</span>
+            <span class="label-hint">(paste the <code class="inline">release.json</code> the E3D node build published, or run <code class="inline">casebroker release register release.json</code> from a terminal or a CI step)</span>
           </label>
           <textarea id="relPaste" rows="4" spellcheck="false"
                     placeholder='[{"build":"1.14.0.827+0e9e6863","platform":"win-x64","file":"E3D-1.14.0.827+0e9e6863-win-x64.exe","sha256":"…"}]'></textarea>
@@ -2728,6 +2740,8 @@
     const badge = $("brokerDbBadge");
     const parts = [];
     if (h.version) parts.push(`v${h.version}`);
+    // The version moves once per commit now, and this says WHICH commit is live.
+    if (h.commit) parts.push(h.commit);
     if (h.db) parts.push(h.db.startsWith("postgres") ? "Postgres" : "SQLite");
     // "accounts" is auth too. Comparing only against "token" labelled a broker
     // secured entirely by accounts as "open", which is the opposite of true.
@@ -3878,17 +3892,56 @@
 
   function shortBuild(b) { return b ? String(b) : ""; }
 
+  /// "6h", "35m", "2.5d": a duration, not a time, for a badge.
+  function ageShort(seconds) {
+    const s = Math.max(0, Math.round(seconds));
+    if (s < 60) return s + "s";
+    if (s < 3600) return Math.round(s / 60) + "m";
+    if (s < 86400) return (s / 3600).toFixed(s < 36000 ? 1 : 0).replace(/\.0$/, "") + "h";
+    return (s / 86400).toFixed(1).replace(/\.0$/, "") + "d";
+  }
+
+  /// The commit a build name carries ("1.14.0.827+e044a147" -> "e044a147"), or null.
+  function commitOf(build) {
+    const m = /\+([0-9a-f]{7,40})$/i.exec(build || "");
+    return m ? m[1] : null;
+  }
+
   /// A worker's build, and whether it is where it should be. `target_build` on
   /// the worker is a canary override; otherwise the fleet's target applies.
+  /// Behind a target, the badge says WHY, from what the broker knows: the node's
+  /// own word (sent with its release asks), a rollback, a missing file for its
+  /// platform, or that it has never asked at all and so cannot update itself.
   function buildCell(w) {
-    if (!w.build) return `<span style="color:var(--text-muted)" title="this worker never declared a build: it predates build identity">undeclared</span>`;
-    const want = w.target_build || (lastReleases && lastReleases.target_build) || null;
+    const now = Math.floor(Date.now() / 1000);
+    const conflict = w.id_conflict && w.id_conflict_at && now - w.id_conflict_at < 86400
+      ? ` <span class="badge quarantined" title="its build flipped between ${esc(w.id_conflict)} within minutes (${esc(relTime(w.id_conflict_at))}): two clients share this worker id -- an E3D node and a Python worker started from the same machine.env? Stop one of them.">shared id?</span>`
+      : "";
+    if (!w.build) return `<span style="color:var(--text-muted)" title="its client sent no build with the lease: an E3D.exe from before build identity, or a Python worker started without EDDY3D_CLI. The broker cannot move it; update it by hand once, and it declares itself from then on">undeclared</span>` + conflict;
+    const r = lastReleases;
+    const want = w.target_build || (r && r.target_build) || null;
     const behind = want && want !== w.build;
-    const blocked = lastReleases && (lastReleases.blocked_builds || []).includes(w.build);
-    return `<code class="inline" title="${esc(w.platform || "")}">${esc(shortBuild(w.build))}</code>`
-      + (blocked ? ` <span class="badge quarantined" title="refused new cases">blocked</span>` : "")
-      + (w.update_failed ? ` <span class="badge quarantined" title="${esc(w.update_failed)}">update failed</span>` : "")
-      + (behind ? ` <span class="badge pending" title="${esc(w.target_build ? "canary target" : "fleet target")}">→ ${esc(shortBuild(want))}</span>` : "");
+    const blocked = r && (r.blocked_builds || []).includes(w.build);
+    let badges = "";
+    if (blocked) badges += ` <span class="badge quarantined" title="refused new cases">blocked</span>`;
+    if (w.update_failed) badges += ` <span class="badge quarantined" title="${esc(w.update_failed)}">update failed</span>`;
+    if (behind) {
+      const since = w.target_build ? w.target_set_at : (r && r.target_since);
+      const apply = (r && r.target_apply) || "case";
+      const limit = (r && r.stuck_after && r.stuck_after[apply]) || 43200;
+      const age = since ? now - since : null;
+      const stuck = age != null && age > limit;
+      const noFile = r && w.platform && !(r.releases || []).some((x) => x.build === want && x.platform === w.platform);
+      let why;
+      if (w.update_failed) why = "it tried this build and rolled back";
+      else if (noFile) why = `nothing to fetch: ${want} has no file for ${w.platform}`;
+      else if (w.update_state) why = `it says: ${w.update_state} (${relTime(w.update_state_at)})`;
+      else if (!w.release_asked_at) why = "it has never asked the broker what to run, so it cannot update itself: a Python worker, or an E3D.exe from before releases. Update it by hand";
+      else why = `it asked ${relTime(w.release_asked_at)} and has not said what it is doing`;
+      const how = w.target_build ? "canary target" : "fleet target";
+      badges += ` <span class="badge ${stuck ? "quarantined" : "pending"}" title="${esc(how + ". " + why + (stuck ? ". Behind for longer than a switch at the \"" + apply + "\" boundary should take" : ""))}">→ ${esc(shortBuild(want))}${age != null ? " · " + esc(ageShort(age)) : ""}${stuck ? " · stuck" : ""}</span>`;
+    }
+    return `<code class="inline" title="${esc(w.platform || "")}">${esc(shortBuild(w.build))}</code>` + badges + conflict;
   }
 
   let lastReleasesText = "";
@@ -3914,22 +3967,92 @@
     $("relApply").value = r.target_apply || "case";
     $("relRequire").checked = !!r.require_build;
     $("relBlocked").value = (r.blocked_builds || []).join(", ");
+    if (document.activeElement !== $("relRepo")) $("relRepo").value = r.release_repo || "";
 
-    const platforms = (b) => (r.releases || []).filter((x) => x.build === b).map((x) => x.platform).sort().join(" ");
+    // Roll back, and the kill switch, exist only once there is somewhere to go back to.
+    const back = r.previous_target;
+    $("relRollbackBtn").hidden = !back;
+    $("relKillBtn").hidden = !(back && r.target_build);
+    if (back) {
+      $("relRollbackBtn").textContent = `Roll back to ${shortBuild(back)}`;
+      $("relRollbackBtn").title = `Point the fleet back at ${back}; nodes move at the boundary chosen above.`;
+    }
+
+    // The fleet in one line.
+    const f = r.fleet || {};
+    const bits = [];
+    if (r.target_build) {
+      bits.push(`${f.on_target || 0} on target`);
+      if (f.behind) {
+        const why = [f.stuck ? `${f.stuck} stuck` : "",
+                     f.cannot_update ? `${f.cannot_update} cannot update by themselves` : ""].filter(Boolean);
+        bits.push(`${f.behind} behind` + (why.length ? ` (${why.join(", ")})` : ""));
+      }
+    } else {
+      bits.push("no fleet target");
+    }
+    if (f.undeclared) bits.push(`${f.undeclared} undeclared`);
+    if (f.update_failed) bits.push(`${f.update_failed} rolled back from an update`);
+    if (f.canaries) bits.push(`${f.canaries} canar${f.canaries === 1 ? "y" : "ies"}`);
+    $("relSummary").textContent = f.workers == null ? ""
+      : `${f.workers} worker${f.workers === 1 ? "" : "s"} seen in 24 h: ${bits.join(" · ")}`;
+    $("relRequireHint").textContent = f.undeclared ? `(${f.undeclared} would be refused)` : "";
+
+    const files = {};
+    (r.releases || []).forEach((x) => (files[x.build] = files[x.build] || []).push(x));
+    const stats = {};
+    (r.builds || []).forEach((b) => (stats[b.build] = b));
+    const prev = r.previous_target ? stats[r.previous_target] : null;
+    const pct = (x) => (x == null ? "" : ` (${Math.round(x * 100)}%)`);
+    const enough = (b) => (b.done || 0) + (b.failed || 0) >= 5;
+    // "Worse than the build before" needs both to have enough cases to mean it.
+    const worse = (b) => {
+      if (!prev || b.build !== r.target_build || b.build === prev.build || !enough(b) || !enough(prev)) return "";
+      const bad = [];
+      if ((b.unconverged_rate || 0) > (prev.unconverged_rate || 0) + 0.05) bad.push("more unconverged");
+      if ((b.failed_rate || 0) > (prev.failed_rate || 0) + 0.05) bad.push("more failures");
+      if (b.mean_wall_seconds && prev.mean_wall_seconds && b.mean_wall_seconds > prev.mean_wall_seconds * 1.25) bad.push("slower");
+      return bad.length
+        ? ` <span class="badge quarantined" title="against ${esc(prev.build)}: ${esc(bad.join(", "))}">worse than ${esc(shortBuild(prev.build))}</span>` : "";
+    };
+    const commitLink = (b) => {
+      const sha = commitOf(b);
+      return r.release_repo && sha
+        ? ` <a href="https://github.com/${esc(r.release_repo)}/commit/${esc(sha)}" target="_blank" rel="noopener" class="label-hint" title="the commit this build was made from">${esc(sha)}</a>` : "";
+    };
+    const compareLink = () => {
+      const a = commitOf(r.previous_target), b = commitOf(r.target_build);
+      return r.release_repo && a && b && a !== b
+        ? ` <a href="https://github.com/${esc(r.release_repo)}/compare/${esc(a)}...${esc(b)}" target="_blank" rel="noopener" class="label-hint" title="what changed between the previous target and this one">what changed</a>` : "";
+    };
     $("relBuilds").innerHTML = (r.builds || []).length === 0
       ? `<div class="panel-subtitle">No build has been declared or registered yet.</div>`
       : `<div class="table-wrap"><table><thead><tr><th>Build</th><th>Published for</th>`
-        + `<th class="num">Workers</th><th class="num">Done</th><th class="num">Unconverged</th><th class="num">Failed</th><th></th></tr></thead><tbody>`
-        + r.builds.map((b) => `<tr>
-            <td><code class="inline">${esc(b.build)}</code>${b.build === r.target_build ? ` <span class="badge done">fleet target</span>` : ""}</td>
-            <td>${platforms(b.build) ? esc(platforms(b.build)) : `<span style="color:var(--text-muted)">not published</span>`}</td>
+        + `<th class="num">Workers</th><th class="num">Done</th><th class="num">Unconverged</th><th class="num">Failed</th><th class="num">Mean wall</th><th></th></tr></thead><tbody>`
+        + r.builds.map((b) => {
+          const rows = files[b.build] || [];
+          const who = rows[0] ? `${rows[0].added_by || "?"}, ${relTime(rows[0].added_at)}` : "";
+          const notes = rows.map((x) => x.notes).filter(Boolean)[0] || "";
+          return `<tr>
+            <td><code class="inline">${esc(b.build)}</code>${commitLink(b.build)}`
+              + (b.build === r.target_build ? ` <span class="badge done">fleet target</span>${compareLink()}` : "")
+              + (b.build === r.previous_target ? ` <span class="badge leased" title="what Roll back returns to">previous target</span>` : "")
+              + worse(b)
+              + (who || notes ? `<div class="label-hint" style="margin-top:2px">${esc(who)}${notes ? ` — ${esc(notes)}` : ""}</div>` : "")
+              + `</td>
+            <td>${(b.published || []).length ? esc(b.published.join(" ")) : `<span style="color:var(--text-muted)">not published</span>`}`
+              + ((b.missing_platforms || []).length
+                  ? `<div class="label-hint" style="color:var(--bad)" title="live workers on this platform would be told to move and could not">no file for ${esc(b.missing_platforms.join(", "))}</div>` : "")
+              + `</td>
             <td class="num">${b.active}/${b.workers}</td>
             <td class="num">${(b.done || 0).toLocaleString()}</td>
-            <td class="num${b.unconverged ? " alert" : ""}">${(b.unconverged || 0).toLocaleString()}</td>
-            <td class="num${b.failed ? " alert" : ""}">${(b.failed || 0).toLocaleString()}</td>
-            <td>${platforms(b.build) && b.build !== r.target_build
+            <td class="num${b.unconverged ? " alert" : ""}">${(b.unconverged || 0).toLocaleString()}${pct(b.unconverged_rate)}</td>
+            <td class="num${b.failed ? " alert" : ""}">${(b.failed || 0).toLocaleString()}${pct(b.failed_rate)}</td>
+            <td class="num">${b.mean_wall_seconds ? esc(ageShort(b.mean_wall_seconds)) : "—"}</td>
+            <td>${rows.length && b.build !== r.target_build
                   ? `<button type="button" class="ghost" data-rel-remove="${esc(b.build)}">Remove</button>` : ""}</td>
-          </tr>`).join("") + `</tbody></table></div>`;
+          </tr>`;
+        }).join("") + `</tbody></table></div>`;
 
     const workers = (lastStatus && lastStatus.workers) || [];
     $("relWorkers").innerHTML = workers.length === 0 ? "" :
@@ -3940,15 +4063,20 @@
           <td><select data-rel-worker="${esc(w.worker_id)}">
                 <option value="">(follow the fleet)</option>
                 ${names.map((b) => `<option value="${esc(b)}"${b === w.target_build ? " selected" : ""}>${esc(b)}</option>`).join("")}
-              </select></td>
+              </select>${w.target_build
+                ? ` <button type="button" class="ghost" data-rel-promote="${esc(w.worker_id)}" title="Make ${esc(w.target_build)} the fleet's target; this worker follows the fleet again.">Promote</button>` : ""}</td>
           <td><button type="button" class="ghost" data-rel-drain="${esc(w.worker_id)}" data-on="${w.drain ? "1" : ""}">${w.drain ? "Resume" : "Drain"}</button></td>
         </tr>`).join("") + `</tbody></table></div>`;
 
     document.querySelectorAll("[data-rel-remove]").forEach((el) => el.onclick = () => releaseCall(
       "/v1/releases/" + encodeURIComponent(el.dataset.relRemove), { method: "DELETE" }, "Removed"));
-    document.querySelectorAll("[data-rel-worker]").forEach((el) => el.onchange = () => releaseCall(
+    document.querySelectorAll("[data-rel-promote]").forEach((el) => el.onclick = () => {
+      if (!window.confirm(`Promote ${el.dataset.relPromote}'s build to the whole fleet?`)) return;
+      releaseCall("/v1/releases/promote", jsonBody("POST", { worker_id: el.dataset.relPromote }), "Promoted");
+    });
+    document.querySelectorAll("[data-rel-worker]").forEach((el) => el.onchange = () => releaseCallForcing(
       "/v1/workers/" + encodeURIComponent(el.dataset.relWorker) + "/target",
-      jsonBody("PUT", { build: el.value || null }), el.value ? "Canary set" : "Following the fleet"));
+      { build: el.value || null }, el.value ? "Canary set" : "Following the fleet"));
     document.querySelectorAll("[data-rel-drain]").forEach((el) => el.onclick = () => {
       const id = encodeURIComponent(el.dataset.relDrain);
       if (el.dataset.on) return releaseCall("/v1/workers/" + id + "/undrain", { method: "POST" }, "Resumed");
@@ -3969,13 +4097,43 @@
     await loadReleases();
   }
 
+  /// A PUT the broker may refuse because a live platform has no file for the
+  /// build: the refusal is shown, and the operator may insist. The insistence
+  /// is a second call with force, never a default.
+  async function releaseCallForcing(path, body, said) {
+    try { await userCall(path, jsonBody("PUT", body)); showToast(said); }
+    catch (e) {
+      if (/no file for/.test(e.message)
+          && window.confirm(e.message + "\n\nSet it anyway and leave those workers behind?")) {
+        try { await userCall(path, jsonBody("PUT", { ...body, force: true })); showToast(said); }
+        catch (e2) { showToast(e2.message); }
+      } else {
+        showToast(e.message);
+      }
+    }
+    await refresh();
+    await loadReleases();
+  }
+
   function wireReleases() {
     if (!$("relTargetBtn")) return;
-    $("relTargetBtn").onclick = () => releaseCall("/v1/releases/target",
-      jsonBody("PUT", { build: $("relTarget").value || null, apply: $("relApply").value }), "Fleet target saved");
+    $("relTargetBtn").onclick = () => releaseCallForcing("/v1/releases/target",
+      { build: $("relTarget").value || null, apply: $("relApply").value }, "Fleet target saved");
+    $("relRollbackBtn").onclick = () => {
+      const r = lastReleases || {};
+      if (!window.confirm(`Point the fleet back at ${r.previous_target}?`)) return;
+      releaseCall("/v1/releases/rollback", jsonBody("POST", { block: false }), "Rolled back");
+    };
+    $("relKillBtn").onclick = () => {
+      const r = lastReleases || {};
+      if (!window.confirm(`Block ${r.target_build} for every node and point the fleet back at ${r.previous_target}?\n\n`
+                          + "A node on it is refused new cases at its next lease; the case in flight finishes.")) return;
+      releaseCall("/v1/releases/rollback", jsonBody("POST", { block: true }), "Blocked and rolled back");
+    };
     $("relPolicyBtn").onclick = () => releaseCall("/v1/releases/policy", jsonBody("PUT", {
       require_build: $("relRequire").checked,
       blocked_builds: $("relBlocked").value.split(",").map((x) => x.trim()).filter(Boolean),
+      release_repo: $("relRepo").value.trim(),
     }), "Policy saved");
     $("relRegisterBtn").onclick = async () => {
       let rows;
