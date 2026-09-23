@@ -4092,6 +4092,9 @@
       : (st.done_last_24h ? `${st.done_last_24h.toLocaleString()} completed in last 24h (insufficient history for ETA)` : "No completions yet — ETA unknown");
 
     if (st.expired_leases > 0) {
+      const seconds = st.expired_lease_release_in_seconds;
+      const releaseIn = seconds == null ? "soon" :
+        (seconds < 60 ? "less than a minute" : `${Math.ceil(seconds / 60).toLocaleString()} minutes`);
       $("expiredBannerWrap").innerHTML = `
         <span class="warn-banner">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -4099,9 +4102,9 @@
             <line x1="12" y1="9" x2="12" y2="13"></line>
             <line x1="12" y1="17" x2="12.01" y2="17"></line>
           </svg>
-          ${st.expired_leases} lease(s) expired — awaiting reclaim
+          ${st.expired_leases} lease(s) expired — will be released in ${releaseIn}
         </span>`;
-      $("expiredText").textContent = `${st.expired_leases} lease(s) expired and awaiting reclaim`;
+      $("expiredText").textContent = `${st.expired_leases} lease(s) expired — will be released in ${releaseIn}`;
     } else {
       $("expiredBannerWrap").innerHTML = "";
       $("expiredText").textContent = "";
