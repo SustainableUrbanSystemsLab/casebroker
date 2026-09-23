@@ -967,6 +967,14 @@
     padding: 2px 6px;
     color: var(--text-primary);
   }
+  code.inline.case-id {
+    display: inline-block;
+    max-width: 120px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    vertical-align: bottom;
+  }
   pre {
     padding: 12px 14px;
     overflow-x: auto;
@@ -5713,7 +5721,7 @@
         <tr class="caseRow${open ? " open" : ""}" data-id="${esc(c.case_id)}">
           <td>
             <div style="display:flex; align-items:center; gap:6px;">
-              <code class="inline">${esc(c.case_id)}</code>
+              <code class="inline case-id" title="${esc(c.case_id)}">${esc(c.case_id)}</code>
             </div>
           </td>
           <td>${badge(c.state)}</td>
