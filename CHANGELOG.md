@@ -8,6 +8,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.17.12] - 2026-09-23
+
+### Fixed
+- The *Queued (SLURM)* tile gave a stale report's age in raw minutes ("last reported 21354
+  min ago" for a 15-day-old ICE report); it now uses the dashboard's own `relTime` ("14d ago").
+
 ## [0.17.11] - 2026-09-23
 
 ### Fixed
