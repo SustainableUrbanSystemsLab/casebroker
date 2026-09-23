@@ -8,6 +8,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.17.1] - 2026-09-22
+
+### Changed
+- docs/fleet.md: the Windows node now takes the pedestrian sample too (Eddy3D #935),
+  proven on blueCFD against v2-0018a674321c0092 -- 45 s on 8 ranks, values within 2.3 cm
+  of 1.75 m above grade, and no fluid under the terrain on the v4 cylinder.
+
 ## [0.17.0] - 2026-09-22
 
 ### Fixed

@@ -133,8 +133,11 @@ place so nothing ever picks up a half-written archive:
   run.log build.json cfg.json spec.json preview_*.png manifest.json
 ```
 
-(The Windows node's archives differ in layout -- `<id>/<id>/case_*`, `geometry/`
--- and, until the node's own sampler lands, carry no pedestrian field; see below.)
+(The Windows node's archives differ in layout -- `<id>/<id>/case_*`, `geometry/`.
+Since Eddy3D #935 the node takes the same pedestrian sample -- same dictionary, same
+cropped sheet -- and ships the raw surfaces (`postProcessing/pedestrianSurface/`),
+`pedestrian/grid.json` and `geometry/<id>_terrain.stl`; `ped_field.py` on the master
+turns them into `U.npz` and the `.wfld`. Archives from before it carry no field: see below.)
 
 Full field data, last time step only, reconstructed on the client -- rank
 counts differ per machine, so a decomposed result would be unusable anywhere
