@@ -57,5 +57,20 @@ check('idle workstation still counted', cards[1].idle, 1);
 cards = fleetCards([{ worker_id: 'foam', cluster: null, current_case: null, last_seen: NOW - 3600 }], [], NOW);
 check('quiet workstation is stale', cards[0].stale, true);
 
+// Nine working and two gone for 16 h: the gone ones are OFFLINE, not idle -- the
+// Workers table's Offline badge (300 s) and this card must say the same thing.
+cards = fleetCards([
+  { worker_id: 'foam', cluster: null, current_case: 'v2-1', last_seen: NOW - 20 },
+  { worker_id: 'ws2', cluster: null, current_case: null, last_seen: NOW - 30 },
+  { worker_id: 'gone1', cluster: null, current_case: null, last_seen: NOW - 16 * 3600 },
+  { worker_id: 'gone2', cluster: null, current_case: null, last_seen: NOW - 17 * 3600 },
+], [], NOW);
+check('offline is not idle', [cards[0].working, cards[0].idle, cards[0].offline], [1, 1, 2]);
+check('a live worker keeps the card fresh', cards[0].stale, false);
+// The boundary is the table's: < 300 s is Active, 300 s is Offline.
+cards = fleetCards([{ worker_id: 'a', cluster: null, current_case: null, last_seen: NOW - 299 },
+                    { worker_id: 'b', cluster: null, current_case: null, last_seen: NOW - 300 }], [], NOW);
+check('offline boundary matches the table', [cards[0].idle, cards[0].offline], [1, 1]);
+
 console.log(bad === 0 ? 'fleet strip: all cases agree' : `${bad} mismatches`);
 process.exit(bad === 0 ? 0 : 1);

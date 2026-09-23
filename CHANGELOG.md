@@ -8,6 +8,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.17.3] - 2026-09-23
+
+### Fixed
+- **Dashboard: a worker gone quiet is offline, not idle.** The fleet strip counted every
+  worker without a lease as idle, so two machines unheard-from for 16 h read "2 idle"
+  while the Workers table beneath called them Offline. It now counts them as offline,
+  by the table's own 300 s rule.
+
 ## [0.17.2] - 2026-09-22
 
 ### Fixed
