@@ -8,6 +8,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.17.4] - 2026-09-23
+
+### Fixed
+- **Dashboard: the case detail panel had no solve ETA.** The Workers table already showed a
+  lease's estimated finish time beside its progress bar; the detail panel only showed the age
+  of the last progress line. `get_case()` now carries the same per-lease estimate and the
+  panel renders it under Progress.
+
 ## [0.17.3] - 2026-09-23
 
 ### Fixed
