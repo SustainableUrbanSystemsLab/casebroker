@@ -4124,6 +4124,7 @@
             ${c.queued === null
               ? `<span><span class="fc-n">${c.idle}</span><span class="fc-lbl">idle</span></span>`
               : `<span><span class="fc-n">${c.queued}</span><span class="fc-lbl">queued</span></span>`}
+            ${c.offline ? `<span title="not heard from for 5 min or more"><span class="fc-n" style="color:var(--text-muted)">${c.offline}</span><span class="fc-lbl">offline</span></span>` : ""}
           </div>
           ${c.detail ? `<div class="fc-age" style="color:var(--text-muted);margin-top:3px">${esc(c.detail)}</div>` : ""}
         </div>`;
@@ -5542,7 +5543,7 @@
     const byName = new Map();
     const card = (name) => {
       if (!byName.has(name)) byName.set(name, {
-        name, working: 0, idle: 0, queued: null, detail: "",
+        name, working: 0, idle: 0, offline: 0, queued: null, detail: "",
         age_seconds: null, stale: false, age_title: "", newest_seen: null,
       });
       return byName.get(name);
@@ -5552,7 +5553,12 @@
       // A worker with no cluster is a workstation; they are counted together
       // rather than one card each, which on a lab of ten would be a wall.
       const c = card(w.cluster || "Workstations");
-      if (w.current_case) c.working++; else c.idle++;
+      // A worker unheard-from for 300 s is OFFLINE, by the Workers table's own
+      // rule. Counted as idle, two machines that had been gone for 16 h read
+      // "2 idle" on this card while the table below called them Offline.
+      if (w.last_seen == null || nowSeconds - w.last_seen >= 300) c.offline++;
+      else if (w.current_case) c.working++;
+      else c.idle++;
       if (c.newest_seen === null || w.last_seen > c.newest_seen) c.newest_seen = w.last_seen;
     }
 
