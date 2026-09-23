@@ -2861,6 +2861,10 @@ def get_case(conn, case_id: str) -> dict[str, Any] | None:
     trail = [dict(e) for e in conn.execute(
         "SELECT ts, event, detail FROM events WHERE case_id = ? ORDER BY id", (case_id,)).fetchall()]
     out.update(_stages.from_events(trail, _now()))
+    # Same estimate the Workers table shows for this case's own lease -- the
+    # detail card had the age of the last line but not when the solve should
+    # end, which is the more useful of the two once a direction is a day in.
+    out["eta"] = _solve_eta(conn, case_id, row["leased_at"]) if row["state"] == "leased" else None
     return out
 
 
