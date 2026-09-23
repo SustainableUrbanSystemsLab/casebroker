@@ -163,22 +163,64 @@ def test_the_pedestrian_sample_follows_the_terrain_instead_of_one_flat_plane():
     real pedestrian surface they differ by 24%).
 
     A string check is weak evidence about generated bash, so this only guards
-    the regression that a rerun would not notice: that the sampler is a
-    terrain-draped distanceSurface and NOT a constant-z cutPlane. The end-to-end
-    proof is the smoke run, whose sample spans 62.6 m of z on a tile with 62.8 m
-    of relief.
+    the regressions a rerun would not notice. The dictionary itself is tested in
+    test_ped_grid.py and the read-back in test_ped_field.py.
     """
     script = (pathlib.Path(__file__).resolve().parents[1] / "runner" / "run_case.sh").read_text(
         encoding="utf-8", errors="replace")
-    assert "distanceSurface" in script
-    # The quotes around the filename are backslash-escaped in the source: the
-    # dict is built inside a double-quoted bash string so that one surface can
-    # be emitted per requested height.
-    assert "ground.stl" in script, "the drape needs the terrain triSurface"
-    assert "distance        $H" in script, "each surface is offset by its own height"
+    # The surface is cut against the builder's WHOLE sheet, cropped by ped_grid,
+    # never the mesh case's ground.stl: that one is the land-cover leftover with
+    # no triangle under the core, and the sampler cut from it sampled nothing.
+    assert 'lib/ped_grid.py" "$SCRATCH/terrain.stl"' in script
+    assert 'cp -f "$ROOT/pedCore.stl" constant/triSurface/pedCore.stl' in script
+    assert "triSurface/ground.stl" not in script
+    # Sampled on the decomposed case: serial, OpenFOAM's cell search alone is
+    # minutes on a campaign mesh.
+    assert "foamPostProcess -dict system/pedGridFO" in script
+    sample = script[script.index("foamPostProcess -dict system/pedGridFO"):]
+    assert sample[:sample.index("\n")].rstrip(" \\").endswith("-parallel > ped.log 2>&1")
+    # Read back with the terrain, so every value's height above grade is measured.
+    assert '--terrain "$SCRATCH/terrain.stl"' in script
     # The old formulation, in either spelling, must not come back.
     assert "planeType       pointAndNormal" not in script
     assert "TERRAIN_ZMAX) + 1.5" not in script
+
+
+def test_the_result_line_says_whether_the_case_has_a_pedestrian_field(tmp_path):
+    """A case without a field has to be visible on the dashboard, not found when
+    somebody opens it. Runs the runner's own closing snippet."""
+    import json
+    import subprocess
+
+    script = (pathlib.Path(__file__).resolve().parents[1] / "runner" / "run_case.sh").read_text(
+        encoding="utf-8", errors="replace")
+    start = script.index('"$PY" - "$ARCHIVE"')
+    snippet = script[script.index("\n", start) + 1:script.index("\nPY", start)]
+    archive = tmp_path / "v2-abc.tar.gz"
+    archive.write_bytes(b"x")
+    meta = tmp_path / "meta.json"
+    meta.write_text(json.dumps({"heights_m": [1.5, 1.75], "grid": {"spacing_m": 2.0},
+                                "directions": [{}, {}],
+                                "coverage": {"case_000@1.5": 0.94, "case_090@1.5": 0.91},
+                                "missing": ["case_090@1.75"]}))
+
+    def ped(status, meta_path):
+        env = dict(os.environ, GEO_REPORT="", PED_META=str(meta_path))
+        if status is not None:
+            env["PED_STATUS"] = status
+        else:
+            env.pop("PED_STATUS", None)
+        out = subprocess.run([sys.executable, "-", str(archive), "4", "321", "0", "case_000=500:1"],
+                             input=snippet, text=True, capture_output=True, env=env, check=True)
+        return json.loads(out.stdout.strip().splitlines()[-1])["metrics"].get("pedestrian")
+
+    p = ped("incomplete", meta)
+    assert p["status"] == "incomplete"
+    assert p["coverage_min"] == 0.91 and p["directions"] == 2
+    assert p["missing"] == ["case_090@1.75"]
+    assert ped("no-grid", tmp_path / "absent.json") == {"status": "no-grid"}
+    # A runner that predates the field says nothing, which is what tells the two apart.
+    assert ped(None, meta) is None
 
 
 def test_the_runner_reports_which_building_source_it_meshed(tmp_path):

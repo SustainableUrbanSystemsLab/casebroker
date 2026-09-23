@@ -389,7 +389,17 @@ TERRAIN_ZMIN=$(printf '%s' "$TERRAIN_Z" | cut -d" " -f2)
 # silently so, because such a slice looks perfectly reasonable when rendered.
 # It also made the sample look mesh-independent (two converged meshes agreed
 # to 1.6% up there, against 24% on the real pedestrian surface).
-PEDESTRIAN_H="${WIND_PEDESTRIAN_H:-1.5}"
+#
+# Two heights by default: 1.75 m is the published pedestrian height, 1.5 m keeps
+# the campaign comparable with what the runner has always meant by it. A GRID
+# STUDY passes more: a label sampled at a fixed height while the first cell
+# centre moves with refinement crosses that centre partway through the
+# sequence, and cellPoint then blends toward the no-slip wall value on some
+# grids and not others -- against the rough log law a -12.9 / 0.0 / -4.5 /
+# -5.9 % non-monotone artefact across c32/c24/c18/c13.5, the size of the effect
+# being measured. Sampling each grid's OWN first-cell-centre height as well lets
+# the wall-model-consistent label be reconstructed, where the artefact cancels.
+PEDESTRIAN_H="${WIND_PEDESTRIAN_H:-1.5,1.75}"
 # The domain floor is placed just ABOVE the terrain's lowest point, so the
 # terrain itself seals it. Measuring terrain.stl is the right way to find that
 # point and it survived the slab->sheet change, because both spell the same
@@ -417,6 +427,37 @@ except Exception:
 " "$GEO_REPORT" 2>/dev/null || echo 0)
 export GROUND_Z GEO_REPORT
 log "domain floor ${DOMAIN_ZMIN}, ABL zGround ${GROUND_Z}"
+
+# The pedestrian field: U on a regular 2 m grid over the 1008 m core,
+# PEDESTRIAN_H above grade. lib/ped_grid.py checks the terrain SHEET, crops it
+# to the core (pedCore.stl) and writes the dictionary OpenFOAM cuts a
+# distanceSurface with, per direction (inner.sh, below); lib/ped_field.py reads
+# the surfaces back onto the grid after the engine exits. Host-side because both
+# need numpy, which the OpenFOAM image does not have; the field values
+# themselves are OpenFOAM's (cellPoint, on the surface's vertices).
+#
+# This replaced a distanceSurface over the mesh case's ground.stl, which sampled
+# NOTHING: the mesher splits the terrain by land cover into rough_core_* and
+# rough_ring_* patches, and ground.stl is only the leftover -- on
+# v2-000c178c579bf034 every one of its triangles lies between radius 924 and
+# 1301 m, so there was no ground under the core to be 1.5 m above. A finished
+# archive (v2-1410516cea4c5d7b) carried residuals and yPlus and not one
+# pedestrian value, and the render step skipped the missing file in silence.
+# terrain.stl here is the builder's whole sheet, and ped_grid refuses any
+# surface that does not span the core rather than cutting against the wrong one.
+#
+# Best effort like the sample it feeds: without a grid the case still solves
+# and ships, and the result line says the field is missing.
+PED_GRID_OK=0
+if uv run --with numpy python "$SCRIPT_DIR/lib/ped_grid.py" "$SCRATCH/terrain.stl" \
+        --heights "$PEDESTRIAN_H" --out "$SCRATCH/pedGridFO" --out-stl "$SCRATCH/pedCore.stl" \
+        --grid-json "$SCRATCH/pedgrid.json" >"$SCRATCH/ped_grid.log" 2>&1; then
+    PED_GRID_OK=1
+    log "$(tail -1 "$SCRATCH/ped_grid.log")"
+else
+    rm -f "$SCRATCH/pedGridFO" "$SCRATCH/pedCore.stl"
+    log "pedestrian grid NOT built (see ped_grid.log): this case will have no pedestrian field"
+fi
 
 # ── 2. build the study ────────────────────────────────────────────────────────
 # $SPEC is written to a file rather than piped in: a `<<'PY'` heredoc on the same
@@ -733,77 +774,19 @@ for c in case_*; do
     FLUX=$(grep -aE 'sum\("?inlet"?\)' fr.log | tail -1 | awk '{print $NF}')
     echo "INLET_FLUX $c ${FLUX:-NONE}"
 
-    # Sample U on a horizontal plane at pedestrian height so run_case.sh can
-    # render a screenshot after the container exits (matplotlib is not on
-    # this image, so the render itself happens host-side -- see step 4).
-    # Best effort: a failed sample must never fail an otherwise-good case.
-    mkdir -p system
-    # One distanceSurface per requested height. PED_H is normally the single
-    # pedestrian height, but a GRID STUDY needs more: a label sampled at a fixed
-    # height while the first cell centre moves with refinement crosses that
-    # centre partway through the sequence, and cellPoint interpolation then
-    # blends toward the no-slip wall value on some grids and not others. Against
-    # the rough log law that is a -12.9 / 0.0 / -4.5 / -5.9 % non-monotone
-    # sampling artefact across c32/c24/c18/c13.5 -- the same size as the effect
-    # being measured, and enough to make an observed order of convergence
-    # numerology. Sampling each grid's OWN first-cell-centre height as well lets
-    # the wall-model-consistent label be reconstructed afterwards, where the
-    # artefact cancels by construction.
-    SURFACES=""
-    for H in $(echo "$PED_H" | tr ',' ' '); do
-      NAME="ped$(echo "$H" | tr -d '.' | tr '-' 'm')"
-      SURFACES="$SURFACES
-        $NAME
-        {
-            // distanceSurface over the terrain: a surface at a fixed normal
-            // distance from ground.stl, i.e. \"$H m above grade\" everywhere,
-            // which is what the label means. \"signed false\" because the
-            // terrain STL is an open SHEET (watertight.py builds it that way):
-            // signed distance needs a closed surface and fatals with \"could
-            // not be classified as either inside or outside\". Unsigned would
-            // also match $H m BELOW the terrain, but there is no mesh there,
-            // so nothing is sampled.
-            type            distanceSurface;
-            surfaceType     triSurfaceMesh;
-            file            \"ground.stl\";
-            distance        $H;
-            signed          false;
-            interpolate     true;
-        }"
-    done
-    cat > system/sliceFO <<SLICEDICT
-FoamFile
-{
-    version     2.0;
-    format      ascii;
-    class       dictionary;
-    object      sliceFO;
-}
-// foamPostProcess -dict reads this as a "functions" dictionary: a LIST of
-// named function objects, so the sampler is one named entry, not the file.
-pedestrianSlice
-{
-    type            surfaces;
-    libs            ("libsampling.so");
-    writeControl    timeStep;
-    writeInterval   1;
-    surfaceFormat   raw;
-    fields          (U);
-    interpolationScheme cellPoint;
-    // OpenFOAM 12 syntax (tutorials/incompressibleFluid/movingCone/system/
-    // cutPlane): surfaces is a LIST, the type is cutPlane, point/normal are
-    // top-level. The older dictionary form ("Attempt to return dictionary
-    // entry as a primitive") and pointAndNormalDict are refused.
-    surfaces
-    (
-$SURFACES
-    );
-}
-SLICEDICT
-    # searchableSurface reads constant/triSurface of the case it runs in, and
-    # build-case stages the STLs in the MESH case only.
-    mkdir -p constant/triSurface
-    cp -f ../mesh*/constant/triSurface/ground.stl constant/triSurface/ 2>/dev/null
+    # Sample U at pedestrian height: one distanceSurface per height over the
+    # terrain sheet cropped to the core (both written host-side by ped_grid.py).
+    # The host reads the surfaces onto the 2 m grid after the engine exits
+    # (ped_field.py). Best effort: a failed sample must never fail an
+    # otherwise-good case.
+    #
+    # -parallel, on the still-decomposed case, and a surface rather than the
+    # 508,032 grid points themselves: OpenFOAM 12 locates a sample point with an
+    # octree search that costs milliseconds a point on a snappyHexMesh mesh, and
+    # three point samplers (sets, ordered sets, a triSurface of point-sized
+    # triangles) were each still searching after 10-20 min on 8 ranks. This cut
+    # took 32 s on the same 8 ranks (v2-1410516cea4c5d7b, 4.8M cells).
+    #
     # SAMPLE_TIMES defaults to the last step, so the campaign path is unchanged.
     # A grid study sets it to a RANGE covering the last few write intervals:
     # without two samples of the same grid there is no iterative noise floor,
@@ -812,9 +795,20 @@ SLICEDICT
     # rather than reaching a fixed point, and residualControl says nothing about
     # whether the LABEL is still swinging. The scratch these come from is
     # node-local and deleted with the job, so this cannot be recovered later.
-    $MPIRUN "$RANKS" \
-        foamPostProcess -dict system/sliceFO -time "${SAMPLE_TIMES:-$LATEST}" -parallel > slice.log 2>&1 \
-        || echo "SLICE_SAMPLE_FAILED $c (see slice.log; not fatal)"
+    # (The collector reads the LATEST time it finds, so a range here is for
+    # reading by hand; U.npz carries the last step.)
+    if [ -f "$ROOT/pedGridFO" ] && [ -f "$ROOT/pedCore.stl" ]; then
+      # searchableSurface reads constant/triSurface of the case it runs in, and
+      # build-case stages STLs in the MESH case only.
+      mkdir -p system constant/triSurface
+      cp -f "$ROOT/pedGridFO" system/pedGridFO
+      cp -f "$ROOT/pedCore.stl" constant/triSurface/pedCore.stl
+      $MPIRUN "$RANKS" \
+          foamPostProcess -dict system/pedGridFO -time "${SAMPLE_TIMES:-$LATEST}" -parallel > ped.log 2>&1 \
+          || echo "PED_SAMPLE_FAILED $c (see ped.log; not fatal)"
+    else
+      echo "PED_SAMPLE_SKIPPED $c (no pedestrian grid was built)"
+    fi
 
     # The archive ships ONE reconstructed time step, not 24 processor
     # directories: rank counts differ per machine, so a decomposed result is
@@ -855,59 +849,67 @@ if grep -a "INLET_FLUX" "$SCRATCH/run.log" | awk '{print $3}' | grep -qvE '^-[0-
     fatal_case "a direction has non-negative inlet flux: the wind did not enter the domain"
 fi
 
-# ── 4. render + sample + ship ─────────────────────────────────────────────────
-# TODO(v2-contract): replace with the terrain-following slice export once the
-# contract is settled. Until then the case's own logs and the flux check are
-# the artefact that actually gates success -- the screenshot below is a
-# convenience for a human looking at the campaign, not something anything
-# downstream depends on, so a failed render must never fail an otherwise
-# good case. It is a PNG on disk, nothing more: never stored in the broker's
-# database, only referenced by the same result_uri directory as everything
-# else in this case.
+# ── 4. collect + render ───────────────────────────────────────────────────────
+# The pedestrian field, gathered: every direction's surfaces read onto the grid
+# into pedestrian/U.npz (ux, uy, uz; direction x height x 504 x 504; NaN inside
+# buildings) plus meta.json, and the dashboard's viewer bundle <case>.wfld --
+# see lib/ped_field.py. Host-side, like the grid: numpy is not on the OpenFOAM
+# image. The .vtk surfaces (~10 MB each, two per direction) are deleted only
+# once U.npz is written. --terrain makes it measure every value's height above
+# grade against the height it is labelled with, into meta.json.
 #
-# matplotlib/numpy are not on the OpenFOAM image, so this runs HOST-side
-# against the .raw sample foamPostProcess wrote inside the container (visible
-# here unchanged -- $STUDY is the same bind-mounted path on both sides).
-# OpenFOAM 12's raw surface writer lays the sample out as
-# postProcessing/<functionObject>/<time>/<surface>.xy (same columns as the
-# older surfaces/<time>/<surface>_U.raw: x y z Ux Uy Uz); both are matched.
-# One PNG per DIRECTION, not per sample. With several heights and several write
-# times the sampler can leave a dozen .xy files per direction, and a tricontourf
-# over a few million points is minutes each -- rendering all of them would cost
-# more than producing the samples did. `ls -t` puts the newest first, so each
-# direction is drawn from its latest sample and the rest are skipped.
-PREVIEWED=""
-for RAWFILE in $(ls -t "$STUDY"/case_*/postProcessing/pedestrianSlice/*/*.xy \
-                       "$STUDY"/case_*/postProcessing/surfaces/*/*_U.raw 2>/dev/null); do
-    [ -f "$RAWFILE" ] || continue
-    CDIR=$(echo "$RAWFILE" | sed -n "s#.*/\(case_[^/]*\)/postProcessing.*#\1#p")
-    case " $PREVIEWED " in *" $CDIR "*) continue ;; esac
-    PREVIEWED="$PREVIEWED $CDIR"
-    PNG="$SCRATCH/preview_${CDIR#case_}.png"
-    uv run --with matplotlib --with numpy python - "$RAWFILE" "$PNG" >>"$SCRATCH/preview.log" 2>&1 <<'PY' \
-        || log "preview render failed for $CDIR (see preview.log; not fatal)"
-import sys
+# Not fatal either way -- the solve is the result and it is already good -- but
+# never silent: the result line carries how much of the core was sampled and
+# which directions are missing, so a case without a field is visible on the
+# dashboard instead of being discovered when somebody opens it.
+PED_STATUS="no-grid"
+if [ "$PED_GRID_OK" = 1 ]; then
+    if uv run --with numpy python "$SCRIPT_DIR/lib/ped_field.py" "$STUDY" \
+            --grid "$SCRATCH/pedgrid.json" --out "$STUDY/pedestrian" \
+            --terrain "$SCRATCH/terrain.stl" --bundle "$STUDY/$CASE_ID.wfld" --case-id "$CASE_ID" --remove-raw \
+            >"$SCRATCH/ped_field.log" 2>&1; then
+        PED_STATUS="ok"
+    else
+        PED_STATUS="incomplete"
+    fi
+    cp "$SCRATCH/pedgrid.json" "$STUDY/pedestrian/grid.json" 2>/dev/null
+    log "$(tail -1 "$SCRATCH/ped_field.log")"
+fi
+
+# One PNG per direction for a human glancing at the campaign, drawn from the
+# gathered field -- a regular grid, so imshow, not the tricontourf over millions
+# of scattered points the old slice needed. Nothing downstream depends on these,
+# so a failed render never fails the case. It is a PNG on disk, nothing more:
+# never stored in the broker's database.
+if [ -f "$STUDY/pedestrian/U.npz" ]; then
+    uv run --with matplotlib --with numpy python - "$STUDY/pedestrian" "$SCRATCH" \
+        >>"$SCRATCH/preview.log" 2>&1 <<'PY' || log "preview render failed (see preview.log; not fatal)"
+import json, sys
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-raw_path, out_png = sys.argv[1], sys.argv[2]
-data = np.loadtxt(raw_path, comments="#")
-x, y = data[:, 0], data[:, 1]
-ux, uy, uz = data[:, 3], data[:, 4], data[:, 5]
-umag = np.sqrt(ux**2 + uy**2 + uz**2)
-
-fig, ax = plt.subplots(figsize=(6, 6), dpi=120)
-tpc = ax.tricontourf(x, y, umag, levels=30, cmap="turbo")
-fig.colorbar(tpc, ax=ax, label="|U| (m/s)")
-ax.set_aspect("equal")
-ax.set_xlabel("x (m)"); ax.set_ylabel("y (m)")
-ax.set_title("Pedestrian-height wind speed")
-fig.tight_layout()
-fig.savefig(out_png)
+ped, out = sys.argv[1], sys.argv[2]
+U = np.load(ped + "/U.npz")["U"]
+meta = json.load(open(ped + "/meta.json"))
+g, heights = meta["grid"], meta["heights_m"]
+hi = min(range(len(heights)), key=lambda k: abs(heights[k] - 1.75))
+mag = np.linalg.norm(U[:, hi], axis=-1)
+vmax = float(np.nanpercentile(mag, 99.5)) if np.isfinite(mag).any() else 1.0
+half = g["half_m"]
+for k, d in enumerate(meta["directions"]):
+    fig, ax = plt.subplots(figsize=(6, 6), dpi=120)
+    im = ax.imshow(mag[k], origin="lower", extent=(-half, half, -half, half),
+                   cmap="turbo", vmin=0, vmax=vmax)
+    fig.colorbar(im, ax=ax, label="|U| (m/s)")
+    ax.set_xlabel("x east (m)"); ax.set_ylabel("y north (m)")
+    ax.set_title(f"|U| at {heights[hi]:g} m above grade, wind from {d['deg']:g} deg")
+    fig.tight_layout()
+    fig.savefig(f"{out}/preview_{d['case'][5:]}.png")
+    plt.close(fig)
 PY
-done
+fi
 
 # ── 5. archive + ship ─────────────────────────────────────────────────────────
 # One .tar.gz per case, laid out as <case_id>/...:
@@ -915,7 +917,13 @@ done
 #                                  link to it and is deliberately NOT included)
 #   case_<dir>/<latest>/           the reconstructed LAST time step, every field
 #   case_<dir>/system, constant/*  dictionaries (constant minus the mesh link)
-#   case_<dir>/*.log, postProcessing/   solver logs, the pedestrian-plane sample
+#   case_<dir>/*.log, postProcessing/   solver logs, residuals, yPlus
+#   pedestrian/U.npz, meta.json, grid.json   the pedestrian field (step 4)
+#   <case_id>.wfld                 the dashboard's viewer bundle
+#   terrain.stl                    the sheet the grid was draped on, so the field
+#                                  can be resampled (another height, another
+#                                  spacing) from the archive alone
+#   eddy3d-study.json              exact angle, Uref and z0 per direction
 #   run.log build.json cfg.json spec.json preview_*.png manifest.json
 # gzip, not zstd: git-bash and the WSL image have no zstd, PACE and blueCFD do;
 # one format everywhere beats a faster one on three machines out of five.
@@ -925,9 +933,12 @@ PACK="$SCRATCH/pack.list"
 : > "$PACK"
 cp "$SCRATCH"/run.log "$SCRATCH"/build.json "$SCRATCH"/cfg.json "$SCRATCH"/spec.json "$STUDY/" 2>/dev/null
 cp "$SCRATCH"/preview_*.png "$STUDY/" 2>/dev/null
-for f in run.log build.json cfg.json spec.json "$STUDY"/preview_*.png; do
+cp "$SCRATCH/terrain.stl" "$STUDY/terrain.stl" 2>/dev/null
+for f in run.log build.json cfg.json spec.json eddy3d-study.json terrain.stl "$CASE_ID.wfld" \
+         "$STUDY"/preview_*.png; do
     f=$(basename "$f"); [ -f "$STUDY/$f" ] && echo "$CASE_ID/$f" >> "$PACK"
 done
+[ -d "$STUDY/pedestrian" ] && echo "$CASE_ID/pedestrian" >> "$PACK"
 for m in "$STUDY"/mesh "$STUDY"/mesh_*; do
     [ -d "$m/constant/polyMesh" ] || continue
     mn=$(basename "$m")
@@ -1004,6 +1015,7 @@ if [ -n "${WIND_SYNCTHING_APIKEY:-}" ] && [ -n "${WIND_SYNCTHING_FOLDER:-}" ]; t
 fi
 [ -n "$PROGRESS_FILE" ] && rm -f "$PROGRESS_FILE" 2>/dev/null
 
+PED_STATUS="$PED_STATUS" PED_META="$STUDY/pedestrian/meta.json" \
 "$PY" - "$ARCHIVE" "$NP" "$RUNTIME" "$RESUMING" "$TIMES" <<'PY'
 import hashlib, json, os, sys
 path, ranks, runtime, resumed, times = sys.argv[1:6]
@@ -1035,6 +1047,30 @@ if report.get("height_source"):
     metrics["height_source"] = report["height_source"]
 elif "height_provenance" in report:
     metrics["height_source"] = "overture"
+# The pedestrian field, summarised: whether there is one, the worst direction's
+# share of the core that was sampled (the rest is buildings), and anything
+# missing. Absent entirely from a runner that predates it, which is what tells
+# the two apart -- "pedestrian": {"status": "no-grid"} is a case that tried.
+ped_status = os.environ.get("PED_STATUS")
+if ped_status:
+    ped = {"status": ped_status}
+    try:
+        with open(os.environ.get("PED_META") or "", encoding="utf-8") as f:
+            pm = json.load(f)
+        cov = list((pm.get("coverage") or {}).values())
+        errs = list((pm.get("height_error") or {}).values())
+        ped.update({"heights_m": pm.get("heights_m"), "spacing_m": (pm.get("grid") or {}).get("spacing_m"),
+                    "directions": len(pm.get("directions") or []),
+                    "coverage_min": min(cov) if cov else None, "missing": pm.get("missing") or []})
+        if errs:
+            # The worst direction's height error, and its share of the core with
+            # mesh UNDER the terrain -- a domain the sheet did not seal, which
+            # is a defect of the solve, not of the sample (ped_field.rasterize).
+            ped["height_error_p99_m"] = max(e.get("p99_abs_m", 0) for e in errs)
+            ped["under_terrain_max"] = max(e.get("under_terrain", 0) for e in errs)
+    except (OSError, ValueError):
+        pass
+    metrics["pedestrian"] = ped
 print(json.dumps({"result_uri": "file://" + path, "sha256": h.hexdigest(),
                   "bytes": os.path.getsize(path), "metrics": metrics}))
 PY

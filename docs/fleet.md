@@ -126,9 +126,15 @@ place so nothing ever picks up a half-written archive:
   mesh/constant/polyMesh/          the mesh, once
   case_<dir>/<latest>/             the RECONSTRUCTED last time step, every field
   case_<dir>/system/  constant/*   dictionaries (constant minus the mesh link)
-  case_<dir>/*.log  postProcessing/  solver logs, pedestrian-plane sample
+  case_<dir>/*.log  postProcessing/  solver logs, residuals, yPlus
+  pedestrian/U.npz meta.json grid.json   the pedestrian field (below)
+  <case_id>.wfld                   the dashboard's viewer bundle
+  terrain.stl eddy3d-study.json    the sheet the field was cut on; angle + z0 per direction
   run.log build.json cfg.json spec.json preview_*.png manifest.json
 ```
+
+(The Windows node's archives differ in layout -- `<id>/<id>/case_*`, `geometry/`
+-- and, until the node's own sampler lands, carry no pedestrian field; see below.)
 
 Full field data, last time step only, reconstructed on the client -- rank
 counts differ per machine, so a decomposed result would be unusable anywhere
@@ -137,6 +143,53 @@ master. `case_*/constant/polyMesh` is deliberately not in the archive (it is a
 link to `mesh/`); relink it to open a case in ParaView. The broker's
 `result_uri` is the archive's path on the machine that made it, and
 `result_sha256`/`result_bytes` are the archive's.
+
+## The pedestrian field
+
+U at 1.5 m and 1.75 m above grade, on a regular 2 m grid over the 1008 m core
+(504 x 504 points), for every direction: `pedestrian/U.npz` (`U[direction,
+height, y, x, (ux, uy, uz)]`, float32, NaN inside buildings, row 0 = south),
+with `meta.json` saying which direction is which, the inlet reference speed at
+each height, how much of the core is air, and how far each value's height above
+grade is from its label.
+
+**How it is made.** OpenFOAM cuts one `distanceSurface` per height over the
+builder's terrain sheet cropped to the core (`runner/lib/ped_grid.py`), under
+MPI on the still-decomposed case, and writes U on its vertices (cellPoint).
+`runner/lib/ped_field.py` reads each surface onto the grid by linear
+interpolation inside the surface's own triangles, so a building stays a hole
+rather than being bridged over. Measured on v2-1410516cea4c5d7b (4.8M cells):
+the cut takes 32 s on 8 ranks for both heights; the read is ~2 s a surface; every
+value lands 1.75 m above the terrain to 1 mm median, 5.6 cm p99.
+
+**Two things it is not**, both measured on that case:
+
+- *Not the grid points sampled directly.* A `sets`/`probes` sample of 508,032
+  points never finished -- 20 min serial, 3.5 min a rank on 8 ranks, an ordered
+  (particle-tracked) set 12 min on 8, a surface of point-sized triangles 10 min
+  on 8 -- because OpenFOAM 12 finds each point's cell with an octree search that
+  is milliseconds a point on a snappyHexMesh mesh. Whatever samples many points
+  has to be a surface, and has to run `-parallel`.
+- *Not identical to a cellPoint probe at the same point.* A surface vertex sits
+  on a cell edge and carries the point-interpolated value; a probe inside the
+  cell also weights the cell-centre value. At 1.75 m, within the first cell
+  layers, the two differ by 6.8% median (18% max, 25 points). The surface is
+  what ParaView draws for the same slice; a cellPoint-exact grid would need the
+  interpolation done outside OpenFOAM from the archived mesh and fields.
+
+**Cases finished before it**: `scripts/backfill_pedestrian.py <archive> --out
+<dir> --e3d <eddy3d-cli>` rebuilds the field from the archive alone -- mesh and
+last time step, no re-solve. An archive without `terrain.stl` gets its sheet
+regenerated with `eddy3d-cli site-geometry`, and the script refuses unless that
+matches the archived geometry report on DEM source, extent, stride and z range.
+~2 min a direction on 8 ranks, dominated by decomposePar.
+
+**Seeing it**: the dashboard reads `<source>/<case_id>.wfld`. On the master,
+`uv run python scripts/serve_fields.py <folder of .wfld>` serves them on
+`http://localhost:8765` (read-only, CORS and Chrome's private-network header
+set); put that URL in Settings -> Preferences -> Wind-field source. A bucket's
+public URL works the same way once there is one. Or drag a `.wfld` onto an
+opened case.
 
 ## Getting archives to the master
 
