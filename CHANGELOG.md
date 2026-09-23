@@ -8,6 +8,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.17.6] - 2026-09-23
+
+### Changed
+- docs/fleet.md: the Syncthing hand-off, as found broken on 2026-09-23 -- the master
+  down since 14 Sep, no remote machine paired, and Eddy3D nodes in quiet mode
+  announcing nothing -- and a three-point checklist for every solving machine. The
+  node makes the scan call from Eddy3D 7c4229cb (#937) on.
+
 ## [0.17.5] - 2026-09-23
 
 ### Fixed
