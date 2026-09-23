@@ -882,6 +882,27 @@ def cmd_release_rollback(args) -> int:
                        "rolled back" + (", and blocked the build left" if args.block else ""))
 
 
+def cmd_repro(args) -> int:
+    from . import repro
+    token = _resolve_token(args.token, "write")
+    if not token:
+        print("a token for --broker is needed to read the case (--token, '-' for stdin, "
+              "or CASEBROKER_WRITE_TOKENS)", file=sys.stderr)
+        return 2
+    return repro.run_repro(args.case_id, source=args.broker, source_token=token, e3d=args.e3d,
+                           root=args.root, cpus=args.cpus, engine=args.engine, port=args.port,
+                           case_timeout=args.case_timeout)
+
+
+def cmd_triage(args) -> int:
+    from . import repro
+    findings = repro.triage(args.study)
+    for f in findings + ([] if repro.signatures(findings) else
+                         ["no known signature found -- read the step logs under mesh*/ and case_*/"]):
+        print(f"- {f}")
+    return 1 if repro.signatures(findings) else 0
+
+
 def cmd_doctor(args) -> int:
     """Check the database, the broker and the token, and name the broken one.
 
@@ -1115,6 +1136,28 @@ def main(argv: list[str] | None = None) -> int:
     rls.add_argument("--token", default=None,
                      help="read token; '-' reads stdin; omitted reads the environment")
     rls.set_defaults(func=cmd_release_list)
+
+    rp_ = sub.add_parser("repro", help="re-run one production case here, through the whole "
+                                       "node pipeline, against a throwaway local broker")
+    rp_.add_argument("case_id")
+    rp_.add_argument("--e3d", required=True, help="the node executable (E3D.exe / E3D) to run it with")
+    rp_.add_argument("--broker", default=os.environ.get("CASEBROKER_URL", "https://casebroker.onrender.com"),
+                     help="where the case lives (default: $CASEBROKER_URL, else production)")
+    rp_.add_argument("--token", default=os.environ.get("CASEBROKER_TOKEN"),
+                     help="token for --broker ('-' reads stdin; default $CASEBROKER_TOKEN)")
+    rp_.add_argument("--root", default="repro", help="scratch root; each run gets a fresh subfolder")
+    rp_.add_argument("--cpus", type=int, default=max(1, (os.cpu_count() or 2) // 4),
+                     help="MPI ranks (default: a quarter of the cores -- a live node may own the rest)")
+    rp_.add_argument("--engine", default="auto", help="auto | docker | wsl | bluecfd; match the failing worker")
+    rp_.add_argument("--port", type=int, default=8799)
+    rp_.add_argument("--case-timeout", type=int, default=3 * 3600,
+                     help="seconds before the node stops the case (default 3 h: enough to mesh and "
+                          "reach a failure, not to solve 32 directions)")
+    rp_.set_defaults(func=cmd_repro)
+
+    tr = sub.add_parser("triage", help="read a failed study's logs for the known failure signatures")
+    tr.add_argument("study", help="the study directory (holds mesh*/ and case_*/)")
+    tr.set_defaults(func=cmd_triage)
 
     idb = sub.add_parser("init-db", help="create or bring forward the schema without "
                                          "starting the service")
