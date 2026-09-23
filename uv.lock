@@ -60,7 +60,7 @@ wheels = [
 
 [[package]]
 name = "casebroker"
-version = "0.17.4"
+version = "0.17.9"
 source = { editable = "." }
 dependencies = [
     { name = "duckdb" },

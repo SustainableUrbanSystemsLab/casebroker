@@ -414,7 +414,11 @@ def echo_runner(lease: LeaseDict, worker: Worker) -> dict[str, Any]:
 # code here needs exactly two things from it: the last stdout line, and a tail
 # of stderr for the error message. Keeping a bounded deque gives both for a
 # fixed cost instead of holding the whole log in the worker's RAM.
-CASE_TIMEOUT_SECONDS = int(os.environ.get("CASEBROKER_CASE_TIMEOUT", str(24 * 3600)))
+# Seven days, not the 24 h it was sized at: a cyl-1008/of12-v4 case is ~800 core-hours
+# (23.7 h on 36 ranks), so a slower machine was killed mid-solve and charged an attempt.
+# Matched to the broker's lease cap and the Eddy3D node's default (75549071); a wedged
+# solve is still reclaimed by the broker once its progress line stops changing.
+CASE_TIMEOUT_SECONDS = int(os.environ.get("CASEBROKER_CASE_TIMEOUT", str(7 * 24 * 3600)))
 CAPTURE_LINES = int(os.environ.get("CASEBROKER_CAPTURE_LINES", "2000"))
 
 
