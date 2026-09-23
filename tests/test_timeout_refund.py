@@ -147,20 +147,23 @@ def test_a_timeout_that_is_not_a_step_budget_is_charged(conn):
     assert row(conn)["attempts"] == 1
 
 
-def test_a_release_repeating_the_same_line_is_judged_on_the_earlier_line(conn):
-    # A re-leased old build sends the identical "starting" line, which is not
-    # recorded again -- so its step kill is judged on the first attempt's line.
-    t0 = 1_000_000
-    got = lease_and_progress(conn, t0, [(60, "solve 0/32 dirs · starting")])
-    assert db.fail(conn, got.lease_id, OLD_STEP_TIMEOUT, retryable=True, now=t0 + int(5.7 * HOUR))
-    t1 = t0 + 6 * HOUR
-    got = lease_and_progress(conn, t1, [(60, "solve 0/32 dirs · starting")])
-    assert db.fail(conn, got.lease_id, OLD_STEP_TIMEOUT, retryable=True, now=t1 + int(5.7 * HOUR))
-    assert (row(conn)["state"], row(conn)["attempts"]) == ("pending", 0), "11.7 h after the line: inside 4 h + 12 h"
-    t2 = t1 + 6 * HOUR
-    got = lease_and_progress(conn, t2, [(60, "solve 0/32 dirs · starting")])
-    assert db.fail(conn, got.lease_id, OLD_STEP_TIMEOUT, retryable=True, now=t2 + int(5.7 * HOUR))
-    assert row(conn)["attempts"] == 1, "17.7 h after the line: charged"
+def test_an_old_build_looping_on_one_case_is_ended_by_the_cap(conn):
+    # An old build fails every v4 case the same way: "starting", then a 240-min
+    # kill. Each lease's first line is its own evidence (it is recorded even
+    # when it repeats the last attempt's), so the cap is what ends the loop:
+    # three refunds, then charged attempts, then quarantine -- never forever.
+    t = 1_000_000
+    states = []
+    for _ in range(db.TIMEOUT_REFUNDS_MAX + 4):
+        got = db.lease(conn, "w1", count=1, now=t)
+        if not got:
+            break
+        assert db.heartbeat(conn, got[0].lease_id, detail="solve 0/32 dirs · starting", now=t + 60)
+        db.fail(conn, got[0].lease_id, OLD_STEP_TIMEOUT, retryable=True, now=t + int(5.7 * HOUR))
+        states.append((row(conn)["state"], row(conn)["attempts"]))
+        t += 6 * HOUR
+    assert states == [("pending", 0)] * db.TIMEOUT_REFUNDS_MAX + [
+        ("pending", 1), ("pending", 2), ("quarantined", 3)]
 
 
 def test_refunds_are_capped_so_a_case_too_big_for_every_worker_still_quarantines(conn):

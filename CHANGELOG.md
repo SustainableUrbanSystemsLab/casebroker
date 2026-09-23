@@ -8,6 +8,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.17.11] - 2026-09-23
+
+### Fixed
+- **A re-leased case's first progress line is recorded even when it repeats the last
+  attempt's.** Heartbeats deduped against the case's last line from any attempt, so a node
+  that opens every attempt with "solve 0/32 dirs · starting" and says nothing else for hours
+  (every build before Eddy3D ae59812f) recorded nothing for the whole attempt: no current
+  stage on the dashboard, and progress times read off the previous attempt
+  (v2-003a9149ad953d85: leased 1.4 h, "line changed 7.1 h ago"). Dedupe is now per lease.
+  A step-timeout refund is therefore judged on the attempt's own first line; the 3-refund
+  cap is what ends an old build looping on one case.
+
 ## [0.17.10] - 2026-09-23
 
 ### Changed
