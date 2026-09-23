@@ -8,6 +8,41 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-09-22
+
+### Fixed
+- **The pedestrian wind sample was empty.** The runner cut its `distanceSurface`
+  from the mesh case's `ground.stl`, which is only what the land-cover roughness
+  zones leave of the terrain -- on v2-000c178c579bf034, no triangle inside radius
+  924 m, so nothing under the 1008 m core. A finished archive carried residuals and
+  yPlus and not one pedestrian value, and the preview step skipped the missing file
+  in silence. The runner now cuts against the builder's own terrain sheet
+  (`<site>_terrain.stl`), cropped to the core, and refuses a surface that does not
+  span it.
+
+### Added
+- **A pedestrian wind field per case.** U at 1.5 m and 1.75 m above grade on a
+  regular 2 m grid over the core (504 x 504 points, every direction), read onto the
+  grid from OpenFOAM's own surface values: `pedestrian/U.npz` + `meta.json` +
+  `grid.json` in the archive, with every value's height above grade checked
+  against the terrain. `runner/lib/ped_grid.py` and `runner/lib/ped_field.py`.
+  Sampled `-parallel` on the decomposed case, as one surface per height: sampling
+  the grid points themselves never finished (OpenFOAM 12's per-point cell search).
+- **Completion metrics say whether a case has one**: `metrics.pedestrian` --
+  `status` (ok / incomplete / no-grid), the worst direction's coverage, anything
+  missing. Absent from a runner that predates it.
+- **`scripts/backfill_pedestrian.py`**: the field for an already-finished case,
+  from its archive alone (mesh + last time step), without re-solving. Regenerates
+  a terrain sheet the archive lacks with `eddy3d-cli site-geometry` and refuses
+  unless it matches the archived geometry report.
+- **Dashboard: wind at pedestrian height.** A done case's panel shows its field:
+  |U| or U/U_ref (the inlet log law at the same height), arrows, a direction
+  slider (arrow keys), hover values. Read from `<source>/<case_id>.wfld` (Settings
+  -> Preferences) or opened from disk; the broker stores none of it.
+  `scripts/serve_fields.py` serves a folder of fields to it from the master.
+- The archive now carries `terrain.stl` and `eddy3d-study.json` (exact angle and
+  z0 per direction), and the preview PNGs are drawn from the gathered field.
+
 ## [0.16.1] - 2026-09-22
 
 ### Fixed

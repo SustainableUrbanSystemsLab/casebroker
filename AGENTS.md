@@ -82,6 +82,17 @@ a CATEGORY; per-building numbers belong in `stats`.
 own keys, so identically named ones vanished and the report showed pre-inference
 numbers for post-inference geometry.
 
+**The pedestrian sample was empty, silently, for the whole campaign.** It cut a
+`distanceSurface` from the mesh case's `ground.stl`, which is only what the
+land-cover roughness zones leave of the terrain -- no triangle under the core.
+The render step then found no file and skipped, non-fatally, in silence. The
+sample now cuts against the builder's terrain sheet and every case reports
+`metrics.pedestrian`. Two things NOT to "simplify" back: the surface must be
+the builder's `<site>_terrain.stl` (ped_grid refuses anything that does not span
+the core), and anything sampling many points must be a surface, run
+`-parallel` -- OpenFOAM 12's per-point cell search on a snappy mesh never
+finished 508k points (docs/fleet.md, "The pedestrian field").
+
 **Delete `__pycache__` after editing modules in `real_cities/`.** A stale
 bytecode cache made a fixed function look broken for several rounds.
 
