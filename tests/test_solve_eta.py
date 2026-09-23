@@ -45,3 +45,24 @@ def test_meshing_alone_gives_no_estimate(tmp_path):
     db.heartbeat(conn, lease.lease_id, 3600, "mesh 1/5 · 01_blockMesh", now=T + 1_100)
     db.heartbeat(conn, lease.lease_id, 3600, "mesh 4/5 · 04_renumberMesh", now=T + 3_100)
     assert _eta(conn, T + 3_100) is None
+
+
+def test_the_case_detail_card_carries_its_own_eta_too(tmp_path):
+    # The Workers table gets its estimate from status(); the case detail panel
+    # reads the same case through get_case() and had no eta field at all --
+    # opening a case still solving showed the age of its last line but never
+    # when the solve should end.
+    conn, lease = _setup(tmp_path)
+    db.heartbeat(conn, lease.lease_id, 3600, "solve 0/8 dirs · iter 0/2000", now=T + 2_000)
+    db.heartbeat(conn, lease.lease_id, 3600, "solve 2/8 dirs · iter 0/2000", now=T + 4_000)
+    eta = db.get_case(conn, "A")["eta"]
+    assert eta["fraction"] == 0.25
+    assert eta["at"] == T + 4_000 + 6_000
+
+
+def test_a_case_not_currently_leased_carries_no_eta(tmp_path):
+    conn, lease = _setup(tmp_path)
+    db.heartbeat(conn, lease.lease_id, 3600, "solve 0/8 dirs · iter 0/2000", now=T + 2_000)
+    db.heartbeat(conn, lease.lease_id, 3600, "solve 2/8 dirs · iter 0/2000", now=T + 4_000)
+    db.complete(conn, lease.lease_id, "file:///tmp/result.tar", now=T + 5_000)
+    assert db.get_case(conn, "A")["eta"] is None
