@@ -8,12 +8,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
-## [0.17.4] - 2026-09-23
+## [0.17.5] - 2026-09-23
 
 ### Fixed
 - **Dashboard: a case ID could push its table row wider than one line.** The Case ID
   column now clips with an ellipsis and shows the full id on hover; the copy button
   still copies the untruncated id.
+
+## [0.17.4] - 2026-09-23
+
+### Fixed
+- **The site-geometry cache is bounded** (`CASEBROKER_FOOTPRINT_CACHE_MAX`, default 500
+  sites; 0 = unbounded). Measured on production at ~90 KB a site, browsing the whole
+  campaign would have put ~450 MB into a 500 MB free-plan database. Past the cap the
+  oldest fetches are dropped and simply re-fetched if opened again.
 
 ## [0.17.3] - 2026-09-23
 
