@@ -267,3 +267,9 @@ def test_a_non_ascii_credential_does_not_500_an_unauthenticated_endpoint(legacy)
     assert legacy.get("/healthz", headers=header).status_code == 200
     assert legacy.get("/v1/whoami", headers=header).json()["scope"] == "none"
     assert legacy.get("/v1/status", headers=header).status_code == 401
+
+
+def test_healthz_answers_head(tmp_path):
+    """The uptime badge probes with HEAD; a 405 there showed the broker as down."""
+    app = create_app(db_path=str(tmp_path / "head.sqlite"), tokens=[], readonly_tokens=[])
+    assert TestClient(app).head("/healthz").status_code == 200

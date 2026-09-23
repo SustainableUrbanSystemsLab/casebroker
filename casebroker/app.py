@@ -761,7 +761,8 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         """
         _db_probe.update({"at": 0.0, "ok": None, "accounts": None})
 
-    @app.get("/healthz")
+    # HEAD too: the shields.io uptime badge probes with HEAD, and a 405 read as "down".
+    @app.api_route("/healthz", methods=["GET", "HEAD"])
     def healthz(request: Request) -> dict[str, Any]:
         # `version` is safe to expose unauthenticated -- it is already in the
         # public OpenAPI document and in the repo -- and it is what lets the
