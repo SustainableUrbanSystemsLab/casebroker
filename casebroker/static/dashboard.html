@@ -710,6 +710,36 @@
   .geo-swatch { display: inline-block; width: 11px; height: 11px; border-radius: 2px; vertical-align: -1px; margin-right: 6px; }
   .geo-note { font-size: 11.5px; color: var(--text-muted); margin-top: 8px; max-width: 46ch; }
 
+  /* -- Wind at pedestrian height (the .wfld viewer) ------------------------- */
+  .wf-wrap { min-height: 40px; outline: none; }
+  .wf-wrap.wf-drop { box-shadow: 0 0 0 2px var(--ring); border-radius: 6px; }
+  .wf-bar { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; margin-bottom: 10px; }
+  .wf-dir { display: flex; align-items: center; gap: 6px; }
+  .wf-dir button { min-width: 30px; justify-content: center; }
+  .wf-dir input[type=range] { width: 180px; }
+  .wf-dirlabel { font-variant-numeric: tabular-nums; font-size: 12.5px; min-width: 15ch; color: var(--text-primary); }
+  .wf-seg { display: inline-flex; border: 1px solid var(--btn-border); border-radius: 6px; overflow: hidden; }
+  .wf-seg button { border: 0; border-radius: 0; background: var(--btn-bg); font-size: 12px; padding: 4px 10px; }
+  .wf-seg button[aria-pressed="true"] { background: var(--primary-light); color: var(--primary); font-weight: 600; }
+  .wf-seg button:disabled { opacity: 0.45; cursor: not-allowed; }
+  .wf-fig { display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap; }
+  .wf-plot { position: relative; width: min(100%, 560px); aspect-ratio: 1 / 1; }
+  .wf-plot canvas { width: 100%; height: 100%; display: block; border: 1px solid var(--border);
+                    border-radius: 6px; background: var(--surface-elevated); cursor: crosshair; }
+  .wf-tip { position: absolute; pointer-events: none; background: var(--surface); border: 1px solid var(--border);
+            box-shadow: var(--shadow); border-radius: 6px; padding: 6px 8px; font-size: 11.5px; line-height: 1.5;
+            color: var(--text-primary); white-space: nowrap; font-variant-numeric: tabular-nums; display: none; z-index: 2; }
+  .wf-tip .k { color: var(--text-muted); }
+  .wf-side { font-size: 12px; color: var(--text-secondary); line-height: 1.6; max-width: 40ch; }
+  .wf-legend { margin: 2px 0 12px; }
+  .wf-legend .wf-ramp { height: 10px; width: 220px; border-radius: 2px; border: 1px solid var(--border); }
+  .wf-legend .wf-ticks { display: flex; justify-content: space-between; width: 222px; font-size: 10.5px;
+                         color: var(--text-muted); font-variant-numeric: tabular-nums; margin-top: 2px; }
+  .wf-legend .wf-ltitle { font-size: 11.5px; color: var(--text-primary); font-weight: 600; margin-bottom: 4px; }
+  .wf-note { font-size: 11.5px; color: var(--text-muted); margin-top: 8px; }
+  .wf-empty { font-size: 12px; color: var(--text-secondary); line-height: 1.6; max-width: 70ch; }
+  .wf-empty .mono, #tab-prefs .mono { font-family: var(--font-mono); font-size: 11.5px; word-break: break-all; }
+
   /* KPI Stats Grid */
   .stats-grid {
     display: grid;
@@ -2081,6 +2111,17 @@
       <div class="panel-subtitle" style="margin-top:6px;">
         Announces only what happens after you switch it on, and only while this tab is open.
       </div>
+
+      <div class="field" style="margin-top:18px;">
+        <label for="fieldBase">Wind-field source <span class="label-hint">(where &lt;case&gt;.wfld files are served)</span></label>
+        <input type="text" id="fieldBase" autocomplete="off" spellcheck="false"
+               placeholder="http://localhost:8765" />
+        <div class="panel-subtitle" style="margin-top:4px;">
+          An opened case fetches <span class="mono">&lt;source&gt;/&lt;case_id&gt;.wfld</span> from here. On the
+          master, <span class="mono">scripts/serve_fields.py</span> serves them; a bucket's public URL works the same
+          way. Empty: open a case's file from disk instead.
+        </div>
+      </div>
     </section>
 
   </div>
@@ -2995,7 +3036,421 @@
     document.querySelectorAll(".geo-load").forEach((b) => {
       if (!b.dataset.auto) { b.dataset.auto = "1"; loadFootprints(b.dataset.case, b.dataset.state, b.parentElement); }
     });
+    wfAttach();
   }
+
+  // -- Wind at pedestrian height: the .wfld viewer -----------------------------
+  // One file per case (runner/lib/ped_field.py, `bundle`): |U| at 1.75 m above
+  // grade on the 2 m grid over the 1008 m core, one byte per point, for every
+  // wind direction, plus arrows every 16 m. The broker stores none of it -- its
+  // database is ~500 MB and a campaign of fields is tens of GB -- so the page
+  // fetches <source>/<case_id>.wfld from wherever the fields are served (the
+  // master's scripts/serve_fields.py today, a bucket later: same URL shape), or
+  // opens the file straight from disk. State lives here, keyed by case, because
+  // the panel's DOM is rebuilt on every refresh.
+  const LS_FIELD_BASE = "casebroker.fieldBase";
+  const wfStates = new Map();       // case_id -> {status, field, err, dir, mode, arrows, src}
+  const WF_KEEP = 6;                // decoded fields held (~8 MB each); oldest dropped first
+
+  function fieldBase() {
+    try { return (localStorage.getItem(LS_FIELD_BASE) || "").trim().replace(/\/+$/, ""); }
+    catch (e) { return ""; }
+  }
+
+  function wfState(id) {
+    let s = wfStates.get(id);
+    if (!s) {
+      s = { status: "idle", field: null, err: "", dir: 0, mode: "speed", arrows: true, src: "" };
+      wfStates.set(id, s);
+    }
+    return s;
+  }
+
+  function wfTrim() {
+    const loaded = [...wfStates.entries()].filter(([, s]) => s.field);
+    for (const [, s] of loaded.slice(0, Math.max(0, loaded.length - WF_KEEP))) {
+      s.field = null; s.status = "idle";
+    }
+  }
+
+  // The bundle: gzip( "WFLD" | u32 version | u32 header length | header JSON |
+  // per direction: nx*ny u8 (|U|, row 0 = SOUTH, 255 = inside a building) then
+  // vny*vnx*2 i16 (ux, uy in cm/s, -32768 = none) ).
+  async function wfDecode(buf) {
+    let bytes = new Uint8Array(buf);
+    if (bytes[0] === 0x1f && bytes[1] === 0x8b) {
+      // A server may already have undone the gzip (Content-Encoding); a file
+      // opened from disk never has.
+      const ds = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("gzip"));
+      bytes = new Uint8Array(await new Response(ds).arrayBuffer());
+    }
+    const magic = String.fromCharCode(bytes[0], bytes[1], bytes[2], bytes[3]);
+    if (magic !== "WFLD") throw new Error("not a wind-field file (no WFLD header)");
+    const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const version = dv.getUint32(4, true), hlen = dv.getUint32(8, true);
+    if (version !== 1) throw new Error(`wind-field format version ${version}; this page reads version 1`);
+    const h = JSON.parse(new TextDecoder().decode(bytes.subarray(12, 12 + hlen)));
+    const n = h.nx * h.ny, vn = h.vector.nx * h.vector.ny;
+    const per = n + 4 * vn;
+    let off = 12 + hlen;
+    if (bytes.length !== off + per * h.directions.length)
+      throw new Error(`the file is ${bytes.length} bytes; its header describes ${off + per * h.directions.length}`);
+    const dirs = h.directions.map((d) => {
+      const mag = bytes.slice(off, off + n);
+      // slice(), not a view: an Int16Array needs an even byte offset, and the
+      // header's length makes this one odd as often as not.
+      const vec = new Int16Array(bytes.slice(off + n, off + per).buffer);
+      off += per;
+      return { ...d, mag, vec };
+    });
+    return { h, dirs };
+  }
+
+  async function wfFetch(id) {
+    const s = wfState(id), base = fieldBase();
+    if (!base) return;
+    s.status = "loading"; s.src = `${base}/${id}.wfld`; wfRedraw(id);
+    try {
+      const r = await fetch(s.src, { cache: "force-cache" });
+      if (r.status === 404) { s.status = "absent"; s.err = ""; }
+      else if (!r.ok) { s.status = "error"; s.err = `${r.status} ${r.statusText}`; }
+      else { s.field = await wfDecode(await r.arrayBuffer()); s.status = "ready"; wfTrim(); }
+    } catch (e) {
+      s.status = "error";
+      // A fetch that never got an answer is almost always the source being down
+      // or refusing cross-origin reads; say which URL, since that is what to check.
+      s.err = e.message || String(e);
+    }
+    wfRedraw(id);
+  }
+
+  async function wfOpenFile(id, file) {
+    const s = wfState(id);
+    s.status = "loading"; s.src = file.name; wfRedraw(id);
+    try {
+      const f = await wfDecode(await file.arrayBuffer());
+      // Concatenated, not templated: the id comes from the FILE, and every template here
+      // is held to esc(); this message is escaped where it is shown (wfDraw).
+      if (f.h.case_id && f.h.case_id !== id) throw new Error("that file is " + f.h.case_id + ", not " + id);
+      s.field = f; s.status = "ready"; wfTrim();
+    } catch (e) { s.status = "error"; s.err = e.message || String(e); }
+    wfRedraw(id);
+  }
+
+  function wfRedraw(id) {
+    document.querySelectorAll(".wf-wrap").forEach((w) => { if (w.dataset.case === id) wfDraw(w); });
+  }
+
+  function wfAttach() {
+    document.querySelectorAll(".wf-wrap").forEach((w) => {
+      const s = wfState(w.dataset.case);
+      if (s.status === "idle" && fieldBase()) wfFetch(w.dataset.case);
+      else wfDraw(w);
+    });
+  }
+
+  const WF_COMPASS = ["N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE", "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"];
+  const wfCompass = (deg) => WF_COMPASS[Math.round(((deg % 360) + 360) % 360 / 22.5) % 16];
+  const wfFmtDeg = (d) => (Math.round(d * 100) / 100).toString();
+
+  // Colour does ONE job per mode. Speed is a magnitude: inferno, calm black to
+  // fast pale yellow, the SAME in both themes (asked for: a field should read
+  // identically whichever theme a screenshot was taken in). Perceptually
+  // uniform and monotone in lightness, so it survives greyscale and colour-vision
+  // deficiency. Stops are matplotlib's inferno at 0, 1/9, ... 1. Amplification
+  // has a meaningful midpoint, 1 = what the undisturbed inlet would give at this
+  // height: blue sheltered, red amplified, neutral gray at 1.
+  const WF_INFERNO = ["#000004", "#1b0c41", "#4a0c6b", "#781c6d", "#a52c60",
+                      "#cf4446", "#ed6925", "#fb9b06", "#f7d13d", "#fcffa4"];
+  const WF_DIV = { light: ["#104281", "#2a78d6", "#9ec5f4", "#f0efec", "#f4a3a2", "#e34948", "#8f1d1c"],
+                   dark:  ["#6da7ec", "#3987e5", "#1c5cab", "#383835", "#a93a3a", "#e66767", "#f4b1b0"] };
+  const WF_AMP_MAX = 2;             // U/U_ref spans 0..2, 1 at the centre
+
+  function wfDark() {
+    const t = document.documentElement.getAttribute("data-theme");
+    return t ? t === "dark" : window.matchMedia("(prefers-color-scheme: dark)").matches;
+  }
+  function wfHex(h) { return [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16)); }
+  function wfLut(stops) {
+    const rgb = stops.map(wfHex), lut = new Uint8ClampedArray(256 * 3);
+    for (let k = 0; k < 256; k++) {
+      const t = k / 255 * (rgb.length - 1), i = Math.min(rgb.length - 2, Math.floor(t)), f = t - i;
+      for (let c = 0; c < 3; c++) lut[k * 3 + c] = rgb[i][c] + (rgb[i + 1][c] - rgb[i][c]) * f;
+    }
+    return lut;
+  }
+  function wfStops(mode) {
+    const dark = wfDark();
+    if (mode === "amp") return dark ? WF_DIV.dark : WF_DIV.light;
+    return WF_INFERNO;
+  }
+
+  function wfCss(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+
+  function wfDraw(wrap) {
+    const id = wrap.dataset.case, s = wfState(id);
+    const hint = wrap.parentElement && wrap.parentElement.querySelector(".wf-src");
+    if (hint) hint.textContent = s.status === "ready" ? `(${s.src})` : "";
+    const openBtn = `<button class="subtle wf-open" type="button">Open .wfld file…</button>`
+      + `<input type="file" accept=".wfld" class="wf-file" hidden />`;
+    if (s.status !== "ready") {
+      const base = fieldBase();
+      let msg;
+      if (s.status === "loading") msg = `Loading <span class="mono">${esc(s.src)}</span>…`;
+      else if (s.status === "absent")
+        msg = `No field at <span class="mono">${esc(s.src)}</span>. Cases finished before the pedestrian sampler was fixed
+               have none until they are backfilled from their archive (<span class="mono">scripts/backfill_pedestrian.py</span>).`;
+      else if (s.status === "error")
+        msg = `Could not read the field${s.src ? ` from <span class="mono">${esc(s.src)}</span>` : ""}: ${esc(s.err)}.`
+          + (s.src && s.src.startsWith("http") ? " Check that the source is running and allows reads from this page." : "");
+      else if (!base)
+        msg = `No wind-field source is set. Set one under Settings → Preferences, or open this case's
+               <span class="mono">${esc(id)}.wfld</span> from disk (drag it here).`;
+      else msg = "";
+      wrap.innerHTML = `<div class="wf-empty">${msg}</div><div style="margin-top:8px;">${openBtn}</div>`;
+      setBusy(wrap, s.status === "loading");
+      return;
+    }
+    setBusy(wrap, false);
+
+    const { h, dirs } = s.field;
+    s.dir = Math.min(Math.max(0, s.dir), dirs.length - 1);
+    const d = dirs[s.dir];
+    const ampOk = dirs.every((x) => x.u_ref > 0);
+    if (!ampOk && s.mode === "amp") s.mode = "speed";
+    const cov = h.coverage && h.coverage[s.dir];
+    wrap.innerHTML = `
+      <div class="wf-bar">
+        <div class="wf-dir">
+          <button class="subtle wf-prev" type="button" aria-label="previous direction">‹</button>
+          <input type="range" class="wf-range" min="0" max="${dirs.length - 1}" step="1" value="${s.dir}"
+                 aria-label="wind direction" />
+          <button class="subtle wf-next" type="button" aria-label="next direction">›</button>
+          <span class="wf-dirlabel">wind from <b>${wfFmtDeg(d.deg)}°</b> ${wfCompass(d.deg)}
+            <span style="color:var(--text-muted)">· ${s.dir + 1}/${dirs.length}</span></span>
+        </div>
+        <div class="wf-seg" role="group" aria-label="quantity">
+          <button type="button" class="wf-mode" data-mode="speed" aria-pressed="${s.mode === "speed"}">|U| m/s</button>
+          <button type="button" class="wf-mode" data-mode="amp" aria-pressed="${s.mode === "amp"}" ${ampOk ? "" : "disabled"}
+                  title="${ampOk ? "local speed over the undisturbed inlet speed at the same height" : "this case's file carries no reference speed"}">U / U<sub>ref</sub></button>
+        </div>
+        <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;">
+          <input type="checkbox" class="wf-arrows" ${s.arrows ? "checked" : ""} /> arrows
+        </label>
+        ${openBtn}
+      </div>
+      <div class="wf-fig">
+        <div class="wf-plot"><canvas></canvas><div class="wf-tip"></div></div>
+        <div class="wf-side">
+          <div class="wf-legend"></div>
+          <div>${h.height_m} m above grade · ${h.nx}×${h.ny} points at ${h.spacing_m} m ·
+               north up, the 1008 m sampled core</div>
+          <div>U<sub>ref</sub> ${d.u_ref ? `${d.u_ref.toFixed(2)} m/s` : "—"}
+               <span style="color:var(--text-muted)">(inlet ${d.uref ?? "?"} m/s at ${d.zref ?? "?"} m, z₀ ${d.z0 ?? "?"} m)</span></div>
+          ${cov != null ? `<div>${(cov * 100).toFixed(1)}% of the core is air here; blank is inside a building</div>` : ""}
+          ${(() => {
+            // A defect of the SOLVE this sample exposed: mesh under the terrain
+            // (a domain the terrain sheet did not seal). The field shown is the
+            // one above grade, but the flow that made it had a path under the
+            // ground, so it is flagged rather than shown as clean.
+            const ck = h.checks && h.checks[s.dir];
+            if (!ck || !(ck.under_terrain > 0.001)) return "";
+            return `<div style="color:var(--warn);margin-top:6px;">⚠ this direction's mesh has fluid UNDER the
+              terrain across ${(ck.under_terrain * 100).toFixed(0)}% of the core — the solve had a path beneath the
+              ground. Treat its field with caution.</div>`;
+          })()}
+          ${(() => {
+            const miss = dirs.filter((x, k) => !(h.coverage && h.coverage[k] > 0)).length;
+            return miss ? `<div style="color:var(--warn)" title="${esc((h.missing || []).join(", "))}">
+              ${miss} of ${dirs.length} directions have no sample (blank)</div>` : "";
+          })()}
+          <div class="wf-note">OpenFOAM's cellPoint values on a surface ${h.height_m} m above the terrain,
+            read onto the grid inside the surface's own triangles — what ParaView draws for the same slice.
+            &larr; &rarr; change direction.</div>
+        </div>
+      </div>`;
+    wfPaint(wrap, s);
+  }
+
+  function wfPaint(wrap, s) {
+    const { h, dirs } = s.field, d = dirs[s.dir];
+    const canvas = wrap.querySelector("canvas");
+    const plot = canvas.parentElement;
+    const css = plot.clientWidth || 520, dpr = window.devicePixelRatio || 1;
+    canvas.width = Math.round(css * dpr); canvas.height = Math.round(css * dpr);
+
+    // The field at its own resolution, one pixel per grid point, north up.
+    const off = document.createElement("canvas");
+    off.width = h.nx; off.height = h.ny;
+    const octx = off.getContext("2d"), img = octx.createImageData(h.nx, h.ny);
+    const lut = wfLut(wfStops(s.mode));
+    // Buildings in a neutral mid gray that no ramp uses -- neither inferno's
+    // black (calm air) nor its yellow -- and the same in both themes.
+    const bld = wfHex("#8a8f98");
+    const amp = s.mode === "amp", scale = h.vmax / 254, uref = d.u_ref || 1;
+    for (let j = 0; j < h.ny; j++) {
+      const row = (h.ny - 1 - j) * h.nx;        // row 0 of the file is the SOUTH edge
+      for (let i = 0; i < h.nx; i++) {
+        const q = d.mag[j * h.nx + i], p = (row + i) * 4;
+        if (q === h.nodata) { img.data[p] = bld[0]; img.data[p + 1] = bld[1]; img.data[p + 2] = bld[2]; img.data[p + 3] = 255; continue; }
+        const k = amp ? Math.min(255, Math.round(q * scale / uref / WF_AMP_MAX * 255)) : Math.round(q / 254 * 255);
+        img.data[p] = lut[k * 3]; img.data[p + 1] = lut[k * 3 + 1]; img.data[p + 2] = lut[k * 3 + 2]; img.data[p + 3] = 255;
+      }
+    }
+    octx.putImageData(img, 0, 0);
+    const ctx = canvas.getContext("2d");
+    ctx.imageSmoothingEnabled = false;          // 2 m cells stay 2 m cells
+    ctx.drawImage(off, 0, 0, canvas.width, canvas.height);
+
+    // Arrows: every other one of the file's 16 m lattice -- one per 32 m, which
+    // at this size is about one per street; the full lattice buried the field
+    // it annotates. Length by speed. White with a dark halo, because inferno
+    // runs from black to near-white and any single ink vanishes at one end.
+    const W = canvas.width, v = h.vector, px = W / h.nx;
+    if (s.arrows) {
+      const shafts = new Path2D(), heads = new Path2D();
+      const every = 2, cell = v.stride * every * px, vmax = h.vmax;
+      for (let j = 0; j < v.ny; j += every) for (let i = 0; i < v.nx; i += every) {
+        const k = (j * v.nx + i) * 2, ux = d.vec[k], uy = d.vec[k + 1];
+        if (ux === v.nodata || uy === v.nodata) continue;
+        const sx = ux * v.scale, sy = uy * v.scale, sp = Math.hypot(sx, sy);
+        if (sp < 1e-3) continue;
+        const len = Math.min(1, sp / vmax) * cell * 0.9;
+        const cx = (v.offset + i * v.stride + 0.5) * px, cy = W - (v.offset + j * v.stride + 0.5) * px;
+        const dx = sx / sp * len, dy = -sy / sp * len;
+        const x0 = cx - dx / 2, y0 = cy - dy / 2, x1 = cx + dx / 2, y1 = cy + dy / 2;
+        shafts.moveTo(x0, y0); shafts.lineTo(x1, y1);
+        const hl = Math.min(4 * dpr, len * 0.4), a = Math.atan2(dy, dx);
+        heads.moveTo(x1, y1);
+        heads.lineTo(x1 - hl * Math.cos(a - 0.45), y1 - hl * Math.sin(a - 0.45));
+        heads.lineTo(x1 - hl * Math.cos(a + 0.45), y1 - hl * Math.sin(a + 0.45));
+        heads.closePath();
+      }
+      ctx.lineJoin = "round";
+      ctx.strokeStyle = "rgba(0,0,0,0.45)"; ctx.lineWidth = 2.6 * dpr;
+      ctx.stroke(shafts); ctx.stroke(heads);
+      ctx.strokeStyle = "rgba(255,255,255,0.85)"; ctx.fillStyle = ctx.strokeStyle; ctx.lineWidth = 1 * dpr;
+      ctx.stroke(shafts); ctx.fill(heads);
+    }
+
+    // Where the wind comes from: an arrow in the corner pointing the way it blows.
+    const r = 20 * dpr, cx = W - r - 10 * dpr, cy = r + 10 * dpr;
+    ctx.fillStyle = wfCss("--surface") || "#fff";
+    ctx.globalAlpha = 0.85; ctx.beginPath(); ctx.arc(cx, cy, r, 0, 2 * Math.PI); ctx.fill(); ctx.globalAlpha = 1;
+    const t = d.deg * Math.PI / 180, fx = -Math.sin(t), fy = Math.cos(t);  // flow direction on screen (y down)
+    ctx.strokeStyle = wfCss("--text-primary") || "#111"; ctx.fillStyle = ctx.strokeStyle; ctx.lineWidth = 2 * dpr;
+    ctx.beginPath(); ctx.moveTo(cx - fx * r * 0.65, cy - fy * r * 0.65); ctx.lineTo(cx + fx * r * 0.45, cy + fy * r * 0.45); ctx.stroke();
+    const a2 = Math.atan2(fy, fx), hx = cx + fx * r * 0.7, hy = cy + fy * r * 0.7;
+    ctx.beginPath(); ctx.moveTo(hx, hy);
+    ctx.lineTo(hx - 8 * dpr * Math.cos(a2 - 0.5), hy - 8 * dpr * Math.sin(a2 - 0.5));
+    ctx.lineTo(hx - 8 * dpr * Math.cos(a2 + 0.5), hy - 8 * dpr * Math.sin(a2 + 0.5));
+    ctx.closePath(); ctx.fill();
+    ctx.font = `${10 * dpr}px ${wfCss("--font-sans") || "sans-serif"}`;
+    ctx.textAlign = "center"; ctx.fillText("N", cx, cy - r + 9 * dpr);
+
+    // Legend: the ramp this mode uses, in the units it is read in.
+    const stops = wfStops(s.mode);
+    const ticks = amp ? ["0", "0.5", "1", "1.5", "≥ 2"]
+      : [0, 0.25, 0.5, 0.75, 1].map((f) => (h.vmax * f).toFixed(1));
+    wrap.querySelector(".wf-legend").innerHTML =
+      `<div class="wf-ltitle">${amp ? "U / U<sub>ref</sub> — below 1 sheltered, above 1 amplified" : "|U| (m/s)"}</div>`
+      + `<div class="wf-ramp" style="background:linear-gradient(to right, ${stops.join(", ")})"></div>`
+      + `<div class="wf-ticks">${ticks.map((x) => `<span>${x}</span>`).join("")}</div>`;
+  }
+
+  function wfHover(wrap, e) {
+    const s = wfState(wrap.dataset.case);
+    const tip = wrap.querySelector(".wf-tip"), canvas = wrap.querySelector("canvas");
+    if (!s.field || !tip || !canvas) return;
+    const { h, dirs } = s.field, d = dirs[s.dir];
+    const r = canvas.getBoundingClientRect();
+    const fx = (e.clientX - r.left) / r.width, fy = (e.clientY - r.top) / r.height;
+    const i = Math.floor(fx * h.nx), j = h.ny - 1 - Math.floor(fy * h.ny);
+    if (i < 0 || j < 0 || i >= h.nx || j >= h.ny) { tip.style.display = "none"; return; }
+    const x = h.x0 + i * h.spacing_m, y = h.y0 + j * h.spacing_m;
+    const q = d.mag[j * h.nx + i];
+    const where = `<span class="k">${Math.abs(x).toFixed(0)} m ${x < 0 ? "W" : "E"}, ${Math.abs(y).toFixed(0)} m ${y < 0 ? "S" : "N"}</span>`;
+    if (q === h.nodata) {
+      tip.innerHTML = `${where}<br>inside a building`;
+    } else {
+      const u = q * h.vmax / 254;
+      tip.innerHTML = `${where}<br>|U| <b>${u.toFixed(2)}</b> m/s`
+        + (d.u_ref ? `<br>U/U<sub>ref</sub> <b>${(u / d.u_ref).toFixed(2)}</b>` : "");
+    }
+    tip.style.display = "block";
+    const px = e.clientX - r.left, py = e.clientY - r.top;
+    tip.style.left = `${Math.min(px + 14, r.width - tip.offsetWidth - 4)}px`;
+    tip.style.top = `${py + 14 > r.height - tip.offsetHeight ? py - tip.offsetHeight - 10 : py + 14}px`;
+  }
+
+  function wfStep(wrap, by) {
+    const s = wfState(wrap.dataset.case);
+    if (!s.field) return;
+    const n = s.field.dirs.length;
+    s.dir = (s.dir + by + n) % n;               // wraps: 348.75 -> 0 is one step, as on a compass
+    wfDraw(wrap);
+  }
+
+  document.addEventListener("click", (e) => {
+    const wrap = e.target.closest(".wf-wrap");
+    if (!wrap) return;
+    const s = wfState(wrap.dataset.case);
+    if (e.target.closest(".wf-prev")) wfStep(wrap, -1);
+    else if (e.target.closest(".wf-next")) wfStep(wrap, 1);
+    else if (e.target.closest(".wf-mode")) {
+      const b = e.target.closest(".wf-mode");
+      if (!b.disabled) { s.mode = b.dataset.mode; wfDraw(wrap); }
+    } else if (e.target.closest(".wf-open")) wrap.querySelector(".wf-file").click();
+  });
+  document.addEventListener("input", (e) => {
+    const wrap = e.target.closest && e.target.closest(".wf-wrap");
+    if (!wrap) return;
+    const s = wfState(wrap.dataset.case);
+    if (e.target.classList.contains("wf-range")) { s.dir = Number(e.target.value); wfDraw(wrap); wrap.querySelector(".wf-range").focus(); }
+    else if (e.target.classList.contains("wf-arrows")) { s.arrows = e.target.checked; wfPaint(wrap, s); }
+  });
+  document.addEventListener("change", (e) => {
+    if (!e.target.classList || !e.target.classList.contains("wf-file")) return;
+    const wrap = e.target.closest(".wf-wrap"), f = e.target.files && e.target.files[0];
+    if (wrap && f) wfOpenFile(wrap.dataset.case, f);
+  });
+  document.addEventListener("keydown", (e) => {
+    const wrap = e.target.closest && e.target.closest(".wf-wrap");
+    if (!wrap || !(e.key === "ArrowLeft" || e.key === "ArrowRight")) return;
+    // The range input moves itself on arrow keys; everywhere else in the panel
+    // the keys are ours.
+    if (e.target.classList.contains("wf-range")) return;
+    e.preventDefault();
+    wfStep(wrap, e.key === "ArrowLeft" ? -1 : 1);
+  });
+  document.addEventListener("pointermove", (e) => {
+    const wrap = e.target.closest && e.target.closest(".wf-wrap");
+    if (wrap && e.target.tagName === "CANVAS") wfHover(wrap, e);
+    else document.querySelectorAll(".wf-tip").forEach((t) => { t.style.display = "none"; });
+  });
+  document.addEventListener("dragover", (e) => {
+    const wrap = e.target.closest && e.target.closest(".wf-wrap");
+    if (!wrap) return;
+    e.preventDefault(); wrap.classList.add("wf-drop");
+  });
+  document.addEventListener("dragleave", (e) => {
+    const wrap = e.target.closest && e.target.closest(".wf-wrap");
+    if (wrap && !wrap.contains(e.relatedTarget)) wrap.classList.remove("wf-drop");
+  });
+  document.addEventListener("drop", (e) => {
+    const wrap = e.target.closest && e.target.closest(".wf-wrap");
+    if (!wrap) return;
+    e.preventDefault(); wrap.classList.remove("wf-drop");
+    const f = e.dataTransfer.files && e.dataTransfer.files[0];
+    if (f) wfOpenFile(wrap.dataset.case, f);
+  });
+  // A theme switch changes both ramps and the building colour.
+  new MutationObserver(() => {
+    document.querySelectorAll(".wf-wrap").forEach((w) => { const s = wfState(w.dataset.case); if (s.field) wfDraw(w); });
+  }).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+  window.addEventListener("resize", () => {
+    document.querySelectorAll(".wf-wrap").forEach((w) => { const s = wfState(w.dataset.case); if (s.field) wfPaint(w, s); });
+  });
 
   // -- Clipboard Toast Helper -------------------------------------------------
   let toastTimer = null;
@@ -4943,6 +5398,16 @@
         </div>
 
         ${stagesHtml(c)}
+
+        ${c.state === "done" ? `
+        <div class="detail-card" style="margin-bottom:14px;">
+          <h3>Wind at pedestrian height
+            <span class="label-hint wf-src" style="font-weight:400; text-transform:none; letter-spacing:0;"></span>
+          </h3>
+          <div class="wf-wrap" tabindex="0" data-case="${esc(c.case_id)}"
+               aria-label="Pedestrian wind field for ${esc(c.case_id)}; left and right arrow keys change the wind direction"></div>
+        </div>` : ""}
+
         ${c.last_error ? `
           <div style="background:var(--bad-light); border:1px solid var(--bad); border-radius:8px; padding:12px 14px; margin-bottom:14px; color:var(--bad);">
             <div style="font-weight:600; margin-bottom:4px; font-size:12px; display:flex; align-items:center; gap:6px;">
@@ -7685,6 +8150,15 @@
   const autoOn = autoSaved === null ? true : autoSaved === "1";
   $("autoRefresh").checked = autoOn;
   setAutoRefresh(autoOn);
+
+  // The wind-field source: kept in this browser, and changing it re-reads every
+  // open case's field from the new place.
+  $("fieldBase").value = fieldBase();
+  $("fieldBase").addEventListener("change", () => {
+    try { localStorage.setItem(LS_FIELD_BASE, $("fieldBase").value.trim()); } catch (e) {}
+    for (const s of wfStates.values()) if (!s.field || s.src.startsWith("http")) { s.status = "idle"; s.field = null; }
+    wfAttach();
+  });
 
   $("authForm").addEventListener("submit", submitAuth);
   $("logoutBtn").addEventListener("click", doLogout);
