@@ -8,6 +8,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.17.7] - 2026-09-23
+
+### Fixed
+- **A case stopped at a worker's own time limit while still moving keeps its attempt.**
+  Nodes built before Eddy3D 75549071 stop a case at 24 h; a v4 case is ~800 core-hours, so
+  slower workers were charged an attempt per stop and could quarantine a site that was
+  solving fine. A timeout of a case whose progress line changed in the last 12 h
+  (`CASEBROKER_TIMEOUT_REFUND_WINDOW`) is now refunded, at most 3 times per case; a
+  wedged case is charged as before. The Python worker's own default timeout is 7 days.
+
 ## [0.17.6] - 2026-09-23
 
 ### Changed

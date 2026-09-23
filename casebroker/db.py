@@ -2080,6 +2080,41 @@ def complete(conn, lease_id: str, result_uri: str,
     return True
 
 
+# A worker stopping a case at its OWN clock is not the case failing. Nodes stop a
+# case at --case-timeout (24 h on every build before Eddy3D 75549071) and report
+# it as a retryable failure; the attempt it cost was charged at lease time and
+# nothing gave it back. A cyl-1008/of12-v4 case is ~800 core-hours, 23.7 h on 36
+# ranks, so a slower worker -- 4 CPUs, a 4.7M-cell mesh, a shared box -- was
+# stopped mid-solve, charged, and three of those quarantined a site that was
+# solving fine. Such a stop is refunded when the case's progress line had
+# changed within TIMEOUT_REFUND_WINDOW_SECONDS: it was moving, and the time limit
+# was the worker's, not the case's. A wedged case's line stops changing, so it is
+# still charged and still quarantines. At most TIMEOUT_REFUNDS_MAX per case, so a
+# case too big for every worker's limit still ends in quarantine instead of
+# looping. The signatures are what each worker sends: the node's NodeWorker
+# ("case exceeded 86400s and was stopped") and worker.py ("runner exceeded
+# 86400s and was killed").
+_TIMEOUT_SIGNATURE = re.compile(r"\b(?:case|runner) exceeded \d+s and was (?:stopped|killed)")
+TIMEOUT_REFUND_WINDOW_SECONDS = int(os.environ.get("CASEBROKER_TIMEOUT_REFUND_WINDOW", str(12 * 3600)))
+TIMEOUT_REFUNDS_MAX = 3
+_TIMEOUT_REFUND_TAG = "stopped at the worker's own time limit while still progressing"
+
+
+def _refund_timeout(conn, case_id: str, error: str, now: int) -> bool:
+    """Is this failure a worker's own time limit on a case that was still moving?"""
+    if not _TIMEOUT_SIGNATURE.search(error or ""):
+        return False
+    last = conn.execute(
+        "SELECT ts FROM events WHERE case_id = ? AND event = 'progress' "
+        "ORDER BY id DESC LIMIT 1", (case_id,)).fetchone()
+    if last is None or last["ts"] < now - TIMEOUT_REFUND_WINDOW_SECONDS:
+        return False
+    refunded = conn.execute(
+        "SELECT COUNT(*) n FROM events WHERE case_id = ? AND event = 'released' AND detail LIKE ?",
+        (case_id, _TIMEOUT_REFUND_TAG + "%")).fetchone()["n"]
+    return refunded < TIMEOUT_REFUNDS_MAX
+
+
 @_locked
 def fail(conn, lease_id: str, error: str, retryable: bool = True,
          now: int | None = None) -> bool:
@@ -2090,6 +2125,16 @@ def fail(conn, lease_id: str, error: str, retryable: bool = True,
         if row is None:
             conn.execute("ROLLBACK")
             return False
+        if retryable and _refund_timeout(conn, row["case_id"], error, now):
+            conn.execute(
+                "UPDATE cases SET state='pending', lease_id=NULL, lease_worker=NULL,"
+                " lease_expires=NULL, leased_at=NULL, last_error=?,"
+                " attempts=CASE WHEN attempts > 0 THEN attempts - 1 ELSE 0 END, updated_at=?"
+                " WHERE case_id=?", (error[:4000], now, row["case_id"]))
+            _event(conn, row["case_id"], row["lease_worker"], "released",
+                   (_TIMEOUT_REFUND_TAG + "; attempt refunded: " + error)[:500], now)
+            conn.execute("COMMIT")
+            return True
         exhausted = row["attempts"] >= row["max_attempts"]
         state = "pending" if (retryable and not exhausted) else "quarantined"
         conn.execute(
