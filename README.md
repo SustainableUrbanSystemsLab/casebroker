@@ -5,25 +5,9 @@
 [![version](https://img.shields.io/github/v/tag/SustainableUrbanSystemsLab/casebroker?label=version&style=flat-square)](https://github.com/SustainableUrbanSystemsLab/casebroker/releases)
 [![license](https://img.shields.io/github/license/SustainableUrbanSystemsLab/casebroker?style=flat-square)](LICENSE)
 
-The broker badge pings `/healthz`, which is unauthenticated precisely so
-infrastructure checks work without a token. It reports whether the service is up,
-not whether the campaign is progressing — the dashboard answers that.
-
-
 A central database of cases plus an HTTP work queue, so that many machines —
 PACE ICE, PACE Phoenix, the lab workstation, anyone else's box — can each ask
 *"what should I simulate next?"* and never collide.
-
-Why a broker rather than splitting the case list across machines up front:
-
-- **Phoenix's free `embers` QOS preempts jobs after one hour.** A statically
-  assigned case dies with its job. A leased case comes back to the pool by
-  itself, so preemption costs one partial solve instead of a lost slot.
-- **Machines are wildly unequal.** ICE, Phoenix and the workstation differ by
-  more than an order of magnitude in throughput, and Phoenix's availability
-  changes hour to hour. Pull beats push whenever the workers' speeds are unknown.
-- **The dataset keeps growing** (5k → 10k → 30k). Adding cases is one idempotent
-  POST; nothing is renumbered and no worker needs restarting.
 
 ## Where things are
 
@@ -102,6 +86,10 @@ quarantined 173 perfectly good sites in under a minute.
 
 <details>
 <summary><b>Why a broker</b> rather than splitting the case list up front</summary>
+
+The broker badge pings `/healthz` (unauthenticated, so uptime checks need no
+token). It says whether the service is up, not whether the campaign is moving —
+the dashboard answers that.
 
 - **Phoenix's free `embers` QOS preempts jobs after one hour.** A statically
   assigned case dies with its job. A leased case comes back to the pool by
