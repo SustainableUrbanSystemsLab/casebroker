@@ -4015,7 +4015,8 @@
         const oldest = fl.length ? Math.max(...fl.map((f) => f.age_seconds || 0)) : null;
         const stale = oldest === null || oldest > 900;
         const sub = !fl.length ? "no cluster is reporting"
-                  : stale ? `last reported ${Math.round(oldest / 60)} min ago`
+                  // relTime, not minutes: a 15-day-old report read "21354 min ago".
+                  : stale ? `last reported ${relTime(Math.floor(Date.now() / 1000) - oldest)}`
                   : `${r} worker(s) running on ${esc(fl.map((f) => f.cluster).join(", "))}`;
         return `<div class="stat-card queued${stale ? " nonzero-stale" : ""}">
           <div class="label">Queued (SLURM)</div>
