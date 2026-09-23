@@ -35,6 +35,14 @@ const cases = [
   ['alive', null, ''],
   ['mesh x/y', null, 'mesh'],
   ['solve 3/0 dirs', null, 'solve'],
+  // Eddy3D ae59812f (#938): the solve line names the direction, phase and rung after the
+  // iteration -- read off the log being written, because the old line sat on
+  // 'solve 0/32 dirs · starting' for five hours while the solver was at 1,594. The
+  // iteration stays the FIRST pair after the separator; the stage text never has one.
+  ['solve 0/32 dirs · case_000 iter 1594/2000 · main, rung 2 (default)', (0 + 1594/2000) / 32, 'solve'],
+  ['solve 5/32 dirs · case_056 iter 212/2000 · warm-up to 400, rung 1 (fast)', (5 + 212/2000) / 32, 'solve'],
+  ['solve 5/32 dirs · case_056 starting · main, rung 3 (robust)', 5 / 32, 'solve'],
+  ['solve · progress unreadable (IOException)', null, 'solve'],
 ];
 // Shapes the current writer no longer emits, but that workers in the field still
 // send: a node built before the grammar existed, and runner/run_case.sh, which is
