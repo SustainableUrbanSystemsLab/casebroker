@@ -143,6 +143,37 @@ def test_an_unchanged_heartbeat_detail_does_not_write_another_event(tmp_path):
     assert rows() == 3
 
 
+def test_a_new_lease_records_its_first_line_even_when_it_repeats_the_last_attempts(tmp_path):
+    """Dedupe is per lease. A node before Eddy3D ae59812f says "solve 0/32 dirs
+    · starting" for hours; when attempt 2 opened with the line attempt 1 had
+    ended on, nothing was recorded for the whole attempt -- no current stage on
+    the dashboard, and the case's progress time was the previous attempt's."""
+    import sys as _sys, pathlib as _pathlib
+    _sys.path.insert(0, str(_pathlib.Path(__file__).resolve().parents[1]))
+    from casebroker import db
+
+    conn = db.connect(str(tmp_path / "hb3.sqlite"))
+    db.add_cases(conn, [{"case_id": "c1", "spec": {}, "recipe": "r",
+                         "city_cluster": "atl", "split": "train"}])
+    line = "solve 0/32 dirs · starting"
+    t0 = 1_000_000
+    first = db.lease(conn, "w1", 1, now=t0)[0]
+    assert db.heartbeat(conn, first.lease_id, 900, line, now=t0 + 60)
+    assert db.fail(conn, first.lease_id, "solve exited 1: FPE", retryable=True, now=t0 + 6 * 3600)
+
+    t1 = t0 + 7 * 3600
+    second = db.lease(conn, "w1", 1, now=t1)[0]
+    for k in range(5):
+        assert db.heartbeat(conn, second.lease_id, 900, line, now=t1 + 60 + 300 * k)
+
+    n = conn.execute("SELECT count(*) AS n FROM events WHERE event = 'progress'").fetchone()["n"]
+    assert n == 2, "once for each lease, and still once within one"
+    case = db.get_case(conn, "c1")
+    assert case["last_progress_at"] == t1 + 60, "this attempt's line, not the last attempt's"
+    assert case["current"] == "solve"
+    assert case["stages"][-1]["attempt"] == 2 and case["stages"][-1]["ended_at"] is None
+
+
 def test_deduping_never_shortens_the_lease_itself(tmp_path):
     """The heartbeat's real job is extending the lease. Skipping a duplicate
     EVENT must not skip the extension, or a quiet solve would lose its case."""

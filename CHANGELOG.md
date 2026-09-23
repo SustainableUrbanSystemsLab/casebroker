@@ -8,12 +8,51 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
-## [0.17.9] - 2026-09-23
+## [0.17.13] - 2026-09-23
 
 ### Fixed
 - **Dashboard: a case ID could push its table row wider than one line.** The Case ID
   column now clips with an ellipsis and shows the full id on hover; the copy button
   still copies the untruncated id.
+
+## [0.17.12] - 2026-09-23
+
+### Fixed
+- The *Queued (SLURM)* tile gave a stale report's age in raw minutes ("last reported 21354
+  min ago" for a 15-day-old ICE report); it now uses the dashboard's own `relTime` ("14d ago").
+
+## [0.17.11] - 2026-09-23
+
+### Fixed
+- **A re-leased case's first progress line is recorded even when it repeats the last
+  attempt's.** Heartbeats deduped against the case's last line from any attempt, so a node
+  that opens every attempt with "solve 0/32 dirs · starting" and says nothing else for hours
+  (every build before Eddy3D ae59812f) recorded nothing for the whole attempt: no current
+  stage on the dashboard, and progress times read off the previous attempt
+  (v2-003a9149ad953d85: leased 1.4 h, "line changed 7.1 h ago"). Dedupe is now per lease.
+  A step-timeout refund is therefore judged on the attempt's own first line; the 3-refund
+  cap is what ends an old build looping on one case.
+
+## [0.17.10] - 2026-09-23
+
+### Changed
+- `docs/fleet.md`: change a Syncthing folder through the GUI or REST API, never by rewriting
+  `config.xml`. On 2026-09-23 an XML rewrite turned the empty `encryptionPassword`s into
+  whitespace, which Syncthing reads as a password, and the master and this box's worker
+  connected and dropped every 20 s with nothing transferred. The per-machine checklist
+  gains a fourth item: proof the master stays connected and reaches 100 % completion.
+
+## [0.17.9] - 2026-09-23
+
+### Fixed
+- **A node's step budget running out is refunded like its case timeout.** Every node build
+  before Eddy3D 00dfaba2 kills any single step at 240 minutes and gives the case up, and
+  case_000 of a cyl-1008/of12-v4 case (it carries the warm-up) does not fit in 240 minutes
+  even on 36 ranks: on 2026-09-23 three of nine leased cases had been charged for exactly
+  that, one on its last attempt, with 5 of 8 live nodes still on such a build. `failed at
+  step <name>: ... timed out after N minutes` is now refunded on the same terms as a case
+  timeout (progress moving, at most 3 per case), with the evidence window reaching back by
+  the step's N minutes -- builds before Eddy3D ae59812f say nothing new during a step.
 
 ## [0.17.8] - 2026-09-23
 
