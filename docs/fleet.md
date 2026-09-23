@@ -246,7 +246,21 @@ existed only on the disk of the machine that solved it.
 `install_master_autostart.ps1` now also restarts both instances every 15
 minutes if they are not running.
 
-**Checklist for a machine that solves cases** -- all three, or its results
+**Change a folder through the GUI or the REST API, never by rewriting
+`config.xml`.** The same night, the 900 s rescan was set by loading the
+worker's `config.xml` into an XML library and saving it back. The
+pretty-printer turned every empty `<encryptionPassword></encryptionPassword>`
+into one holding a newline and indentation. Syncthing takes that whitespace
+as a real password, so it treated the master as an *untrusted, encrypted*
+peer. Both instances then connected every 20 s and dropped within a second:
+`remote expects to exchange plain data, but local data is encrypted` on one
+side, `remote device missing in cluster config` on the other. The master
+received nothing, and no error was visible outside the Syncthing log. Use
+`PATCH /rest/config/folders/wind-done` (or the GUI), which validates the change
+and writes the file itself. To repair a damaged file, `GET /rest/config`, blank
+every whitespace-only string, `PUT` it back and restart.
+
+**Checklist for a machine that solves cases** -- all four, or its results
 stay on its own disk:
 
 1. Syncthing running there, with the `wind-done` folder Send Only at its
@@ -254,7 +268,12 @@ stay on its own disk:
 2. the master's device ID added there AND that machine's device ID added on
    the master, with the folder shared to it (step 2-3 below);
 3. the scan variables in the environment of whatever runs cases (or, for a
-   node on an older build, a 900 s rescan).
+   node on an older build, a 900 s rescan);
+4. proof, not configuration: `GET /rest/system/connections` there shows the
+   master `"connected": true` for longer than a minute, and after an archive
+   lands, `GET /rest/db/completion?folder=wind-done&device=<master id>` reaches
+   100. A pairing that connects and drops every 20 s shows as *configured* in
+   every listing, which is how it went unnoticed.
 
 **Measured, 2026-09-12** (two Syncthing v2.1.5 instances, one standing in for a
 remote worker, `C:\rc2\syncthing\`): a 23 MB case archive replicated

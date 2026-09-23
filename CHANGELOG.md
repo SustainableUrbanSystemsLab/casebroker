@@ -8,6 +8,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.17.10] - 2026-09-23
+
+### Changed
+- `docs/fleet.md`: change a Syncthing folder through the GUI or REST API, never by rewriting
+  `config.xml`. On 2026-09-23 an XML rewrite turned the empty `encryptionPassword`s into
+  whitespace, which Syncthing reads as a password, and the master and this box's worker
+  connected and dropped every 20 s with nothing transferred. The per-machine checklist
+  gains a fourth item: proof the master stays connected and reaches 100 % completion.
+
 ## [0.17.9] - 2026-09-23
 
 ### Fixed
