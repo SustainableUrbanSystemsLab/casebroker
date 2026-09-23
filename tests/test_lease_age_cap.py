@@ -156,3 +156,48 @@ def test_a_lease_predating_the_column_starts_its_clock(tmp_path):
     # From then on the cap applies normally.
     assert db.heartbeat(conn, "L", now=now + 8 * DAY) is False
     assert db.get_case(conn, "OLD")["state"] == "pending"
+
+
+# ── a slow solve is not a wedged one ─────────────────────────────────────────
+# The cap was sized for ~66 core-hour cases. A cyl-1008/of12-v4 case is ~800
+# (23.7 h x 36 ranks, 16.7 h x 48, measured on production), so a 4-CPU node needs
+# ~8 days: at day 7 the age cap took the case back, charged an attempt, and
+# discarded a week of healthy work. An old lease is now reclaimed only when its
+# progress line has also stopped changing -- which is what "wedged" looks like.
+
+def test_a_slow_solve_still_moving_past_seven_days_keeps_its_case(conn):
+    got = db.lease(conn, "w1", count=1, now=1_000_000)[0]
+    for day in range(1, 10):   # a new direction every day, heartbeating as it goes
+        t = 1_000_000 + day * DAY
+        assert db.heartbeat(conn, got.lease_id, detail=f"solve {day}/32 dirs", now=t) is True, day
+    row = db.get_case(conn, "A")
+    assert row["state"] == "leased" and row["lease_worker"] == "w1"
+
+
+def test_an_old_lease_whose_progress_stopped_changing_is_released(conn):
+    got = db.lease(conn, "w1", count=1, now=1_000_000)[0]
+    assert db.heartbeat(conn, got.lease_id, detail="solve 3/32 dirs", now=1_000_000 + 5 * DAY)
+    # Same line for two days past the cap: wedged.
+    assert db.heartbeat(conn, got.lease_id, detail="solve 3/32 dirs",
+                        now=1_000_000 + 7 * DAY + 1) is False
+    assert db.get_case(conn, "A")["state"] == "pending"
+
+
+def test_the_stall_window_is_measured_from_the_last_change(conn):
+    got = db.lease(conn, "w1", count=1, now=1_000_000)[0]
+    last_change = 1_000_000 + 7 * DAY - 3600
+    assert db.heartbeat(conn, got.lease_id, detail="solve 9/32 dirs", now=last_change)
+    # Old, but changed an hour ago: kept -- until the line has been still for a day.
+    assert db.heartbeat(conn, got.lease_id, detail="solve 9/32 dirs", now=last_change + 3600)
+    assert db.heartbeat(conn, got.lease_id, detail="solve 9/32 dirs",
+                        now=last_change + db.LEASE_STALL_SECONDS + 1) is False
+
+
+def test_another_worker_cannot_take_an_old_lease_that_is_still_moving(conn):
+    got = db.lease(conn, "w1", count=1, lease_seconds=90 * DAY, now=1_000_000)[0]
+    later = 1_000_000 + 8 * DAY
+    assert db.heartbeat(conn, got.lease_id, detail="solve 20/32 dirs", now=later - 3600)
+    assert db.lease(conn, "w2", count=1, now=later) == [], "a moving solve was taken away"
+    # A day with no new line, and it is reclaimable as before.
+    taken = db.lease(conn, "w2", count=1, now=later - 3600 + db.LEASE_STALL_SECONDS + 1)
+    assert [g.case_id for g in taken] == ["A"]
