@@ -952,6 +952,22 @@ _LOCK = threading.RLock()
 # three wall-hours on 24 cores) so this only ever fires on something genuinely
 # stuck.
 MAX_LEASE_AGE_SECONDS = int(os.environ.get("CASEBROKER_MAX_LEASE_AGE", str(7 * 86400)))
+# ...and that age alone no longer takes a case back from a worker that is still
+# MOVING. The cap was sized when a case was ~66 core-hours (~3 wall-hours on 24
+# cores). A cyl-1008/of12-v4 case is ~800 (measured: 23.7 h x 36 ranks, 16.7 h x
+# 48), so a 4-CPU node needs ~8 days, and at day 7 the cap released it -- a week
+# of healthy solving discarded, an attempt charged, and three of those
+# quarantine a site nothing is wrong with. What the cap is FOR is a solve that
+# is alive but wedged; a wedged solve's progress line stops changing, a slow one
+# moves on to its next direction. So an old lease is reclaimed only once its
+# progress line has also not changed for this long. A lease that never reported
+# progress at all (an older worker) is judged on age alone, as before.
+LEASE_STALL_SECONDS = int(os.environ.get("CASEBROKER_LEASE_STALL", str(86400)))
+
+# The newest 'progress' event of a case -- heartbeat records one only when the
+# line CHANGED, so this is when the worker last said something new.
+_LAST_PROGRESS_SQL = ("COALESCE((SELECT MAX(e.ts) FROM events e WHERE e.case_id = cases.case_id"
+                      " AND e.event = 'progress'), 0)")
 
 
 def _is_connection_error(exc: BaseException) -> bool:
@@ -1363,10 +1379,12 @@ def lease(conn, worker_id: str, count: int = 1,
             own_only = ("(state = 'leased' AND lease_worker = ?)" if draining else
                         "(state = 'pending'"
                         "      OR (state = 'leased' AND (lease_expires < ?"
-                        "          OR (leased_at IS NOT NULL AND leased_at < ?)"
+                        "          OR (leased_at IS NOT NULL AND leased_at < ?"
+                        "              AND " + _LAST_PROGRESS_SQL + " < ?)"
                         "          OR lease_worker = ?)))")
             own_params = ([worker_id] if draining
-                          else [now, now - MAX_LEASE_AGE_SECONDS, worker_id])
+                          else [now, now - MAX_LEASE_AGE_SECONDS, now - LEASE_STALL_SECONDS,
+                                worker_id])
             rows = conn.execute(
                 "SELECT case_id, spec, attempts, max_attempts, state, lease_worker"
                 " FROM cases WHERE case_id IN (" + placeholders + ")"
@@ -1378,7 +1396,7 @@ def lease(conn, worker_id: str, count: int = 1,
 
         remaining = 0 if draining else count - len(out)
         if remaining > 0:
-            params: list[Any] = [now, now - MAX_LEASE_AGE_SECONDS]
+            params: list[Any] = [now, now - MAX_LEASE_AGE_SECONDS, now - LEASE_STALL_SECONDS]
             split_sql = ""
             if splits:
                 placeholders = ",".join("?" for _ in splits)
@@ -1395,7 +1413,8 @@ def lease(conn, worker_id: str, count: int = 1,
                 # keeps the first from ever firing.
                 " WHERE (state = 'pending'"
                 "        OR (state = 'leased' AND (lease_expires < ?"
-                "            OR (leased_at IS NOT NULL AND leased_at < ?))))"
+                "            OR (leased_at IS NOT NULL AND leased_at < ?"
+                "                AND " + _LAST_PROGRESS_SQL + " < ?))))"
                 + split_sql + recipe_sql +
                 # Every worker targets the same "lowest" rows. That is contention by
                 # design, not by accident: under SKIP LOCKED a locked row is simply
@@ -1925,6 +1944,17 @@ def _by_lease(conn, lease_id: str):
     return conn.execute(sql, (lease_id,)).fetchone()
 
 
+def _still_progressing(conn, case_id: str, detail: str | None, now: int) -> bool:
+    """Has this case's worker said something NEW within LEASE_STALL_SECONDS --
+    counting the heartbeat being handled, whose line is not recorded yet?"""
+    previous = conn.execute(
+        "SELECT detail, ts FROM events WHERE case_id = ? AND event = 'progress' "
+        "ORDER BY id DESC LIMIT 1", (case_id,)).fetchone()
+    if detail and (previous is None or previous["detail"] != detail):
+        return True
+    return previous is not None and previous["ts"] >= now - LEASE_STALL_SECONDS
+
+
 @_locked
 def heartbeat(conn, lease_id: str, lease_seconds: int = 3600,
               detail: str | None = None, now: int | None = None) -> bool:
@@ -1949,14 +1979,14 @@ def heartbeat(conn, lease_id: str, lease_seconds: int = 3600,
         # the cap -- the ones most likely to be stuck -- escape it permanently.
         conn.execute("UPDATE cases SET leased_at=? WHERE lease_id=?", (now, lease_id))
         leased_at = now
-    if leased_at < now - MAX_LEASE_AGE_SECONDS:
+    if leased_at < now - MAX_LEASE_AGE_SECONDS and not _still_progressing(conn, row["case_id"], detail, now):
         conn.execute(
             "UPDATE cases SET state='pending', lease_id=NULL, lease_worker=NULL,"
             " lease_expires=NULL, leased_at=NULL, updated_at=? WHERE case_id=?",
             (now, row["case_id"]))
         _event(conn, row["case_id"], row["lease_worker"], "released",
-               "abandoned: held %d days without completing"
-               % (MAX_LEASE_AGE_SECONDS // 86400), now)
+               "abandoned: held %d days without completing, progress unchanged for %d h"
+               % (MAX_LEASE_AGE_SECONDS // 86400, LEASE_STALL_SECONDS // 3600), now)
         return False
     conn.execute("UPDATE cases SET lease_expires=?, updated_at=? WHERE lease_id=?",
                  (now + lease_seconds, now, lease_id))
@@ -2050,6 +2080,41 @@ def complete(conn, lease_id: str, result_uri: str,
     return True
 
 
+# A worker stopping a case at its OWN clock is not the case failing. Nodes stop a
+# case at --case-timeout (24 h on every build before Eddy3D 75549071) and report
+# it as a retryable failure; the attempt it cost was charged at lease time and
+# nothing gave it back. A cyl-1008/of12-v4 case is ~800 core-hours, 23.7 h on 36
+# ranks, so a slower worker -- 4 CPUs, a 4.7M-cell mesh, a shared box -- was
+# stopped mid-solve, charged, and three of those quarantined a site that was
+# solving fine. Such a stop is refunded when the case's progress line had
+# changed within TIMEOUT_REFUND_WINDOW_SECONDS: it was moving, and the time limit
+# was the worker's, not the case's. A wedged case's line stops changing, so it is
+# still charged and still quarantines. At most TIMEOUT_REFUNDS_MAX per case, so a
+# case too big for every worker's limit still ends in quarantine instead of
+# looping. The signatures are what each worker sends: the node's NodeWorker
+# ("case exceeded 86400s and was stopped") and worker.py ("runner exceeded
+# 86400s and was killed").
+_TIMEOUT_SIGNATURE = re.compile(r"\b(?:case|runner) exceeded \d+s and was (?:stopped|killed)")
+TIMEOUT_REFUND_WINDOW_SECONDS = int(os.environ.get("CASEBROKER_TIMEOUT_REFUND_WINDOW", str(12 * 3600)))
+TIMEOUT_REFUNDS_MAX = 3
+_TIMEOUT_REFUND_TAG = "stopped at the worker's own time limit while still progressing"
+
+
+def _refund_timeout(conn, case_id: str, error: str, now: int) -> bool:
+    """Is this failure a worker's own time limit on a case that was still moving?"""
+    if not _TIMEOUT_SIGNATURE.search(error or ""):
+        return False
+    last = conn.execute(
+        "SELECT ts FROM events WHERE case_id = ? AND event = 'progress' "
+        "ORDER BY id DESC LIMIT 1", (case_id,)).fetchone()
+    if last is None or last["ts"] < now - TIMEOUT_REFUND_WINDOW_SECONDS:
+        return False
+    refunded = conn.execute(
+        "SELECT COUNT(*) n FROM events WHERE case_id = ? AND event = 'released' AND detail LIKE ?",
+        (case_id, _TIMEOUT_REFUND_TAG + "%")).fetchone()["n"]
+    return refunded < TIMEOUT_REFUNDS_MAX
+
+
 @_locked
 def fail(conn, lease_id: str, error: str, retryable: bool = True,
          now: int | None = None) -> bool:
@@ -2060,6 +2125,16 @@ def fail(conn, lease_id: str, error: str, retryable: bool = True,
         if row is None:
             conn.execute("ROLLBACK")
             return False
+        if retryable and _refund_timeout(conn, row["case_id"], error, now):
+            conn.execute(
+                "UPDATE cases SET state='pending', lease_id=NULL, lease_worker=NULL,"
+                " lease_expires=NULL, leased_at=NULL, last_error=?,"
+                " attempts=CASE WHEN attempts > 0 THEN attempts - 1 ELSE 0 END, updated_at=?"
+                " WHERE case_id=?", (error[:4000], now, row["case_id"]))
+            _event(conn, row["case_id"], row["lease_worker"], "released",
+                   (_TIMEOUT_REFUND_TAG + "; attempt refunded: " + error)[:500], now)
+            conn.execute("COMMIT")
+            return True
         exhausted = row["attempts"] >= row["max_attempts"]
         state = "pending" if (retryable and not exhausted) else "quarantined"
         conn.execute(

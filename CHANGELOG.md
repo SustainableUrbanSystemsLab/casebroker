@@ -8,12 +8,39 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
-## [0.17.5] - 2026-09-23
+## [0.17.8] - 2026-09-23
 
 ### Fixed
 - **Dashboard: a case ID could push its table row wider than one line.** The Case ID
   column now clips with an ellipsis and shows the full id on hover; the copy button
   still copies the untruncated id.
+
+## [0.17.7] - 2026-09-23
+
+### Fixed
+- **A case stopped at a worker's own time limit while still moving keeps its attempt.**
+  Nodes built before Eddy3D 75549071 stop a case at 24 h; a v4 case is ~800 core-hours, so
+  slower workers were charged an attempt per stop and could quarantine a site that was
+  solving fine. A timeout of a case whose progress line changed in the last 12 h
+  (`CASEBROKER_TIMEOUT_REFUND_WINDOW`) is now refunded, at most 3 times per case; a
+  wedged case is charged as before. The Python worker's own default timeout is 7 days.
+
+## [0.17.6] - 2026-09-23
+
+### Changed
+- docs/fleet.md: the Syncthing hand-off, as found broken on 2026-09-23 -- the master
+  down since 14 Sep, no remote machine paired, and Eddy3D nodes in quiet mode
+  announcing nothing -- and a three-point checklist for every solving machine. The
+  node makes the scan call from Eddy3D 7c4229cb (#937) on.
+
+## [0.17.5] - 2026-09-23
+
+### Fixed
+- **A slow solve is no longer taken back at 7 days.** The lease-age cap was sized for
+  ~66 core-hour cases; a cyl-1008/of12-v4 case is ~800, so a 4-CPU node needs ~8 days
+  and lost its case -- and an attempt -- at day 7. An old lease is now reclaimed only
+  once its progress line has also stopped changing for `CASEBROKER_LEASE_STALL`
+  (default a day); a lease that never reported progress is judged on age alone.
 
 ## [0.17.4] - 2026-09-23
 
