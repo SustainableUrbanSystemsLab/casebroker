@@ -8,12 +8,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
-## [0.17.8] - 2026-09-23
+## [0.17.9] - 2026-09-23
 
 ### Fixed
 - **Dashboard: a case ID could push its table row wider than one line.** The Case ID
   column now clips with an ellipsis and shows the full id on hover; the copy button
   still copies the untruncated id.
+
+## [0.17.8] - 2026-09-23
+
+### Changed
+- The node's richer solve line (Eddy3D ae59812f: `solve 0/32 dirs · case_000 iter 1594/2000
+  · main, rung 2 (default)`) is pinned in both of this repo's readers -- the dashboard's
+  progress grammar and the broker's ETA parser, which had no test of its own.
 
 ## [0.17.7] - 2026-09-23
 

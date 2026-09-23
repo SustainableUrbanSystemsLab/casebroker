@@ -115,3 +115,22 @@ def test_the_fleet_strip_shows_the_whole_fleet():
     assert result.returncode == 0, result.stdout + result.stderr
     assert "all cases agree" in result.stdout
 
+
+
+def test_the_broker_eta_reads_the_node_s_newer_solve_lines():
+    """The broker's ETA extrapolates _solve_fraction over a case's progress
+    events, and it had no test of its own. Eddy3D ae59812f (#938) puts the
+    direction, phase and rung AFTER the iteration -- the old line sat on 'solve
+    0/32 dirs · starting' for five hours while the solver was at 1,594 -- so the
+    iteration must still be the first pair after the separator, and the stage
+    text must never be read as one."""
+    from casebroker.db import _solve_fraction
+
+    assert _solve_fraction("solve 0/32 dirs \u00b7 case_000 iter 1594/2000 \u00b7 main, rung 2 (default)") \
+        == pytest.approx((0 + 1594 / 2000) / 32)
+    assert _solve_fraction("solve 5/32 dirs \u00b7 case_056 iter 212/2000 \u00b7 warm-up to 400, rung 1 (fast)") \
+        == pytest.approx((5 + 212 / 2000) / 32)
+    assert _solve_fraction("solve 5/32 dirs \u00b7 case_056 starting \u00b7 main, rung 3 (robust)") \
+        == pytest.approx(5 / 32)
+    assert _solve_fraction("solve 3/8 dirs \u00b7 iter 412/2000") == pytest.approx((3 + 412 / 2000) / 8)
+    assert _solve_fraction("mesh 3/6 \u00b7 03_snappyHexMesh") is None
