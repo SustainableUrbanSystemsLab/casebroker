@@ -56,9 +56,9 @@ Rules that are easy to get wrong:
   Check either with
   `uv run casebroker token check --broker <url> --token <t> --expect write`,
   which also names which kind you handed it.
-- Browser pairing (`eddy3d-cli setup-simulation-node`) does **not** produce a
+- Browser pairing (`eddy3d-cli setup-sim-node`) does **not** produce a
   token for this script. It stores its credential for the native
-  `eddy3d-cli run-simulation-node` runner instead, and never writes
+  `eddy3d-cli run-sim-node` runner instead, and never writes
   `machine.env`; see [Enrol each machine](operations.md#first-run-from-nothing-to-a-working-broker).
 
 ## 3. Run

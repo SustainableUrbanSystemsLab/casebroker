@@ -1,6 +1,6 @@
 """A machine asks to join; an admin approves in the browser.
 
-This is what `E3D --setup-simulation-node` talks to. The enrolment it replaces
+This is what `E3D --setup-sim-node` talks to. The enrolment it replaces
 had an admin type their password on every simulation node -- shared cluster
 logins and lab boxes, which is the wrong place for it. Here nothing secret is
 typed on the node at all, and the design goes one step further than the textbook

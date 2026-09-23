@@ -59,8 +59,8 @@ all three; only how it is launched and how MPI is spelled differ:
      `uv run casebroker worker setup --broker <url>`, run on the box itself,
      does the same without the dashboard and writes the token into
      `machine.env` for you (it asks for your admin login once and keeps no
-     session). Browser pairing (`eddy3d-cli setup-simulation-node`) is a
-     different path: its credential serves the native `run-simulation-node`
+     session). Browser pairing (`eddy3d-cli setup-sim-node`) is a
+     different path: its credential serves the native `run-sim-node`
      runner and never lands in `machine.env` -- see
      [operations.md](operations.md#first-run-from-nothing-to-a-working-broker).
    - `WIND_NP` -- ranks per case, **measured per machine** (below). Until

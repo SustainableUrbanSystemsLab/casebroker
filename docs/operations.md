@@ -80,7 +80,7 @@ Or **pair it from the browser**, with nothing secret typed on the node at all â€
 **Eddy3D `dev` only, in no release yet**, so build `eddy3d-cli` from `dev`:
 
 ```bash
-eddy3d-cli setup-simulation-node https://broker.example.org
+eddy3d-cli setup-sim-node https://broker.example.org
 ```
 
 It shows a short code and opens the broker. Signed in as an admin, check the
@@ -92,7 +92,7 @@ login node; `--name <cluster>` for a cluster, as with *Issue token*.
 The credential lands in `%LOCALAPPDATA%\Eddy3D\node\credential.json` on
 Windows and `~/.local/share/Eddy3D/node/` on Linux (`EDDY3D_NODE_DIR` overrides
 it, for clusters whose systems share one home) â€” **not** in `machine.env`. So
-pairing serves `eddy3d-cli run-simulation-node`, the native runner, and not
+pairing serves `eddy3d-cli run-sim-node`, the native runner, and not
 `start_worker.sh`/`.ps1`, which still read `CASEBROKER_TOKEN` from
 `machine.env`. Use one of the two routes above for those.
 
