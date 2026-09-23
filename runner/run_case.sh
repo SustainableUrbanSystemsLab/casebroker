@@ -308,6 +308,37 @@ fi
 [ -f "$TERRAIN" ]   || retry_case "terrain STL not found: $TERRAIN"
 cp "$BUILDINGS" "$SCRATCH/buildings.stl"
 cp "$TERRAIN"   "$SCRATCH/terrain.stl"
+
+# The domain has to stay on the terrain. build-case turns a BOX by 180 - theta to
+# face each wind direction, and the terrain is an open sheet that seals the floor
+# only where it spans the box: turned 45 deg, the +/-1300 m box reaches ~1838 m,
+# past the +/-1304 m sheet, and snappyHexMesh keeps the space under the ground
+# as fluid. On v2-1410516cea4c5d7b (fixed-box-1008/of12-v3) that was 64% of the
+# core in all four diagonal directions -- solved, archived, and silent.
+#
+# So this runner no longer builds a campaign RECIPE at all. The only domain it
+# derives is that box, which is the defect; and it has never built
+# cyl-1008/of12-v4, the recipe the campaign queues -- it ignored the recipe and
+# would have solved a v4 case on the v3 box and archived it labelled v4. A case
+# with no domain of its own is handed back (69: released, attempt refunded, this
+# worker stops) for an Eddy3D node, which builds every recipe it declares. A spec
+# that brings its own box (smoke tests, grid studies) still runs -- unless that
+# box, turned, leaves the sheet, which is the spec's defect and fatal anywhere.
+HAS_DOMAIN=$(printf '%s' "$SPEC" | "$PY" -c 'import json,sys; print(1 if json.load(sys.stdin).get("domain") else 0)')
+if [ "$HAS_DOMAIN" != 1 ]; then
+    RECIPE=$(printf '%s' "$SPEC" | "$PY" -c 'import json,sys; print(json.load(sys.stdin).get("recipe",""))')
+    node_unfit "run_case.sh cannot build recipe '${RECIPE:-none}': it derives only a box that, turned to the diagonal directions, leaves the terrain sheet -- run campaign cases on an Eddy3D node"
+fi
+DOMAIN_JSON=$(printf '%s' "$SPEC" | "$PY" -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["domain"]))')
+DIRS=$(printf '%s' "$SPEC" | "$PY" -c 'import json,sys; print(",".join(str(d) for d in (json.load(sys.stdin).get("wind") or {}).get("directions", [0,45,90,135,180,225,270,315])))')
+LEAK=$("$PY" "$SCRIPT_DIR/lib/domain_check.py" "$SCRATCH/terrain.stl" --domain "$DOMAIN_JSON" --directions "$DIRS")
+case $? in
+    0) ;;
+    # 3 is a measured leak: the spec's geometry, wrong on every machine.
+    3) fatal_case "the spec's domain leaves the terrain sheet when turned to face the wind, so the mesh would have fluid under the ground: $(printf '%s' "$LEAK" | tr '\n' ';')" ;;
+    # Anything else is the check failing, which says nothing about the site.
+    *) retry_case "domain check could not run" ;;
+esac
 # Tree crowns, when the geometry builder found any (canopy_zones.py; absent on a
 # treeless or CHM-less site, and the case is then simply built without a canopy).
 CANOPY=$(printf '%s' "$SPEC" | "$PY" -c 'import json,sys; print(json.load(sys.stdin).get("canopy_stl",""))')
