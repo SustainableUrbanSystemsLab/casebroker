@@ -1977,7 +1977,7 @@
       <div id="machines" style="display:none;">
         <div class="panel-title-group" style="margin-bottom:4px;"><h2>Machines</h2></div>
         <div class="panel-subtitle">One credential per worker. Revoking one leaves the rest running.</div>
-        <!-- Machines that ran `E3D --setup-simulation-node` and are waiting. The
+        <!-- Machines that ran `E3D --setup-sim-node` and are waiting. The
              node prints the same code it sends here; matching the two is what
              stops someone else's request being approved by mistake. -->
         <div id="pairingList" style="margin-top:12px;"></div>
@@ -6350,7 +6350,7 @@
       if (!rows.length) {
         $("machineList").innerHTML =
           '<div class="panel-subtitle">No machines yet. On a simulation node run ' +
-          '<code>E3D --setup-simulation-node</code> and give it this URL; its request ' +
+          '<code>E3D --setup-sim-node</code> and give it this URL; its request ' +
           'appears above for you to approve. Issuing a token by hand still works.</div>';
         return;
       }

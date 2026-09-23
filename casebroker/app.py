@@ -1148,7 +1148,7 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
 
     # -- pairing: a machine asks, an admin approves in the browser ---------------
     #
-    # What `E3D --setup-simulation-node` talks to. The old enrolment needed an
+    # What `E3D --setup-sim-node` talks to. The old enrolment needed an
     # admin to type their PASSWORD on every simulation node, which is the wrong
     # place for it: those are shared cluster logins and lab boxes. Here the node
     # shows a short code and opens the dashboard; whoever is already signed in as
