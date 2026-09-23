@@ -96,6 +96,26 @@ def test_expired_lease_returns_to_the_pool(tmp_path):
     assert second[0].attempt == 2, "a reclaim consumes an attempt"
 
 
+def test_status_counts_down_to_and_releases_an_unreclaimed_expired_lease(tmp_path):
+    """An idle fleet must not leave a dead lease looking in-flight forever."""
+    conn = make_db(tmp_path, 1)
+    t0 = 1_000_000
+    db.lease(conn, "dead-worker", lease_seconds=60, now=t0)
+
+    before = db.status(conn, now=t0 + 60 + 3_600)
+    assert before["expired_leases"] == 1
+    assert before["expired_lease_release_in_seconds"] == 48 * 3600 - 3_600
+
+    after = db.status(conn, now=t0 + 60 + 48 * 3600)
+    assert after["expired_leases"] == 0
+    assert after["by_state"] == {"pending": 1}
+    event = conn.execute("SELECT worker_id, event, detail FROM events ORDER BY id DESC").fetchone()
+    assert dict(event) == {
+        "worker_id": "dead-worker", "event": "stale-released",
+        "detail": "expired lease was not reclaimed within 48 hours",
+    }
+
+
 def test_a_quarantine_found_at_lease_names_the_worker_whose_attempt_ran_out(tmp_path):
     """Its last attempt expired on one node; another node asked next and found it
     spent. The event belongs to the first -- the one whose attempt ran out -- and

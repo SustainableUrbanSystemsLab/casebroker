@@ -46,9 +46,11 @@ refused. Key it by `case_id` instead and a zombie silently overwrites a good
 result, which looks exactly like success.
 
 - Default TTL **900 s**, renewed by heartbeat every **300 s** — a 3× margin.
-- **Lease expiry is the only liveness mechanism.** No reaper process exists. A
-  dead worker's case is reclaimed by the same SQL statement that hands out fresh
-  work, the next time anyone asks for some.
+- **Lease expiry is the liveness mechanism.** A dead worker's case is reclaimed
+  by the same SQL statement that hands out fresh work, the next time anyone asks
+  for some. If no worker asks within 48 hours, a status check records a
+  `stale-released` event and returns the expired row to `pending`; it does not
+  refund the attempt.
 - **A 409 means stop.** On heartbeat or complete, it means the case belongs to
   someone else now. Continuing burns core-hours on a result that will be refused.
 

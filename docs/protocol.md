@@ -80,7 +80,7 @@ done; they differ in how much is wasted.
 | | What happens | Cost |
 | --- | --- | --- |
 | **Preempted** (SIGTERM first) | The client catches the signal and calls `POST /v1/release`. State → `pending`, **and the attempt is refunded** — preemption is not the case's fault. | One partial solve. Back in the pool in under a second. |
-| **Killed** (no warning) | Heartbeats simply stop and the lease TTL lapses. Nothing detects this, and nothing needs to. | Up to one lease period of idle before someone re-leases it. |
+| **Killed** (no warning) | Heartbeats simply stop and the lease TTL lapses. The next lease reclaims it; if nobody asks for 48 hours, the dashboard's status check records `stale-released` and returns it to pending. | Up to one lease period of idle before someone re-leases it. |
 | **Zombie returns** | The old worker finishes and calls `complete` with a superseded `lease_id`. Rejected with **409**; the real owner's result stands. | Nothing — but see below. |
 
 The third is the dangerous one, and why every mutating call re-checks the lease
@@ -206,10 +206,11 @@ so the median of an odd set is 50 and the largest of 100 is 99.5.
 
 ## Three design decisions worth knowing
 
-**Lease expiry is the only liveness mechanism.** A worker that dies without
-warning is not detected, reported, or reaped by anything; its lease simply lapses
-and the next `POST /v1/lease` reclaims the case in the same statement that hands
-out fresh work. There is no reaper process to run or monitor.
+**Lease expiry is the liveness mechanism.** A worker that dies without warning
+has its case reclaimed by the next `POST /v1/lease` in the same statement that
+hands out fresh work. If nobody asks within 48 hours, a status check records a
+`stale-released` event and returns the expired row to pending without refunding
+its consumed attempt.
 
 **A superseded lease cannot write.** If a worker is preempted, its case is
 re-leased, and the original worker then wakes up and finishes, its `complete`

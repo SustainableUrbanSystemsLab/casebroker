@@ -1271,6 +1271,35 @@ def _attach_labels(conn, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 # -- lease / report -----------------------------------------------------------
 
+# An expired lease is immediately eligible for a new worker to reclaim.  This
+# longer interval is only for clearing rows that no worker has asked for, so the
+# dashboard does not describe dead work as in-flight forever.
+STALE_LEASE_RELEASE_SECONDS = 48 * 3600
+
+
+@_locked
+def _release_stale_leases(conn, now: int) -> int:
+    """Return abandoned expired leases to pending without refunding attempts.
+
+    `release()` is deliberately not used: graceful preemption refunds an
+    attempt, whereas this worker already consumed one before disappearing.
+    Heartbeats reject expired lease ids, so no live worker can be displaced.
+    """
+    rows = conn.execute(
+        "SELECT case_id, lease_worker FROM cases"
+        " WHERE state='leased' AND lease_expires <= ?",
+        (now - STALE_LEASE_RELEASE_SECONDS,),
+    ).fetchall()
+    for row in rows:
+        conn.execute(
+            "UPDATE cases SET state='pending', lease_id=NULL, lease_worker=NULL,"
+            " lease_expires=NULL, leased_at=NULL, updated_at=? WHERE case_id=?",
+            (now, row["case_id"]),
+        )
+        _event(conn, row["case_id"], row["lease_worker"], "stale-released",
+               "expired lease was not reclaimed within 48 hours", now)
+    return len(rows)
+
 @_locked
 def lease(conn, worker_id: str, count: int = 1,
           lease_seconds: int = 3600, splits: list[str] | None = None,
@@ -1293,9 +1322,9 @@ def lease(conn, worker_id: str, count: int = 1,
     A DRAINING worker gets no new case, and may still resume its own: that is how
     a node restarts onto a new build in the middle of a case without losing it.
 
-    Expired leases are reclaimed by the same statement that hands out fresh work,
-    so a crashed or preempted worker's cases re-enter the pool with no reaper
-    process and no operator action.
+    Expired leases are reclaimed by the same statement that hands out fresh work.
+    A status check also clears one that nobody reclaimed for 48 hours, recording
+    that cleanup without refunding its consumed attempt.
 
     ``resume_case_ids`` are cases this worker holds a local checkpoint for. They
     are claimed FIRST, ahead of the priority order, and one still leased to this
@@ -2714,6 +2743,11 @@ def _solve_eta(conn, case_id: str, since: int | None) -> dict[str, Any] | None:
 @_locked
 def status(conn, now: int | None = None) -> dict[str, Any]:
     now = now or _now()
+    # A normal expired lease is claimable immediately by lease().  After 48
+    # hours with no claimant, clear it here as well: status is polled by the
+    # dashboard, giving abandoned rows a bounded lifetime even while the fleet
+    # is idle.  The event records that this was timeout cleanup, not preemption.
+    _release_stale_leases(conn, now)
     by_state = {r["state"]: r["n"] for r in
                 conn.execute("SELECT state, COUNT(*) n FROM cases GROUP BY state")}
     by_split = {r["split"] + "/" + r["state"]: r["n"] for r in
@@ -2721,6 +2755,11 @@ def status(conn, now: int | None = None) -> dict[str, Any]:
     stale = conn.execute(
         "SELECT COUNT(*) n FROM cases WHERE state='leased' AND lease_expires < ?",
         (now,)).fetchone()["n"]
+    next_stale_release = conn.execute(
+        "SELECT MIN(lease_expires + ?) AS at FROM cases"
+        " WHERE state='leased' AND lease_expires < ?",
+        (STALE_LEASE_RELEASE_SECONDS, now),
+    ).fetchone()["at"]
     done_24h = conn.execute(
         "SELECT COUNT(*) n FROM events WHERE event='done' AND ts > ?",
         (now - 86400,)).fetchone()["n"]
@@ -2752,6 +2791,10 @@ def status(conn, now: int | None = None) -> dict[str, Any]:
         "by_state": by_state,
         "by_split": by_split,
         "expired_leases": stale,
+        # The earliest deadline is enough for the banner: it tells operators
+        # when the first still-visible expired row will be cleared.
+        "expired_lease_release_in_seconds": (
+            max(0, int(next_stale_release) - now) if next_stale_release is not None else None),
         "done_last_24h": done_24h,
         "remaining": remaining,
         # None, not a fabricated infinity: with no completions the rate is unknown.
