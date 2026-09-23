@@ -243,6 +243,70 @@ archive, result line -- in minutes. The archive's `manifest.json` and the
 reported metrics carry `converged: false`. It is a dev switch: never set it
 on a production worker, where an unconverged case is quarantined on purpose.
 
+## Reproducing one case on another machine
+
+When a case is quarantined and the machine that failed it is out of reach, run
+the SAME case through the whole node pipeline somewhere else. Reasoning from
+the broker's excerpt is how `v2-00697fb4542aa4c6` (2026-09-22) collected two
+wrong diagnoses -- a skewed mesh, then potentialFoam -- before a reproduction
+showed 68 cells sealed off from the flow, which checkMesh only stars as
+`*Number of regions: 69` without failing the mesh.
+
+The case id is derived from the coordinates and recipe, so a throwaway broker
+holding just that case hands the node exactly what production did:
+
+```bash
+# 1. a broker on SQLite, reachable only from this machine
+CASEBROKER_DB=E:/wind/repro/broker.sqlite CASEBROKER_WRITE_TOKENS=repro-local-token \
+  uv run uvicorn casebroker.app:app --host 127.0.0.1 --port 8799 &
+
+# 2. the production case's own spec, with max_attempts 1 (one failure is the answer)
+curl -s -H "Authorization: Bearer $PROD_TOKEN" \
+  https://casebroker.onrender.com/v1/cases/<case_id> > case.json
+python - <<'EOF'
+import json
+d = json.load(open("case.json"))
+s = json.loads(d["spec"]) if isinstance(d["spec"], str) else d["spec"]
+json.dump([dict(lat=s["lat"], lon=s["lon"], recipe=d["recipe"], city_cluster=d["city_cluster"],
+                lcz=d["lcz"], spec=s, max_attempts=1)], open("case_in.json", "w"))
+EOF
+curl -s -X POST -H "Authorization: Bearer repro-local-token" -H 'Content-Type: application/json' \
+  --data @case_in.json http://127.0.0.1:8799/v1/cases
+
+# 3. a node credential for that broker in its OWN node dir -- never the
+#    machine's real one, which a live node on the same box is using
+mkdir -p E:/wind/repro/node
+echo '{"broker": "http://127.0.0.1:8799", "name": "repro", "token": "repro-local-token", "paired_at": "2026-01-01T00:00:00+00:00"}' \
+  > E:/wind/repro/node/credential.json
+
+# 4. one case, then exit. Separate work and done folders: done must NOT be the
+#    Syncthing folder, or a reproduction's archive reaches the master.
+EDDY3D_NODE_DIR='E:\wind\repro\node' E3D.exe run-simulation-node \
+  --work 'E:\wind\repro\work' --done 'E:\wind\repro\done' \
+  --cpus 12 --engine bluecfd --max-cases 1 --drain --max-idle-polls 1
+```
+
+Match the failing worker's engine, and leave alone the cores a live node on
+the same machine is using. The node reports progress to the broker, not to its
+own log: read `last_progress` from the local broker, and the step logs under
+`<work>/cases/<id>/<id>/{mesh,case_NNN}/`. To try a new build on the same
+case, `POST /v1/cases/reopen?case_id=<id>&dry_run=false` on the local broker
+and start the node from a FRESH `--work`: a scratch holding a finished mesh is
+resumed, not re-meshed, so a meshing fix would never run.
+
+Before reasoning from a difference between the reproduction and production,
+check that both meshes finished: `Finished meshing` in `03_snappyHexMesh.txt`,
+and similar checkMesh numbers. The first reproduction of that case checked at
+skewness 1.28 against production's 13.98 and looked like a machine-dependent
+mesher; snappy had died mid-snap and the step had passed the castellated mesh
+on as finished (Eddy3D builds from `8b416080` on fail that step instead).
+
+Once it reproduces, read the evidence before the error text: the region count
+in `06_checkMesh.txt`, and the frames under `sigFpeHandler` in the backtrace.
+`DICPreconditioner::calcReciprocalD` there is a zero pivot -- a cell or region
+with no connection to anything that fixes the pressure -- not a divergence,
+and no numerics setting reaches it.
+
 ## Where each thing can go wrong
 
 - A worker that exits in seconds "successfully": the podman path passes the

@@ -85,6 +85,24 @@ numbers for post-inference geometry.
 **Delete `__pycache__` after editing modules in `real_cities/`.** A stale
 bytecode cache made a fixed function look broken for several rounds.
 
+**Reproduce a quarantined case before diagnosing it.** `v2-00697fb4542aa4c6`
+failed every rung with a floating-point trap and a mesh warning of skewness
+13.98. Two fixes went where the error text pointed -- the skewed mesh, then
+potentialFoam -- and neither was the cause. Re-run through the whole node
+pipeline on another machine (a throwaway broker holding just that case:
+[`docs/fleet.md`](docs/fleet.md), "Reproducing one case"), it failed identically,
+and the mesh held 68 single cells sealed inside building voids -- which
+checkMesh does not fail a mesh for; it only stars `*Number of regions: 69`.
+A cell with no neighbour has a zero diagonal, and
+`DICPreconditioner::calcReciprocalD` under the FPE handler is that signature.
+Eddy3D now removes such cells after snappy and counts regions in the mesh
+verdict. **"Mesh OK" is not the verdict, and a crash in iteration 1 with healthy
+numbers above it is not a divergence.** And compare a reproduction's mesh with
+production's before reasoning from the difference: the first reproduction's
+"much better" mesh (skewness 1.28 against 13.98) was an unsnapped one left by a
+snappyHexMesh that died mid-snap, which the step then reported as finished.
+Eddy3D now fails that step unless snappy says `Finished meshing`.
+
 **Hooking any machine into the campaign as a worker -- Windows or Linux,
 Docker, Podman or native blueCFD -- is [`docs/fleet.md`](docs/fleet.md):**
 `machine.env` + `start_worker.sh`/`.ps1`, progress in the heartbeat,

@@ -8,6 +8,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-09-22
+
+### Added
+- `casebroker repro <case_id> --e3d <E3D>` re-runs a production case on this
+  machine through the whole node pipeline, against a throwaway SQLite broker that
+  holds only that case, then triages it. `casebroker triage <study_dir>` names the
+  known failure signatures in a study's logs: disconnected mesh regions, a DIC
+  zero pivot, a snappyHexMesh that never finished, a diverged start, a death in
+  iteration 1. Both come from v2-00697fb4542aa4c6, where two fixes followed the
+  error text before a reproduction found 68 sealed cells.
+- README: updating the nodes, and a step-by-step test of the auto-updater.
+
 ## [0.15.4] - 2026-09-22
 
 ## [0.15.3] - 2026-09-22

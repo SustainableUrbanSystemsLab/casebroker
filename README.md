@@ -118,11 +118,80 @@ uv run casebroker token check --broker URL --expect write     # what can this on
 uv run casebroker health  --broker URL                        # version and auth posture
 uv run casebroker doctor  --broker URL                        # find the broken piece
 uv run casebroker fleet   --broker URL --cluster ICE          # report squeue (login node)
+uv run casebroker release register release.json --broker URL  # add a node build to the catalog
+uv run casebroker release promote <worker> --broker URL       # canary is good: whole fleet onto it
+uv run casebroker release rollback --broker URL [--block]     # back to the previous build (kill switch)
+uv run casebroker repro <case_id> --e3d E3D.exe --engine bluecfd  # re-run a failed case HERE
+uv run casebroker triage <study_dir>                          # name the known failure in its logs
 ```
 
 Full endpoint table in [docs/protocol.md](docs/protocol.md).
 
 </details>
+
+## Updating the nodes — and testing the auto-updater
+
+A node updates itself only when it runs under the **supervisor**, `E3D node`.
+Started as `E3D run-sim-node` (or `run-simulation-node`) it never switches, and
+says so at start-up: *"started directly, so it will not switch builds by
+itself"*. The broker never ships a file. It names the build and its SHA-256,
+and the node installs that file from its **release share**, by default
+`%LOCALAPPDATA%\Eddy3D\node\releases` (point Syncthing at it on a real fleet).
+The whole model, with the guards and badges, is in
+[docs/releases.md](docs/releases.md).
+
+To test it on ONE machine before trusting it with the fleet:
+
+1. **Run the machine under the supervisor.** Stop its node, then start it
+   with the same options, `node` in place of `run-sim-node`:
+
+   ```powershell
+   E3D.exe node --done E:\wind\done --cpus 36
+   ```
+
+   A case in flight is resumed, not restarted.
+2. **Put a different build on its share.** Every push to Eddy3D `dev` builds
+   one (`gh release download e3d-node-latest -R Eddy3D-Dev/Eddy3D -p E3D.exe`).
+   Publish it into the share; this prints the `release.json` the broker needs:
+
+   ```powershell
+   E3D.exe node-release publish --file .\E3D.exe --to $env:LOCALAPPDATA\Eddy3D\node\releases > release.json
+   ```
+
+3. **Register it**:
+   `uv run casebroker release register release.json --broker URL --username <admin>`
+   (or paste `release.json` into *Machines → Node builds → Register a published build*).
+4. **Make this one machine the canary.** *Machines → Node builds*: set its
+   *Canary target* to the new build, and pick when it switches: `direction` is
+   the right test, since it proves a case survives the switch without waiting
+   for the case to finish.
+5. **Check that it switched.** Within a heartbeat, the node reports that it
+   installed and verified the file and will switch. At the boundary it exits
+   and the supervisor starts the new build, which asks for its own case back
+   and continues at the next direction **without spending an attempt**. Look
+   for all four:
+   - `%LOCALAPPDATA%\Eddy3D\node\versions\<build>\` exists and `current.txt`
+     names it;
+   - the dashboard's Build column shows the new build and no `→` badge;
+   - the case still says `attempt 1`;
+   - the finished direction folders carry an `.e3d-build` stamp from the build
+     that solved each one.
+6. **Test the way back.** Set the canary target back to the old build. The
+   node switches again at the boundary, and nothing is downloaded, because
+   the old build is still installed side by side.
+7. **Test the refusal.** Register a build whose file you did NOT put on the
+   share, and make it the canary target. The node must stay where it is, and
+   the Build column's `→` tooltip must say *the broker wants X and has no file
+   on the share yet*. A node that runs something it could not verify is the
+   failure this step is looking for.
+8. **Then the fleet.** `uv run casebroker release promote <canary worker>` moves
+   everyone to the canary's build in one call. `uv run casebroker release
+   rollback` goes back to the previous fleet target, and `--block` also refuses
+   the build being left, at every node's next lease.
+
+Machines that are not under the supervisor yet stay on their build and are
+counted *cannot update by themselves*. So step 1 has to be done once on every
+machine, by hand.
 
 ## Status
 
