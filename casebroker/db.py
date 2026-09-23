@@ -2368,9 +2368,21 @@ def cancel_case(conn, case_id: str, by: str | None, reason: str | None = None,
 
 # -- observability ------------------------------------------------------------
 
+# The site-geometry cache is bounded. It is a CACHE -- three remote reads that
+# cost seconds and give the same answer again -- but it grew without limit:
+# measured on production, 15 sites took 1.36 MB (~90 KB each, the GeoJSON with
+# terrain and canopy grids), so browsing the whole 5,000-case campaign would put
+# ~450 MB in a database whose quota is 500 MB, with the cases themselves in it.
+# Past this many sites the ones fetched longest ago are dropped; opening one of
+# them again costs one re-fetch. 0 turns the bound off.
+FOOTPRINT_CACHE_MAX = int(os.environ.get("CASEBROKER_FOOTPRINT_CACHE_MAX", "500"))
+
+
 @_locked
-def put_footprints(conn, case_id: str, geojson: str, n: int, now: int | None = None) -> None:
+def put_footprints(conn, case_id: str, geojson: str, n: int, now: int | None = None,
+                   cap: int | None = None) -> None:
     now = now or _now()
+    cap = FOOTPRINT_CACHE_MAX if cap is None else cap
     conn.execute("BEGIN IMMEDIATE")
     try:
         if not conn.execute(
@@ -2378,6 +2390,14 @@ def put_footprints(conn, case_id: str, geojson: str, n: int, now: int | None = N
                 (geojson, n, now, case_id)).rowcount:
             conn.execute("INSERT INTO footprints (case_id, geojson, n, fetched_at)"
                          " VALUES (?, ?, ?, ?)", (case_id, geojson, n, now))
+        if cap > 0:
+            over = conn.execute("SELECT COUNT(*) n FROM footprints").fetchone()["n"] - cap
+            if over > 0:
+                # Oldest fetch first; the row just written is the newest, so it
+                # is never the one dropped.
+                conn.execute("DELETE FROM footprints WHERE case_id IN (SELECT case_id FROM"
+                             " footprints WHERE case_id <> ? ORDER BY fetched_at ASC, case_id"
+                             " LIMIT ?)", (case_id, over))
         conn.execute("COMMIT")
     except Exception:
         conn.execute("ROLLBACK")
