@@ -39,7 +39,7 @@ SAFE_CALLS = ("esc(", "formatBytes(", "relTime(", "badge(", "progressCell(",
 
 
 def _interpolations():
-    for i, line in enumerate(DASH.read_text().splitlines(), 1):
+    for i, line in enumerate(DASH.read_text(encoding="utf-8").splitlines(), 1):
         for m in re.finditer(r"\$\{([^{}]*)\}", line):
             yield i, m.group(1).strip()
 
@@ -79,7 +79,7 @@ def _function_body(src, name):
 
 
 def test_telemetry_renderers_escape_every_node_string():
-    src = DASH.read_text()
+    src = DASH.read_text(encoding="utf-8")
     bad = []
     for name in TELEMETRY_RENDERERS:
         for line in _function_body(src, name).splitlines():
@@ -101,12 +101,12 @@ def test_telemetry_renderers_escape_every_node_string():
 
 
 def test_hist_svg_escapes_its_tip():
-    body = _function_body(DASH.read_text(), "histSvg")
+    body = _function_body(DASH.read_text(encoding="utf-8"), "histSvg")
     assert "esc(o.tip)" in body, "histSvg() must escape the tip it puts in <title>"
 
 def test_badge_escapes_both_positions():
     """`state` lands in a class attribute as well as in text."""
-    src = DASH.read_text()
+    src = DASH.read_text(encoding="utf-8")
     m = re.search(r"function badge\(state\)\s*\{(.+?)\n  \}", src, re.S)
     assert m, "badge() not found"
     body = m.group(1)
@@ -119,7 +119,7 @@ def test_progress_cell_escapes_the_line_it_draws():
     allowlist is asserting. The line it draws is `last_progress` -- a string a
     worker credential writes -- and it reaches the DOM twice: as the bar's title
     and as the text under it."""
-    src = DASH.read_text()
+    src = DASH.read_text(encoding="utf-8")
     m = re.search(r"function progressCell\(line\)\s*\{(.+?)\n  \}", src, re.S)
     assert m, "progressCell() not found"
     body = m.group(1)
@@ -136,7 +136,7 @@ def test_progress_cell_escapes_the_line_it_draws():
 
 
 def test_esc_covers_every_character_that_matters():
-    src = DASH.read_text()
+    src = DASH.read_text(encoding="utf-8")
     m = re.search(r"function esc\(s\)\s*\{(.+?)\n  \}", src, re.S)
     assert m, "esc() not found"
     body = m.group(1)

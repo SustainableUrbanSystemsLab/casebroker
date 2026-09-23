@@ -599,7 +599,7 @@ def test_the_dashboard_s_fallback_labels_match_the_registry():
     dashboard.html). A metric added here and not there prints under its bare
     key; a unit changed here and not there prints wrong."""
     src = (pathlib.Path(__file__).resolve().parents[1]
-           / "casebroker" / "static" / "dashboard.html").read_text()
+           / "casebroker" / "static" / "dashboard.html").read_text(encoding="utf-8")
     block = src.split("const METRIC_INFO = {", 1)[1].split("\n  };", 1)[0]
     rows = re.findall(r'^\s*(\w+): \["([^"]*)", (null|"[^"]*"), "(\w+)"\],$', block, re.M)
     got = [(k, label, None if unit == "null" else unit.strip('"'), group)

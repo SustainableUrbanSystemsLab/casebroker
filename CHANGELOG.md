@@ -8,6 +8,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.17.2] - 2026-09-22
+
+### Fixed
+- `scripts/bump_version.py` crashed on a Windows console printing "→"/"✓" (cp1252),
+  after it had already moved `pyproject.toml` and `uv.lock` but not `CHANGELOG.md`.
+  It writes UTF-8 now.
+- `casebroker worker setup` read `machine.env` in the locale encoding.
+- The fast suite is green on Windows (697 passed): tests that read the dashboard
+  without an encoding, fed bash to `cmd.exe` as a runner, or serialised 5000 levels
+  of JSON past Windows' lower C recursion limit.
+
 ## [0.17.1] - 2026-09-22
 
 ### Changed

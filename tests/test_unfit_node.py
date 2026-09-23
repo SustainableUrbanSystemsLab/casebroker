@@ -16,6 +16,7 @@ case, or a genuinely broken site would cycle the fleet for ever.
 
 from __future__ import annotations
 
+import os
 import pathlib
 import sys
 
@@ -74,11 +75,26 @@ def test_the_runner_reserves_a_distinct_exit_code_for_an_unfit_node():
 
 # -- the worker's half ---------------------------------------------------------
 
+def _runner_script(tmp_path, name, code, stderr=None):
+    """A runner that exits `code`, in the form the worker runs on THIS system. POSIX
+    runs it with bash; Windows executes it directly -- a `.cmd` launcher in production
+    (runner/run_case.cmd) -- and a `.sh` there fails with WinError 193 before it can
+    exit with anything, which is how these tests were red on every Windows box."""
+    if os.name == "nt":
+        script = tmp_path / f"{name}.cmd"
+        say = f"echo {stderr} 1>&2\r\n" if stderr else ""
+        script.write_text(f"@echo off\r\n{say}exit /b {code}\r\n")
+    else:
+        script = tmp_path / f"{name}.sh"
+        say = f"echo '{stderr}' >&2\n" if stderr else ""
+        script.write_text(f"#!/bin/sh\n{say}exit {code}\n")
+        script.chmod(0o755)
+    return script
+
+
 def test_a_runner_that_exits_69_raises_NodeUnfit_not_an_ordinary_failure(tmp_path):
     """Through the real script_runner, not by inspecting an exception class."""
-    script = tmp_path / "unfit.sh"
-    script.write_text("#!/bin/sh\necho 'no OpenFOAM runtime found' >&2\nexit 69\n")
-    script.chmod(0o755)
+    script = _runner_script(tmp_path, "unfit", 69, stderr="no OpenFOAM runtime found")
 
     run = worker.script_runner(str(script))
     with pytest.raises(worker.NodeUnfitError):
@@ -90,10 +106,7 @@ def test_the_other_exit_codes_keep_their_meaning(tmp_path):
     is still an ordinary retryable failure -- or a genuinely broken site would
     cycle the fleet for ever instead of being parked on its third attempt."""
     def runner_for(code):
-        script = tmp_path / f"exit{code}.sh"
-        script.write_text(f"#!/bin/sh\nexit {code}\n")
-        script.chmod(0o755)
-        return worker.script_runner(str(script))
+        return worker.script_runner(str(_runner_script(tmp_path, f"exit{code}", code)))
 
     lease = {"case_id": "c1", "lease_id": "L-1", "spec": {}, "attempt": 1}
     with pytest.raises(worker.FatalCaseError):
