@@ -8,6 +8,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.17.13] - 2026-09-23
+
+### Fixed
+- **Dashboard: a case ID could push its table row wider than one line.** The Case ID
+  column now clips with an ellipsis and shows the full id on hover; the copy button
+  still copies the untruncated id.
 ## [0.17.14] - 2026-09-23
 
 ### Fixed
