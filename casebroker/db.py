@@ -1440,6 +1440,15 @@ def list_releases(conn) -> dict[str, Any]:
         "SELECT build, platform, file, sha256, notes, added_at, added_by FROM releases"
         " ORDER BY added_at DESC, build, platform").fetchall()]
     stats = {r["build"]: dict(r) for r in conn.execute("SELECT * FROM build_stats").fetchall()}
+    # The earliest date this build shows up anywhere: when a case first
+    # completed or failed on it (build_stats.first_seen), or -- for a build
+    # with no cases yet -- when it was first published. A build seen only by a
+    # worker that has neither finished a case nor been published has no date
+    # to show; nothing here invents one.
+    first_published: dict[str, int] = {}
+    for r in releases:
+        if r["build"] not in first_published or r["added_at"] < first_published[r["build"]]:
+            first_published[r["build"]] = r["added_at"]
     live = _now() - 300
     running: dict[str, dict[str, int]] = {}
     for r in conn.execute(
@@ -1456,7 +1465,11 @@ def list_releases(conn) -> dict[str, Any]:
         "blocked_builds": json.loads(settings.get("blocked_builds") or "[]"),
         "releases": releases,
         "builds": [{"build": b, **{k: stats.get(b, {}).get(k, 0) for k in ("done", "failed", "unconverged")},
-                    **running.get(b, {"workers": 0, "active": 0})} for b in builds],
+                    **running.get(b, {"workers": 0, "active": 0}),
+                    "first_seen": min(d for d in (stats.get(b, {}).get("first_seen"), first_published.get(b))
+                                      if d is not None)
+                                  if stats.get(b, {}).get("first_seen") or b in first_published else None}
+                   for b in builds],
     }
 
 
