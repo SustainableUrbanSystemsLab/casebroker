@@ -8,6 +8,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.17.5] - 2026-09-23
+
+### Fixed
+- **A slow solve is no longer taken back at 7 days.** The lease-age cap was sized for
+  ~66 core-hour cases; a cyl-1008/of12-v4 case is ~800, so a 4-CPU node needs ~8 days
+  and lost its case -- and an attempt -- at day 7. An old lease is now reclaimed only
+  once its progress line has also stopped changing for `CASEBROKER_LEASE_STALL`
+  (default a day); a lease that never reported progress is judged on age alone.
+
 ## [0.17.4] - 2026-09-23
 
 ### Fixed

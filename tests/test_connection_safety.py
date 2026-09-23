@@ -42,6 +42,7 @@ def _conn_functions():
 _ALLOWED_UNLOCKED = {
     "_event",              # called only from within locked writers
     "_by_lease",           # ditto: heartbeat/complete/fail/release
+    "_still_progressing",  # ditto: called only from heartbeat, under its lock
     "_count_for_build",    # ditto: complete/fail, inside their transaction
     "_setting",            # read inside the locked release functions
     "_set_setting",        # the core of set_setting; also called by set_target/roll_back
