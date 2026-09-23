@@ -2008,9 +2008,18 @@ def heartbeat(conn, lease_id: str, lease_seconds: int = 3600,
         #
         # idx_events_case is (case_id, id), so this seeks straight to the case
         # and reads one row backwards rather than scanning.
+        #
+        # Changed since THIS lease began, not since the case's last line. A
+        # re-leased case whose first line repeated the previous attempt's last
+        # one -- a node before Eddy3D ae59812f says "solve 0/32 dirs · starting"
+        # for hours -- recorded nothing for the whole attempt: the dashboard
+        # showed no current stage, and v2-003a9149ad953d85, leased 1.4 h on
+        # 2026-09-23, read "line changed 7.1 h ago" off its first attempt.
         previous = conn.execute(
-            "SELECT detail FROM events WHERE case_id = ? AND event = 'progress' "
-            "ORDER BY id DESC LIMIT 1", (row["case_id"],)).fetchone()
+            "SELECT detail FROM events WHERE case_id = ? AND event = 'progress'"
+            " AND id > COALESCE((SELECT MAX(id) FROM events WHERE case_id = ?"
+            "                    AND event IN ('leased', 'resumed')), 0)"
+            " ORDER BY id DESC LIMIT 1", (row["case_id"], row["case_id"])).fetchone()
         if previous is None or previous["detail"] != detail:
             _event(conn, row["case_id"], row["lease_worker"], "progress", detail, now)
     return True
