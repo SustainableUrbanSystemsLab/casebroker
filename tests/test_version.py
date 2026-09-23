@@ -220,7 +220,8 @@ def _bump(*args, repo=None):
     """
     script = (repo / "scripts" / "bump_version.py") if repo else BUMP
     return subprocess.run([sys.executable, str(script), *args],
-                          cwd=str(repo or ROOT), capture_output=True, text=True)
+                          cwd=str(repo or ROOT), capture_output=True, text=True,
+                          encoding="utf-8")  # what the script writes; the locale default is cp1252 on Windows
 
 
 def test_the_bump_arithmetic_is_semver():

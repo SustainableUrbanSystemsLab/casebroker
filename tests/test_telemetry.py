@@ -229,8 +229,19 @@ def test_data_nested_too_deep_is_422_and_the_case_stays_readable(env, levels):
     ~255 levels). 1000+ levels answered 500 on the POST itself."""
     c, _ = env
     lease = _lease(c)[0]
-    r = _post(c, lease, "site", _nested(levels))
-    assert r.status_code == 422 and "16 levels" in r.json()["detail"]
+    # The body is sent as TEXT, built without recursion: json.dumps of 5000 levels raises
+    # RecursionError in the CLIENT on Windows, whose C recursion limit is lower than
+    # Linux's -- so the test failed before the server it is about ever saw a byte.
+    body = ('{"lease_id": %s, "case_id": %s, "kind": "site", "data": {"a": %s1%s}}' % (
+        json.dumps(lease["lease_id"]), json.dumps(lease["case_id"]),
+        "[" * (levels - 1), "]" * (levels - 1)))
+    r = c.post("/v1/telemetry", content=body, headers={"Content-Type": "application/json"})
+    # Refused either way, never stored and never a 500. Where the platform's JSON parser can
+    # read the body (Linux, production) the depth check answers 422; past the parser's own
+    # recursion limit (5000 levels on Windows) FastAPI refuses it first, as a 400.
+    assert r.status_code in (400, 422), r.text
+    if r.status_code == 422:
+        assert "16 levels" in r.json()["detail"]
     got = c.get(f"/v1/cases/{lease['case_id']}")
     assert got.status_code == 200 and got.json()["telemetry"] == {}
 

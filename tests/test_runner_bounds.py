@@ -19,11 +19,37 @@ import pytest
 from casebroker import worker as w
 
 
+def _windows_bash():
+    """The bash runner/run_case.cmd would pick, in its order."""
+    for candidate in (os.environ.get("BASH"),
+                      os.path.join(os.environ.get("ProgramFiles", ""), "Git", "bin", "bash.exe"),
+                      os.path.join(os.environ.get("ProgramFiles(x86)", ""), "Git", "bin", "bash.exe"),
+                      os.path.join(os.environ.get("LocalAppData", ""), "Programs", "Git", "bin", "bash.exe"),
+                      r"C:\blueCFD-Core-2024\msys64\usr\bin\bash.exe"):
+        if candidate and os.path.isfile(candidate):
+            return candidate
+    return None
+
+
 def _script(tmp_path, body: str):
-    p = tmp_path / ("s.cmd" if os.name == "nt" else "s.sh")
-    p.write_text(textwrap.dedent(body))
-    p.chmod(0o755)
-    return str(p)
+    """A bash runner, launched the way the worker launches one on THIS system.
+
+    The worker execs the runner by path. On Windows that is a `.cmd` which hands the
+    `.sh` to a bash (runner/run_case.cmd); these bodies used to be written into the
+    `.cmd` itself, so cmd.exe ran bash syntax -- "'#!' is not recognized", and an
+    `echo '{...}'` whose quotes cmd keeps, which is not JSON.
+    """
+    sh = tmp_path / "s.sh"
+    sh.write_text(textwrap.dedent(body), newline="\n")
+    sh.chmod(0o755)
+    if os.name != "nt":
+        return str(sh)
+    bash = _windows_bash()
+    if bash is None:
+        pytest.skip("no bash on this Windows machine (set BASH, or install Git for Windows)")
+    launcher = tmp_path / "s.cmd"
+    launcher.write_text(f'@echo off\r\n"{bash}" "%~dp0s.sh"\r\nexit /b %ERRORLEVEL%\r\n', newline="")
+    return str(launcher)
 
 
 @pytest.fixture()

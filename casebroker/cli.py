@@ -631,7 +631,7 @@ def _write_env(path: pathlib.Path, values: dict) -> None:
     paths and whatever else that box needed, and enrolling is not a reason to
     lose them.
     """
-    lines = path.read_text().splitlines() if path.exists() else []
+    lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
     remaining = dict(values)
     out = []
     for line in lines:

@@ -234,6 +234,14 @@ def check_range(rng: str) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # "→" and "✓" crashed the script on a Windows console (cp1252: UnicodeEncodeError) --
+    # measured 2026-09-22, halfway through a bump: pyproject.toml and uv.lock had moved,
+    # CHANGELOG.md had not yet. Say it in UTF-8 wherever stdout is.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8")
+        except (AttributeError, ValueError):
+            pass
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     g = p.add_mutually_exclusive_group(required=True)
