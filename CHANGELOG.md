@@ -8,6 +8,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.17.9] - 2026-09-23
+
+### Fixed
+- **A node's step budget running out is refunded like its case timeout.** Every node build
+  before Eddy3D 00dfaba2 kills any single step at 240 minutes and gives the case up, and
+  case_000 of a cyl-1008/of12-v4 case (it carries the warm-up) does not fit in 240 minutes
+  even on 36 ranks: on 2026-09-23 three of nine leased cases had been charged for exactly
+  that, one on its last attempt, with 5 of 8 live nodes still on such a build. `failed at
+  step <name>: ... timed out after N minutes` is now refunded on the same terms as a case
+  timeout (progress moving, at most 3 per case), with the evidence window reaching back by
+  the step's N minutes -- builds before Eddy3D ae59812f say nothing new during a step.
+
 ## [0.17.8] - 2026-09-23
 
 ### Changed
