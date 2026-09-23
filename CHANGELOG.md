@@ -8,6 +8,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.16.1] - 2026-09-22
+
+### Fixed
+- **The runner no longer builds a domain with fluid under the terrain.** build-case
+  turns a box domain to face each wind direction, and turned 45 deg the +/-1300 m
+  box reaches ~1838 m, past the +/-1304 m terrain sheet, which then no longer seals
+  the floor: on v2-1410516cea4c5d7b (fixed-box-1008/of12-v3) 64% of the core had
+  mesh under the ground in all four diagonal directions. The runner also ignored
+  the recipe, so it would have solved a cyl-1008/of12-v4 case on that box and
+  archived it labelled v4. It now hands any case without its own domain back (exit
+  69: released, attempt refunded, the worker stops) for an Eddy3D node, and refuses
+  a spec whose box, turned, leaves the sheet (`runner/lib/domain_check.py`).
+
 ## [0.16.0] - 2026-09-22
 
 ### Added
