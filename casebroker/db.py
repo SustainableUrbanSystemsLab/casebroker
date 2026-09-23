@@ -2008,9 +2008,18 @@ def heartbeat(conn, lease_id: str, lease_seconds: int = 3600,
         #
         # idx_events_case is (case_id, id), so this seeks straight to the case
         # and reads one row backwards rather than scanning.
+        #
+        # Changed since THIS lease began, not since the case's last line. A
+        # re-leased case whose first line repeated the previous attempt's last
+        # one -- a node before Eddy3D ae59812f says "solve 0/32 dirs · starting"
+        # for hours -- recorded nothing for the whole attempt: the dashboard
+        # showed no current stage, and v2-003a9149ad953d85, leased 1.4 h on
+        # 2026-09-23, read "line changed 7.1 h ago" off its first attempt.
         previous = conn.execute(
-            "SELECT detail FROM events WHERE case_id = ? AND event = 'progress' "
-            "ORDER BY id DESC LIMIT 1", (row["case_id"],)).fetchone()
+            "SELECT detail FROM events WHERE case_id = ? AND event = 'progress'"
+            " AND id > COALESCE((SELECT MAX(id) FROM events WHERE case_id = ?"
+            "                    AND event IN ('leased', 'resumed')), 0)"
+            " ORDER BY id DESC LIMIT 1", (row["case_id"], row["case_id"])).fetchone()
         if previous is None or previous["detail"] != detail:
             _event(conn, row["case_id"], row["lease_worker"], "progress", detail, now)
     return True
@@ -2099,15 +2108,35 @@ TIMEOUT_REFUND_WINDOW_SECONDS = int(os.environ.get("CASEBROKER_TIMEOUT_REFUND_WI
 TIMEOUT_REFUNDS_MAX = 3
 _TIMEOUT_REFUND_TAG = "stopped at the worker's own time limit while still progressing"
 
+# The node's STEP budget is the same stop one level down, and it charged more
+# cases than the case timeout ever did. Every node build before Eddy3D 00dfaba2
+# kills any one step -- a direction's solve, one rung of its numerics ladder -- at
+# 240 minutes and gives the case up ("not retried; a harder numerics path cannot
+# fix it"), and case_000 of a cyl-1008/of12-v4 case, which carries the warm-up,
+# does not fit in 240 minutes even on 36 ranks. On 2026-09-23 three of the nine
+# leased cases had already been charged for exactly that, one on its last
+# attempt, while 5 of the 8 live nodes still ran such a build. Later builds give a
+# step 12 h and say why it ran out ("so it RAN the whole time ... The case itself
+# is fine"), but that is still the worker's budget, not the case. The engines word
+# it "Batch '<bat>'", "Container command" or "WSL command" "timed out after N
+# minutes", after the runner's "failed at step <name>:".
+_STEP_TIMEOUT = re.compile(r"\bfailed at step \S+: [^\n]*?\btimed out after (\d+) minutes")
+
 
 def _refund_timeout(conn, case_id: str, error: str, now: int) -> bool:
     """Is this failure a worker's own time limit on a case that was still moving?"""
-    if not _TIMEOUT_SIGNATURE.search(error or ""):
+    step = _STEP_TIMEOUT.search(error or "")
+    if step is None and not _TIMEOUT_SIGNATURE.search(error or ""):
         return False
+    # A build that reports progress once per direction (all of them before Eddy3D
+    # ae59812f) says nothing new for the whole of a long step, so a step that ran
+    # its full budget is judged on the line from before it began: the window
+    # reaches back by the budget the step was given.
+    window = TIMEOUT_REFUND_WINDOW_SECONDS + (int(step.group(1)) * 60 if step else 0)
     last = conn.execute(
         "SELECT ts FROM events WHERE case_id = ? AND event = 'progress' "
         "ORDER BY id DESC LIMIT 1", (case_id,)).fetchone()
-    if last is None or last["ts"] < now - TIMEOUT_REFUND_WINDOW_SECONDS:
+    if last is None or last["ts"] < now - window:
         return False
     refunded = conn.execute(
         "SELECT COUNT(*) n FROM events WHERE case_id = ? AND event = 'released' AND detail LIKE ?",
