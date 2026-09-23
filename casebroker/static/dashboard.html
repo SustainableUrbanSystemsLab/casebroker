@@ -5902,10 +5902,11 @@
     const platforms = (b) => (r.releases || []).filter((x) => x.build === b).map((x) => x.platform).sort().join(" ");
     $("relBuilds").innerHTML = (r.builds || []).length === 0
       ? `<div class="panel-subtitle">No build has been declared or registered yet.</div>`
-      : `<div class="table-wrap"><table><thead><tr><th>Build</th><th>Published for</th>`
+      : `<div class="table-wrap"><table><thead><tr><th>Build</th><th>First seen</th><th>Published for</th>`
         + `<th class="num">Workers</th><th class="num">Done</th><th class="num">Unconverged</th><th class="num">Failed</th><th></th></tr></thead><tbody>`
         + r.builds.map((b) => `<tr>
             <td><code class="inline">${esc(b.build)}</code>${b.build === r.target_build ? ` <span class="badge done">fleet target</span>` : ""}</td>
+            <td class="mono" title="${b.first_seen ? esc(new Date(b.first_seen * 1000).toLocaleString()) : "no completed case and never published: nothing has dated this build yet"}">${b.first_seen ? esc(relTime(b.first_seen)) : "—"}</td>
             <td>${platforms(b.build) ? esc(platforms(b.build)) : `<span style="color:var(--text-muted)">not published</span>`}</td>
             <td class="num">${b.active}/${b.workers}</td>
             <td class="num">${(b.done || 0).toLocaleString()}</td>

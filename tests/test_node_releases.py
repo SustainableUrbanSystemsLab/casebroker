@@ -249,3 +249,26 @@ def test_a_node_that_rolled_back_says_so_once_and_it_clears_when_it_gets_there(c
 
     db.node_release(conn, "foam-1", "win-x64", NEW)       # later: on the build, nothing failed
     assert conn.execute("SELECT update_failed FROM workers WHERE worker_id='foam-1'").fetchone()["update_failed"] is None
+
+
+# -- when a build was first seen -----------------------------------------------
+
+def test_a_build_is_dated_by_its_first_completed_case_or_its_publish(admin):
+    """The panel's date column: a build that ran before it was ever published
+    is dated by that first case, not left blank until someone registers it."""
+    admin.post("/v1/cases", headers=W, json=[{"lat": 33.8, "lon": -84.4, "recipe": "r", "city_cluster": "atl"}])
+    lease = admin.post("/v1/lease", headers=W, json={"worker_id": "n", "build": NEW}).json()[0]
+    row = {b["build"]: b for b in admin.get("/v1/releases").json()["builds"]}[NEW]
+    assert row["first_seen"] is None, "declared, but nothing dated yet: no case finished, nothing published"
+
+    admin.post("/v1/complete", headers=W, json={"lease_id": lease["lease_id"], "result_uri": "file:///a",
+                                                "metrics": {"eddy3d_build": NEW}})
+    row = {b["build"]: b for b in admin.get("/v1/releases").json()["builds"]}[NEW]
+    assert row["first_seen"] is not None, "the completed case dates it"
+    from_case = row["first_seen"]
+
+    # Publishing it later does not move the date backward: it is dated by
+    # whichever happened first anywhere -- the case, here.
+    admin.post("/v1/releases", json={"build": NEW, "platform": "win-x64", "file": "f.exe", "sha256": SHA})
+    row = {b["build"]: b for b in admin.get("/v1/releases").json()["builds"]}[NEW]
+    assert row["first_seen"] == from_case

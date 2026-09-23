@@ -8,6 +8,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.12.2] - 2026-09-22
+
+### Added
+- **The Node builds table says when each build was first seen.** Dated by whichever happened first: its earliest completed or failed case, or, for a build with no case yet, its earliest publish. Previously a build with neither had no date at all.
+
 ## [0.12.1] - 2026-09-22
 
 ### Changed
