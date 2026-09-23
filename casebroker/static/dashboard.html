@@ -5357,6 +5357,7 @@
                      moving band from overclaiming -- the bar says a worker is
                      on this, the age says when it last said anything. -->
                 ${c.last_progress_at ? `<div style="color:var(--text-muted);font-family:var(--font);font-size:10.5px;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">last line ${esc(relTime(c.last_progress_at))}</div>` : ""}
+                ${c.state === "leased" && c.eta ? `<div style="margin-top:2px;">${etaLine(c.eta)}</div>` : ""}
               </dd>
             </dl>
           </div>
