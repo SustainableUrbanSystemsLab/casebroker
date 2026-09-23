@@ -225,6 +225,37 @@ Unset, the runner does nothing and Syncthing behaves as configured. On a
 machine that should be silent between cases you can also pause the folder
 and have a cron unpause/pause it; the scan call is simpler and enough.
 
+**The same variables drive the Windows node.** An Eddy3D node (`E3D node`,
+`run-sim-node`) makes the same scan call right after its archive is renamed
+into place -- from Eddy3D 7c4229cb (#937) on -- when `WIND_SYNCTHING_APIKEY`
+and `WIND_SYNCTHING_FOLDER` (and `WIND_SYNCTHING_URL` if its GUI is not on
+127.0.0.1:8384) are in the node's environment: `setx` them for the account
+the node runs as, then restart the node. **Quiet mode with neither the
+variables nor a build that has the call ships nothing, silently.** Until a
+node runs such a build, give its folder a periodic rescan instead
+(`rescanIntervalS` 900): the done folder holds only finished archives, never
+a live case tree, so a rescan costs a directory listing.
+
+What that cost, found 2026-09-23 on the master (COD-PKAST-7865): its
+Syncthing had been down since 14 Sep -- the instances were started by a
+logon trigger, and an RDP reconnect is not a logon -- no remote machine had
+ever been paired with it, and its own worker folder was in quiet mode under
+an Eddy3D node that never announced a file. The master held one 23 MB test
+archive from 11 Sep and none of the campaign's results; every finished case
+existed only on the disk of the machine that solved it.
+`install_master_autostart.ps1` now also restarts both instances every 15
+minutes if they are not running.
+
+**Checklist for a machine that solves cases** -- all three, or its results
+stay on its own disk:
+
+1. Syncthing running there, with the `wind-done` folder Send Only at its
+   done directory and `.tmp` ignored;
+2. the master's device ID added there AND that machine's device ID added on
+   the master, with the folder shared to it (step 2-3 below);
+3. the scan variables in the environment of whatever runs cases (or, for a
+   node on an older build, a 900 s rescan).
+
 **Measured, 2026-09-12** (two Syncthing v2.1.5 instances, one standing in for a
 remote worker, `C:\rc2\syncthing\`): a 23 MB case archive replicated
 worker -> master over a direct QUIC connection with identical SHA-256 and
