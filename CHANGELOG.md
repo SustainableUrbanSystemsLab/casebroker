@@ -8,6 +8,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-09-24
+
+### Added
+- **Cases shipped in parts read back as one.** An Eddy3D node now ships the mesh the moment
+  meshing passes, and each direction the moment it is finished, instead of holding everything
+  until the last direction (COD-359-38 was switched off with 7 of 32 directions solved, and they
+  were lost). `casebroker.archives` finds a case's parts beside its archive, unpacks them together
+  and says whether a case is complete, waiting for parts, or partial.
+  - `casebroker archives <done>` lists every case in the master's done folder with its state;
+    `--state partial` shows what stopped nodes left behind, `--verify` hashes each part against
+    the manifest.
+  - `scripts/backfill_pedestrian.py` unpacks a case's parts along with its archive.
+
 ## [0.18.0] - 2026-09-23
 
 ### Added
