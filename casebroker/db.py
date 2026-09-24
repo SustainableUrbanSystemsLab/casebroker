@@ -2319,6 +2319,10 @@ _TIMEOUT_SIGNATURE = re.compile(r"\b(?:case|runner) exceeded \d+s and was (?:sto
 TIMEOUT_REFUND_WINDOW_SECONDS = int(os.environ.get("CASEBROKER_TIMEOUT_REFUND_WINDOW", str(12 * 3600)))
 TIMEOUT_REFUNDS_MAX = 3
 _TIMEOUT_REFUND_TAG = "stopped at the worker's own time limit while still progressing"
+# What an Eddy3D node gives as the reason when it hands a case back because the
+# machine cannot run it (NodeWorker.GiveBackAndStop): its engine went away, its
+# install broke, or -- since Eddy3D #942 -- its scratch cannot be cleared.
+_MACHINE_RELEASE = "node cannot run cases"
 
 # The node's STEP budget is the same stop one level down, and it charged more
 # cases than the case timeout ever did. Every node build before Eddy3D 00dfaba2
@@ -3302,6 +3306,14 @@ def list_errors(conn, limit: int = 2000) -> dict[str, Any]:
         c["history"] = []
     # One query for all histories, not one per case: this runs under _LOCK, and a
     # campaign-wide failure is exactly when there are thousands of rows here.
+    #
+    # A stop the broker forgave is still a stop, and so is a node giving a case
+    # back because the MACHINE cannot run it: both are 'released', and a history of
+    # failures alone showed neither. Field case, 2026-09-24: v2-000c178c579bf034's
+    # snappy ran out of its 120 minutes on cod-358-21 five times in ten hours; three
+    # stops were refunded, and the export listed ONE failure on that machine -- a
+    # loop that read as a single timeout. An ordinary release (a preemption, a node
+    # stopped for an update) stays out: nothing went wrong in it.
     ids = list(by_id)
     for i in range(0, len(ids), 500):
         chunk = ids[i:i + 500]
@@ -3309,8 +3321,11 @@ def list_errors(conn, limit: int = 2000) -> dict[str, Any]:
         for e in conn.execute(
                 "SELECT e.case_id, e.ts, e.event, e.worker_id, e.detail, w.host, w.cluster"
                 " FROM events e LEFT JOIN workers w ON w.worker_id = e.worker_id"
-                f" WHERE e.event IN ('failed','quarantined') AND e.case_id IN ({marks})"
-                " ORDER BY e.id", chunk).fetchall():
+                " WHERE (e.event IN ('failed','quarantined')"
+                "        OR (e.event = 'released' AND (e.detail LIKE ? OR e.detail LIKE ?)))"
+                f" AND e.case_id IN ({marks})"
+                " ORDER BY e.id",
+                [_TIMEOUT_REFUND_TAG + "%", _MACHINE_RELEASE + "%", *chunk]).fetchall():
             d = dict(e)
             by_id[d.pop("case_id")]["history"].append(d)
     return {"total": total, "returned": len(cases), "truncated": total > len(cases),
