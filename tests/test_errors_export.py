@@ -90,3 +90,33 @@ def test_thousands_of_histories_are_one_pass_not_a_query_per_case(tmp_path):
     data = c.get("/v1/errors?limit=5000", headers=R).json()
     assert data["returned"] == 1200 and all(len(x["history"]) == 1 for x in data["cases"])
     assert data["cases"][0]["lat"] is not None
+
+
+def test_a_stop_the_broker_forgave_and_a_machine_giving_up_are_in_the_history(tmp_path):
+    # v2-000c178c579bf034, 2026-09-24: snappy ran out of its 120 minutes on cod-358-21 five
+    # times in ten hours; three stops were refunded and the export showed one failure -- a
+    # loop that read as a single timeout. An ordinary release (a preemption) stays out.
+    c = _client(tmp_path)
+    _cases(c, 1)
+
+    def lease():
+        return c.post("/v1/lease", json={"worker_id": "a", "host": "node-a"}, headers=W).json()[0]
+
+    got = lease()
+    assert c.post("/v1/heartbeat", json={"lease_id": got["lease_id"], "detail": "mesh 3/5 · 03_snappyHexMesh"},
+                  headers=W).status_code == 200
+    step = ("meshing exited 1: Meshing mesh failed at step 03_snappyHexMesh: Batch 'Run_headless.bat' "
+            "timed out after 120 minutes.")
+    assert c.post("/v1/fail", json={"lease_id": got["lease_id"], "error": step}, headers=W).status_code == 200
+    assert c.post("/v1/release", json={"lease_id": lease()["lease_id"], "reason": "preempted"}, headers=W).status_code == 200
+    assert c.post("/v1/release", json={"lease_id": lease()["lease_id"], "reason": "node cannot run cases: the scratch is held"},
+                  headers=W).status_code == 200
+    assert c.post("/v1/fail", json={"lease_id": lease()["lease_id"], "error": "transient"}, headers=W).status_code == 200
+
+    case = c.get("/v1/errors", headers=R).json()["cases"][0]
+    assert case["attempts"] == 1, "the refunded stop and both releases cost nothing"
+    assert [(h["event"], (h["detail"] or "").split(";")[0].split(":")[0]) for h in case["history"]] == [
+        ("released", "stopped at the worker's own time limit while still progressing"),
+        ("released", "node cannot run cases"),
+        ("failed", "transient"),
+    ]
