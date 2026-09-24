@@ -115,9 +115,10 @@ def test_the_workers_table_sorts_every_column_it_draws():
     block = block[:block.index("];")]
     import re
     labels = re.findall(r'\["([^"]+)",\s*"([^"]+)"\]', block)
-    # 10: the Build column added one, the Reliability column (done / done+failed,
-    # which the two count columns beside it already say) was dropped.
-    assert len(labels) == 10, f"the workers table draws {len(labels)} headers"
+    # 8: the Build column added one, the Reliability column (done / done+failed)
+    # was dropped, and so were the Done and Failed counts themselves (2026-09-24;
+    # /v1/status still carries them).
+    assert len(labels) == 8, f"the workers table draws {len(labels)} headers"
     # Status is a reading of last_seen; it has to sort by something real rather
     # than by a missing field.
     by_label = dict(labels)
