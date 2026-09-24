@@ -196,6 +196,31 @@ opened case.
 
 ## Getting archives to the master
 
+**Pairing is the broker's job now, and needs no admin rights on any machine.**
+Syncthing only moves a file between two devices that know each other's device
+ID, so every machine had to be paired by hand on both sides. On 2026-09-23 no
+remote machine had ever been paired: every archive a remote node finished was
+still on that node's own disk. Now:
+
+1. **The master is named once**, in the dashboard (Settings, then Machines, then
+   *Syncthing master*) or with `PUT /v1/syncthing {device_id, folder}`, admin
+   session. The master node prints its device ID when it starts.
+2. **Each E3D node pairs itself.** It runs Syncthing as the logged-in user. It
+   adopts one already installed, or downloads the pinned release and checks its
+   hash. It creates the send-only `wind-done` folder at its done directory,
+   adds the master named by the broker, and reports its own device with every
+   lease (`syncthing_id`).
+3. **The master accepts exactly the devices the broker lists**
+   (`GET /v1/syncthing`). The broker's credentials decide who may send the
+   master anything.
+
+Workers only dial out, so they need no firewall rule. A rule on the master
+(which does need admin) makes transfers direct, and so faster; without one,
+Syncthing still connects through NAT traversal or its relays.
+
+The rest of this section covers what the node does, and the manual setup for a
+runner that is not an E3D node.
+
 **Workstations: Syncthing.** Share `$WIND_DONE` -- *only* that folder, never a
 live case tree; a solve writes thousands of files per rank per step and
 Syncthing would spend its life hashing them.

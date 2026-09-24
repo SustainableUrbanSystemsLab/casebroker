@@ -204,6 +204,17 @@ class LeaseIn(BaseModel):
     version: str | None = Field(default=None, max_length=64)
     platform: str | None = Field(default=None, max_length=32)
     recipes: list[str] | None = Field(default=None, max_length=64)
+    # This machine's Syncthing device ID, so the fleet's master can accept it
+    # (GET /v1/syncthing). Optional and additive like the rest; one that is not a
+    # device ID is ignored rather than refused -- a lease must never fail over it.
+    syncthing_id: str | None = Field(default=None, max_length=80)
+
+
+class SyncthingIn(BaseModel):
+    """The fleet's Syncthing master: its device ID (null forgets it) and the
+    folder ID every worker shares with it (unchanged when omitted)."""
+    device_id: str | None = Field(default=None, max_length=80)
+    folder: str | None = Field(default=None, max_length=64)
 
 
 class ReleaseIn_(BaseModel):
@@ -1546,7 +1557,8 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
                        host=body.host, cluster=body.cluster,
                        resume_case_ids=body.resume_case_ids,
                        build=body.build, version=body.version,
-                       platform=body.platform, recipes=body.recipes)
+                       platform=body.platform, recipes=body.recipes,
+                       syncthing_id=body.syncthing_id)
         return [LeaseOut(case_id=g.case_id, lease_id=g.lease_id, expires_at=g.expires_at,
                          attempt=g.attempt, spec=g.spec) for g in got]
 
@@ -1577,6 +1589,24 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
                                failed_build=(failed_build or "")[:96] or None,
                                failed_reason=failed_reason,
                                state=(state or "")[:200] or None)
+
+    @app.get("/v1/syncthing", dependencies=[ReadAuth])
+    def syncthing() -> dict[str, Any]:
+        """The Syncthing rendezvous: the master an admin named, and every worker
+        device a node reported with its leases in the last 30 days. A node pairs
+        itself with the master from this, and the master accepts exactly these
+        workers. A device ID is a public-key fingerprint, not a credential, so
+        read scope is enough."""
+        return db.syncthing_view(conn)
+
+    @app.put("/v1/syncthing")
+    def set_syncthing(body: SyncthingIn, user=AdminAuth) -> dict[str, Any]:
+        """Name the fleet's Syncthing master. Admin only: every node pairs with
+        whatever device this names, so it decides where the campaign's archives go."""
+        try:
+            return db.set_syncthing_master(conn, body.device_id, body.folder, by=user["username"])
+        except ValueError as e:
+            raise HTTPException(422, str(e))
 
     @app.get("/v1/releases", dependencies=[ReadAuth])
     def releases() -> dict[str, Any]:

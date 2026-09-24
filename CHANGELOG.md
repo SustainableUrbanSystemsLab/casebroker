@@ -8,6 +8,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-09-23
+
+### Added
+- **The broker is the Syncthing rendezvous.** Finished archives reach the master over
+  Syncthing only between devices that know each other's ID. That meant pairing by hand, on
+  both sides, for every machine, and on 2026-09-23 no remote machine had ever been paired.
+  - An admin names the master once: dashboard, Settings → Machines → *Syncthing master*, or
+    `PUT /v1/syncthing`.
+  - Each node reports its own device with every lease (`syncthing_id`).
+  - `GET /v1/syncthing` gives a node the master to pair with, and gives the master the exact
+    list of worker devices to accept.
+  - Device IDs are normalised, and a malformed one is refused on `PUT`. On a lease it is
+    ignored, since a lease never fails over it.
+
 ## [0.17.21] - 2026-09-23
 
 ## [0.17.20] - 2026-09-23

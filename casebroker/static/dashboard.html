@@ -2094,6 +2094,27 @@
                     placeholder='[{"build":"1.14.0.827+0e9e6863","platform":"win-x64","file":"E3D-1.14.0.827+0e9e6863-win-x64.exe","sha256":"…"}]'></textarea>
         </div>
         <div><button id="relRegisterBtn" type="button">Register</button></div>
+        <!-- The Syncthing rendezvous (GET/PUT /v1/syncthing). Pairing used to be a
+             device ID typed into both sides for every machine, and no remote machine
+             had ever been paired: name the master once here, and each node pairs
+             itself with it and reports its own device, which the master accepts. -->
+        <h3 style="margin:22px 0 4px;">Syncthing master</h3>
+        <div class="panel-subtitle">Finished archives go from every node to one master. Name its device once; each node pairs itself with it, and the master accepts the devices the nodes report here. Nothing needs admin rights on any machine.</div>
+        <div class="row" style="margin-top:10px; align-items:flex-end;">
+          <div class="field" style="flex:1; min-width:320px;">
+            <label for="stMaster">Master device ID
+              <span class="label-hint">(the master node prints it when it starts)</span>
+            </label>
+            <input type="text" id="stMaster" spellcheck="false" autocomplete="off"
+                   placeholder="XXXXXXX-XXXXXXX-XXXXXXX-XXXXXXX-XXXXXXX-XXXXXXX-XXXXXXX-XXXXXXX" />
+          </div>
+          <div class="field" style="min-width:140px;">
+            <label for="stFolder">Folder ID</label>
+            <input type="text" id="stFolder" spellcheck="false" placeholder="wind-done" />
+          </div>
+          <div><button id="stSaveBtn" type="button">Save</button></div>
+        </div>
+        <div id="stWorkers" class="panel-subtitle" style="margin-top:8px;"></div>
       </div>
       <div id="machinesLocked" class="panel-subtitle">
         Sign in as an admin to issue and revoke machine credentials.
@@ -6228,7 +6249,7 @@
     // A signed-in human has no use for the bearer-token form; it stays in the
     // DOM because everything still reads $("token").value.
     $("connectForm").style.display = signedIn ? "none" : "";
-    if (isAdmin) { loadMachines(); loadPairings(); loadUsers(); } else machineCount = null;
+    if (isAdmin) { loadMachines(); loadPairings(); loadUsers(); loadSyncthing(); } else machineCount = null;
     loadReleases();
     renderWizard();
   }
@@ -6429,6 +6450,25 @@
   const REL_WORKER_SKEL = [{ w: 140, h: 20 }, { w: 130, h: 20 }, { w: 150, h: 26 }, { w: 60, h: 26 }];
   const relWorkersSkeleton = () => `<div class="table-wrap" aria-hidden="true"><table><tbody>`
     + skelTableRows(2, REL_WORKER_SKEL) + `</tbody></table></div>`;
+
+  /// The Syncthing rendezvous: the master an admin named, and the devices the
+  /// nodes reported with their leases. Read-scoped on the broker; shown in the
+  /// admin panel because naming the master decides where every archive goes.
+  async function loadSyncthing() {
+    if (!$("stMaster")) return;
+    let s;
+    try { s = await api("/v1/syncthing"); }
+    catch (e) { setHtml("stWorkers", "Could not read the Syncthing settings: " + esc(e.message)); return; }
+    if (document.activeElement !== $("stMaster")) $("stMaster").value = s.master ? s.master.device_id : "";
+    if (document.activeElement !== $("stFolder")) $("stFolder").value = s.master ? s.master.folder : "";
+    const nodes = s.workers || [];
+    setHtml("stWorkers", !s.master
+      ? "No master named yet: nodes report their devices, and pair with nobody until one is."
+      : nodes.length
+        ? nodes.length + " node" + (nodes.length === 1 ? "" : "s") + " reported a device: "
+          + nodes.map((w) => esc(w.worker_id)).join(", ")
+        : "No node has reported a device yet: a node reports it once it runs a build that pairs itself.");
+  }
 
   async function loadReleases() {
     if (!releasesAnswered) {
@@ -6631,6 +6671,15 @@
 
   function wireReleases() {
     if (!$("relTargetBtn")) return;
+    $("stSaveBtn").onclick = async () => {
+      const device = $("stMaster").value.trim();
+      try {
+        await userCall("/v1/syncthing", jsonBody("PUT",
+          { device_id: device || null, folder: $("stFolder").value.trim() || null }));
+        showToast(device ? "Syncthing master saved" : "Syncthing master cleared");
+      } catch (e) { showToast(e.message); }
+      await loadSyncthing();
+    };
     $("relTargetBtn").onclick = () => releaseCallForcing("/v1/releases/target",
       { build: $("relTarget").value || null, apply: $("relApply").value }, "Fleet target saved");
     $("relRollbackBtn").onclick = () => {
