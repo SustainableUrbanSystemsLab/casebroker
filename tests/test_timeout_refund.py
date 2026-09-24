@@ -150,27 +150,37 @@ def test_a_timeout_that_is_not_a_step_budget_is_charged(conn):
 def test_an_old_build_looping_on_one_case_is_ended_by_the_cap(conn):
     # An old build fails every v4 case the same way: "starting", then a 240-min
     # kill. Each lease's first line is its own evidence (it is recorded even
-    # when it repeats the last attempt's), so the cap is what ends the loop:
-    # three refunds, then charged attempts, then quarantine -- never forever.
+    # when it repeats the last attempt's), so the refunds let it try again --
+    # until the cap. Its first CHARGED stop then sends the case to other
+    # machines (FAIL_COOLDOWN_SECONDS), and it takes three machines failing it
+    # to quarantine it: never one machine forever, and never one machine alone.
     t = 1_000_000
     states = []
-    for _ in range(db.TIMEOUT_REFUNDS_MAX + 4):
+    for _ in range(db.TIMEOUT_REFUNDS_MAX + 1):
         got = db.lease(conn, "w1", count=1, now=t)
-        if not got:
-            break
+        assert got, "a refunded stop goes back to its own machine"
         assert db.heartbeat(conn, got[0].lease_id, detail="solve 0/32 dirs · starting", now=t + 60)
         db.fail(conn, got[0].lease_id, OLD_STEP_TIMEOUT, retryable=True, now=t + int(5.7 * HOUR))
         states.append((row(conn)["state"], row(conn)["attempts"]))
         t += 6 * HOUR
-    assert states == [("pending", 0)] * db.TIMEOUT_REFUNDS_MAX + [
-        ("pending", 1), ("pending", 2), ("quarantined", 3)]
+    assert states == [("pending", 0)] * db.TIMEOUT_REFUNDS_MAX + [("pending", 1)]
+    assert db.lease(conn, "w1", count=1, now=t) == [], "charged once: this machine waits"
+    for other in ("w2", "w3"):
+        got = db.lease(conn, other, count=1, now=t)
+        assert got and got[0].case_id == "A", other
+        assert db.heartbeat(conn, got[0].lease_id, detail="solve 0/32 dirs · starting", now=t + 60)
+        db.fail(conn, got[0].lease_id, OLD_STEP_TIMEOUT, retryable=True, now=t + int(5.7 * HOUR))
+        t += 6 * HOUR
+    assert (row(conn)["state"], row(conn)["attempts"]) == ("quarantined", 3)
 
 
 def test_refunds_are_capped_so_a_case_too_big_for_every_worker_still_quarantines(conn):
     t = 1_000_000
     states = []
     for i in range(db.TIMEOUT_REFUNDS_MAX + 3):
-        got = db.lease(conn, "w1", count=1, now=t)
+        # Every worker in turn: "too big for every worker", and a charged stop
+        # sends the case to another machine anyway (FAIL_COOLDOWN_SECONDS).
+        got = db.lease(conn, f"w{i}", count=1, now=t)
         if not got:
             break
         db.heartbeat(conn, got[0].lease_id, detail=f"solve {i}/32 dirs", now=t + 23 * HOUR)

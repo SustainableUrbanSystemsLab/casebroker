@@ -8,6 +8,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.17.18] - 2026-09-23
+
+### Fixed
+- **A case a machine just failed goes to a different machine first.** The failing worker
+  asked for work at once, and the failed case was first in the queue, so a case's three
+  attempts were three tries on one machine within minutes. On 2026-09-23 every quarantine in
+  the campaign had been spent that way:
+  - `v2-00ed64225d4979d7` on cod-359-40-2 at 18:37, 18:44 and 18:51;
+  - `v2-0057457805ddf4bf` three times on cod-359-38 inside one minute;
+  - `v2-00427078fdfaa380` three times in six minutes on cod-358-21, and three more after a reset.
+
+  For `CASEBROKER_FAIL_COOLDOWN` (12 h) after a failure, no worker on that host is handed the
+  case again, as a fresh lease or a resume. Any other machine can take it. Refunded stops are
+  exempt, so the checkpoint's machine still continues them.
+
 ## [0.17.17] - 2026-09-23
 
 ### Fixed
