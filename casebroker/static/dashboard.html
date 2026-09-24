@@ -4094,7 +4094,11 @@
     if (st.expired_leases > 0) {
       const seconds = st.expired_lease_release_in_seconds;
       const releaseIn = seconds == null ? "soon" :
-        (seconds < 60 ? "less than a minute" : `${Math.ceil(seconds / 60).toLocaleString()} minutes`);
+        (seconds < 60 ? "less than a minute" : (() => {
+          const mins = Math.ceil(seconds / 60);
+          const h = Math.floor(mins / 60), m = mins % 60;
+          return h === 0 ? `${m} min` : (m === 0 ? `${h} h` : `${h} h ${m} min`);
+        })());
       $("expiredBannerWrap").innerHTML = `
         <span class="warn-banner">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
