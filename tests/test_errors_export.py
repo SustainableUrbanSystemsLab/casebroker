@@ -69,7 +69,8 @@ def test_a_case_that_later_succeeds_drops_out(tmp_path):
     c = _client(tmp_path)
     _cases(c, 1)
     _fail(c, "a", "transient")
-    lease = c.post("/v1/lease", json={"worker_id": "a"}, headers=W).json()[0]
+    # Another machine: "a" just failed it and waits out FAIL_COOLDOWN_SECONDS.
+    lease = c.post("/v1/lease", json={"worker_id": "b"}, headers=W).json()[0]
     assert c.post("/v1/complete", json={"lease_id": lease["lease_id"], "case_id": lease["case_id"],
                                         "result_uri": "file:///x"}, headers=W).status_code == 200
     assert c.get("/v1/errors", headers=R).json()["total"] == 0

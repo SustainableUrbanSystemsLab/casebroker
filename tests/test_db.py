@@ -143,12 +143,14 @@ def test_release_refunds_the_attempt(tmp_path):
 
 def test_retryable_failure_requeues_then_quarantines(tmp_path):
     conn = make_db(tmp_path, 1)
-    for expected in (1, 2, 3):
-        lease = db.lease(conn, "w")[0]
+    # Each retry on another machine: the one that failed a case waits
+    # FAIL_COOLDOWN_SECONDS before it is handed that case again (test_fail_cooldown).
+    for expected, worker in ((1, "w1"), (2, "w2"), (3, "w3")):
+        lease = db.lease(conn, worker)[0]
         assert lease.attempt == expected
         assert db.fail(conn, lease.lease_id, "solver diverged", retryable=True)
     # Retries are spent; the next claim parks it instead of looping forever.
-    assert db.lease(conn, "w") == []
+    assert db.lease(conn, "w4") == []
     assert db.status(conn)["by_state"] == {"quarantined": 1}
 
 
@@ -221,7 +223,7 @@ def test_events_record_every_transition(tmp_path):
     conn = make_db(tmp_path, 1)
     lease = db.lease(conn, "w")[0]
     db.fail(conn, lease.lease_id, "boom")
-    lease2 = db.lease(conn, "w")[0]
+    lease2 = db.lease(conn, "w2")[0]       # another machine: "w" just failed it
     db.complete(conn, lease2.lease_id, "file:///r")
     events = [r["event"] for r in conn.execute("SELECT event FROM events ORDER BY id")]
     assert events == ["created", "leased", "failed", "leased", "done"]
