@@ -8,6 +8,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.17.19] - 2026-09-23
+
+### Fixed
+- A failure report whose error text holds NUL characters no longer answers
+  HTTP 500 on Postgres. `wsl.exe` writes UTF-16, which a node reads as text
+  with a NUL after every character; Postgres TEXT refuses U+0000, so the
+  failure was never counted and the node leased the same case again at the
+  same attempt. The Postgres shim now drops NULs from every string parameter.
+
 ## [0.17.18] - 2026-09-23
 
 ### Fixed

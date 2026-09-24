@@ -985,6 +985,20 @@ def _is_connection_error(exc: BaseException) -> bool:
     return isinstance(exc, (psycopg.OperationalError, psycopg.InterfaceError))
 
 
+def _strip_nul(value: Any) -> Any:
+    """A string parameter without NUL characters; anything else unchanged.
+
+    Postgres TEXT cannot hold U+0000 and psycopg refuses the whole statement
+    ("PostgreSQL text fields cannot contain NUL (0x00) bytes"), where SQLite
+    stores it happily. Node output reaches the database verbatim -- a /v1/fail
+    error is the tail of a step log -- and `wsl.exe` writes UTF-16, which a
+    node reading it as UTF-8 turns into text with a NUL after every character.
+    Every such failure report answered 500, so the failure was never counted and
+    the node that could not run the case leased it again at the same attempt.
+    """
+    return value.replace("\x00", "") if isinstance(value, str) and "\x00" in value else value
+
+
 class PgConnection:
     """Thin shim so call sites written for SQLite keep working against Postgres.
 
@@ -1052,7 +1066,7 @@ class PgConnection:
         if sql.strip().upper() == "BEGIN IMMEDIATE":
             sql = "BEGIN"
         sql = sql.replace("?", "%s")
-        params = tuple(params) if params else None
+        params = tuple(_strip_nul(p) for p in params) if params else None
         verb = sql.strip().upper()
         # Known-dead up front: reconnect before running anything. Safe because
         # nothing has been sent yet, so there is no half-applied work to repeat --
