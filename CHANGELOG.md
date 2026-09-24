@@ -8,6 +8,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.18.1] - 2026-09-24
+
+### Fixed
+- **"Copy all errors" shows the stops the broker forgave, and a machine giving a case
+  back.** The per-attempt history listed failures and quarantines only, so a refunded
+  time-limit stop and a node's "node cannot run cases" release left no trace in it. On
+  2026-09-24, `v2-000c178c579bf034`'s snappy ran out of its 120 minutes on `cod-358-21`
+  five times in ten hours. Three of those stops were refunded, and the export listed one
+  failure on that machine: a loop that read as a single timeout. Both kinds of release now
+  appear in the history, as `released`, with the reason the broker stored. An ordinary
+  release, such as a preemption or a node stopping for an update, stays out.
+
 ## [0.18.0] - 2026-09-23
 
 ### Added
