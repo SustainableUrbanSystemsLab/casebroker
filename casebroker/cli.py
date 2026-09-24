@@ -903,6 +903,34 @@ def cmd_triage(args) -> int:
     return 1 if repro.signatures(findings) else 0
 
 
+def cmd_archives(args) -> int:
+    """What the master's done folder holds, per case: complete, waiting for parts
+    Syncthing has not delivered yet, or partial -- the parts a node shipped before
+    it stopped (casebroker/archives.py)."""
+    from . import archives
+    done = pathlib.Path(args.done)
+    if not done.is_dir():
+        print(f"not a folder: {done}", file=sys.stderr)
+        return 2
+    found = archives.scan(done, verify=args.verify)
+    if args.state:
+        found = [c for c in found if c.state == args.state]
+    if args.json:
+        print(json.dumps([c.as_json() for c in found], indent=2))
+        return 0
+    for c in found:
+        dirs = sum(1 for p in c.parts if ".case_" in p.name)
+        mesh = "mesh" if any(p.name.endswith(".mesh.tar.gz") for p in c.parts) else "no mesh"
+        extra = f" · missing {', '.join(c.missing)}" if c.missing else ""
+        extra += f" · sha256 mismatch {', '.join(c.corrupt)}" if c.corrupt else ""
+        print(f"{c.case_id}  {c.state:<8}  {mesh}, {dirs} direction part(s){extra}")
+    counts: dict[str, int] = {}
+    for c in found:
+        counts[c.state] = counts.get(c.state, 0) + 1
+    print(f"{len(found)} case(s): " + ", ".join(f"{n} {s}" for s, n in sorted(counts.items())) if found else "nothing here")
+    return 0
+
+
 def cmd_doctor(args) -> int:
     """Check the database, the broker and the token, and name the broken one.
 
@@ -1158,6 +1186,16 @@ def main(argv: list[str] | None = None) -> int:
     tr = sub.add_parser("triage", help="read a failed study's logs for the known failure signatures")
     tr.add_argument("study", help="the study directory (holds mesh*/ and case_*/)")
     tr.set_defaults(func=cmd_triage)
+
+    ar = sub.add_parser("archives", help="per case in the master's done folder: complete, waiting "
+                                          "for parts, or partial (shipped before its node stopped)")
+    ar.add_argument("done", help="the done folder Syncthing fills (e.g. E:/wind/done)")
+    ar.add_argument("--state", choices=["complete", "waiting", "partial", "corrupt"],
+                    help="only cases in this state")
+    ar.add_argument("--verify", action="store_true",
+                    help="hash every part against the manifest (reads every byte)")
+    ar.add_argument("--json", action="store_true", help="one JSON document instead of lines")
+    ar.set_defaults(func=cmd_archives)
 
     idb = sub.add_parser("init-db", help="create or bring forward the schema without "
                                          "starting the service")
