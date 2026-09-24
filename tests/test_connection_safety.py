@@ -282,3 +282,30 @@ def test_a_fleet_under_contention_never_double_leases(tmp_path):
     assert not dupes, f"the same case was leased more than once: {dupes}"
     assert not errors, f"request failed under contention: {errors[0]}"
     assert client.get("/v1/status").json()["by_state"].get("done") == n_cases
+
+
+class _RecordingRaw:
+    """A psycopg-shaped connection that records what it was asked to run."""
+
+    def __init__(self):
+        self.calls, self.closed = [], False
+
+    def cursor(self):
+        return self
+
+    def execute(self, sql, params=None):
+        self.calls.append((sql, params))
+        return self
+
+
+def test_nul_characters_never_reach_postgres():
+    """A /v1/fail error from `wsl.exe` output (UTF-16 read as UTF-8) carries a
+    NUL after every character; Postgres TEXT refuses U+0000 and the whole report
+    answered 500. The shim drops the NULs from string parameters, nothing else."""
+    raw = _RecordingRaw()
+    conn = db.PgConnection(raw)
+    conn.execute("UPDATE cases SET last_error=?, attempts=? WHERE case_id=?",
+                 ("W\x00S\x00L\x00", 2, "c1"))
+    sql, params = raw.calls[-1]
+    assert params == ("WSL", 2, "c1")
+    assert "%s" in sql and "?" not in sql
