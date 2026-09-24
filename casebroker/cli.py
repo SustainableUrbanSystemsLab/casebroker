@@ -882,6 +882,24 @@ def cmd_release_rollback(args) -> int:
                        "rolled back" + (", and blocked the build left" if args.block else ""))
 
 
+def cmd_parts_reset(args) -> int:
+    """Forget what a case shipped to the master, so the next node meshes it afresh.
+    Only for a master that is gone for good: a node does not solve a case on a mesh
+    it cannot fetch, and waits for it instead."""
+    opener = _admin_session(args)
+    if opener is None:
+        return 1
+    try:
+        status, got = _call(opener, args.broker, "DELETE", "/v1/cases/%s/parts" % args.case_id)
+        if status != 200:
+            print("refused: %s" % got.get("detail", status), file=sys.stderr)
+            return 1
+        print("%s: dropped %d part(s); the next node meshes it afresh" % (args.case_id, got["dropped"]))
+    finally:
+        _call(opener, args.broker, "POST", "/v1/auth/logout")
+    return 0
+
+
 def cmd_repro(args) -> int:
     from . import repro
     token = _resolve_token(args.token, "write")
@@ -901,6 +919,34 @@ def cmd_triage(args) -> int:
                          ["no known signature found -- read the step logs under mesh*/ and case_*/"]):
         print(f"- {f}")
     return 1 if repro.signatures(findings) else 0
+
+
+def cmd_archives(args) -> int:
+    """What the master's done folder holds, per case: complete, waiting for parts
+    Syncthing has not delivered yet, or partial -- the parts a node shipped before
+    it stopped (casebroker/archives.py)."""
+    from . import archives
+    done = pathlib.Path(args.done)
+    if not done.is_dir():
+        print(f"not a folder: {done}", file=sys.stderr)
+        return 2
+    found = archives.scan(done, verify=args.verify)
+    if args.state:
+        found = [c for c in found if c.state == args.state]
+    if args.json:
+        print(json.dumps([c.as_json() for c in found], indent=2))
+        return 0
+    for c in found:
+        dirs = sum(1 for p in c.parts if ".case_" in p.name)
+        mesh = "mesh" if any(p.name.endswith(".mesh.tar.gz") for p in c.parts) else "no mesh"
+        extra = f" · missing {', '.join(c.missing)}" if c.missing else ""
+        extra += f" · sha256 mismatch {', '.join(c.corrupt)}" if c.corrupt else ""
+        print(f"{c.case_id}  {c.state:<8}  {mesh}, {dirs} direction part(s){extra}")
+    counts: dict[str, int] = {}
+    for c in found:
+        counts[c.state] = counts.get(c.state, 0) + 1
+    print(f"{len(found)} case(s): " + ", ".join(f"{n} {s}" for s, n in sorted(counts.items())) if found else "nothing here")
+    return 0
 
 
 def cmd_doctor(args) -> int:
@@ -1131,6 +1177,15 @@ def main(argv: list[str] | None = None) -> int:
                     help="also refuse the current target to every node at once (the kill switch)")
     rb.set_defaults(func=cmd_release_rollback)
 
+    pt = sub.add_parser("parts", help="what of a case already reached the Syncthing master "
+                                      "(mesh, finished directions)").add_subparsers(
+        dest="parts_cmd", required=True)
+    pr = _release_admin(pt.add_parser(
+        "reset", help="forget a case's shipped parts so the next node meshes it afresh "
+                      "(only when the master holding its mesh is gone for good)"))
+    pr.add_argument("case_id")
+    pr.set_defaults(func=cmd_parts_reset)
+
     rls = rl.add_parser("list", help="the catalog, the target and where the fleet is")
     rls.add_argument("--broker", required=True)
     rls.add_argument("--token", default=None,
@@ -1158,6 +1213,16 @@ def main(argv: list[str] | None = None) -> int:
     tr = sub.add_parser("triage", help="read a failed study's logs for the known failure signatures")
     tr.add_argument("study", help="the study directory (holds mesh*/ and case_*/)")
     tr.set_defaults(func=cmd_triage)
+
+    ar = sub.add_parser("archives", help="per case in the master's done folder: complete, waiting "
+                                          "for parts, or partial (shipped before its node stopped)")
+    ar.add_argument("done", help="the done folder Syncthing fills (e.g. E:/wind/done)")
+    ar.add_argument("--state", choices=["complete", "waiting", "partial", "corrupt"],
+                    help="only cases in this state")
+    ar.add_argument("--verify", action="store_true",
+                    help="hash every part against the manifest (reads every byte)")
+    ar.add_argument("--json", action="store_true", help="one JSON document instead of lines")
+    ar.set_defaults(func=cmd_archives)
 
     idb = sub.add_parser("init-db", help="create or bring forward the schema without "
                                          "starting the service")

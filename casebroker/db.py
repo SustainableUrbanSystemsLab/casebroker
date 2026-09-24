@@ -322,6 +322,25 @@ CREATE TABLE IF NOT EXISTS build_stats (
     first_seen  INTEGER NOT NULL,
     last_seen   INTEGER NOT NULL
 );
+-- What a node has already shipped of a case to the Syncthing master: the mesh
+-- once meshing passed, each direction as it finished (Eddy3D CaseParts). A node
+-- that takes the case over continues from the master's copy of THIS mesh and
+-- solves only the directions not listed here. A direction is valid only with
+-- the mesh it was solved on, so every row carries that mesh's sha256, and a new
+-- mesh for the case deletes the rows of the old one (report_part).
+CREATE TABLE IF NOT EXISTS case_parts (
+    case_id     TEXT NOT NULL,
+    part        TEXT NOT NULL,
+    archive     TEXT NOT NULL,
+    sha256      TEXT NOT NULL,
+    bytes       BIGINT,
+    mesh_sha256 TEXT,
+    -- A direction's convergence entry (JSON), as the node's gate writes it.
+    verdict     TEXT,
+    worker_id   TEXT,
+    reported_at INTEGER NOT NULL,
+    PRIMARY KEY (case_id, part)
+);
 """
 
 # Same schema, Postgres-flavoured: no PRAGMAs (meaningless there), and the
@@ -593,6 +612,25 @@ CREATE TABLE IF NOT EXISTS build_stats (
     wall_seconds BIGINT,
     first_seen  INTEGER NOT NULL,
     last_seen   INTEGER NOT NULL
+);
+-- What a node has already shipped of a case to the Syncthing master: the mesh
+-- once meshing passed, each direction as it finished (Eddy3D CaseParts). A node
+-- that takes the case over continues from the master's copy of THIS mesh and
+-- solves only the directions not listed here. A direction is valid only with
+-- the mesh it was solved on, so every row carries that mesh's sha256, and a new
+-- mesh for the case deletes the rows of the old one (report_part).
+CREATE TABLE IF NOT EXISTS case_parts (
+    case_id     TEXT NOT NULL,
+    part        TEXT NOT NULL,
+    archive     TEXT NOT NULL,
+    sha256      TEXT NOT NULL,
+    bytes       BIGINT,
+    mesh_sha256 TEXT,
+    -- A direction's convergence entry (JSON), as the node's gate writes it.
+    verdict     TEXT,
+    worker_id   TEXT,
+    reported_at INTEGER NOT NULL,
+    PRIMARY KEY (case_id, part)
 );
 """
 
@@ -938,6 +976,9 @@ class Lease:
     expires_at: int
     spec: dict[str, Any]
     attempt: int
+    # What earlier attempts already shipped to the Syncthing master (case_parts):
+    # a node continues from that mesh and skips those directions.
+    parts: tuple[dict[str, Any], ...] = ()
 
 
 # One process-wide lock around every statement. FastAPI runs sync endpoints in a
@@ -1355,7 +1396,8 @@ def lease(conn, worker_id: str, count: int = 1,
           build: str | None = None, version: str | None = None,
           platform: str | None = None,
           recipes: list[str] | None = None,
-          syncthing_id: str | None = None) -> list[Lease]:
+          syncthing_id: str | None = None,
+          can_continue: bool | None = None) -> list[Lease]:
     """Atomically claim up to ``count`` cases.
 
     ``recipes`` are the exact recipes this worker can produce. When it declares
@@ -1401,6 +1443,12 @@ def lease(conn, worker_id: str, count: int = 1,
         recipe_params = list(recipes)
     # Not a case this machine failed within FAIL_COOLDOWN_SECONDS (see there).
     cooldown_params = [now - FAIL_COOLDOWN_SECONDS, worker_id, host]
+    # A node that cannot fetch a mesh from the master is not handed a case that
+    # has one on record: it would give it back, and take it again, forever. Its
+    # own case it may still resume -- the mesh is on its disk.
+    continue_sql = ("" if can_continue is not False else
+                    " AND NOT EXISTS (SELECT 1 FROM case_parts p WHERE p.case_id = cases.case_id"
+                    " AND p.part = 'mesh')")
 
     def claim(rows, resumed: bool) -> None:
         for row in rows:
@@ -1440,7 +1488,7 @@ def lease(conn, worker_id: str, count: int = 1,
                    "attempt %d" % attempt, now)
             out.append(Lease(case_id=row["case_id"], lease_id=lease_id,
                              expires_at=expires, spec=json.loads(row["spec"]),
-                             attempt=attempt))
+                             attempt=attempt, parts=tuple(_parts_of(conn, row["case_id"]))))
 
     conn.execute("BEGIN IMMEDIATE")
     try:
@@ -1494,7 +1542,7 @@ def lease(conn, worker_id: str, count: int = 1,
                 "        OR (state = 'leased' AND (lease_expires < ?"
                 "            OR (leased_at IS NOT NULL AND leased_at < ?"
                 "                AND " + _LAST_PROGRESS_SQL + " < ?))))"
-                + split_sql + recipe_sql + _RECENTLY_FAILED_HERE_SQL +
+                + split_sql + recipe_sql + continue_sql + _RECENTLY_FAILED_HERE_SQL +
                 # Every worker targets the same "lowest" rows. That is contention by
                 # design, not by accident: under SKIP LOCKED a locked row is simply
                 # skipped, and case_id is a hash so the tiebreak is effectively random
@@ -1685,10 +1733,22 @@ def syncthing_view(conn, now: int | None = None) -> dict[str, Any]:
         "SELECT worker_id, host, syncthing_id, last_seen FROM workers"
         " WHERE syncthing_id IS NOT NULL AND last_seen > ? ORDER BY worker_id",
         (now - SYNCTHING_WORKER_WINDOW_SECONDS,)).fetchall()
+    # The meshes the master should offer the fleet right now: every case that has
+    # a mesh on record and is waiting for, or being solved by, a node OTHER than
+    # the one that meshed it -- i.e. a case being continued. The master shares
+    # only these (a hardlink each, in its mesh folder), not the mesh of every
+    # case in flight, which its own node still holds.
+    continuations = conn.execute(
+        "SELECT p.case_id, p.archive, p.sha256 FROM case_parts p JOIN cases c ON c.case_id = p.case_id"
+        " WHERE p.part = 'mesh' AND (c.state = 'pending'"
+        "   OR (c.state = 'leased' AND (c.lease_worker IS NULL OR c.lease_worker <> p.worker_id)))"
+        " ORDER BY p.case_id").fetchall()
     return {
         "master": {"device_id": master, "folder": folder} if master else None,
         "workers": [{"worker_id": r["worker_id"], "host": r["host"],
                      "device_id": r["syncthing_id"], "last_seen": r["last_seen"]} for r in rows],
+        "continuations": [{"case_id": r["case_id"], "archive": r["archive"], "sha256": r["sha256"]}
+                          for r in continuations],
     }
 
 
@@ -2371,6 +2431,126 @@ def release(conn, lease_id: str, reason: str = "released",
         conn.execute("ROLLBACK")
         raise
     return True
+
+
+# -- parts: what of a case already reached the master --------------------------
+#
+# A node ships a case while it runs: <case>.mesh.tar.gz once meshing passed,
+# <case>.case_NNN.tar.gz as each direction finishes (Eddy3D CaseParts), and it
+# reports each one here. Before, a machine switched off mid-case took every
+# finished direction with it (COD-359-38, 2026-09-24: 7 of 32, lost). With the
+# parts on record, whichever node leases the case next is told what exists, takes
+# the master's copy of the mesh and solves only the rest.
+#
+# A direction is only worth keeping WITH the mesh it was solved on: snappyHexMesh
+# on another machine, or another rank count, is a different mesh, and one case
+# must never be answered on two. So each direction carries its mesh's sha256, a
+# direction reported against a mesh that is no longer the case's is refused, and
+# a NEW mesh for the case deletes every part recorded for the old one.
+
+PART_NAME = re.compile(r"(mesh|case_[A-Za-z0-9_-]{1,32})")
+_SHA256 = re.compile(r"[0-9a-f]{64}")
+ARCHIVE_NAME = re.compile(r"[A-Za-z0-9._-]{1,200}\.tar\.gz")
+
+
+def _parts_of(conn, case_id: str) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        "SELECT part, archive, sha256, bytes, mesh_sha256, verdict, worker_id, reported_at"
+        " FROM case_parts WHERE case_id=?", (case_id,)).fetchall()
+    out = []
+    for r in rows:
+        d = dict(r)
+        try:
+            d["verdict"] = json.loads(d["verdict"]) if d["verdict"] else None
+        except (TypeError, ValueError):
+            d["verdict"] = None
+        out.append(d)
+    # The mesh first, then the directions in order.
+    return sorted(out, key=lambda r: (r["part"] != "mesh", r["part"]))
+
+
+@_locked
+def case_parts(conn, case_id: str) -> list[dict[str, Any]]:
+    return _parts_of(conn, case_id)
+
+
+@_locked
+def report_part(conn, lease_id: str, case_id: str, part: str, archive: str,
+                sha256: str, size: int | None = None, mesh_sha256: str | None = None,
+                verdict: dict[str, Any] | None = None, now: int | None = None,
+                worker_ok: Callable[[str | None], bool] | None = None) -> str:
+    """Record one part the lease holder shipped to the master.
+
+    Returns ``"ok"``; ``"gone"`` (not this case's current lease, or not the
+    caller's -- the same ownership rule as post_telemetry); ``"invalid"`` (a part
+    name, archive name or hash that is not one); or ``"stale_mesh"`` (a
+    direction solved on a mesh that is no longer this case's: it is not kept).
+    """
+    sha256 = (sha256 or "").lower()
+    mesh_sha256 = (mesh_sha256 or "").lower() or None
+    if not PART_NAME.fullmatch(part or "") or not ARCHIVE_NAME.fullmatch(archive or "") \
+            or not _SHA256.fullmatch(sha256) or (mesh_sha256 and not _SHA256.fullmatch(mesh_sha256)) \
+            or (size is not None and size < 0):
+        return "invalid"
+    verdict_json = None
+    if verdict is not None:
+        outcome, cleaned = prepare_telemetry("verdict", verdict)
+        if outcome != "ok":
+            return "invalid"
+        verdict_json = _telemetry_json(cleaned)
+    now = now or _now()
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        row = _by_lease(conn, lease_id)
+        if row is None or row["case_id"] != case_id \
+                or (worker_ok is not None and not worker_ok(row["lease_worker"])):
+            conn.execute("ROLLBACK")
+            return "gone"
+        mesh = conn.execute("SELECT sha256 FROM case_parts WHERE case_id=? AND part='mesh'",
+                            (case_id,)).fetchone()
+        if part == "mesh":
+            if mesh is not None and mesh["sha256"] != sha256:
+                gone = conn.execute("SELECT COUNT(*) AS n FROM case_parts WHERE case_id=?",
+                                    (case_id,)).fetchone()["n"]
+                conn.execute("DELETE FROM case_parts WHERE case_id=?", (case_id,))
+                _event(conn, case_id, row["lease_worker"], "parts_reset",
+                       "a new mesh; %d part(s) of the old one dropped" % gone, now)
+            mesh_sha256 = sha256
+        elif mesh is not None and mesh_sha256 != mesh["sha256"]:
+            conn.execute("ROLLBACK")
+            return "stale_mesh"
+        conn.execute(
+            "INSERT INTO case_parts(case_id, part, archive, sha256, bytes, mesh_sha256,"
+            " verdict, worker_id, reported_at) VALUES (?,?,?,?,?,?,?,?,?)"
+            " ON CONFLICT(case_id, part) DO UPDATE SET archive=excluded.archive,"
+            " sha256=excluded.sha256, bytes=excluded.bytes, mesh_sha256=excluded.mesh_sha256,"
+            " verdict=excluded.verdict, worker_id=excluded.worker_id, reported_at=excluded.reported_at",
+            (case_id, part, archive, sha256, size, mesh_sha256, verdict_json, row["lease_worker"], now))
+        _event(conn, case_id, row["lease_worker"], "part_shipped", part, now)
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    return "ok"
+
+
+@_locked
+def reset_parts(conn, case_id: str, by: str | None = None, now: int | None = None) -> int:
+    """Forget what a case shipped, so the next node meshes it afresh. For a master
+    that is gone for good: a node will not solve a case on a mesh it cannot get."""
+    now = now or _now()
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        n = conn.execute("SELECT COUNT(*) AS n FROM case_parts WHERE case_id=?",
+                         (case_id,)).fetchone()["n"]
+        conn.execute("DELETE FROM case_parts WHERE case_id=?", (case_id,))
+        if n:
+            _event(conn, case_id, by, "parts_reset", "%d part(s) dropped by an admin" % n, now)
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    return n
 
 
 # -- telemetry: what the node measured while it worked -------------------------
