@@ -52,6 +52,7 @@ _ALLOWED_UNLOCKED = {
     "_note_build_change",  # inside lease(), in its transaction
     "_attach_labels",      # inside list_cases and get_case
     "_recipe_knowledge",   # inside list_releases and recipe_gaps
+    "_parts_of",           # inside lease() and case_parts
     "_existing_tables",    # schema bring-forward, under _LOCK in connect()
     "_existing_columns",
     "reconcile_columns",

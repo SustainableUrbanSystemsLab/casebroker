@@ -181,6 +181,38 @@ uv run casebroker archives E:/wind/done --verify      # also hash every part aga
 Runner-script archives and nodes from before parts write only `<case>.tar.gz`,
 which reads as complete, as before.
 
+### A case outlives its machine
+
+Each part is also reported to the broker (`POST /v1/parts`, lease-scoped like
+telemetry): the mesh with its sha256, each direction with the sha256 of the mesh
+it was solved on and its convergence verdict. The broker keeps them in
+`case_parts` and hands them out with the next lease of the case, so the node that
+takes it over continues on the **same** mesh -- fetched back from the master --
+and solves only the directions not listed. One case is never answered on two
+meshes:
+
+- a direction reported against a mesh that is no longer the case's is refused (409);
+- a NEW mesh for a case (the site changed, or an admin reset it) drops every
+  part of the old one, with a `parts_reset` event.
+
+The mesh comes back through a second Syncthing folder, `<folder>-mesh`, never
+the done folder, which stays receive-only on the master. The master offers in it
+only what `GET /v1/syncthing` lists under `continuations` (a mesh on record, and
+the case pending or leased by a node other than the one that meshed it), as
+hardlinks; each worker receives into it ignoring everything but the one file it
+asked for. Eddy3D's `docs/SIMULATION_NODE.md` has the node's side.
+
+A node that cannot fetch a mesh (Syncthing off, a cluster) leases with
+`can_continue: false` and is not handed a case that has one. If the master that
+holds a case's mesh is gone for good:
+
+```
+uv run casebroker parts reset <case_id> --broker https://casebroker.onrender.com
+```
+
+and the next node meshes it afresh. `GET /v1/cases/<case_id>/parts` shows what a
+case has on record.
+
 ## The pedestrian field
 
 U at 1.5 m and 1.75 m above grade, on a regular 2 m grid over the 1008 m core
