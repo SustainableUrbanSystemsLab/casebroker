@@ -2001,6 +2001,37 @@
           </div>
           <div id="reopenResult" style="margin-top:12px;"></div>
         </div>
+
+        <!-- A site its recipe cannot build fails the same way on every node that
+             knows only that recipe. Moving it is a new case (a case id is its site
+             AND recipe), so only nodes declaring the new recipe are handed it and
+             none can resume the old recipe's mesh; the old case is parked with a
+             pointer to the new one. -->
+        <div class="detail-card" style="margin-top:14px;">
+          <h3>Move cases to another recipe</h3>
+          <div class="panel-subtitle" style="margin-bottom:10px;">
+            For a site its recipe cannot build. Each one is added again under the
+            new recipe as a new case, which only nodes that know that recipe are
+            given, and the old case is parked with a pointer to it. A case a node
+            is working on is left alone — pull it off first.
+          </div>
+          <div class="row" style="gap:8px; align-items:center; flex-wrap:wrap;">
+            <input type="text" id="respecIds" placeholder="case ids, separated by spaces or commas"
+                   style="flex:2; min-width:220px;">
+            <input type="text" id="respecMatch" placeholder="and/or: last failure contains…"
+                   style="flex:1; min-width:160px;">
+          </div>
+          <div class="row" style="gap:8px; align-items:center; margin-top:8px; flex-wrap:wrap;">
+            <input type="text" id="respecRecipe" list="respecRecipes" placeholder="new recipe"
+                   style="flex:1; min-width:200px;">
+            <datalist id="respecRecipes"></datalist>
+            <input type="text" id="respecReason" maxlength="300" placeholder="why — kept in both cases' history"
+                   style="flex:1; min-width:200px;">
+            <button id="respecScanBtn" type="button" class="subtle">Scan</button>
+            <button id="respecFixBtn" type="button" style="display:none;">Move</button>
+          </div>
+          <div id="respecResult" style="margin-top:12px;"></div>
+        </div>
       </div>
       <div id="campaignLocked" class="panel-subtitle">
         Sign in as an operator or an admin to run campaign housekeeping.
@@ -5270,6 +5301,13 @@
     }
   }
 
+  /// When, by whom and why a case was moved to another recipe: the hover text of
+  /// its Moved to / Moved from row. Plain text; the caller escapes it.
+  function moveNote(m) {
+    return "moved " + (m.at ? new Date(m.at * 1000).toLocaleString() : "")
+      + (m.by ? " by " + m.by : "") + (m.reason ? ": " + m.reason : "");
+  }
+
   function caseDetailHtml(c) {
     // Which domain the map link draws; only the recipe's "cyl-" prefix is read.
     const cylDomain = String(c.recipe || "").startsWith("cyl-");
@@ -5308,6 +5346,13 @@
               <dd><span class="chip mono">${esc(c.split || "—")}</span></dd>
               <dt>Recipe</dt>
               <dd>${esc(c.recipe || "—")}</dd>
+              <!-- A move to another recipe is a new case (POST /v1/cases/respec):
+                   the parked one says where its site went, the new one where it
+                   came from. Only the full record carries these. -->
+              ${c.moved_to ? `<dt title="this site was added again under another recipe; this case is parked">Moved to</dt>
+              <dd class="mono" title="${esc(moveNote(c.moved_to))}">${esc(c.moved_to.recipe || "—")} as <span style="white-space:nowrap">${esc(c.moved_to.case_id || "—")}</span></dd>` : ""}
+              ${c.moved_from ? `<dt title="this case is a site moved here from another recipe">Moved from</dt>
+              <dd class="mono" title="${esc(moveNote(c.moved_from))}">${esc(c.moved_from.recipe || "—")}, <span style="white-space:nowrap">${esc(c.moved_from.case_id || "—")}</span></dd>` : ""}
               <dt>LCZ</dt>
               <dd>${esc(c.lcz || "—")}</dd>
               <dt title="country from the polygon the site is in; nearest town of 15,000+ people (GeoNames) and how far it is">Location</dt>
@@ -8202,6 +8247,105 @@
       refresh();
     } catch (e) {
       $("reopenResult").innerHTML = `<span style="font-size:12px;color:var(--bad)">reopen failed: ${esc(e.message || e.status || e)}</span>`;
+    } finally {
+      b.disabled = false;
+    }
+  });
+
+  // -- Move cases to another recipe (POST /v1/cases/respec) -------------------
+  // The selection Scan showed is the one Move sends, kept rather than re-read
+  // from the fields: an edit between the two must not change what is moved.
+  let respecScanned = null;
+
+  function respecQuery() {
+    const q = new URLSearchParams();
+    q.set("recipe", $("respecRecipe").value.trim());
+    for (const id of $("respecIds").value.split(/[\s,;]+/)) if (id) q.append("case_id", id);
+    const match = $("respecMatch").value.trim();
+    if (match) q.set("error_contains", match);
+    const why = $("respecReason").value.trim();
+    if (why) q.set("reason", why);
+    return q;
+  }
+
+  function renderRespecResult(d, changed) {
+    const n = changed ? d.moved : d.matched;
+    const builds = Array.isArray(d.known_to_builds) ? d.known_to_builds : [];
+    // Which nodes will take the new cases: the point of moving them.
+    const takers = builds.length
+      ? `<div class="geo-note" style="margin-top:4px">Nodes on ${esc(builds.join(", "))} declare ${esc(d.recipe)}; a node that knows only other recipes is never given these cases.</div>`
+      : `<div class="geo-note" style="margin-top:4px;color:var(--warn)">No build declares ${esc(d.recipe)} yet: the new cases wait until a node that knows it asks.</div>`;
+    const moving = changed ? "" : (Array.isArray(d.examples) ? d.examples : []).map((e) =>
+      `<div style="font-size:12px;margin-top:4px"><code class="inline" style="white-space:nowrap">${esc(e.case_id)}</code> ${badge(e.state)} `
+      + `<span style="color:var(--text-muted)">${esc(e.recipe)} → ${esc(d.recipe)} as</span> <code class="inline" style="white-space:nowrap">${esc(e.new_case_id)}</code>`
+      + (e.new_exists ? ` <span style="color:var(--text-muted)">(already in the campaign; linked, not added)</span>` : "")
+      + `</div>`).join("");
+    const skipped = Array.isArray(d.skipped) ? d.skipped : [];
+    const left = skipped.map((s) => `<div style="font-size:12px;margin-top:4px"><code class="inline" style="white-space:nowrap">${esc(s.case_id)}</code> `
+      + `<span style="color:var(--text-muted)">left alone — ${esc(s.why)}</span></div>`).join("")
+      + (d.skipped_total > skipped.length ? `<div class="geo-note">…and ${d.skipped_total - skipped.length} more left alone.</div>` : "");
+    const head = !n
+      ? `<div style="font-size:12px;color:var(--accent)">${changed ? "Done — nothing left to move." : "Nothing to move."}</div>`
+      : changed
+        ? `<div style="font-size:12px;color:var(--accent)">${n} case${n === 1 ? "" : "s"} moved to ${esc(d.recipe)}; ${n === 1 ? "the old one is" : "the old ones are"} parked.</div>`
+        : `<div style="font-size:12px"><strong>${n}</strong> case${n === 1 ? "" : "s"} would move to ${esc(d.recipe)}.`
+          + `${d.capped ? " Each press moves " + (d.examples || []).length + "." : ""} Nothing has changed yet.</div>`;
+    $("respecResult").innerHTML = head + (n ? takers : "") + moving + left;
+  }
+
+  $("respecRecipe").addEventListener("focus", async () => {
+    // Suggest what the fleet can build and what the campaign already carries;
+    // the broker refuses anything neither has heard of, so this is only typing.
+    let r = lastReleases;
+    if (!r) { try { r = await api("/v1/releases"); } catch (e) { r = null; } }
+    if (!r) return;
+    const names = new Set(Object.keys(r.queue_recipes || {}));
+    for (const b of r.builds || []) for (const k of b.knows || []) names.add(k);
+    $("respecRecipes").innerHTML = [...names].sort().map((k) => `<option value="${esc(k)}"></option>`).join("");
+  });
+
+  $("respecScanBtn").addEventListener("click", async () => {
+    const b = $("respecScanBtn");
+    b.disabled = true;
+    respecScanned = null;
+    $("respecResult").innerHTML = `<span style="font-size:12px;color:var(--text-muted)">scanning…</span>`
+      + `<div aria-hidden="true" style="margin-top:6px">${skelBar("min(300px, 70%)")}</div>`;
+    setBusy($("respecResult"), true);
+    $("respecFixBtn").style.display = "none";
+    try {
+      const q = respecQuery();
+      const d = await campaignCall("/v1/cases/respec?" + q.toString());
+      renderRespecResult(d, false);
+      if (d.matched) {
+        respecScanned = q;
+        const k = d.capped ? (d.examples || []).length : d.matched;
+        $("respecFixBtn").textContent = `Move ${k} case${k === 1 ? "" : "s"}`;
+        $("respecFixBtn").style.display = "";
+      }
+    } catch (e) {
+      $("respecResult").innerHTML = `<span style="font-size:12px;color:var(--bad)">scan failed: ${esc(e.message || e.status || e)}</span>`;
+    } finally {
+      setBusy($("respecResult"), false);
+      b.disabled = false;
+    }
+  });
+
+  $("respecFixBtn").addEventListener("click", async () => {
+    if (!respecScanned) return;
+    const b = $("respecFixBtn");
+    b.disabled = true;
+    try {
+      const q = new URLSearchParams(respecScanned);
+      q.set("dry_run", "false");
+      const d = await campaignCall("/v1/cases/respec?" + q.toString());
+      renderRespecResult(d, true);
+      $("respecFixBtn").style.display = "none";
+      respecScanned = null;
+      showToast(`${d.moved} case${d.moved === 1 ? "" : "s"} moved`);
+      loadCases();
+      refresh();
+    } catch (e) {
+      $("respecResult").innerHTML = `<span style="font-size:12px;color:var(--bad)">move failed: ${esc(e.message || e.status || e)}</span>`;
     } finally {
       b.disabled = false;
     }

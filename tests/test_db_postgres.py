@@ -405,6 +405,46 @@ def test_a_declared_recipe_filters_the_lease_and_the_build_is_recorded():
 
 
 @scratch_only
+def test_a_case_moves_to_another_recipe_over_a_real_connection():
+    """respec_cases is new SQL on the production engine -- an IN over chunked
+    ids, a guarded UPDATE, a plain INSERT and JSON in an event's detail -- which
+    no SQLite test exercises.
+
+    Scratch only: the moved case's id is derived from its coordinates, so it
+    cannot carry this run's prefix and the shared teardown would never find it.
+    It is removed here instead, and never written to the campaign's database."""
+    conn = fresh_conn()
+    old_recipe, new_recipe = prefix("recipe-v4"), prefix("recipe-v5")
+    lat, lon = -45.12345, 170.54321
+    old = prefix("respec-old")
+    new = ids.case_id(lat, lon, new_recipe)
+    db.add_cases(conn, [{"case_id": old, "spec": {"lat": lat, "lon": lon, "recipe": old_recipe},
+                         "recipe": old_recipe, "city_cluster": prefix("city-r"), "split": "train",
+                         "labels": {"campaign": "pgtest"}}])
+    w = prefix("w-respec")
+    assert db.lease(conn, w, 1, 900, build="1.0+pgtest", recipes=[new_recipe]) == []
+    try:
+        out = db.respec_cases(conn, new_recipe, case_ids=[old], dry_run=False, by="pgtest",
+                              reason="scratch")
+        assert out["moved"] == 1 and out["examples"][0]["new_case_id"] == new
+
+        other = fresh_conn()
+        assert other.execute("SELECT state FROM cases WHERE case_id = ?",
+                             (old,)).fetchone()["state"] == "quarantined"
+        got = db.lease(other, w, 1, 900, build="1.0+pgtest", recipes=[new_recipe])
+        assert [g.case_id for g in got] == [new]
+        moved = db.get_case(other, new)
+        assert moved["moved_from"]["case_id"] == old and moved["labels"] == {"campaign": "pgtest"}
+        assert db.get_case(other, old)["moved_to"]["case_id"] == new
+        assert db.respec_cases(conn, new_recipe, case_ids=[old], dry_run=False)["moved"] == 0
+    finally:
+        tidy = fresh_conn()
+        tidy.execute("DELETE FROM events WHERE case_id = ?", (new,))
+        tidy.execute("DELETE FROM case_labels WHERE case_id IN (?, ?)", (new, old))
+        tidy.execute("DELETE FROM cases WHERE case_id = ?", (new,))
+
+
+@scratch_only
 def test_the_release_catalog_and_target_roundtrip():
     """Fleet-wide settings: only ever written against a throwaway Postgres -- the
     main-only job points this file at the LIVE campaign database, and a test must
