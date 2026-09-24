@@ -42,14 +42,20 @@ def make_db(tmp_path, n=3):
 
 
 def quarantine_one(conn, worker_id="ws-01", error="Docker daemon is not running"):
-    """Burn a case's attempts exactly as the field failure did: fail it retryably
-    until the broker gives up on it."""
+    """Burn a case's attempts as the field failure did: one machine failing it
+    retryably until the broker gives up on it. The broker now hands a case a
+    machine just failed to a DIFFERENT machine first (db.FAIL_COOLDOWN_SECONDS),
+    so one broken node only gets the case back once each cooldown has passed --
+    the clock moves past it between attempts."""
     case_id = None
     for _ in range(3):
-        leased = db.lease(conn, worker_id, 1, 900)
+        now = conn.execute("SELECT COALESCE(MAX(ts), 0) AS t FROM events").fetchone()["t"] \
+            + db.FAIL_COOLDOWN_SECONDS + 60
+        leased = db.lease(conn, worker_id, 1, 900, now=now)
         assert leased, "expected a case to lease"
+        assert case_id in (None, leased[0].case_id), "the same case, attempt after attempt"
         case_id = leased[0].case_id
-        db.fail(conn, leased[0].lease_id, error, retryable=True)
+        db.fail(conn, leased[0].lease_id, error, retryable=True, now=now + 60)
     row = conn.execute("SELECT state FROM cases WHERE case_id=?", (case_id,)).fetchone()
     assert dict(row)["state"] == "quarantined", "the fixture must reproduce the quarantine"
     return case_id

@@ -114,10 +114,12 @@ def test_a_case_page_says_how_long_each_stage_took_and_which_one_failed(conn):
     assert failed["failed_in"] == "solve" and failed["current"] is None
     assert failed["stages"][-1]["seconds"] == 1100
 
-    # The next attempt is its own: a resume starts at the mesh it kept.
-    again = db.lease(conn, "foam-1", now=T0 + 2000)[0]
-    db.heartbeat(conn, again.lease_id, detail="resuming", now=T0 + 2010)
-    db.heartbeat(conn, again.lease_id, detail="solve 2/8 dirs · iter 10/2000", now=T0 + 2100)
+    # The next attempt is its own: a resume starts at the mesh it kept. The same
+    # machine only gets a case it failed back once FAIL_COOLDOWN_SECONDS have passed.
+    t2 = T0 + 1500 + db.FAIL_COOLDOWN_SECONDS + 1
+    again = db.lease(conn, "foam-1", now=t2)[0]
+    db.heartbeat(conn, again.lease_id, detail="resuming", now=t2 + 10)
+    db.heartbeat(conn, again.lease_id, detail="solve 2/8 dirs · iter 10/2000", now=t2 + 100)
     second = db.get_case(conn, "c001")
     assert [(s["attempt"], s["stage"]) for s in second["stages"]][-2:] == [(2, "resume"), (2, "solve")]
 

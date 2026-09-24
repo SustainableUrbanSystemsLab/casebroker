@@ -162,7 +162,9 @@ def test_a_new_lease_records_its_first_line_even_when_it_repeats_the_last_attemp
     assert db.fail(conn, first.lease_id, "solve exited 1: FPE", retryable=True, now=t0 + 6 * 3600)
 
     t1 = t0 + 7 * 3600
-    second = db.lease(conn, "w1", 1, now=t1)[0]
+    # Another machine on the same old build, as the fleet now hands a failed case
+    # to a different one first -- it opens with the very same line.
+    second = db.lease(conn, "w2", 1, now=t1)[0]
     for k in range(5):
         assert db.heartbeat(conn, second.lease_id, 900, line, now=t1 + 60 + 300 * k)
 

@@ -87,6 +87,15 @@ fatal quarantined 173 perfectly good sites in under a minute.
 Note that a *systematic* retryable failure still exhausts `max_attempts` and
 quarantines. Retryable buys three chances, not immunity.
 
+**Three chances means three machines.** A machine that fails a case is not
+handed it again for `CASEBROKER_FAIL_COOLDOWN` (12 h). That applies to every
+worker on that host, and to a fresh lease and a resume alike, so the next
+attempt runs somewhere else. Until 2026-09-23, the failing worker asked for work
+at once and got the same case straight back. Every quarantine in the campaign
+had spent its three attempts on one machine within minutes, so a bad build or a
+leftover process read as a broken site. A refunded stop (`release`, the timeout
+refund) is exempt, because that machine holds the checkpoint.
+
 ---
 
 ## Worker

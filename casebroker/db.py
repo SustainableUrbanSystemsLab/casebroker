@@ -1300,6 +1300,30 @@ def _release_stale_leases(conn, now: int) -> int:
                "expired lease was not reclaimed within 48 hours", now)
     return len(rows)
 
+
+# A case a MACHINE just failed goes to a different machine first. A worker asks
+# for its next case the moment it reports a failure, and the failed case -- back
+# in pending with its own priority and case_id -- is first in the queue, so a
+# case's three attempts were three tries on ONE machine within minutes and the
+# second opinion they exist for never happened. On 2026-09-23 every quarantine
+# in the campaign had been spent that way: v2-00ed64225d4979d7 on cod-359-40-2
+# at 18:37, 18:44 and 18:51; v2-0057457805ddf4bf three times on cod-359-38
+# inside one minute, each lease meeting the files the one before it left;
+# v2-00427078fdfaa380 three times in six minutes on cod-358-21, then three more
+# in sixteen after a reset. A bad build, a leftover process or a machine that
+# cannot mesh a site read as a broken site. For this long after a failure, no
+# worker on that host is handed the case again -- fresh or as a resume -- while
+# any other machine can take it. Only a failure counts: a refunded stop is
+# recorded as 'released', and that is exactly the case a machine should get
+# back to continue its own checkpoint. A one-machine fleet still retries, later.
+FAIL_COOLDOWN_SECONDS = int(os.environ.get("CASEBROKER_FAIL_COOLDOWN", str(12 * 3600)))
+_RECENTLY_FAILED_HERE_SQL = (
+    " AND NOT EXISTS (SELECT 1 FROM events f WHERE f.case_id = cases.case_id"
+    " AND f.event IN ('failed', 'quarantined') AND f.ts > ?"
+    " AND (f.worker_id = ? OR f.worker_id IN"
+    "      (SELECT w.worker_id FROM workers w WHERE w.host = ?)))")
+
+
 @_locked
 def lease(conn, worker_id: str, count: int = 1,
           lease_seconds: int = 3600, splits: list[str] | None = None,
@@ -1352,6 +1376,8 @@ def lease(conn, worker_id: str, count: int = 1,
     if recipes:
         recipe_sql = " AND recipe IN (" + ",".join("?" for _ in recipes) + ")"
         recipe_params = list(recipes)
+    # Not a case this machine failed within FAIL_COOLDOWN_SECONDS (see there).
+    cooldown_params = [now - FAIL_COOLDOWN_SECONDS, worker_id, host]
 
     def claim(rows, resumed: bool) -> None:
         for row in rows:
@@ -1417,9 +1443,9 @@ def lease(conn, worker_id: str, count: int = 1,
             rows = conn.execute(
                 "SELECT case_id, spec, attempts, max_attempts, state, lease_worker"
                 " FROM cases WHERE case_id IN (" + placeholders + ")"
-                " AND " + own_only + recipe_sql +
+                " AND " + own_only + recipe_sql + _RECENTLY_FAILED_HERE_SQL +
                 " ORDER BY case_id ASC" + lock_clause,
-                [*ids, *own_params, *recipe_params],
+                [*ids, *own_params, *recipe_params, *cooldown_params],
             ).fetchall()
             claim(rows, resumed=True)
 
@@ -1432,6 +1458,7 @@ def lease(conn, worker_id: str, count: int = 1,
                 split_sql = " AND split IN (" + placeholders + ")"
                 params.extend(splits)
             params.extend(recipe_params)
+            params.extend(cooldown_params)
             params.append(remaining)
             rows = conn.execute(
                 "SELECT case_id, spec, attempts, max_attempts, state, lease_worker FROM cases"
@@ -1444,7 +1471,7 @@ def lease(conn, worker_id: str, count: int = 1,
                 "        OR (state = 'leased' AND (lease_expires < ?"
                 "            OR (leased_at IS NOT NULL AND leased_at < ?"
                 "                AND " + _LAST_PROGRESS_SQL + " < ?))))"
-                + split_sql + recipe_sql +
+                + split_sql + recipe_sql + _RECENTLY_FAILED_HERE_SQL +
                 # Every worker targets the same "lowest" rows. That is contention by
                 # design, not by accident: under SKIP LOCKED a locked row is simply
                 # skipped, and case_id is a hash so the tiebreak is effectively random
