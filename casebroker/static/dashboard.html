@@ -1614,8 +1614,6 @@
             <th>First seen</th>
             <th>Last seen</th>
             <th>Working on</th>
-            <th class="num">Done</th>
-            <th class="num">Failed</th>
           </tr>
         </thead>
         <tbody id="workersBody"></tbody>
@@ -4205,7 +4203,7 @@
     const WORKER_COLUMNS = [
     ["Worker ID", "worker_id"], ["Host", "host"], ["Cluster", "cluster"],
     ["Build", "build"], ["Status", "last_seen"], ["First seen", "first_seen"], ["Last seen", "last_seen"],
-    ["Working on", "current_case"], ["Done", "cases_done"], ["Failed", "cases_failed"],
+    ["Working on", "current_case"],
   ];
 
   /// Sorts the WHOLE fleet: /v1/status hands over every worker seen in 24 h, so
@@ -4226,8 +4224,7 @@
 
   function renderWorkersHead() {
     $("workersHead").innerHTML = "<tr>" + WORKER_COLUMNS
-      .map(([label, key], i) => sortableTh(label, key, workerSort.key, workerSort.dir, "workers",
-                                           i >= 8 ? "num" : ""))
+      .map(([label, key]) => sortableTh(label, key, workerSort.key, workerSort.dir, "workers", ""))
       .join("") + "</tr>";
     wireSorting("workersHead", (key) => {
       if (workerSort.key === key) workerSort.dir = workerSort.dir === "asc" ? "desc" : "asc";
@@ -4280,8 +4277,6 @@
                     + etaLine(w.current_eta)
                     + `</div>`
                   : "—"}</td>
-            <td class="num" style="font-weight:600;">${(w.cases_done || 0).toLocaleString()}</td>
-            <td class="num${(w.cases_failed || 0) > 0 ? ' alert' : ''}">${(w.cases_failed || 0).toLocaleString()}</td>
           </tr>`;
       }).join("");
     } else {
