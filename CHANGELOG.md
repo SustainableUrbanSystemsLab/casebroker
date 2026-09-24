@@ -8,6 +8,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.17.17] - 2026-09-23
+
+### Fixed
+- A case whose lease was stale-released (48 h unreclaimed) no longer shows its
+  dead run's stage as still running: the stage ends at the last line its worker
+  sent.
+
 ## [0.17.16] - 2026-09-23
 
 ## [0.17.15] - 2026-09-23
