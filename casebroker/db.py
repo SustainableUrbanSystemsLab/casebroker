@@ -3151,6 +3151,9 @@ def get_case(conn, case_id: str) -> dict[str, Any] | None:
     trail = [dict(e) for e in conn.execute(
         "SELECT ts, event, detail FROM events WHERE case_id = ? ORDER BY id", (case_id,)).fetchall()]
     out.update(_stages.from_events(trail, _now()))
+    # Which case this one was moved to another recipe as, or from (respec_cases):
+    # a parked case says where its site went, and the new one where it came from.
+    out.update(_respec_links(trail, case_id))
     # Same estimate the Workers table shows for this case's own lease -- the
     # detail card had the age of the last line but not when the solve should
     # end, which is the more useful of the two once a direction is a day in.
@@ -3624,6 +3627,216 @@ def reopen_cases(conn, *, error_contains: str | None = None,
         conn.execute("ROLLBACK")
         raise
     out["reopened"] = len(to_reopen)
+    return out
+
+
+def _respec_links(trail: list[dict[str, Any]], case_id: str) -> dict[str, Any]:
+    """`moved_from` / `moved_to` for one case, read off its 'respec' events.
+
+    Both cases of a move carry the same event, so which side this case was on is
+    read from the ids in it. A case moved twice (v4 -> v5 -> v6) was moved TO
+    the last one: the latest link wins.
+    """
+    links: dict[str, Any] = {"moved_from": None, "moved_to": None}
+    for e in trail:
+        if e.get("event") != "respec":
+            continue
+        try:
+            d = json.loads(e.get("detail") or "")
+        except ValueError:
+            continue
+        if not isinstance(d, dict):
+            continue
+        said = {"at": e.get("ts"), "by": d.get("by"), "reason": d.get("reason")}
+        if d.get("to") == case_id:
+            links["moved_from"] = {"case_id": d.get("from"), "recipe": d.get("from_recipe"), **said}
+        elif d.get("from") == case_id:
+            links["moved_to"] = {"case_id": d.get("to"), "recipe": d.get("to_recipe"), **said}
+    return links
+
+
+@_locked
+def respec_cases(conn, recipe: str, *, case_ids: list[str] | None = None,
+                 error_contains: str | None = None, reason: str | None = None,
+                 by: str | None = None, dry_run: bool = True, limit: int = 50,
+                 now: int | None = None) -> dict[str, Any]:
+    """Move cases to another recipe: each site is admitted again under ``recipe``
+    and the case it came from is parked, so nothing spends attempts on it again.
+
+    A NEW case, never an edited one. A case id is a function of the site and the
+    recipe (DOMAIN.md, invariant 1), so a re-spec coexists with its original, and
+    that is exactly what makes the move safe:
+
+    * a node that does not declare ``recipe`` is never handed the new case -- the
+      lease filters on the exact recipe -- so a site the old recipe cannot build
+      (v2-00ed64225d4979d7: v4's snappy aborts in its post-snap merge, every
+      machine, every rank count) stops costing attempts on nodes that only know
+      the old one;
+    * a node's scratch and its resume list are keyed by case id, so no machine can
+      resume the old recipe's mesh as the new case -- the failure that cost
+      v2-00427078fdfaa380 three attempts after a reopen.
+
+    The new case is what ``POST /v1/cases`` makes of the same site and recipe: the
+    old spec with its recipe replaced, the same city, LCZ, split, priority, attempt
+    budget and labels. Posting the site under the new recipe later is therefore a
+    no-op, and one that was posted already is linked rather than duplicated.
+
+    The old case goes to quarantine, which already means "not going to run, and
+    the trail says why", with a 'quarantined' event naming the new case. That
+    event is what reopen matches on, so reopening by the error that got a case
+    moved cannot quietly put the old recipe back in the queue beside the new one;
+    by id it still can, on purpose. Its ``last_error`` is cleared: the case needs
+    nobody now, and ``/v1/errors`` is the list of what does. Both cases get a
+    'respec' event, which ``get_case`` turns into ``moved_to`` / ``moved_from``.
+
+    Selected by ``case_ids``, by ``error_contains`` (the case's LAST failure, as
+    reopen matches it), or both as an AND; one of them is required. A leased case
+    is skipped (a node is solving it: cancel it first -- nothing here releases a
+    live lease), a done one too (its result stands; post the site under the new
+    recipe for a second run), and so is one already on ``recipe`` or already
+    moved to it. Each skip says why.
+
+    A recipe no worker has ever declared and no case carries raises ValueError:
+    that is a typo, and the cases would wait for a node that does not exist.
+    ``known_to_builds`` in the answer names the builds that do declare it.
+
+    ``dry_run`` defaults to TRUE and ``limit`` bounds the WRITES, as in reopen.
+    """
+    from . import ids as _ids
+
+    recipe = (recipe or "").strip()
+    if not recipe:
+        raise ValueError("name the recipe to move the cases to")
+    if not case_ids and not error_contains:
+        raise ValueError("name the cases to move: case_id, error_contains, or both")
+    limit = max(1, min(int(limit), 5000))
+
+    knows, _queue = _recipe_knowledge(conn)
+    declared: set[str] = set()
+    for r in conn.execute("SELECT recipes FROM workers WHERE recipes IS NOT NULL").fetchall():
+        try:
+            names = json.loads(r["recipes"])
+        except (TypeError, ValueError):
+            continue
+        if isinstance(names, list):
+            declared.update(str(n) for n in names)
+    carried = conn.execute("SELECT 1 FROM cases WHERE recipe = ? LIMIT 1", (recipe,)).fetchone()
+    if recipe not in declared and carried is None:
+        raise ValueError(
+            "no worker has declared recipe %r and no case carries it -- a typo? Declared: %s"
+            % (recipe, ", ".join(sorted(declared)) or "none"))
+
+    needle = (error_contains or "").lower()
+    if case_ids:
+        wanted = list(dict.fromkeys(case_ids))
+    else:
+        # By failure text alone: the cases whose LAST failure says it, found in
+        # one pass over the failure events rather than a query per case in the
+        # pool -- this holds the lock every lease and heartbeat waits on, and the
+        # pool is thousands of cases on a database across a network.
+        wanted = [r["case_id"] for r in conn.execute(
+            "SELECT e.case_id, e.detail FROM events e JOIN (SELECT case_id, MAX(id) AS id"
+            " FROM events WHERE event IN ('failed', 'quarantined') GROUP BY case_id) f"
+            " ON f.id = e.id").fetchall() if needle in (r["detail"] or "").lower()]
+    cols = ("SELECT case_id, spec, recipe, state, lease_worker, city_cluster, lcz, split,"
+            " priority, max_attempts FROM cases")
+    rows: list[dict[str, Any]] = []
+    for i in range(0, len(wanted), 500):
+        part = wanted[i:i + 500]
+        rows.extend(dict(r) for r in conn.execute(
+            cols + " WHERE case_id IN (" + ",".join("?" for _ in part) + ")", part).fetchall())
+    if not case_ids:
+        # Only what the queue holds or has parked: a done case's old failure says
+        # nothing about it now.
+        rows = [r for r in rows if r["state"] in ("pending", "leased", "quarantined")]
+    rows.sort(key=lambda r: r["case_id"])
+
+    movable: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    for row in rows:
+        cid = row["case_id"]
+        if case_ids and needle:
+            last = conn.execute(
+                "SELECT detail FROM events WHERE case_id=? AND event IN ('failed', 'quarantined')"
+                " ORDER BY id DESC LIMIT 1", (cid,)).fetchone()
+            if needle not in ((dict(last)["detail"] if last else None) or "").lower():
+                continue
+        spec = row["spec"]
+        if isinstance(spec, str):
+            spec = json.loads(spec)
+        lat, lon = spec.get("lat"), spec.get("lon")
+        why = None
+        if row["recipe"] == recipe:
+            why = "already on %s" % recipe
+        elif row["state"] == "leased":
+            why = "leased to %s: a node is working on it -- cancel it first" % row["lease_worker"]
+        elif row["state"] == "done":
+            why = "done: its result stands -- post the site under %s for a second run" % recipe
+        elif lat is None or lon is None:
+            why = "its spec has no coordinates to derive the new case from"
+        new_id = None if why else _ids.case_id(float(lat), float(lon), recipe)
+        if new_id and row["state"] == "quarantined":
+            trail = [dict(e) for e in conn.execute(
+                "SELECT ts, event, detail FROM events WHERE case_id=? AND event='respec'"
+                " ORDER BY id", (cid,)).fetchall()]
+            if (_respec_links(trail, cid)["moved_to"] or {}).get("case_id") == new_id:
+                why = "already moved to %s as %s" % (recipe, new_id)
+        if why:
+            skipped.append({"case_id": cid, "state": row["state"], "recipe": row["recipe"], "why": why})
+            continue
+        exists = conn.execute("SELECT 1 FROM cases WHERE case_id=?", (new_id,)).fetchone() is not None
+        movable.append({**row, "spec": spec, "new_case_id": new_id, "new_exists": exists})
+
+    to_move = movable[:limit]
+    shown = ("case_id", "state", "recipe", "new_case_id", "new_exists")
+    out: dict[str, Any] = {
+        "recipe": recipe, "known_to_builds": sorted(b for b, n in knows.items() if recipe in n),
+        "matched": len(movable), "moved": 0, "capped": len(movable) > len(to_move),
+        "dry_run": dry_run,
+        "examples": [{k: m[k] for k in shown} for m in movable[:limit]],
+        "skipped": skipped[:limit], "skipped_total": len(skipped)}
+    if dry_run or not to_move:
+        return out
+
+    now = now or _now()
+    # The same row add_cases writes for this site and recipe.
+    insert_sql = ("INSERT INTO cases (case_id, spec, recipe, city_cluster, lcz, split, priority,"
+                  " max_attempts, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)")
+    moved = 0
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        for m in to_move:
+            old, new = m["case_id"], m["new_case_id"]
+            # Guarded on the state it was read in: a case leased since the scan
+            # belongs to its node now, and is left to it.
+            parked = conn.execute(
+                "UPDATE cases SET state='quarantined', last_error=NULL, updated_at=?"
+                " WHERE case_id=? AND state IN ('pending', 'quarantined')", (now, old)).rowcount
+            if not parked:
+                continue
+            if conn.execute("SELECT 1 FROM cases WHERE case_id=?", (new,)).fetchone() is None:
+                spec = dict(m["spec"], recipe=recipe)
+                conn.execute(insert_sql, (new, json.dumps(spec, sort_keys=True), recipe,
+                                          m["city_cluster"], m["lcz"], m["split"], m["priority"],
+                                          m["max_attempts"], now, now))
+                for lab in conn.execute("SELECT key, value FROM case_labels WHERE case_id=?",
+                                        (old,)).fetchall():
+                    conn.execute("INSERT INTO case_labels(case_id, key, value) VALUES (?,?,?)",
+                                 (new, lab["key"], lab["value"]))
+                _event(conn, new, None, "created", recipe, now)
+            link = json.dumps({"from": old, "to": new, "from_recipe": m["recipe"],
+                               "to_recipe": recipe, "by": by, "reason": reason}, sort_keys=True)
+            _event(conn, new, None, "respec", link, now)
+            _event(conn, old, None, "respec", link, now)
+            _event(conn, old, None, "quarantined",
+                   "moved to %s as %s%s%s" % (recipe, new, (" by " + by) if by else "",
+                                              (": " + reason) if reason else ""), now)
+            moved += 1
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    out["moved"] = moved
     return out
 
 

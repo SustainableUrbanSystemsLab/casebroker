@@ -1494,6 +1494,44 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         return db.reopen_cases(conn, error_contains=error_contains, case_ids=case_id,
                                dry_run=dry_run, limit=limit)
 
+    @app.post("/v1/cases/respec", dependencies=[WriteAuth])
+    def respec_cases(request: Request, recipe: str = Query(..., min_length=1, max_length=128),
+                     error_contains: str | None = Query(None, max_length=300),
+                     reason: str | None = Query(None, max_length=300),
+                     dry_run: bool = True, limit: int = 50,
+                     case_id: list[str] | None = Query(None)) -> dict[str, Any]:
+        """Move cases to another recipe, so the nodes that cannot build the old
+        one stop spending attempts on them.
+
+        Each site is admitted again under `recipe` -- a NEW case, since a case id
+        is a function of site and recipe -- and the case it came from is parked in
+        quarantine with a pointer to it. A node is handed only the recipes it
+        declares, so the new case waits for one that knows the new recipe; and
+        because it has a new id, no machine can resume the old recipe's mesh as
+        it. `GET /v1/cases/{id}` shows the link both ways (`moved_to`,
+        `moved_from`).
+
+        Selection is reopen's: `case_id` (repeatable), `error_contains` (the
+        case's last failure), or both. A leased case is skipped -- cancel it
+        first; nothing here releases a live lease -- and so is a done one, whose
+        result stands. A recipe no worker has declared and no case carries is
+        refused as a typo; `known_to_builds` names the builds that declare it.
+
+        `dry_run` defaults to TRUE and `limit` bounds how many are moved, as for
+        reopen. Who moved them, and `reason`, go in both cases' trails.
+        """
+        # Named when the credential has a name: an account, or a machine's own
+        # token. A shared env token has none, and the trail then says nothing
+        # rather than something untrue.
+        user = _session_principal(request)
+        machine = None if user else _machine_principal(request)
+        by = user["username"] if user else (machine["name"] if machine else None)
+        try:
+            return db.respec_cases(conn, recipe, case_ids=case_id, error_contains=error_contains,
+                                   reason=reason, by=by, dry_run=dry_run, limit=limit)
+        except ValueError as e:
+            raise HTTPException(422, str(e))
+
     @app.delete("/v1/cases", dependencies=[PurgeAuth])
     def purge_cases(expect: int | None = None, recipe: str | None = None,
                     state: str | None = None, dry_run: bool = True) -> dict[str, Any]:
