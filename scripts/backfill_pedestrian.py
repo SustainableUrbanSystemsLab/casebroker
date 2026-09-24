@@ -6,7 +6,9 @@ ground.stl, which holds no ground under the core; the Windows node never
 sampled at all). But every archive keeps the mesh and the reconstructed last
 time step of every direction, and that is all the sample needs:
 
-  1. extract the archive (mesh*/constant/polyMesh, case_*/<latest>/, system/);
+  1. extract the archive (mesh*/constant/polyMesh, case_*/<latest>/, system/),
+     and the parts beside it when the node shipped the case in parts
+     (<case>.mesh.tar.gz, <case>.case_NNN.tar.gz; casebroker/archives.py);
   2. find the terrain SHEET: terrain.stl in the archive when the runner put it
      there, otherwise regenerate it with `eddy3d-cli site-geometry` from the
      archived coordinates -- and refuse unless the regenerated report agrees
@@ -36,13 +38,15 @@ import os
 import shutil
 import subprocess
 import sys
-import tarfile
 import tempfile
 import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "runner" / "lib"))
+sys.path.insert(0, str(HERE.parent))
+
+from casebroker import archives  # noqa: E402
 
 import ped_field  # noqa: E402
 import ped_grid  # noqa: E402
@@ -59,17 +63,16 @@ def log(msg: str) -> None:
 
 
 def extract(archive: Path, into: Path) -> Path:
-    """The archive's single top-level <case_id>/ folder, extracted under `into`."""
-    into.mkdir(parents=True, exist_ok=True)
-    # tarfile, not a tar binary: Git's GNU tar on Windows reads "E:\..." as a
-    # remote host and mangles backslashed destinations, and bsdtar is not
-    # everywhere. The "data" filter refuses absolute paths and links out of `into`.
-    with tarfile.open(archive, "r:gz") as tf:
-        tf.extractall(into, filter="data")
+    """The case's <case_id>/ folder, extracted under `into`: the archive, and the
+    parts shipped beside it while the case ran (the archive last, so its copies win).
+    tarfile, not a tar binary: Git's GNU tar on Windows reads "E:\\..." as a remote
+    host and mangles backslashed destinations, and bsdtar is not everywhere."""
+    case_id = archive.name.split(".")[0]
+    root = archives.extract_case(archive.parent, case_id, into)
     tops = [p for p in into.iterdir() if p.is_dir()]
-    if len(tops) != 1:
-        raise SystemExit(f"{archive}: expected one top-level folder, found {[p.name for p in tops]}")
-    return tops[0]
+    if len(tops) != 1 or not root.is_dir():
+        raise SystemExit(f"{archive}: expected one top-level folder {case_id}/, found {[p.name for p in tops]}")
+    return root
 
 
 def study_dir(root: Path, case_id: str) -> Path:
@@ -212,7 +215,7 @@ def main() -> int:
     ap.add_argument("--keep", action="store_true", help="keep the extracted scratch")
     a = ap.parse_args()
 
-    case_id = a.archive.name.split(".tar")[0]
+    case_id = a.archive.name.split(".")[0]
     work = Path(a.work or tempfile.mkdtemp(prefix=f"ped-{case_id}-"))
     t0 = time.time()
     try:

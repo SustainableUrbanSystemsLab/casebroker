@@ -8,7 +8,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
-## [0.19.0] - 2026-09-24
+## [0.21.0] - 2026-09-24
 
 ### Added
 - **Move cases to another recipe**: `POST /v1/cases/respec`, and a card beside Reopen
@@ -26,6 +26,48 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
   - A leased case is left to its node, and a done case keeps its result. A recipe
     nobody declares is refused as a typo.
   - `dry_run` by default, and `limit` bounds the writes, as for reopen.
+
+## [0.20.1] - 2026-09-24
+
+### Fixed
+- **"Copy all errors" shows the stops the broker forgave, and a machine giving a case
+  back.** The per-attempt history listed failures and quarantines only, so a refunded
+  time-limit stop and a node's "node cannot run cases" release left no trace in it. On
+  2026-09-24, `v2-000c178c579bf034`'s snappy ran out of its 120 minutes on `cod-358-21`
+  five times in ten hours. Three of those stops were refunded, and the export listed one
+  failure on that machine: a loop that read as a single timeout. Both kinds of release now
+  appear in the history, as `released`, with the reason the broker stored. An ordinary
+  release, such as a preemption or a node stopping for an update, stays out.
+
+## [0.20.0] - 2026-09-24
+
+### Added
+- **A case outlives the machine solving it.** Nodes report every part they ship
+  (`POST /v1/parts`: the mesh, and each direction with the mesh it was solved on and its
+  verdict), and the next lease of the case carries them (`parts`). The node that takes it over
+  continues on the same mesh, fetched back from the Syncthing master, and solves only the
+  directions not yet shipped.
+  - One case is never answered on two meshes: a direction reported against another mesh is
+    refused, and a new mesh drops the old one's parts (`parts_reset` event).
+  - `GET /v1/syncthing` lists `continuations`, the meshes the master should offer through its
+    `<folder>-mesh` folder right now.
+  - A lease with `can_continue: false` (a node without Syncthing) is not handed a case that has a
+    mesh on record.
+  - `GET /v1/cases/{id}/parts`, and `DELETE` (admin) / `casebroker parts reset <case>` for a
+    master that is gone for good.
+
+## [0.19.0] - 2026-09-24
+
+### Added
+- **Cases shipped in parts read back as one.** An Eddy3D node now ships the mesh the moment
+  meshing passes, and each direction the moment it is finished, instead of holding everything
+  until the last direction (COD-359-38 was switched off with 7 of 32 directions solved, and they
+  were lost). `casebroker.archives` finds a case's parts beside its archive, unpacks them together
+  and says whether a case is complete, waiting for parts, or partial.
+  - `casebroker archives <done>` lists every case in the master's done folder with its state;
+    `--state partial` shows what stopped nodes left behind, `--verify` hashes each part against
+    the manifest.
+  - `scripts/backfill_pedestrian.py` unpacks a case's parts along with its archive.
 
 ## [0.18.0] - 2026-09-23
 

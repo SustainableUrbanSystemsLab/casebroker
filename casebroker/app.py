@@ -208,6 +208,11 @@ class LeaseIn(BaseModel):
     # (GET /v1/syncthing). Optional and additive like the rest; one that is not a
     # device ID is ignored rather than refused -- a lease must never fail over it.
     syncthing_id: str | None = Field(default=None, max_length=80)
+    # Whether the node can fetch a mesh back from the Syncthing master and so
+    # continue a case another node started (db.report_part). False: it is not
+    # handed such a case. Absent (a node from before parts): handed anything, as
+    # before -- it re-meshes, and reports no parts.
+    can_continue: bool | None = None
 
 
 class SyncthingIn(BaseModel):
@@ -270,6 +275,27 @@ class LeaseOut(BaseModel):
     expires_at: int
     attempt: int
     spec: dict[str, Any]
+    # What earlier attempts already shipped to the Syncthing master (db.report_part):
+    # the mesh to continue from and the directions not to solve again. Empty for a
+    # case nobody has shipped anything of; a node from before parts ignores it.
+    parts: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class PartIn(BaseModel):
+    """One archive a node shipped to the master while the case ran; see
+    db.report_part."""
+    lease_id: str = Field(min_length=1, max_length=128)
+    case_id: str = Field(min_length=1, max_length=128)
+    part: str = Field(min_length=1, max_length=40)
+    archive: str = Field(min_length=1, max_length=210)
+    sha256: str = Field(min_length=64, max_length=64)
+    bytes: int | None = Field(default=None, ge=0)
+    # The mesh a direction was solved on; ignored for the mesh itself.
+    mesh_sha256: str | None = Field(default=None, min_length=64, max_length=64)
+    # A direction's convergence entry, as the node's gate writes it into the
+    # manifest -- so the node that finishes the case can say whether directions
+    # solved elsewhere converged. Small; bounded like telemetry.
+    verdict: dict[str, Any] | None = None
 
 
 class HeartbeatIn(BaseModel):
@@ -1596,9 +1622,9 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
                        resume_case_ids=body.resume_case_ids,
                        build=body.build, version=body.version,
                        platform=body.platform, recipes=body.recipes,
-                       syncthing_id=body.syncthing_id)
+                       syncthing_id=body.syncthing_id, can_continue=body.can_continue)
         return [LeaseOut(case_id=g.case_id, lease_id=g.lease_id, expires_at=g.expires_at,
-                         attempt=g.attempt, spec=g.spec) for g in got]
+                         attempt=g.attempt, spec=g.spec, parts=list(g.parts)) for g in got]
 
 
     # -- node releases -----------------------------------------------------
@@ -1840,6 +1866,46 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
                                      f"{db.TELEMETRY_MAX_DEPTH} levels deep")
         raise HTTPException(422, "kind must match ^[a-z][a-z0-9_]{0,31}$ and data must be an object")
 
+
+    @app.post("/v1/parts", dependencies=[WriteAuth])
+    def report_part(body: PartIn, request: Request) -> dict[str, bool]:
+        """A part of the case the node shipped to the Syncthing master: the mesh
+        once meshing passed, or one finished direction. See db.report_part.
+
+        409 when the lease is not this case's current one or not this
+        credential's (as /v1/telemetry), and when a direction was solved on a mesh
+        that is no longer the case's -- in both, the node stops reporting for
+        this case. Never 404: a node reads that as "a broker from before parts"."""
+        machine = _machine_principal(request)
+        worker_ok = None
+        if machine:
+            name = machine["name"]
+            worker_ok = lambda worker: bool(worker) and _may_lease_as(name, worker)  # noqa: E731
+        outcome = db.report_part(conn, body.lease_id, body.case_id, body.part, body.archive,
+                                 body.sha256, body.bytes, body.mesh_sha256, verdict=body.verdict,
+                                 worker_ok=worker_ok)
+        if outcome == "ok":
+            return {"ok": True}
+        if outcome == "gone":
+            raise HTTPException(409, "lease expired or superseded, or not this case's, or not "
+                                     "this credential's; stop reporting parts for this case")
+        if outcome == "stale_mesh":
+            raise HTTPException(409, "this direction was solved on a mesh that is no longer "
+                                     "the case's; it is not kept")
+        raise HTTPException(422, "part must be 'mesh' or 'case_<dir>', archive a .tar.gz "
+                                 "name, and sha256/mesh_sha256 64 hex characters")
+
+    @app.get("/v1/cases/{case_id}/parts", dependencies=[ReadAuth])
+    def get_parts(case_id: str) -> dict[str, Any]:
+        """What of a case already reached the master, mesh first."""
+        return {"case_id": case_id, "parts": db.case_parts(conn, case_id)}
+
+    @app.delete("/v1/cases/{case_id}/parts")
+    def delete_parts(case_id: str, user=AdminAuth) -> dict[str, Any]:
+        """Forget what a case shipped, so the next node meshes it afresh -- for a
+        master that is gone for good, since a node will not solve a case on a mesh
+        it cannot fetch."""
+        return {"case_id": case_id, "dropped": db.reset_parts(conn, case_id, by=user["username"])}
 
     @app.get("/v1/dataset", dependencies=[ReadAuth])
     def dataset_stats() -> dict[str, Any]:
