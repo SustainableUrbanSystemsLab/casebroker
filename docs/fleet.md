@@ -147,6 +147,40 @@ link to `mesh/`); relink it to open a case in ParaView. The broker's
 `result_uri` is the archive's path on the machine that made it, and
 `result_sha256`/`result_bytes` are the archive's.
 
+### Shipped in parts (Eddy3D node)
+
+An Eddy3D node no longer holds a case until its last direction is solved. On
+2026-09-24 COD-359-38 was switched off with 7 of 32 directions of
+v2-00e76e426bea6d52 solved, and all of them were lost with it. The node now
+ships each piece of a case the moment it is done (Eddy3D `CaseParts`):
+
+| when | file in `$WIND_DONE` |
+| --- | --- |
+| meshing passed | `<case>.mesh.tar.gz`: mesh, `cfg.json`, `spec.json`, site JSON, terrain sheet |
+| a direction is finished | `<case>.case_NNN.tar.gz`: its latest time, `system/`, `postProcessing/`, logs |
+| the case is done | `<case>.tar.gz`: `manifest.json` (its `parts` name every part with its sha256), the rest |
+
+All of them unpack under the same `<case_id>/`, and unpacked together, the case
+archive last, they are exactly the single archive above. The broker's
+`result_uri` is still `<case>.tar.gz`. On the master:
+
+```
+uv run casebroker archives E:/wind/done               # every case: complete / waiting / partial
+uv run casebroker archives E:/wind/done --state partial   # what stopped nodes left behind
+uv run casebroker archives E:/wind/done --verify      # also hash every part against its manifest
+```
+
+- **complete**: the case archive and every part its manifest names;
+- **waiting**: the case archive arrived before some of its parts (Syncthing does
+  not deliver in write order);
+- **partial**: parts and no case archive -- the node stopped, or is still solving.
+  The mesh and the finished directions are here and unpack
+  (`casebroker.archives.extract_case`); `scripts/backfill_pedestrian.py` takes
+  any of a case's archives and unpacks them all.
+
+Runner-script archives and nodes from before parts write only `<case>.tar.gz`,
+which reads as complete, as before.
+
 ## The pedestrian field
 
 U at 1.5 m and 1.75 m above grade, on a regular 2 m grid over the 1008 m core
