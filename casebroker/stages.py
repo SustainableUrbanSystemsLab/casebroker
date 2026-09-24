@@ -65,14 +65,17 @@ def from_events(events: list[dict[str, Any]], now: int) -> dict[str, Any]:
 
     Each segment: ``stage``, ``started_at``, ``ended_at`` (None while open),
     ``seconds``, the last ``detail`` seen in it, and the ``attempt`` it belongs
-    to -- a lease or a resume starts one; done, failed, quarantined, released
-    and cancelled end it. ``failed_in`` is the stage that was open when the
+    to -- a lease or a resume starts one; done, failed, quarantined, released,
+    cancelled and stale-released end it. A stale release (db._release_stale_leases) ends the
+    segment at the last thing its worker said, not at the sweep 48 h later: the
+    run stopped when the machine went silent. ``failed_in`` is the stage that was open when the
     most recent failure landed, ``current`` the open one of a running case.
     """
     segments: list[dict[str, Any]] = []
     open_seg: dict[str, Any] | None = None
     attempt = 0
     failed_in: str | None = None
+    last_ts: int | None = None
 
     def close(ts: int) -> None:
         nonlocal open_seg
@@ -83,6 +86,8 @@ def from_events(events: list[dict[str, Any]], now: int) -> dict[str, Any]:
 
     for e in events:
         kind, ts, detail = e["event"], e["ts"], e.get("detail")
+        # Before any branch: the progress branch `continue`s on a repeated line.
+        said_last, last_ts = last_ts, ts
         if kind in ("leased", "resumed"):
             close(ts)
             attempt += 1
@@ -104,6 +109,8 @@ def from_events(events: list[dict[str, Any]], now: int) -> dict[str, Any]:
             close(ts)
         elif kind in ("done", "released", "cancelled"):
             close(ts)
+        elif kind == "stale-released":
+            close(said_last if said_last is not None else ts)
     current = open_seg["stage"] if open_seg is not None else None
     if open_seg is not None:
         open_seg["seconds"] = max(0, now - open_seg["started_at"])
