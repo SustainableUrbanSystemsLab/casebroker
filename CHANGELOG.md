@@ -8,6 +8,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-09-24
+
+### Added
+- **A case outlives the machine solving it.** Nodes report every part they ship
+  (`POST /v1/parts`: the mesh, and each direction with the mesh it was solved on and its
+  verdict), and the next lease of the case carries them (`parts`). The node that takes it over
+  continues on the same mesh, fetched back from the Syncthing master, and solves only the
+  directions not yet shipped.
+  - One case is never answered on two meshes: a direction reported against another mesh is
+    refused, and a new mesh drops the old one's parts (`parts_reset` event).
+  - `GET /v1/syncthing` lists `continuations`, the meshes the master should offer through its
+    `<folder>-mesh` folder right now.
+  - A lease with `can_continue: false` (a node without Syncthing) is not handed a case that has a
+    mesh on record.
+  - `GET /v1/cases/{id}/parts`, and `DELETE` (admin) / `casebroker parts reset <case>` for a
+    master that is gone for good.
+
 ## [0.19.0] - 2026-09-24
 
 ### Added

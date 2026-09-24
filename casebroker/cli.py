@@ -882,6 +882,24 @@ def cmd_release_rollback(args) -> int:
                        "rolled back" + (", and blocked the build left" if args.block else ""))
 
 
+def cmd_parts_reset(args) -> int:
+    """Forget what a case shipped to the master, so the next node meshes it afresh.
+    Only for a master that is gone for good: a node does not solve a case on a mesh
+    it cannot fetch, and waits for it instead."""
+    opener = _admin_session(args)
+    if opener is None:
+        return 1
+    try:
+        status, got = _call(opener, args.broker, "DELETE", "/v1/cases/%s/parts" % args.case_id)
+        if status != 200:
+            print("refused: %s" % got.get("detail", status), file=sys.stderr)
+            return 1
+        print("%s: dropped %d part(s); the next node meshes it afresh" % (args.case_id, got["dropped"]))
+    finally:
+        _call(opener, args.broker, "POST", "/v1/auth/logout")
+    return 0
+
+
 def cmd_repro(args) -> int:
     from . import repro
     token = _resolve_token(args.token, "write")
@@ -1158,6 +1176,15 @@ def main(argv: list[str] | None = None) -> int:
     rb.add_argument("--block", action="store_true",
                     help="also refuse the current target to every node at once (the kill switch)")
     rb.set_defaults(func=cmd_release_rollback)
+
+    pt = sub.add_parser("parts", help="what of a case already reached the Syncthing master "
+                                      "(mesh, finished directions)").add_subparsers(
+        dest="parts_cmd", required=True)
+    pr = _release_admin(pt.add_parser(
+        "reset", help="forget a case's shipped parts so the next node meshes it afresh "
+                      "(only when the master holding its mesh is gone for good)"))
+    pr.add_argument("case_id")
+    pr.set_defaults(func=cmd_parts_reset)
 
     rls = rl.add_parser("list", help="the catalog, the target and where the fleet is")
     rls.add_argument("--broker", required=True)

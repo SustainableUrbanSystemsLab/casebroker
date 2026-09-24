@@ -33,7 +33,7 @@ def test_a_device_id_is_normalised_and_anything_else_is_not_one():
 
 
 def test_no_master_until_an_admin_names_one(conn):
-    assert db.syncthing_view(conn, now=T0) == {"master": None, "workers": []}
+    assert db.syncthing_view(conn, now=T0) == {"master": None, "workers": [], "continuations": []}
 
 
 def test_naming_the_master_and_its_folder(conn):
@@ -99,7 +99,8 @@ def test_the_api_reads_with_read_scope_and_writes_only_as_admin(tmp_path, monkey
     got = client.get("/v1/syncthing", headers=reader)
     assert got.status_code == 200
     assert got.json() == {"master": None, "workers": [
-        {"worker_id": "cod-1", "host": "COD-1", "device_id": WORKER, "last_seen": got.json()["workers"][0]["last_seen"]}]}
+        {"worker_id": "cod-1", "host": "COD-1", "device_id": WORKER, "last_seen": got.json()["workers"][0]["last_seen"]}],
+        "continuations": []}
 
     # Pointing the fleet's archives somewhere is an admin decision, like a release target.
     assert client.put("/v1/syncthing", headers=worker, json={"device_id": MASTER}).status_code in (401, 403)
