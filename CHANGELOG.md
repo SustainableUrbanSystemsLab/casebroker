@@ -8,6 +8,25 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-09-24
+
+### Added
+- **Move cases to another recipe**: `POST /v1/cases/respec`, and a card beside Reopen
+  on the dashboard's campaign tab. v2-00ed64225d4979d7 fails under
+  `cyl-1008/of12-v4` on every machine and meshes under `of12-v5`. Before this, the
+  only way to say so was to edit the database; a reopen just handed the case to the
+  next v4 node to fail again.
+  - The site is admitted again under the new recipe as a **new case**, because a
+    case id is a function of site and recipe. The old case is parked in quarantine
+    with a pointer to it.
+  - Only nodes declaring the new recipe are handed it. Its new id means no node can
+    resume the old recipe's mesh as it.
+  - `GET /v1/cases/{id}` shows the link both ways (`moved_to`, `moved_from`), and so
+    does the case panel.
+  - A leased case is left to its node, and a done case keeps its result. A recipe
+    nobody declares is refused as a typo.
+  - `dry_run` by default, and `limit` bounds the writes, as for reopen.
+
 ## [0.20.1] - 2026-09-24
 
 ### Fixed

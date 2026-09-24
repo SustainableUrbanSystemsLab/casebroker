@@ -27,6 +27,20 @@ and re-posting an existing id is a no-op. Changing the recipe deliberately
 produces a *different* id for the same coordinates, so a re-spec coexists with
 the original instead of overwriting it.
 
+**Moving a case to another recipe is a re-spec too** (`POST /v1/cases/respec`).
+The site is admitted again under the new recipe, exactly as `POST /v1/cases`
+would admit it. The old case is parked in `quarantined` with a pointer to the
+new one, and `GET /v1/cases/{id}` shows the link both ways (`moved_to`,
+`moved_from`). It exists for the site a recipe cannot build: v2-00ed64225d4979d7
+failed under `cyl-1008/of12-v4` on every machine and meshes under `of12-v5`.
+
+- **A node is handed only the recipes it declares**, so the new case waits for a
+  node that knows its recipe instead of spending attempts on the ones that don't.
+- **A new id means a new scratch.** Nodes resume by case id, so no machine can
+  resume the old recipe's mesh as the new case.
+- **A leased case is never moved**, since that would pull a live solve: cancel it
+  first. **A done case is never moved** either; its result stands.
+
 **Split is assigned by city, not by tile.** Tiles from one city share morphology
 and often literal buildings at their edges, so a per-tile split leaks the test
 set into training. `ids.split_for(city_cluster)` hashes the city, which also
