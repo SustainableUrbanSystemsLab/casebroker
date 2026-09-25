@@ -8,6 +8,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.21.3] - 2026-09-25
+
+### Fixed
+- **A case whose attempts ran out on expired leases shows up in the error report.**
+  When the last attempt ended because the node died or went dark, there was no failure
+  text to record, so the quarantine left `last_error` empty. `/v1/errors` and *Copy all
+  errors* list only cases that carry one. On 2026-09-24 that hid two cases:
+  v2-00b8665f5c6ecefe, whose node was replaced mid-solve, and v2-0082073ee09f09f9, whose
+  machine went dark. The broker counted 7 quarantined while the report showed 5.
+  - Such a quarantine now records why. The first line is the same for every such case,
+    so the report groups them.
+  - The second line names the worker whose lease ran out and the one that found it.
+
 ## [0.21.2] - 2026-09-24
 
 ## [0.21.1] - 2026-09-24
