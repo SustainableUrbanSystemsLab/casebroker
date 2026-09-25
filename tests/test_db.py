@@ -130,6 +130,26 @@ def test_a_quarantine_found_at_lease_names_the_worker_whose_attempt_ran_out(tmp_
     assert row["detail"] == "attempts exhausted (3); found by finder"
 
 
+def test_a_case_whose_attempts_ran_out_on_expired_leases_is_in_the_error_report(tmp_path):
+    """v2-00b8665f5c6ecefe (its node replaced mid-solve) and v2-0082073ee09f09f9 (its
+    machine went dark), 2026-09-24: every attempt ended in an expired lease, so there
+    was never a failure to record and the quarantine left last_error empty. /v1/errors
+    lists only cases that carry one, so neither was in the report the operator works
+    from -- the broker said 7 quarantined, the report showed 5."""
+    conn = make_db(tmp_path, 1)
+    t0 = 1_000_000
+    for i, worker in enumerate(("w1", "w2", "w3")):
+        assert len(db.lease(conn, worker, lease_seconds=60, now=t0 + i * 61)) == 1
+    assert db.lease(conn, "finder", now=t0 + 3 * 61) == []
+
+    report = db.list_errors(conn)
+    assert [c["state"] for c in report["cases"]] == ["quarantined"]
+    first, second = report["cases"][0]["last_error"].split("\n")
+    # The same first line for every such case, so the report's tally groups them.
+    assert first == "attempts exhausted (3): the last attempt ended without a result -- its lease expired"
+    assert second == "held by w3; found by finder"
+
+
 def test_release_refunds_the_attempt(tmp_path):
     """Phoenix preemption. The case was fine; the worker just lost its node, so
     the attempt must not count against max_attempts."""
