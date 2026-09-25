@@ -1457,11 +1457,24 @@ def lease(conn, worker_id: str, count: int = 1,
             if attempt > row["max_attempts"]:
                 # Poison case: its retries are spent. Park it rather than let it
                 # cycle forever through every worker in the fleet.
+                #
+                # And say why in last_error, which is what /v1/errors -- the
+                # dashboard's "Copy all errors" -- selects on. A case whose last
+                # attempt ended in an expired lease never had a failure to record,
+                # so it was quarantined with none and appeared in no error report:
+                # v2-00b8665f5c6ecefe (its node replaced mid-solve) and
+                # v2-0082073ee09f09f9 (its machine went dark), 2026-09-24. The first
+                # line is the same for every such case, so the report groups them.
+                held = row["lease_worker"]
+                why = ("attempts exhausted (%d): the last attempt ended without a result%s\n"
+                       "%sfound by %s" % (row["max_attempts"],
+                                           " -- its lease expired" if held else "",
+                                           ("held by %s; " % held) if held else "", worker_id))
                 conn.execute(
                     "UPDATE cases SET state='quarantined', lease_id=NULL,"
                     " lease_worker=NULL, lease_expires=NULL, leased_at=NULL,"
-                    " updated_at=?"
-                    " WHERE case_id=?", (now, row["case_id"]))
+                    " last_error=?, updated_at=?"
+                    " WHERE case_id=?", (why, now, row["case_id"]))
                 # Named after the worker whose attempt ran out -- the previous
                 # holder, whose lease expired -- not the one that happened to ask
                 # next and found it spent; that one is recorded in the detail.
