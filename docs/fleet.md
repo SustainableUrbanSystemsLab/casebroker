@@ -519,3 +519,10 @@ and no numerics setting reaches it.
 - ICE/Phoenix `$HOME` is 20-30 GB and usually nearly full -- checkpoints and
   archives must go to scratch (`WIND_CASES`/`WIND_DONE` in the sbatch files),
   and a 100%-full scratch silently loses rank data during the copy-back.
+- A worker shown as **Drained**, with a reason that starts `drained by the
+  broker:`, failed five different cases within ten minutes. That points at the
+  machine, not the sites: a full disk (COD-358-21, 2026-09-26, 663 cases in 38
+  minutes), a stopped container daemon, or leftover processes. Fix the machine
+  and undrain it. Then give back the attempts it charged with
+  `POST /v1/cases/reopen?error_contains=<its error>&include_pending=true`: look
+  at the dry run first, then repeat the call with `dry_run=false`.

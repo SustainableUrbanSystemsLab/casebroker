@@ -77,6 +77,20 @@ def test_a_dataset_page_is_found_by_key_not_by_sorting_the_table(big):
     assert "TEMP B-TREE" not in plan.upper(), plan
 
 
+def test_the_burst_count_in_fail_reads_only_the_last_minutes(big):
+    """Every fail() counts the worker's recent failures (db._drain_on_burst), inside
+    its transaction. It must seek to the window by idx_events_ts rather than scan
+    the campaign's whole event trail -- during the burst it exists for, fail() ran
+    every four seconds."""
+    _, path = big
+    plan = _plan(path, "SELECT COUNT(DISTINCT case_id) AS n FROM events WHERE worker_id = 'w'"
+                       " AND event IN ('failed', 'quarantined') AND ts > 0"
+                       " AND (detail IS NULL OR detail NOT LIKE 'attempts exhausted%')")
+    assert "idx_events_ts" in plan, plan
+    plan = _plan(path, "SELECT MAX(ts) AS t FROM events WHERE event = 'undrain' AND detail = 'w'")
+    assert "idx_events_ts" in plan, plan
+
+
 def test_every_index_the_schema_declares_actually_exists(big):
     """The schema is applied by a reconciler, not by hand.
 

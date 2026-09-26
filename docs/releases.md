@@ -107,6 +107,11 @@ against the hash it was given.
 | `POST /v1/workers/{id}/drain`, `/undrain` | `{reason}` |
 | `GET /v1/node/release` | what this node should run: `target_build`, `canary`, `current`, `apply`, `file`, `sha256`, `drain`, `blocked` |
 
+The broker also drains a worker by itself, when it fails
+`CASEBROKER_FAIL_BURST_CASES` (5) different cases within
+`CASEBROKER_FAIL_BURST_SECONDS` (600). The reason then starts `drained by the
+broker:`, and it stays drained until someone undrains it.
+
 The terminal has the same: `casebroker release list|register|target|promote|rollback`.
 
 ## The Python worker

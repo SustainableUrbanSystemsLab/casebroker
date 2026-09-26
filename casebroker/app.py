@@ -1492,7 +1492,8 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
     @app.post("/v1/cases/reopen", dependencies=[WriteAuth])
     def reopen_cases(error_contains: str | None = None, dry_run: bool = True,
                      limit: int = 50,
-                     case_id: list[str] | None = Query(None)) -> dict[str, Any]:
+                     case_id: list[str] | None = Query(None),
+                     include_pending: bool = False) -> dict[str, Any]:
         """Put quarantined cases back in the pool, attempts refunded.
 
         Quarantine means "this site is broken everywhere". It also collects cases
@@ -1516,9 +1517,19 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         took a list; the endpoint never passed one through, so an operator looking
         at ONE wrongly quarantined case had only a substring match over everybody's
         errors to reach it with. Combines with `error_contains` as an AND.
+
+        `include_pending` also refunds PENDING cases that were charged an attempt.
+        A broken machine leaves far more of those than quarantines: COD-358-21's
+        full disk failed 663 cases once each in 38 minutes, and none of them was
+        in reach. Refused (422) without `error_contains` or `case_id`, since it
+        would otherwise forgive every real failure in the queue too.
         """
-        return db.reopen_cases(conn, error_contains=error_contains, case_ids=case_id,
-                               dry_run=dry_run, limit=limit)
+        try:
+            return db.reopen_cases(conn, error_contains=error_contains, case_ids=case_id,
+                                   dry_run=dry_run, limit=limit,
+                                   include_pending=include_pending)
+        except ValueError as e:
+            raise HTTPException(422, str(e))
 
     @app.post("/v1/cases/respec", dependencies=[WriteAuth])
     def respec_cases(request: Request, recipe: str = Query(..., min_length=1, max_length=128),
