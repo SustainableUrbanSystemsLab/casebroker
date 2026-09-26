@@ -3882,14 +3882,30 @@ def reopen_cases(conn, *, error_contains: str | None = None,
     if dry_run or not to_reopen:
         return out
 
+    # A few statements per chunk, never two per case. This holds the lock every
+    # lease, heartbeat and /healthz ping waits on, and each statement is a round
+    # trip to Supabase: about 80 ms from production (measured 2026-09-26, 25
+    # cases in 4.5 s). Refunding COD-358-21's 663 cases in one call was ~1,300 of
+    # them -- well over a minute of a broker that answered nothing -- and it came
+    # back 502 with nothing applied: the broker went down mid-transaction.
     now = _now()
+    detail = "attempts refunded: " + (error_contains or "reopened by an operator")
+    state_marks = ",".join("?" for _ in states)
     changed = 0
     conn.execute("BEGIN IMMEDIATE")
     try:
-        for cid in to_reopen:
+        for i in range(0, len(to_reopen), 500):
+            chunk = to_reopen[i:i + 500]
+            marks = ",".join("?" for _ in chunk)
             # A case leased between the scan and here is left alone: it is
             # running, and its attempt is its own.
-            n = conn.execute(
+            ids = [r["case_id"] for r in conn.execute(
+                "SELECT case_id FROM cases WHERE case_id IN (" + marks + ")"
+                " AND state IN (" + state_marks + ")", (*chunk, *states)).fetchall()]
+            if not ids:
+                continue
+            id_marks = ",".join("?" for _ in ids)
+            conn.execute(
                 # last_error goes with the attempts. The counter is reset because
                 # the history says nothing about the case; the message is the same
                 # history in prose, and leaving it behind puts a red "Last Failure
@@ -3898,13 +3914,13 @@ def reopen_cases(conn, *, error_contains: str | None = None,
                 "UPDATE cases SET state='pending', lease_id=NULL, lease_worker=NULL,"
                 " lease_expires=NULL, leased_at=NULL, attempts=0, last_error=NULL,"
                 " updated_at=?"
-                " WHERE case_id=? AND state IN (" + ",".join("?" for _ in states) + ")",
-                (now, cid, *states)).rowcount
-            if not n:
-                continue
-            changed += 1
-            _event(conn, cid, None, "reopened",
-                   "attempts refunded: " + (error_contains or "reopened by an operator"), now)
+                " WHERE case_id IN (" + id_marks + ") AND state IN (" + state_marks + ")",
+                (now, *ids, *states))
+            conn.execute(
+                "INSERT INTO events(ts, case_id, worker_id, event, detail) VALUES "
+                + ",".join("(?,?,?,?,?)" for _ in ids),
+                [v for cid in ids for v in (now, cid, None, "reopened", detail)])
+            changed += len(ids)
         conn.execute("COMMIT")
     except Exception:
         conn.execute("ROLLBACK")

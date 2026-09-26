@@ -209,6 +209,44 @@ def test_a_case_running_again_keeps_its_attempt(tmp_path):
         {"state": "leased", "attempts": 2, "lease_id": again.lease_id}
 
 
+class _Counting:
+    """The connection, counting its statements: each is a round trip on Postgres."""
+
+    def __init__(self, conn):
+        self.conn, self.n = conn, 0
+
+    def execute(self, *a):
+        self.n += 1
+        return self.conn.execute(*a)
+
+    def __getattr__(self, name):
+        return getattr(self.conn, name)
+
+
+def _refund_statements(tmp_path, n_cases, monkeypatch):
+    monkeypatch.setattr(db, "FAIL_BURST_CASES", 0)      # one machine fails them all
+    conn = make_db(tmp_path / ("b%d.sqlite" % n_cases), ["train"] * n_cases)
+    for i in range(n_cases):
+        fail_next(conn, "cod-358-21", DISK_FULL, now=T0 + 60 * i)
+    counting = _Counting(conn)
+    out = db.reopen_cases(counting, error_contains="not enough space", include_pending=True,
+                          dry_run=False, limit=1000)
+    assert out["reopened"] == n_cases
+    assert conn.execute("SELECT COUNT(*) AS n FROM events WHERE event='reopened'").fetchone()["n"] == n_cases
+    assert conn.execute("SELECT COUNT(*) AS n FROM cases WHERE attempts=0 AND last_error IS NULL"
+                        " AND state='pending'").fetchone()["n"] == n_cases
+    return counting.n
+
+
+def test_a_large_refund_is_a_few_statements_not_two_per_case(tmp_path, monkeypatch):
+    """Every statement is a round trip to Supabase -- about 80 ms from production --
+    under the lock every lease, heartbeat and /healthz ping waits on. Refunding
+    COD-358-21's 663 cases took one UPDATE and one INSERT per case, ~1,300 round
+    trips: the broker answered nothing for well over a minute and came back 502
+    with nothing applied (2026-09-26). The count must not grow with the cases."""
+    assert _refund_statements(tmp_path, 40, monkeypatch) == _refund_statements(tmp_path, 3, monkeypatch)
+
+
 def test_include_pending_will_not_forgive_everything(tmp_path):
     """Unselected, it would refund every real failure in the queue as well."""
     conn = make_db(tmp_path / "b.sqlite", ["train"])
