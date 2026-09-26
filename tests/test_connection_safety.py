@@ -43,6 +43,7 @@ _ALLOWED_UNLOCKED = {
     "_event",              # called only from within locked writers
     "_by_lease",           # ditto: heartbeat/complete/fail/release
     "_refund_timeout",     # ditto: called only from fail, under its lock
+    "_drain_on_burst",     # ditto: called only from fail, inside its transaction
     "_still_progressing",  # ditto: called only from heartbeat, under its lock
     "_count_for_build",    # ditto: complete/fail, inside their transaction
     "_setting",            # read inside the locked release functions

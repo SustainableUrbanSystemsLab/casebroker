@@ -80,7 +80,10 @@ def test_it_needs_a_credential(tmp_path):
     assert _client(tmp_path).get("/v1/errors").status_code == 401
 
 
-def test_thousands_of_histories_are_one_pass_not_a_query_per_case(tmp_path):
+def test_thousands_of_histories_are_one_pass_not_a_query_per_case(tmp_path, monkeypatch):
+    # One worker failing 1200 cases back to back is the burst the broker drains a
+    # machine for (db.FAIL_BURST_CASES). This test is about the export, so the rule is off.
+    monkeypatch.setattr(db, "FAIL_BURST_CASES", 0)
     c = _client(tmp_path)
     _cases(c, 1200)                       # past the 500-id chunk, twice
     conn = db.connect(str(tmp_path / "b.sqlite"))

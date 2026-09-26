@@ -8,6 +8,29 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-09-25
+
+### Added
+- **A worker that fails case after case is drained.** When one worker fails five
+  different cases within ten minutes, the broker drains it. It gets no new case at its next
+  lease, can still resume its own, and stays drained until an operator undrains it. The
+  reason shows on the dashboard's Drained badge and in the node's log. A healthy node fails
+  a few cases a day. On 2026-09-26 COD-358-21's disk filled, and its node failed 663 cases
+  in 38 minutes, one every four seconds, charging each an attempt. A stopped Docker daemon
+  (COD-PKAST-7865, 09-19) and leftover processes (COD-359-38, 09-23) caused the same kind
+  of burst.
+  - `CASEBROKER_FAIL_BURST_CASES` (default 5) and `CASEBROKER_FAIL_BURST_SECONDS` (default
+    600) tune it; 0 cases turns it off.
+  - Only the broker sees the rate, so this works for every node build already in the field.
+  - A lease-time "attempts exhausted" quarantine does not count against the worker it
+    names; that worker has usually just died. An undrain starts the count over.
+- **`POST /v1/cases/reopen?include_pending=true` refunds pending cases as well.** Reopen
+  reached only quarantined cases, but a broken machine leaves mostly pending ones at 1 of 3.
+  None of COD-358-21's 663 were in reach. With the flag, a matching pending case gets its
+  attempts reset and its error cleared.
+  - It needs `error_contains` or `case_id`, and answers 422 without one.
+  - A case leased again since is running, and keeps its attempt.
+
 ## [0.21.3] - 2026-09-25
 
 ### Fixed
