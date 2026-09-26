@@ -2406,10 +2406,59 @@ def fail(conn, lease_id: str, error: str, retryable: bool = True,
         _count_for_build(conn, None, row["lease_worker"], now, failed=1)
         _event(conn, row["case_id"], row["lease_worker"],
                "failed" if state == "pending" else "quarantined", error[:500], now)
+        _drain_on_burst(conn, row["lease_worker"], error, now)
         conn.execute("COMMIT")
     except Exception:
         conn.execute("ROLLBACK")
         raise
+    return True
+
+
+# A worker that fails case after case is a broken MACHINE, not a queue of broken
+# sites. A stopped Docker daemon (COD-PKAST-7865, 2026-09-19), leftover processes
+# (COD-359-38, 2026-09-23) and a full disk (COD-358-21, 2026-09-26: 663 cases in 38
+# minutes, the node leasing the next one every four seconds and charging each an
+# attempt) all looked exactly like this, and a healthy node fails a few cases a DAY.
+# So a worker that reports FAIL_BURST_CASES different cases failed within
+# FAIL_BURST_SECONDS is drained -- no new case at its next lease, its own case still
+# resumable -- with the reason on the workers table, until an operator undrains it.
+# Only the broker sees the burst, so this works for every node build, old ones
+# included. A lease-time "attempts exhausted" quarantine is not counted: it is named
+# after a worker that has usually just died, and would drain it when it came back.
+FAIL_BURST_CASES = int(os.environ.get("CASEBROKER_FAIL_BURST_CASES", "5"))
+FAIL_BURST_SECONDS = int(os.environ.get("CASEBROKER_FAIL_BURST_SECONDS", "600"))
+_EXHAUSTED_AT_LEASE = "attempts exhausted%"
+
+
+def _drain_on_burst(conn, worker_id: str | None, error: str, now: int) -> bool:
+    """Drain `worker_id` if this failure completes a burst (see FAIL_BURST_CASES).
+    Inside the caller's transaction; True when it drained the worker just now."""
+    if not worker_id or FAIL_BURST_CASES <= 0:
+        return False
+    # An undrain starts the count over. The operator has looked at the machine,
+    # and the burst that drained it must not drain it again at its next failure.
+    since = now - FAIL_BURST_SECONDS
+    undrained = conn.execute("SELECT MAX(ts) AS t FROM events WHERE event = 'undrain'"
+                             " AND detail = ?", (worker_id,)).fetchone()["t"]
+    if undrained is not None:
+        since = max(since, undrained)
+    n = conn.execute(
+        "SELECT COUNT(DISTINCT case_id) AS n FROM events WHERE worker_id = ?"
+        " AND event IN ('failed', 'quarantined') AND ts > ?"
+        " AND (detail IS NULL OR detail NOT LIKE ?)",
+        (worker_id, since, _EXHAUSTED_AT_LEASE)).fetchone()["n"]
+    if n < FAIL_BURST_CASES:
+        return False
+    # Read in the node's log ("this node is DRAINING (<reason>)") and on the
+    # dashboard's Drained badge, so it names the rule and the last error.
+    last = (error or "").strip().split("\n")[0][:160]
+    reason = ("drained by the broker: %d cases failed here within %d min, which points at "
+              "this machine, not the sites; last error: %s"
+              % (n, max(1, FAIL_BURST_SECONDS // 60), last))
+    if not conn.execute("UPDATE workers SET drain = 1, drain_reason = ? WHERE worker_id = ?"
+                        " AND drain = 0", (reason, worker_id)).rowcount:
+        return False
+    _event(conn, None, None, "drain", "%s: %s" % (worker_id, reason), now)
     return True
 
 
@@ -3745,7 +3794,8 @@ def quarantine_not_on_land(conn, is_land, dry_run: bool = True,
 @_locked
 def reopen_cases(conn, *, error_contains: str | None = None,
                  case_ids: list[str] | None = None,
-                 dry_run: bool = True, limit: int = 50) -> dict[str, Any]:
+                 dry_run: bool = True, limit: int = 50,
+                 include_pending: bool = False) -> dict[str, Any]:
     """Put quarantined cases back in the pool, with their attempts refunded.
 
     Quarantine is meant to say "this SITE is broken" -- degenerate geometry that
@@ -3780,30 +3830,48 @@ def reopen_cases(conn, *, error_contains: str | None = None,
     Rows are taken in ``case_id`` order, so repeated calls drain the backlog
     deterministically, and ``capped`` beside ``matched`` and ``reopened`` is what
     keeps the truncation visible instead of silent.
+
+    ``include_pending`` also refunds cases that were charged an attempt and are
+    still PENDING, which a broken machine produces far more of than quarantines.
+    COD-358-21's full disk (2026-09-26) failed 663 cases in 38 minutes, each once,
+    and none of them was quarantined, so reopen could not reach any. Their attempts
+    are reset and their error cleared; their state is unchanged. It needs
+    ``error_contains`` or ``case_ids``: refunding every pending case with a failure
+    on record would also forgive the failures that were real.
     """
-    where = ["state = 'quarantined'"]
+    if include_pending and not (error_contains or case_ids):
+        raise ValueError("include_pending needs error_contains or case_id: refunding every "
+                         "pending failure would forgive the real ones too")
+    states = ("quarantined", "pending") if include_pending else ("quarantined",)
+    where = ["(state = 'quarantined'"
+             + (" OR (state = 'pending' AND (attempts > 0 OR last_error IS NOT NULL))"
+                if include_pending else "") + ")"]
     params: list[Any] = []
     if case_ids:
         where.append("case_id IN (%s)" % ",".join("?" for _ in case_ids))
         params.extend(case_ids)
 
     rows = conn.execute(
-        "SELECT case_id, attempts, max_attempts, updated_at FROM cases"
+        "SELECT case_id, state, attempts, max_attempts, updated_at FROM cases"
         " WHERE " + " AND ".join(where) + " ORDER BY case_id", params).fetchall()
+    # Each case's LAST failure, in one pass rather than a query per case: with
+    # pending cases in the scan there can be thousands, and this holds the lock
+    # every lease and heartbeat waits on.
+    last_failure = {r["case_id"]: r["detail"] or "" for r in conn.execute(
+        "SELECT e.case_id, e.detail FROM events e JOIN (SELECT case_id, MAX(id) AS id"
+        " FROM events WHERE event IN ('failed', 'quarantined') GROUP BY case_id) f"
+        " ON f.id = e.id").fetchall()}
 
     found, ids_hit = [], []
     for r in rows:
         row = dict(r)
-        last = conn.execute(
-            "SELECT detail FROM events WHERE case_id=? AND event IN ('failed', 'quarantined')"
-            " ORDER BY id DESC LIMIT 1", (row["case_id"],)).fetchone()
-        detail = (dict(last)["detail"] if last else None) or ""
+        detail = last_failure.get(row["case_id"], "")
         if error_contains and error_contains.lower() not in detail.lower():
             continue
         ids_hit.append(row["case_id"])
         if len(found) < limit:
-            found.append({"case_id": row["case_id"], "attempts": row["attempts"],
-                          "last_error": detail[:200]})
+            found.append({"case_id": row["case_id"], "state": row["state"],
+                          "attempts": row["attempts"], "last_error": detail[:200]})
 
     # The cap applies to what is CHANGED, not only to what is listed back.
     to_reopen = ids_hit[:limit]
@@ -3815,10 +3883,13 @@ def reopen_cases(conn, *, error_contains: str | None = None,
         return out
 
     now = _now()
+    changed = 0
     conn.execute("BEGIN IMMEDIATE")
     try:
         for cid in to_reopen:
-            conn.execute(
+            # A case leased between the scan and here is left alone: it is
+            # running, and its attempt is its own.
+            n = conn.execute(
                 # last_error goes with the attempts. The counter is reset because
                 # the history says nothing about the case; the message is the same
                 # history in prose, and leaving it behind puts a red "Last Failure
@@ -3827,14 +3898,18 @@ def reopen_cases(conn, *, error_contains: str | None = None,
                 "UPDATE cases SET state='pending', lease_id=NULL, lease_worker=NULL,"
                 " lease_expires=NULL, leased_at=NULL, attempts=0, last_error=NULL,"
                 " updated_at=?"
-                " WHERE case_id=? AND state='quarantined'", (now, cid))
+                " WHERE case_id=? AND state IN (" + ",".join("?" for _ in states) + ")",
+                (now, cid, *states)).rowcount
+            if not n:
+                continue
+            changed += 1
             _event(conn, cid, None, "reopened",
                    "attempts refunded: " + (error_contains or "reopened by an operator"), now)
         conn.execute("COMMIT")
     except Exception:
         conn.execute("ROLLBACK")
         raise
-    out["reopened"] = len(to_reopen)
+    out["reopened"] = changed
     return out
 
 
