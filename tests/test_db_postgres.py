@@ -452,27 +452,39 @@ def test_a_burst_drains_its_worker_and_reopen_refunds_pending_over_a_real_connec
     last-failure join with a list of states in its guarded UPDATE.
 
     Scratch only: it drains a worker and writes fleet events, which the per-run
-    teardown does not look for."""
+    teardown does not look for.
+
+    Its cases end PENDING -- that is the refund -- so it removes them itself. A
+    later test that leases whatever is pending counts every case with this run's
+    prefix as its own: the racers claimed four of these and failed on "64, not
+    60" (CI, 2026-09-26). The module teardown comes too late for that."""
     recipe = prefix("r-burst")
     mine = seed(5, "burst", recipe=recipe)
     w = prefix("w-burst")
     conn = fresh_conn()
     disk_full = "There is not enough space on the disk. " + RUN
-    for _ in range(5):
-        got = db.lease(conn, w, 1, 900, recipes=[recipe])
-        assert got, "expected a case to lease"
-        assert db.fail(conn, got[0].lease_id, disk_full, retryable=True)
+    try:
+        for _ in range(5):
+            got = db.lease(conn, w, 1, 900, recipes=[recipe])
+            assert got, "expected a case to lease"
+            assert db.fail(conn, got[0].lease_id, disk_full, retryable=True)
 
-    row = fresh_conn().execute("SELECT drain, drain_reason FROM workers WHERE worker_id = ?", (w,)).fetchone()
-    assert row["drain"] == 1 and "5 cases failed" in row["drain_reason"]
-    assert db.lease(conn, w, 1, 900, recipes=[recipe]) == []
+        row = fresh_conn().execute("SELECT drain, drain_reason FROM workers WHERE worker_id = ?", (w,)).fetchone()
+        assert row["drain"] == 1 and "5 cases failed" in row["drain_reason"]
+        assert db.lease(conn, w, 1, 900, recipes=[recipe]) == []
 
-    out = db.reopen_cases(fresh_conn(), error_contains=disk_full, include_pending=True,
-                          dry_run=False, limit=50)
-    assert out["reopened"] == 5
-    got = fresh_conn().execute(
-        "SELECT state, attempts, last_error FROM cases WHERE case_id IN (?, ?, ?, ?, ?)", mine).fetchall()
-    assert {(r["state"], r["attempts"], r["last_error"]) for r in got} == {("pending", 0, None)}
+        out = db.reopen_cases(fresh_conn(), error_contains=disk_full, include_pending=True,
+                              dry_run=False, limit=50)
+        assert out["reopened"] == 5
+        got = fresh_conn().execute(
+            "SELECT state, attempts, last_error FROM cases WHERE case_id IN (?, ?, ?, ?, ?)", mine).fetchall()
+        assert {(r["state"], r["attempts"], r["last_error"]) for r in got} == {("pending", 0, None)}
+    finally:
+        tidy = fresh_conn()
+        marks = ", ".join("?" for _ in mine)
+        tidy.execute("DELETE FROM events WHERE case_id IN (%s)" % marks, mine)
+        tidy.execute("DELETE FROM cases WHERE case_id IN (%s)" % marks, mine)
+        tidy.execute("DELETE FROM events WHERE event = 'drain' AND detail LIKE ?", (w + ":%",))
 
 
 @scratch_only
