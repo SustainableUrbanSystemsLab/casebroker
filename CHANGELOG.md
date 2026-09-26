@@ -8,6 +8,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.22.1] - 2026-09-26
+
+### Fixed
+- **Reopen writes a batch in a few statements, not two per case.** It holds the lock that
+  every lease, heartbeat and `/healthz` ping waits on, and each statement is a round trip
+  to Supabase, about 80 ms from production. Refunding COD-358-21's 663 cases in one call
+  (2026-09-26) meant about 1,300 round trips. The broker answered nothing for well over a
+  minute, the call came back 502, and nothing was applied: the broker went down
+  mid-transaction. A batch is now a select, an update and one insert per 500 cases. The
+  refund was then done in batches of 25.
+
 ## [0.22.0] - 2026-09-25
 
 ### Added
