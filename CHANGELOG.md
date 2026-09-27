@@ -8,6 +8,38 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.24.0] - 2026-09-26
+
+### Added
+- **The campaign can be seen one recipe at a time.** Until now every recipe was a CFD
+  wind recipe and everything was pooled. The Radiance surface-temperature recipe
+  (`docs/thermal.md`) is a different training set with a different throughput: an hour
+  a case where CFD takes days.
+  - `GET /v1/status?recipe=` scopes the counts, the splits and the ETA. `by_recipe`
+    always lists every recipe's states.
+  - `GET /v1/cases?recipe=` filters the case browser.
+  - `GET /v1/dataset?recipe=` answers for one recipe's cases, from the same cached pass.
+  - A case's percentiles now rank it among its own recipe. Pooled, every thermal case
+    sat at the bottom of the run-time distribution.
+  - The dashboard has a recipe selector beside the ETA that scopes all four. It is hidden
+    while the campaign holds one recipe.
+- **The thermal recipe's phases are stages, with an ETA.** `scene`, `trace` and `surface`
+  are stages. `trace a/b chunks` counts chunks finished, as `dirs` does, and drives the
+  ETA. The dashboard labels them "Radiance" and "Surface temperatures".
+- **A thermal case's page shows its own report.** A "Surface temperatures" card, from
+  `telemetry.thermal` and `metrics.t_surface`, replaces Mesh & Solve. The pedestrian-wind
+  viewer is hidden, and the map link draws the sensed core with no mesh domain.
+- `docs/thermal.md`: the contract a node that runs the thermal recipe follows (recipe,
+  spec, progress, telemetry, metrics, archive, exit codes).
+- **`scripts/admit_thermal.py` admits the thermal pilot.** It puts a thermal case beside wind
+  sites, spread across LCZs and then across cities.
+  - Each case's weather is chosen at admission and written into its spec: the nearest
+    whole-record TMYx station in Eddy3D's climate catalogue (`E3D climate-index find`).
+  - It runs dry by default, and with `--post` it posts in batches of 25.
+  - It refuses to post while workers that declare no recipes would be handed thermal cases.
+  - `--any-state` samples wind sites that aren't finished. The campaign had 2 finished
+    sites of 5,000 when the pilot was set up.
+
 ## [0.23.0] - 2026-09-26
 
 ### Added

@@ -31,7 +31,8 @@ def test_the_load_requests_go_out_together_rather_than_in_a_chain():
     row appeared."""
     body = _refresh_body()
     first_await = body.index("await ")
-    started_before = [name for name in ("checkHealth()", 'api("/v1/status")', "startCases()")
+    # The status request's prefix: it carries the page's recipe scope when there is one.
+    started_before = [name for name in ("checkHealth()", 'api("/v1/status"', "startCases()")
                       if name in body[:first_await]]
     assert len(started_before) == 3, (
         "every load request must be STARTED before the first await, or the one "

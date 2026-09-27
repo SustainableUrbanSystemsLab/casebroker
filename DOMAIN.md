@@ -8,7 +8,10 @@ coding errors but disagreements about what one of these words meant.
 
 ## Case
 
-A **site** plus a **recipe**. One CFD job.
+A **site** plus a **recipe**. One simulation job: a CFD wind case, or (since
+2026-09) a Radiance surface-temperature case, whose contract is
+[`docs/thermal.md`](docs/thermal.md). A recipe is a training set, so the
+dashboard, the ETA and the dataset can each be scoped to one.
 
 | Field | Meaning |
 | --- | --- |

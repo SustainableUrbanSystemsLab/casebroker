@@ -1574,6 +1574,10 @@
             <polyline points="12 6 12 12 16 14"></polyline>
           </svg>
           <span id="etaText"></span>
+          <!-- A recipe is a training set: the counts, the ETA, the case browser and the
+               dataset for one of them, or for all. Hidden while there is one. -->
+          <select id="recipeScope" hidden style="font-size:12px;"
+                  title="Scope the counts, the ETA, the case browser and the dataset to one recipe"></select>
         </div>
         <div>
           <span id="expiredText" style="color: var(--warn); font-weight: 500;"></span>
@@ -2201,6 +2205,13 @@
   const LS_THEME = "casebroker.theme";
   const LS_AUTO = "casebroker.autoRefresh";
   const LS_NOTIFY = "casebroker.notifyDone";
+  const LS_RECIPE = "casebroker.recipeScope";
+  // The one recipe the page is scoped to, or "" for the whole campaign. Since
+  // 2026-09 the queue holds CFD wind and Radiance surface temperatures, whose
+  // counts, throughput and statistics mean nothing pooled.
+  let recipeScope = "";
+  try { recipeScope = localStorage.getItem(LS_RECIPE) || ""; } catch (e) {}
+  const recipeQuery = (sep) => recipeScope ? `${sep}recipe=${encodeURIComponent(recipeScope)}` : "";
 
   // -- Theme Management --------------------------------------------------------
   function initTheme() {
@@ -4010,7 +4021,23 @@
   const STATE_ORDER = ["pending", "leased", "done", "quarantined"];
   const STATE_LABEL = { pending: "Pending", leased: "Leased", done: "Done", quarantined: "Quarantined" };
 
+  /// The header's recipe selector, from status's `by_recipe`: hidden while the
+  /// campaign holds one recipe and the page is not scoped to another.
+  function renderRecipeScope(st) {
+    const sel = $("recipeScope");
+    if (!sel || document.activeElement === sel) return;
+    const by = st.by_recipe || {};
+    const recipes = Object.keys(by).sort();
+    if (recipeScope && !recipes.includes(recipeScope)) recipes.push(recipeScope);
+    sel.hidden = recipes.length < 2 && !recipeScope;
+    if (sel.hidden) return;
+    const count = (r) => Object.values(by[r] || {}).reduce((a, b) => a + b, 0);
+    sel.innerHTML = `<option value="">All recipes</option>` + recipes.map((r) =>
+      `<option value="${esc(r)}"${r === recipeScope ? " selected" : ""}>${esc(r)} (${count(r).toLocaleString()})</option>`).join("");
+  }
+
   function renderStatus(st) {
+    renderRecipeScope(st);
     statusSkeletonDone(true);          // every slot the skeleton used is overwritten below
     $("statusEmpty").style.display = "none";
     $("statusBody").style.display = "block";
@@ -4143,9 +4170,9 @@
       : `<tr><td colspan="7" class="empty-state">No split data yet.</td></tr>`;
 
     // Velocity & ETA text
-    $("etaText").textContent = st.eta_days != null
+    $("etaText").textContent = (st.recipe ? String(st.recipe) + ": " : "") + (st.eta_days != null
       ? `Estimated completion: ~${st.eta_days} day(s) at current throughput (${st.done_last_24h.toLocaleString()} completed in last 24h)`
-      : (st.done_last_24h ? `${st.done_last_24h.toLocaleString()} completed in last 24h (insufficient history for ETA)` : "No completions yet — ETA unknown");
+      : (st.done_last_24h ? `${st.done_last_24h.toLocaleString()} completed in last 24h (insufficient history for ETA)` : "No completions yet — ETA unknown"));
 
     if (st.expired_leases > 0) {
       const seconds = st.expired_lease_release_in_seconds;
@@ -4599,18 +4626,22 @@
       properties: { name, ...extra, stroke: color, "stroke-width": 2, fill: color, "fill-opacity": fill },
       geometry: { type: "Polygon", coordinates: coords } });
     const site = geo ? siteMapFeatures(geo) : null;
+    // cyl === null: a Radiance surface-temperature case (docs/thermal.md), which has
+    // no mesh domain -- its sensors ARE the core.
+    const meshed = cyl !== null;
     const draw = (layers, note) => ({ type: "FeatureCollection", features: [
-      feature(cyl ? circle(DOMAIN_HALF_M) : square(DOMAIN_HALF_M),
+      ...(meshed ? [feature(cyl ? circle(DOMAIN_HALF_M) : square(DOMAIN_HALF_M),
               cyl ? "mesh domain (cylinder, r = 1,300 m)" : "mesh domain (±1,300 m)", "#d97706", 0.05,
-              note ? { note } : undefined),
+              note ? { note } : undefined)] : []),
       ...layers,
       // An outline once there is something inside it: a red wash over the buildings
       // would tint every one of them.
-      feature(square(CORE_HALF_M), "sampled core (1,008 m)", "#dc2626", layers.length ? 0 : 0.12),
+      feature(square(CORE_HALF_M), meshed ? "sampled core (1,008 m)" : "sensed core (1,008 m)", "#dc2626",
+              layers.length ? 0 : 0.12, !meshed && note ? { note } : undefined),
       { type: "Feature", properties: { name: "site centre", "marker-color": "#dc2626" },
         geometry: { type: "Point", coordinates: [+lon.toFixed(6), +lat.toFixed(6)] } },
     ] });
-    const base = "The sampled core and the mesh domain";
+    const base = meshed ? "The sampled core and the mesh domain" : "The sensed core";
     if (!site || (!site.buildings.length && !site.canopy.length)) {
       return { url: mapUrl(draw([])), title: `${base} drawn on a map (geojson.io)` };
     }
@@ -4836,7 +4867,8 @@
   /// The cached answer (possibly stale) or null. Starts a fetch when the copy
   /// is stale or missing, none is in flight, and no back-off is running.
   function datasetPeek() {
-    const base = brokerBase($("broker").value);
+    // The recipe is part of the key: another scope is another training set.
+    const base = brokerBase($("broker").value) + "|" + recipeScope;
     if (dataset.base !== base) {               // another broker: its campaign, not this one's
       clearTimeout(dataset.retryTimer);
       Object.assign(dataset, { base, data: null, at: 0, inFlight: null, error: null, retryAt: 0, retryTimer: null });
@@ -4848,7 +4880,7 @@
 
   function datasetFetch() {
     const base = dataset.base;
-    const p = api("/v1/dataset").then((d) => {
+    const p = api("/v1/dataset" + recipeQuery("?")).then((d) => {
       if (dataset.base !== base) return;
       dataset.data = d; dataset.at = Date.now(); dataset.error = null; dataset.retryAt = 0;
     }, (e) => {
@@ -4877,6 +4909,59 @@
       // A newer copy leaves the open record's ranks behind it: re-read them.
       refreshCaseDetail(openDetailId, casesOnScreen.find((c) => c.case_id === openDetailId));
     }
+  }
+
+  // -- Surface temperatures: the thermal recipe's report (docs/thermal.md) --------
+
+  /// A Radiance surface-temperature case rather than a CFD one. The recipe's
+  /// prefix says so before the case has reported anything; its own telemetry
+  /// says so after.
+  function isThermal(c) {
+    const t = parseMaybeJson(c && c.telemetry);
+    return String((c && c.recipe) || "").startsWith("surf-") || isObj(t && t.thermal);
+  }
+
+  /// What the node reported (telemetry.thermal) and, once done, what it found
+  /// (metrics.t_surface). Every value is escaped or formatted as a number: all of
+  /// it arrives from a worker.
+  function thermalCardHtml(c) {
+    const tel = parseMaybeJson(c.telemetry);
+    const t = isObj(tel) && isObj(tel.thermal) ? tel.thermal : {};
+    const m = parseMaybeJson(c.metrics);
+    const num = (x) => Number(x).toLocaleString();
+    const rows = [];
+    if (isObj(t.sensors)) {
+      const parts = ["ground", "roof", "facade"].filter((k) => finite(t.sensors[k]))
+        .map((k) => `${num(t.sensors[k])} ${k}`);
+      if (parts.length) rows.push(["Sensors", parts.join(" · ")]);
+    }
+    if (isObj(t.weather) && t.weather.key) {
+      rows.push(["Weather", esc(t.weather.key)
+        + (finite(t.weather.distance_km) ? ` · ${Number(t.weather.distance_km).toFixed(1)} km away` : "")]);
+    }
+    if (finite(t.daylight_hours)) rows.push(["Daylight hours", num(t.daylight_hours)]);
+    if (isObj(t.radiance)) {
+      const r = t.radiance;
+      const said = [r.engine, r.image, r.params].filter((x) => x).map((x) => esc(x));
+      if (finite(r.seconds)) said.push(esc(formatDuration(Math.round(Number(r.seconds)))));
+      if (said.length) rows.push(["Radiance", said.join(" · ")]);
+    }
+    if (isObj(t.surface) && finite(t.surface.seconds)) {
+      rows.push(["Surface solve", esc(formatDuration(Math.round(Number(t.surface.seconds)))) ]);
+    }
+    if (isObj(m) && isObj(m.t_surface)) {
+      for (const kind of ["ground", "roof", "facade"]) {
+        const k = m.t_surface[kind];
+        if (!isObj(k)) continue;
+        const said = ["p50", "p95", "max"].filter((q) => finite(k[q]))
+          .map((q) => `${q} ${Number(k[q]).toFixed(1)}`);
+        if (said.length) rows.push([`${kind[0].toUpperCase()}${kind.slice(1)}, °C`, said.join(" · ")]);
+      }
+    }
+    const body = rows.length
+      ? `<dl class="kv-list">${rows.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${v}</dd>`).join("")}</dl>`
+      : `<div style="color:var(--text-muted);font-size:12px;">Nothing reported yet.</div>`;
+    return `<div class="detail-card"><h3>Surface temperatures</h3>${body}</div>`;
   }
 
   // -- Mesh & Solve: the node's mesh and solve reports for one case -------------
@@ -5311,7 +5396,9 @@
 
   function caseDetailHtml(c) {
     // Which domain the map link draws; only the recipe's "cyl-" prefix is read.
-    const cylDomain = String(c.recipe || "").startsWith("cyl-");
+    // A thermal case has none (null): it is sensed over the core, not meshed.
+    const thermal = isThermal(c);
+    const cylDomain = thermal ? null : String(c.recipe || "").startsWith("cyl-");
     const metrics = parseMaybeJson(c.metrics);
     const spec = parseMaybeJson(c.spec);
     const curlSnippet = `curl -H "Authorization: Bearer ${esc($("token").value.trim() || "<TOKEN>")}" "${$("broker").value.replace(/\/+$/, "")}/v1/cases/${esc(c.case_id)}"`;
@@ -5464,8 +5551,9 @@
             </div>
           </div>
 
-          <!-- Mesh & Solve: the node's own reports (telemetry.mesh / .solve) -->
-          ${meshSolveCardHtml(c)}
+          <!-- Mesh & Solve: the node's own reports (telemetry.mesh / .solve); a
+               Radiance case has neither, and reports telemetry.thermal instead. -->
+          ${thermal ? thermalCardHtml(c) : meshSolveCardHtml(c)}
         </div>
 
         ${pctCardHtml(c)}
@@ -5484,7 +5572,7 @@
 
         ${stagesHtml(c)}
 
-        ${c.state === "done" ? `
+        ${c.state === "done" && !thermal ? `
         <div class="detail-card" style="margin-bottom:14px;">
           <h3>Wind at pedestrian height
             <span class="label-hint wf-src" style="font-weight:400; text-transform:none; letter-spacing:0;"></span>
@@ -5571,7 +5659,9 @@
     if (outer === null) return null;
     const inner = parts.length > 1 ? pairIn(parts.slice(1).join(" ")) : null;
 
-    const countsFinished = /\bdirs?\b/i.test(head);
+    // "chunks" is the thermal recipe's unit, and like directions it counts work
+    // FINISHED (docs/thermal.md): "trace 12/36 chunks".
+    const countsFinished = /\b(dirs?|chunks?)\b/i.test(head);
     const completed = Math.max(0, countsFinished ? outer.a : outer.a - 1);
     const clamp = (x) => Math.max(0, Math.min(1, x));
     // The inner pair says how far into the current unit we are, which is what
@@ -5592,10 +5682,13 @@
   /// counts the reader has to decode -- the raw line stays in the tooltip.
   function progressLabel(text, head, outer, inner, countsFinished) {
     const word = head.trim().split(/[\s]/)[0].toLowerCase();
-    const phase = SOLVER_STEP.test(text) || word === "solve" || countsFinished ? "Solving" : "Meshing";
+    // The thermal recipe's two counted phases (docs/thermal.md).
+    const thermal = { trace: "Radiance", surface: "Surface temperatures" }[word];
+    const phase = thermal || (SOLVER_STEP.test(text) || word === "solve" || countsFinished ? "Solving" : "Meshing");
     if (countsFinished) {
-      // Directions FINISHED, so the one under way is the next.
-      const dir = `dir ${Math.min(outer.a + 1, outer.b)}/${outer.b}`;
+      // Units FINISHED, so the one under way is the next.
+      const unit = thermal ? "chunk" : "dir";
+      const dir = `${unit} ${Math.min(outer.a + 1, outer.b)}/${outer.b}`;
       return inner === null ? `${phase} \u00b7 ${dir}` : `${phase} \u00b7 ${dir} \u00b7 iter ${inner.a}/${inner.b}`;
     }
     // The detail is whatever follows the count: after the separator when there
@@ -5870,6 +5963,7 @@
     if (caseList.split) q.set("split", caseList.split);
     if (caseList.city) q.set("city_cluster", caseList.city);
     if (caseList.label) q.set("label", caseList.label);
+    if (recipeScope) q.set("recipe", recipeScope);
     // The page ships every case's `spec` -- a few hundred bytes of site,
     // directions and mesh settings each -- and the table draws none of it. Only
     // the ONE expanded row needs it, and that row fetches its own full record.
@@ -7857,7 +7951,7 @@
       // the other two turn out to have been wasted -- one cheap 401 -- which is
       // the price of not making every authenticated load wait to find out.
       const healthP = checkHealth();
-      const statusP = api("/v1/status");
+      const statusP = api("/v1/status" + recipeQuery("?"));
       const casesReq = startCases();
       // Handlers attached NOW, in the same tick they were created: a rejection
       // nobody is listening to yet is an unhandled rejection, and on the gated
@@ -8441,6 +8535,16 @@
     caseList.singleId = null;
     openDetailId = null;
     requeryCases();
+  });
+
+  // Scopes the status counts, the ETA, the case browser and the dataset at once.
+  $("recipeScope").addEventListener("change", (e) => {
+    recipeScope = e.target.value;
+    try { localStorage.setItem(LS_RECIPE, recipeScope); } catch (err) {}
+    caseList.offset = 0;
+    caseList.singleId = null;
+    openDetailId = null;
+    refresh();
   });
 
   let cityTimer = null;
