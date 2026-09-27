@@ -87,11 +87,16 @@ parts, since a thermal case has no mesh to continue from.
 | --- | --- |
 | `manifest.json` | Recipe, build, engine, Radiance parameters, weather (key, url, sha256), sensor counts, material table, and the scale and offset of every array. |
 | `sensors.npy` | Structured: `x y z nx ny nz` (float32, site frame), `kind` (uint8: 0 ground, 1 roof, 2 facade), `material` (uint8), `svf` (float32). |
-| `t_surface.npy` | int16 `[8760, n]`, °C × 100. |
-| `irradiance.npy` | int16 `[daylight_hours, n]`, W/m² × 10. |
-| `daylight_hours.npy` | int16 `[daylight_hours]`: the hour of year of each irradiance row. |
+| `t_surface.npy` | int16 `[n, 8760]`, °C × 100: one row per sensor, in `sensors.npy` order. |
+| `irradiance.npy` | int16 `[n, daylight_hours]`, W/m² × 10. |
+| `daylight_hours.npy` | int16 `[daylight_hours]`: the hour of year of each irradiance column. |
 | `weather.epw` | The file the case was computed with. |
 | `<site>.json` | The site report, as for wind. |
+
+The arrays are **sensor-major**: one row per sensor. A node writes them chunk by
+chunk, as Radiance finishes each block of sensors. Hour-major would mean holding
+a whole case in memory, about 8 GB, which a lab PC doesn't have. For a field of
+one hour, read a column; `np.load(..., mmap_mode="r")[:, h]` doesn't load the rest.
 
 ## Exit codes
 
