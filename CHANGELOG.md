@@ -31,6 +31,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
   viewer is hidden, and the map link draws the sensed core with no mesh domain.
 - `docs/thermal.md`: the contract a node that runs the thermal recipe follows (recipe,
   spec, progress, telemetry, metrics, archive, exit codes).
+- **`scripts/admit_thermal.py` admits the thermal pilot.** It puts a thermal case beside wind
+  sites, spread across LCZs and then across cities.
+  - Each case's weather is chosen at admission and written into its spec: the nearest
+    whole-record TMYx station in Eddy3D's climate catalogue (`E3D climate-index find`).
+  - It runs dry by default, and with `--post` it posts in batches of 25.
+  - It refuses to post while workers that declare no recipes would be handed thermal cases.
+  - `--any-state` samples wind sites that aren't finished. The campaign had 2 finished
+    sites of 5,000 when the pilot was set up.
 
 ## [0.23.0] - 2026-09-26
 
