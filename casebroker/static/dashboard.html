@@ -2101,6 +2101,12 @@
             </label>
             <input type="text" id="relBlocked" placeholder="1.14.0.827+0e9e6863" />
           </div>
+          <div class="field" style="flex:1; min-width:260px;">
+            <label for="relUndeclared">Recipes for nodes that declare none
+              <span class="label-hint">(comma-separated; empty = any recipe, "none" = nothing)</span>
+            </label>
+            <input type="text" id="relUndeclared" placeholder="any recipe" />
+          </div>
           <label style="display:flex; align-items:center; gap:6px; font-size:12px; padding-bottom:8px;">
             <input type="checkbox" id="relRequire" /> only lease to nodes that declare a build
             <span id="relRequireHint" class="label-hint"></span>
@@ -6546,6 +6552,10 @@
     $("relApply").value = r.target_apply || "case";
     $("relRequire").checked = !!r.require_build;
     $("relBlocked").value = (r.blocked_builds || []).join(", ");
+    if (document.activeElement !== $("relUndeclared")) {
+      const u = r.undeclared_recipes;
+      $("relUndeclared").value = u == null ? "" : (u.length ? u.join(", ") : "none");
+    }
     if (document.activeElement !== $("relRepo")) $("relRepo").value = r.release_repo || "";
     // The fields now hold the broker's policy rather than the markup's
     // defaults, so saving them can no longer overwrite it with those defaults.
@@ -6733,11 +6743,17 @@
                           + "A node on it is refused new cases at its next lease; the case in flight finishes.")) return;
       releaseCall("/v1/releases/rollback", jsonBody("POST", { block: true }), "Blocked and rolled back");
     };
-    $("relPolicyBtn").onclick = () => releaseCall("/v1/releases/policy", jsonBody("PUT", {
-      require_build: $("relRequire").checked,
-      blocked_builds: $("relBlocked").value.split(",").map((x) => x.trim()).filter(Boolean),
-      release_repo: $("relRepo").value.trim(),
-    }), "Policy saved");
+    $("relPolicyBtn").onclick = () => {
+      // Empty is "any recipe" (the policy cleared); "none" is an empty list.
+      const undeclared = $("relUndeclared").value.trim();
+      releaseCall("/v1/releases/policy", jsonBody("PUT", {
+        require_build: $("relRequire").checked,
+        blocked_builds: $("relBlocked").value.split(",").map((x) => x.trim()).filter(Boolean),
+        undeclared_recipes: !undeclared ? null : undeclared.toLowerCase() === "none" ? []
+          : undeclared.split(",").map((x) => x.trim()).filter(Boolean),
+        release_repo: $("relRepo").value.trim(),
+      }), "Policy saved");
+    };
     $("relRegisterBtn").onclick = async () => {
       let rows;
       try { rows = JSON.parse($("relPaste").value); } catch (e) { showToast("That is not JSON"); return; }
