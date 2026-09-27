@@ -47,6 +47,7 @@ _ALLOWED_UNLOCKED = {
     "_still_progressing",  # ditto: called only from heartbeat, under its lock
     "_count_for_build",    # ditto: complete/fail, inside their transaction
     "_setting",            # read inside the locked release functions
+    "_undeclared_recipes", # ditto: inside lease() and list_releases
     "_set_setting",        # the core of set_setting; also called by set_target/roll_back
     "_set_target",         # inside set_target, promote_canary, roll_back
     "_live_workers",       # inside list_releases, platform_gaps, release_in_use

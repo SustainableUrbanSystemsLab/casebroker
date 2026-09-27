@@ -244,6 +244,10 @@ class TargetIn(BaseModel):
 class PolicyIn(BaseModel):
     require_build: bool | None = None
     blocked_builds: list[str] | None = Field(default=None, max_length=64)
+    # What a worker that declares no recipes may be handed (db._undeclared_recipes).
+    # Omitted leaves it as it is; null clears it, so such a worker takes anything
+    # again; [] hands it nothing.
+    undeclared_recipes: list[str] | None = Field(default=None, max_length=64)
     # "owner/name" on GitHub, for the commit links the panel draws from build
     # names; "" clears it.
     release_repo: str | None = Field(default=None, max_length=120)
@@ -1745,6 +1749,14 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
             db.set_setting(conn, "require_build", "1" if body.require_build else "0", by=user["username"])
         if body.blocked_builds is not None:
             db.set_setting(conn, "blocked_builds", json.dumps(sorted(set(body.blocked_builds))),
+                           by=user["username"])
+        if "undeclared_recipes" in body.model_fields_set:
+            wanted = body.undeclared_recipes
+            if wanted is not None:
+                wanted = sorted({r.strip() for r in wanted})
+                if any(not r or len(r) > 128 for r in wanted):
+                    raise HTTPException(422, "undeclared_recipes are recipe names, 1-128 characters each")
+            db.set_setting(conn, "undeclared_recipes", None if wanted is None else json.dumps(wanted),
                            by=user["username"])
         if body.release_repo is not None:
             repo = body.release_repo.strip()

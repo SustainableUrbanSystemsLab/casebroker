@@ -1405,8 +1405,9 @@ def lease(conn, worker_id: str, count: int = 1,
     partitioned by, and a node that does not know one must never be given it (the
     alternative was measured -- recipe selection by prefix solved a v4 case as v3
     and archived it labelled v4). A worker that declares NOTHING predates
-    declarations and is left unfiltered, which is what `require_build` exists to
-    fence off when a campaign needs it.
+    declarations: it is handed only the campaign's ``undeclared_recipes`` when
+    that policy is set (see `_undeclared_recipes`), and anything when it is not.
+    `require_build` fences such workers off entirely.
 
     A DRAINING worker gets no new case, and may still resume its own: that is how
     a node restarts onto a new build in the middle of a case without losing it.
@@ -1438,9 +1439,11 @@ def lease(conn, worker_id: str, count: int = 1,
     # everything to begin with.
     lock_clause = " FOR UPDATE SKIP LOCKED" if is_pg else ""
     recipe_sql, recipe_params = "", []
-    if recipes:
-        recipe_sql = " AND recipe IN (" + ",".join("?" for _ in recipes) + ")"
-        recipe_params = list(recipes)
+    allowed = list(recipes) if recipes else _undeclared_recipes(conn)
+    if allowed is not None:
+        recipe_sql = (" AND recipe IN (" + ",".join("?" for _ in allowed) + ")") if allowed \
+            else " AND 1 = 0"
+        recipe_params = allowed
     # Not a case this machine failed within FAIL_COOLDOWN_SECONDS (see there).
     cooldown_params = [now - FAIL_COOLDOWN_SECONDS, worker_id, host]
     # A node that cannot fetch a mesh from the master is not handed a case that
@@ -1675,6 +1678,25 @@ APPLY_MODES = ("case", "direction", "now")
 def _setting(conn, key: str, default: str | None = None) -> str | None:
     row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
     return row["value"] if row else default
+
+
+# A worker that declares no recipes predates declarations, and every such worker
+# was built for the wind campaign: casebroker's own worker behind
+# runner/run_case.sh, or an E3D node started with --runner. Until 2026-09 every
+# recipe in the queue was a CFD recipe, so handing it anything was harmless. The
+# Radiance surface-temperature recipe is the first one that is not, and such a
+# worker handed one gives it back with exit 69 and STOPS -- harmless to the case,
+# the end of a PACE allocation. So the campaign names what an undeclared worker may
+# take: None (the policy unset) is anything, as before; [] is nothing at all.
+def _undeclared_recipes(conn) -> list[str] | None:
+    raw = _setting(conn, "undeclared_recipes")
+    if raw is None:
+        return None
+    try:
+        value = json.loads(raw)
+    except ValueError:
+        return None
+    return [str(r) for r in value] if isinstance(value, list) else None
 
 
 @_locked
@@ -1926,6 +1948,7 @@ def list_releases(conn, now: int | None = None) -> dict[str, Any]:
         "previous_target": value("previous_target"),
         "require_build": value("require_build") == "1",
         "blocked_builds": json.loads(value("blocked_builds") or "[]"),
+        "undeclared_recipes": _undeclared_recipes(conn),
         "release_repo": value("release_repo"),
         "stuck_after": STUCK_AFTER,
         "queue_recipes": queue,

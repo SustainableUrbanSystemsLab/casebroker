@@ -18,6 +18,7 @@ against the hash it was given.
 | **apply** | when a node switches: `case` (after the case in flight), `direction` (after the wind direction being solved; `--resume` skips solved ones), `now` (the case is given back). |
 | **drain** | no new case for this worker; the one in flight finishes; it may still resume its own. |
 | **blocked** | a build refused new cases at every lease (426). `require_build` refuses workers that declare none. |
+| **undeclared recipes** | what a worker that declares **no recipes** may be handed. Unset, it takes any recipe (such workers predate declarations, and every recipe used to be a CFD one); `[]`, none. Set it to the wind recipes before posting a recipe of another kind: a script worker handed a Radiance case gives it back with exit 69 and stops. |
 
 ## The loop
 
@@ -100,7 +101,7 @@ against the hash it was given.
 | `POST /v1/releases` | register `{build, platform, file, sha256, notes}` |
 | `DELETE /v1/releases/{build}` | remove a build from the catalog (guarded) |
 | `PUT /v1/releases/target` | `{build, apply, force}`; `build: null` clears it |
-| `PUT /v1/releases/policy` | `{require_build, blocked_builds, release_repo}` — the repo (`owner/name`) gives the panel commit and compare links |
+| `PUT /v1/releases/policy` | `{require_build, blocked_builds, undeclared_recipes, release_repo}` — the repo (`owner/name`) gives the panel commit and compare links; `undeclared_recipes: null` clears that policy |
 | `POST /v1/releases/promote` | `{worker_id}` |
 | `POST /v1/releases/rollback` | `{block}` |
 | `PUT /v1/workers/{id}/target` | `{build, force}`; `null` follows the fleet |

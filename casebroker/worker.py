@@ -667,7 +667,8 @@ def main(argv: list[str] | None = None) -> int:
     if w.build:
         print(f"[info] build {w.build} ({w.platform or 'platform unknown'}); "
               + (f"recipes {', '.join(recipes)}" if recipes
-                 else "no recipes declared, so any case may be handed to this worker"))
+                 else "no recipes declared, so this worker takes whatever the campaign allows "
+                      "undeclared workers (any recipe, unless it says otherwise)"))
     else:
         print("[info] no build declared (set EDDY3D_CLI to an e3d that answers "
               "`version --json`); the fleet table will show this worker as undeclared")

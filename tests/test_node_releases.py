@@ -12,6 +12,7 @@ things have to hold, and each was broken or absent before this:
 """
 from __future__ import annotations
 
+import json
 import pathlib
 import sys
 
@@ -85,6 +86,59 @@ def test_a_worker_that_declares_nothing_is_left_unfiltered(conn):
 def test_the_recipe_filter_also_guards_a_resume(conn):
     db.add_cases(conn, [case(1, V4)])
     assert db.lease(conn, "n", count=1, recipes=[V3], resume_case_ids=["c001"]) == []
+
+
+# -- a recipe of another kind --------------------------------------------------
+#
+# Every recipe until 2026-09 was a CFD recipe, so a worker that declares nothing
+# (casebroker's worker behind run_case.sh, an E3D node with --runner) could take
+# any of them. Radiance surface temperatures is the first that is not: such a
+# worker gives the case back with exit 69 and STOPS, which ends a PACE allocation.
+# The campaign names what an undeclared worker may take.
+
+THERMAL = "surf-1008/rad6R0P2-fft-v1"
+
+
+def test_an_undeclared_worker_takes_only_the_recipes_the_campaign_names(conn):
+    db.add_cases(conn, [case(1, V4), case(2, THERMAL)])
+    db.set_setting(conn, "undeclared_recipes", json.dumps([V4]))
+
+    assert [g.case_id for g in db.lease(conn, "legacy", count=5)] == ["c001"]
+    assert db.lease(conn, "legacy", count=5) == []
+    # A node that declares the new recipe is not touched by the policy.
+    assert [g.case_id for g in db.lease(conn, "rad-node", count=5, recipes=[THERMAL])] == ["c002"]
+
+
+def test_an_empty_list_hands_an_undeclared_worker_nothing(conn):
+    db.add_cases(conn, [case(1, V4)])
+    db.set_setting(conn, "undeclared_recipes", "[]")
+
+    assert db.lease(conn, "legacy", count=5) == []
+    assert len(db.lease(conn, "node", count=5, recipes=[V4])) == 1
+
+
+def test_the_policy_also_guards_an_undeclared_resume(conn):
+    db.add_cases(conn, [case(1, THERMAL)])
+    db.set_setting(conn, "undeclared_recipes", json.dumps([V4]))
+
+    assert db.lease(conn, "legacy", count=1, resume_case_ids=["c001"]) == []
+
+
+def test_an_admin_names_clears_and_keeps_the_undeclared_recipes(admin):
+    r = admin.put("/v1/releases/policy", json={"undeclared_recipes": [V4, " " + V4, V3]})
+    assert r.status_code == 200, r.text
+    assert r.json()["undeclared_recipes"] == sorted([V3, V4]), "trimmed, deduplicated, sorted"
+    # Saving another field leaves it as it is...
+    assert admin.put("/v1/releases/policy",
+                     json={"require_build": False}).json()["undeclared_recipes"] == sorted([V3, V4])
+    # ...[] is "nothing", null clears it ("any recipe", as before the policy existed).
+    assert admin.put("/v1/releases/policy", json={"undeclared_recipes": []}).json()["undeclared_recipes"] == []
+    assert admin.put("/v1/releases/policy", json={"undeclared_recipes": None}).json()["undeclared_recipes"] is None
+    assert admin.put("/v1/releases/policy", json={"undeclared_recipes": [" "]}).status_code == 422
+    # A machine's write token is not an admin.
+    admin.cookies.clear()
+    assert admin.put("/v1/releases/policy", headers=W,
+                     json={"undeclared_recipes": [V4]}).status_code in (401, 403)
 
 
 # -- fencing builds off --------------------------------------------------------
