@@ -8,6 +8,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-09-26
+
+### Added
+- **The campaign names the recipes a worker that declares none may take.** This is
+  `undeclared_recipes` in the release policy, set from the dashboard or with
+  `PUT /v1/releases/policy`.
+  - Such workers predate recipe declarations and were built for the wind campaign:
+    casebroker's worker behind `run_case.sh`, or an E3D node started with `--runner`.
+  - The Radiance surface-temperature recipe is the first that isn't CFD. Such a worker
+    handed one gives it back with exit 69 and stops, which ends a PACE allocation.
+  - Unset, these workers take any recipe, as before; `[]` hands them nothing. Set it to
+    the wind recipes before posting a recipe of another kind.
+
 ## [0.22.1] - 2026-09-26
 
 ### Fixed
