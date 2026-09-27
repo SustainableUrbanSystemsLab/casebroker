@@ -19,12 +19,27 @@ Radiance itself computes no temperatures. The recipe's physics is the admittance
 | | |
 | --- | --- |
 | **Recipe** | `surf-1008/rad6R0P2-fft-v1` |
-| **Sensors** | Ground at 2 m, on the wind campaign's pedestrian lattice and seated on the terrain; roofs and facades at 4 m. Each faces along its surface normal, 5 cm off the surface. Points inside another building (the GBA prisms are not unioned) are dropped. |
-| **Materials** | Ground: an assembly and reflectance per WorldCover class. Roofs: `concrete_roof`. Facades: `brick_wall`. Buildings keep 22 °C behind the wall; ground assemblies use the EPW's annual mean air temperature at depth. |
-| **Trees** | Canopy columns are a Radiance `trans` material with shortwave transmittance 0.2. |
+| **Sensors** | Ground at 2 m, on the wind campaign's pedestrian lattice and seated on the terrain; roofs and facades at 4 m. Each faces along its surface normal, 5 cm off the surface. Points inside another building (the GBA prisms are not unioned) are dropped, and so is ground under water or snow. |
+| **Materials** | `worldcover-v1`, below. Buildings keep 22 °C behind the wall; ground assemblies use the EPW's annual mean air temperature at depth. |
+| **Trees** | The canopy crowns are a Radiance `trans` material: each face reflects 0.15 and transmits 0.45, diffusely, so about 0.2 gets through a crown's two faces. |
+| **Sky view** | Each sensor's, read off its chunk's own direct-only sky trace: open ground 1, an open wall ½. It sets the long-wave exchange. |
 | **Weather** | The nearest TMYx EPW in Eddy3D's climate catalogue, chosen when the case is admitted. |
-| **Radiance** | rad6R0P2, Standard preset (`-ab 3 -ad 2000 -lw 1e-4`). The container image is pinned by digest; native Windows (the pinned zip plus Git Bash) is allowed. Each case records which it used. |
+| **Radiance** | rad6R0P2, Standard preset (`-ab 3 -ad 2000 -lw 1e-4`). The container image is used where a container engine answers; otherwise native Windows (the pinned zip plus Git Bash). Each case records which it used. |
 | **Priority** | 200, so wind cases lease first. |
+
+### Materials: `worldcover-v1`
+
+Each surface's Radiance reflectance is **1 − its assembly's absorptivity**, so
+Radiance and the solver agree on what it absorbs.
+
+| surface | assembly | reflectance |
+| --- | --- | --- |
+| built-up ground (WorldCover 50), unclassified ground | `concrete_ground` | 0.35 |
+| tree, shrub, grass, crop, wetland, mangrove, moss (10, 20, 30, 40, 90, 95, 100) | `grass_ground` | 0.25 |
+| bare ground (60) | `brick_ground` | 0.30 |
+| snow (70), water (80) | no sensor | 0.70, 0.07 |
+| roofs | `concrete_roof` | 0.15 |
+| facades | `brick_wall` | 0.30 |
 
 ## The spec
 
@@ -51,32 +66,36 @@ optionally `a/b unit`, then `·`-separated detail.
 site geometry
 scene · 312,440 sensors
 trace 12/36 chunks · 3,904 daylight hours
-surface 30/36 chunks
 archiving
 ```
 
-`trace` (Radiance) is the long phase and drives the ETA.
+`trace` is the long phase and drives the ETA. A chunk counts once it has been
+traced AND solved: the admittance solve runs on each chunk as it leaves Radiance,
+so there is no separate phase for it. The broker also knows a `surface a/b chunks`
+phase, for a node that ever splits the two.
 
 ## Telemetry
 
-`site` is the same as for wind. `thermal` carries:
+`site` is the same as for wind. `thermal` is sent before the trace, and again with
+its timings when it ends:
 
 ```json
 {"sensors": {"ground": 0, "roof": 0, "facade": 0},
  "weather": {"key": "", "distance_km": 0.0},
  "daylight_hours": 0,
- "radiance": {"engine": "container|native", "image": "", "params": "", "chunks": 0, "seconds": 0},
- "surface": {"seconds": 0},
+ "radiance": {"engine": "container|native", "image": "", "params": "", "chunks": 0, "seconds": null},
  "materials": "worldcover-v1"}
 ```
 
 ## Completion metrics
 
-- `recipe`, `eddy3d_build`, `engine`, `case_seconds`
+- `recipe`, `builder` (`eddy3d-thermal`), `eddy3d_build`, `case_seconds`
+- `engine`, `radiance` (what produced the numbers: the image, or the native build)
 - `sensors`, `sensors_ground`, `sensors_roof`, `sensors_facade`
-- `daylight_hours`, `trace_seconds`, `surface_seconds`
+- `daylight_hours`, `trace_seconds`
 - `weather_key`, `weather_distance_km`
-- `t_surface`: per surface kind, the p50, p95 and max of the hourly field, in °C
+- `t_surface`: per surface kind, the p50, p95 and max of every hourly value, in °C, from 0.1 K histograms
+- `urban_form`, as for wind
 
 ## The archive
 
@@ -85,13 +104,14 @@ parts, since a thermal case has no mesh to continue from.
 
 | file | |
 | --- | --- |
-| `manifest.json` | Recipe, build, engine, Radiance parameters, weather (key, url, sha256), sensor counts, material table, and the scale and offset of every array. |
-| `sensors.npy` | Structured: `x y z nx ny nz` (float32, site frame), `kind` (uint8: 0 ground, 1 roof, 2 facade), `material` (uint8), `svf` (float32). |
+| `manifest.json` | Recipe, build, engine, Radiance parameters, weather (key, url, distance, sha256), the material table, the crown optics, the temperatures behind each surface, sensor counts and spacing, and the dtype, shape, scale and unit of every array. |
+| `sensors.npy` | Packed records: `x y z nx ny nz` (float32, site metres: x east, y north), `kind` (uint8: 0 ground, 1 roof, 2 facade), `material` (uint8: the WorldCover class on the ground, 200 roof, 201 facade), `svf` (float32). |
 | `t_surface.npy` | int16 `[n, 8760]`, °C × 100: one row per sensor, in `sensors.npy` order. |
 | `irradiance.npy` | int16 `[n, daylight_hours]`, W/m² × 10. |
 | `daylight_hours.npy` | int16 `[daylight_hours]`: the hour of year of each irradiance column. |
 | `weather.epw` | The file the case was computed with. |
-| `<site>.json` | The site report, as for wind. |
+| `spec.json` | The spec the case was leased with. |
+| `geometry/<case>.json` | The site report, as for wind. |
 
 The arrays are **sensor-major**: one row per sensor. A node writes them chunk by
 chunk, as Radiance finishes each block of sensors. Hour-major would mean holding
