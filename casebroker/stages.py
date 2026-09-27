@@ -20,7 +20,11 @@ from typing import Any
 
 #: In the order a case goes through them. "resume" is what a restarted node
 #: says before it picks up where it stopped; "gate" is the convergence gate.
-STAGES = ("geometry", "build-case", "resume", "mesh", "solve", "gate", "archive")
+#: A Radiance surface-temperature case (docs/thermal.md) goes geometry, "scene"
+#: (sensors and materials), "trace" (Radiance), "surface" (the admittance solve),
+#: archive.
+STAGES = ("geometry", "build-case", "resume", "mesh", "solve", "gate",
+          "scene", "trace", "surface", "archive")
 
 _SOLVER = re.compile(r"foamrun|simplefoam|urbanmicroclimatefoam|foammultirun|potentialfoam", re.I)
 _LEGACY_STEP = re.compile(r"^step\s+\d+/\d+:\s*(?P<name>\S+)", re.I)
@@ -47,6 +51,13 @@ def stage_of(detail: str | None) -> str | None:
         return "gate"
     if line.startswith("archiving"):
         return "archive"
+    # The thermal recipe's phases (docs/thermal.md, "Progress").
+    if line.startswith("scene"):
+        return "scene"
+    if line.startswith("trace"):
+        return "trace"
+    if line.startswith("surface"):
+        return "surface"
     m = _LEGACY_STEP.match(line)
     if m:
         name = m.group("name")
