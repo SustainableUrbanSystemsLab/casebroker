@@ -19,7 +19,8 @@ A **site** plus a **recipe**. One CFD job.
 | `state` | `pending` → `leased` → `done` \| `quarantined` |
 | `attempts` / `max_attempts` | Retry budget, default 3. |
 | `priority` | Lease order, ascending. Default 100. |
-| `result_uri`, `result_sha256`, `result_bytes` | Where the answer lives. The broker never opens it. |
+| `result_uri`, `result_sha256`, `result_bytes` | Where the archive lives. The broker never opens it. |
+| `case_fields` rows | The pedestrian wind field itself, per direction: \|U\| at 1.75 m on the 2 m grid, sent by the node as each direction finishes. The one result the broker HOLDS rather than points at (since 0.24.0). |
 
 **A case id depends only on where and how, never on when or on how many exist.**
 That is what makes adding cases a pure append: no renumbering, no reshuffling,
