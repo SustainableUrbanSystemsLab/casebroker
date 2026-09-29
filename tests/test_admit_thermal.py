@@ -59,3 +59,64 @@ def test_a_thermal_case_keeps_the_wind_cases_site_split_and_a_link_to_it():
     assert case["spec"]["wind_case"] == "v2-0000000000000007"
     assert case["spec"]["weather"]["url"].endswith(".zip") and case["spec"]["weather"]["distance_km"] == 12.74
     assert case["labels"] == {"campaign": "thermal-pilot"}
+
+
+# -- versions --------------------------------------------------------------------
+#
+# A recipe version is a training set (docs/thermal.md, "Versions"). v1 traced the
+# sun matrix without -d, so every sun also carried the whole sky; v2 is sun-only.
+
+V1 = "surf-1008/rad6R0P2-fft-v1"
+
+
+def test_the_script_posts_v2_and_never_a_withdrawn_version():
+    assert admit.RECIPE == "surf-1008/rad6R0P2-fft-v2"
+    assert V1 in admit.WITHDRAWN and admit.RECIPE not in admit.WITHDRAWN
+
+
+def test_only_a_withdrawn_case_still_waiting_or_running_counts_as_in_flight():
+    cases = [{"recipe": V1, "state": s} for s in ("pending", "leased", "leased", "done", "quarantined")]
+    cases.append({"recipe": admit.RECIPE, "state": "pending"})
+    assert admit.withdrawn_in_flight(cases) == {V1: 3}
+    assert admit.withdrawn_in_flight([c for c in cases if c["state"] in ("done", "quarantined")]) == {}
+
+
+class FakeBroker:
+    """The broker as main() sees it: a policy that fences undeclared workers, and `held`."""
+    held: list[dict] = []
+    posted: list = []
+
+    def __init__(self, url: str, token: str):
+        pass
+
+    def call(self, method, path, body=None):
+        if path == "/v1/releases":
+            return {"undeclared_recipes": list(admit.WIND_RECIPES)}
+        if method == "POST":
+            FakeBroker.posted.append(body)
+            return {"added": len(body)}
+        raise AssertionError(f"unexpected {method} {path}")
+
+    def cases(self, **params):
+        # Unfiltered, as a broker from before `recipe` was a filter answers: main() must filter.
+        return [c for c in FakeBroker.held if params.get("state") in (None, c["state"])]
+
+
+def run_main(monkeypatch, held):
+    FakeBroker.held, FakeBroker.posted = held, []
+    monkeypatch.setattr(admit, "Broker", FakeBroker)
+    monkeypatch.setattr(admit, "e3d_catalogue", lambda e3d: None)
+    return admit.main(["--broker", "https://broker.test", "--token", "t", "--e3d", "E3D", "--post"])
+
+
+def test_posting_is_refused_while_a_withdrawn_case_is_pending_or_leased(monkeypatch):
+    held = [{"case_id": "t1", "recipe": V1, "state": "leased", "spec": {}}]
+    assert run_main(monkeypatch, held) == 2
+    assert FakeBroker.posted == []
+
+
+def test_a_finished_withdrawn_case_does_not_block_posting(monkeypatch):
+    # The control: the same broker with the v1 case done gets past the guard (and,
+    # with no finished wind site to pair, posts nothing and succeeds).
+    held = [{"case_id": "t1", "recipe": V1, "state": "done", "spec": {}}]
+    assert run_main(monkeypatch, held) == 0

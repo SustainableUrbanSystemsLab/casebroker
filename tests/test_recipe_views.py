@@ -23,7 +23,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from casebroker import dataset, db, stages  # noqa: E402
 from casebroker.app import create_app  # noqa: E402
 
-WIND, THERMAL = "cyl-1008/of12-v5", "surf-1008/rad6R0P2-fft-v1"
+WIND, THERMAL = "cyl-1008/of12-v5", "surf-1008/rad6R0P2-fft-v2"
 T0 = 1_000_000
 
 

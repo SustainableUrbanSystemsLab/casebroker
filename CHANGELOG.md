@@ -8,6 +8,28 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.24.1] - 2026-09-29
+
+0.24.0 below is PR #40. It was merged into the stacked branch of #39 seven seconds
+after #39 reached `main`, so it never reached `main` or production; it ships with
+this release. This release moves the thermal recipe to v2 before a single case of
+v1 was admitted.
+
+### Changed
+- **The thermal recipe is `surf-1008/rad6R0P2-fft-v2`.** v1's sun matrix was built
+  without `gendaymtx -d`, so every sun also carried the whole Perez sky and the direct
+  term re-counted about 2.6 % of each sensor's diffuse sky: about 1.1 % of total
+  irradiance on open ground, about 30 % of "direct" on a north wall (Eddy3D PR #960).
+  `irradiance.npy` and `t_surface.npy` change, so it is a new version, not an edit.
+  - `docs/thermal.md` has a Versions section, a Sky row naming the three `gendaymtx`
+    matrices, and the manifest's and telemetry's `radiance.gendaymtx` (sky, sun,
+    direct-sky flags) that a v2 node records.
+  - v1 is withdrawn. On 2026-09-29 production held no v1 case in any state and no
+    worker had declared it, so nothing is retired.
+  - `scripts/admit_thermal.py` posts v2, and refuses to post while a case of a
+    withdrawn version is still pending or leased, so two versions are never produced
+    side by side.
+
 ## [0.24.0] - 2026-09-26
 
 ### Added

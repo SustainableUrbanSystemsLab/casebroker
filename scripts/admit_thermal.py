@@ -20,7 +20,9 @@ large call took the broker down on 2026-09-26.
 
 It refuses to post while the broker hands every recipe to workers that declare
 none (the release policy's `undeclared_recipes`): such a worker gives a thermal
-case back with exit 69 and stops, which ends a PACE allocation.
+case back with exit 69 and stops, which ends a PACE allocation. It also refuses
+while a case of a WITHDRAWN version of the recipe is still pending or leased:
+two versions are two training sets, and are never produced side by side.
 
     python scripts/admit_thermal.py --broker https://casebroker.onrender.com \\
         --e3d C:/E3D/E3D.exe --count 50 [--post]
@@ -39,7 +41,11 @@ import urllib.request
 from collections import defaultdict
 from typing import Any, Callable, Iterable
 
-RECIPE = "surf-1008/rad6R0P2-fft-v1"
+RECIPE = "surf-1008/rad6R0P2-fft-v2"
+# Earlier versions of the recipe, each a different training set (docs/thermal.md, "Versions").
+# Never posted again, and never produced beside RECIPE: a node on an older build still declares
+# one, so while a case of it is pending or leased that node keeps archiving it.
+WITHDRAWN = ("surf-1008/rad6R0P2-fft-v1",)
 WIND_RECIPES = ("cyl-1008/of12-v5", "cyl-1008/of12-v4")
 PRIORITY = 200
 BATCH = 25
@@ -106,6 +112,16 @@ def e3d_catalogue(e3d: str) -> str | None:
         return json.loads(out.stdout).get("builtAtUtc")
     except (ValueError, AttributeError):
         return None
+
+
+def withdrawn_in_flight(cases: Iterable[dict[str, Any]]) -> dict[str, int]:
+    """How many cases of each WITHDRAWN recipe are still pending or leased. A done or
+    quarantined one is finished with: it stays its own training set and no node takes it."""
+    out: dict[str, int] = defaultdict(int)
+    for c in cases:
+        if c.get("recipe") in WITHDRAWN and c.get("state") in ("pending", "leased"):
+            out[c["recipe"]] += 1
+    return dict(out)
 
 
 def thermal_case(wind: dict[str, Any], station: dict[str, Any], catalogue: str | None, campaign: str) -> dict[str, Any]:
@@ -177,6 +193,11 @@ def main(argv: list[str] | None = None) -> int:
         if policy.get("undeclared_recipes") is None:
             print("refusing to post: the broker hands every recipe to workers that declare none. Set the release "
                   f"policy's undeclared_recipes (e.g. {list(WIND_RECIPES)}) first; see docs/releases.md.", file=sys.stderr)
+            return 2
+        old = withdrawn_in_flight(c for r in WITHDRAWN for c in broker.cases(recipe=r))
+        if old:
+            print(f"refusing to post: withdrawn thermal recipe(s) still pending or leased: {old}. Cancel them "
+                  f"or respec them to {RECIPE} first; see docs/thermal.md, Versions.", file=sys.stderr)
             return 2
 
     wanted = {} if a.any_state else {"state": "done"}

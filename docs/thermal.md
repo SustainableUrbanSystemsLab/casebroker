@@ -3,7 +3,8 @@
 A second kind of case. The broker's job is the same, but the case is not a CFD
 job. Its decisions were made on 2026-09-26 and are listed below. Changing any of
 them makes a different training set, which means a new recipe **version**
-(`…-v2`), never an edit to this one.
+(`…-v3` next), never an edit to this one. The current version is **v2**; what
+changed from v1, and why v1 is withdrawn, is under [Versions](#versions).
 
 ## What a case computes
 
@@ -18,13 +19,14 @@ Radiance itself computes no temperatures. The recipe's physics is the admittance
 
 | | |
 | --- | --- |
-| **Recipe** | `surf-1008/rad6R0P2-fft-v1` |
+| **Recipe** | `surf-1008/rad6R0P2-fft-v2` |
 | **Sensors** | Ground at 2 m, on the wind campaign's pedestrian lattice and seated on the terrain; roofs and facades at 4 m. Each faces along its surface normal, 5 cm off the surface. Points inside another building (the GBA prisms are not unioned) are dropped, and so is ground under water or snow. |
 | **Materials** | `worldcover-v1`, below. Buildings keep 22 °C behind the wall; ground assemblies use the EPW's annual mean air temperature at depth. |
 | **Trees** | The canopy crowns are a Radiance `trans` material: each face reflects 0.15 and transmits 0.45, diffusely, so about 0.2 gets through a crown's two faces. |
 | **Sky view** | Each sensor's, read off its chunk's own direct-only sky trace: open ground 1, an open wall ½. It sets the long-wave exchange. |
 | **Weather** | The nearest TMYx EPW in Eddy3D's climate catalogue, chosen when the case is admitted. |
 | **Radiance** | rad6R0P2, Standard preset (`-ab 3 -ad 2000 -lw 1e-4`). The container image is used where a container engine answers; otherwise native Windows (the pinned zip plus Git Bash). Each case records which it used. |
+| **Sky** | Three `gendaymtx` matrices from the EPW's daylight hours: the sky `-m 1 -O1` (Perez sky and sun, for the indirect pass), the direct sky `-m 1 -O1 -d` (sun only, subtracted), and the sun `-5 0.533 -m 4 -O1 -d` (2,305 suns of 0.533°, **sun only**). Each case records the three flag strings. |
 | **Priority** | 200, so wind cases lease first. |
 
 ### Materials: `worldcover-v1`
@@ -43,7 +45,7 @@ Radiance and the solver agree on what it absorbs.
 
 ## The spec
 
-`POST /v1/cases`, `recipe: "surf-1008/rad6R0P2-fft-v1"`, and in `spec`:
+`POST /v1/cases`, `recipe: "surf-1008/rad6R0P2-fft-v2"`, and in `spec`:
 
 | key | |
 | --- | --- |
@@ -83,7 +85,9 @@ its timings when it ends:
 {"sensors": {"ground": 0, "roof": 0, "facade": 0},
  "weather": {"key": "", "distance_km": 0.0},
  "daylight_hours": 0,
- "radiance": {"engine": "container|native", "image": "", "params": "", "chunks": 0, "seconds": null},
+ "radiance": {"engine": "container|native", "image": "", "params": "",
+              "gendaymtx": {"sky": "-m 1 -O1", "sun": "-5 0.533 -m 4 -O1 -d", "direct_sky": "-m 1 -O1 -d"},
+              "chunks": 0, "seconds": null},
  "materials": "worldcover-v1"}
 ```
 
@@ -104,7 +108,7 @@ parts, since a thermal case has no mesh to continue from.
 
 | file | |
 | --- | --- |
-| `manifest.json` | Recipe, build, engine, Radiance parameters, weather (key, url, distance, sha256), the material table, the crown optics, the temperatures behind each surface, sensor counts and spacing, and the dtype, shape, scale and unit of every array. |
+| `manifest.json` | Recipe, build, engine, Radiance parameters and sky chain (`radiance.gendaymtx`: the `sky`, `sun` and `direct_sky` flags), weather (key, url, distance, sha256), the material table, the crown optics, the temperatures behind each surface, sensor counts and spacing, and the dtype, shape, scale and unit of every array. |
 | `sensors.npy` | Packed records: `x y z nx ny nz` (float32, site metres: x east, y north), `kind` (uint8: 0 ground, 1 roof, 2 facade), `material` (uint8: the WorldCover class on the ground, 200 roof, 201 facade), `svf` (float32). |
 | `t_surface.npy` | int16 `[n, 8760]`, °C × 100: one row per sensor, in `sensors.npy` order. |
 | `irradiance.npy` | int16 `[n, daylight_hours]`, W/m² × 10. |
@@ -127,3 +131,30 @@ As for wind:
 - **Anything else:** retryable.
 
 A disk-full write gives the case back and stops the node, as it does for wind.
+
+## Versions
+
+A version is a training set. Two versions are never pooled: the broker keys every
+aggregate by the exact recipe, and a node declares the exact recipes it builds, so
+it is never handed another version's case.
+
+| recipe | status | |
+| --- | --- | --- |
+| `surf-1008/rad6R0P2-fft-v2` | **current**, from 2026-09-29 | The sun matrix is sun-only (`gendaymtx … -d`). Eddy3D PR #960. |
+| `surf-1008/rad6R0P2-fft-v1` | **withdrawn** 2026-09-29, never admitted | The sun matrix carried the whole Perez sky as well as the sun. |
+
+**Why v1 is withdrawn.** The DDS chain adds each sensor's direct sun, traced
+against the fine sun matrix, to its sky, traced against the full sky with the
+coarse direct sun subtracted. v1 built the sun matrix without `-d`, so every one
+of its suns also carried the whole sky, and the direct term re-counted about
+2.6 % of each sensor's diffuse sky. That is about 1.1 % of total irradiance on
+open ground and about 30 % of "direct" on a north wall. `irradiance.npy` and
+`t_surface.npy` both change, which makes a different training set.
+
+**What happened to v1.** Nothing needed to. On 2026-09-29 the production broker
+held no v1 case in any state (admitted, leased or done), and no worker had ever
+declared the recipe: the fleet's builds predate the thermal runner. An Eddy3D
+build with the v2 change declares v2 only and hands a v1 case back untouched,
+with the reason. An older build that declares v1 keeps its declaration, and
+`scripts/admit_thermal.py` refuses to post v2 while any v1 case is still pending
+or leased, so the two are never produced side by side.
