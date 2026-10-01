@@ -8,6 +8,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.25.1] - 2026-10-01
+
+### Changed
+- **`scripts/admit_thermal.py` links each thermal site to its v6 wind case.** The pending v4
+  cases move to `cyl-1008/of12-v6` (respec), which leaves each site with a quarantined v4 case
+  pointing at a pending v6 one. The script now takes one wind case per site, the newest recipe's,
+  and leaves the moved ones out, so no site is proposed twice or linked to a parked case.
+- `--priority` sets the thermal cases' lease order (default 200, after the wind cases at 50).
+
+### Fixed
+- **An `E3D climate-index find` that printed nothing is an error, not "no station".** Before Eddy3D
+  #964 a station without statistics among the nearest 300 made `find` exit 1 with empty output,
+  and the script read that as no TMYx station for every site: a `--post` run would have admitted
+  nothing and said only "skipped". Exit 1 with `[]` is still "no station".
+
 ## [0.25.0] - 2026-10-01
 
 ### Added
