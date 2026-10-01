@@ -43,6 +43,12 @@ const cases = [
   ['solve 5/32 dirs · case_056 iter 212/2000 · warm-up to 400, rung 1 (fast)', (5 + 212/2000) / 32, 'solve'],
   ['solve 5/32 dirs · case_056 starting · main, rung 3 (robust)', 5 / 32, 'solve'],
   ['solve · progress unreadable (IOException)', null, 'solve'],
+  // The thermal recipe (docs/thermal.md): chunks FINISHED, like directions. The
+  // separator's detail carries no pair, so "3,904" is never read as one.
+  ['scene · 312,440 sensors', null, ''],
+  ['trace 12/36 chunks · 3,904 daylight hours', 12 / 36, ''],
+  ['trace 0/36 chunks', 0, ''],
+  ['surface 30/36 chunks', 30 / 36, ''],
 ];
 // Shapes the current writer no longer emits, but that workers in the field still
 // send: a node built before the grammar existed, and runner/run_case.sh, which is
@@ -97,6 +103,8 @@ const labels = [
   ['solve 0/8 dirs · starting', 'Solving · dir 1/8'],
   // The last direction must not read as a ninth.
   ['solve 8/8 dirs · starting', 'Solving · dir 8/8'],
+  ['trace 12/36 chunks · 3,904 daylight hours', 'Radiance · chunk 13/36'],
+  ['surface 30/36 chunks', 'Surface temperatures · chunk 31/36'],
 ];
 for (const [line, want] of labels) {
   const got = progressParse(line).label;

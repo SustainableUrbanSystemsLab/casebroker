@@ -8,6 +8,60 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.24.1] - 2026-09-29
+
+0.24.0 below is PR #40. It was merged into the stacked branch of #39 seven seconds
+after #39 reached `main`, so it never reached `main` or production; it ships with
+this release. This release moves the thermal recipe to v2 before a single case of
+v1 was admitted.
+
+### Changed
+- **The thermal recipe is `surf-1008/rad6R0P2-fft-v2`.** v1's sun matrix was built
+  without `gendaymtx -d`, so every sun also carried the whole Perez sky and the direct
+  term re-counted about 2.6 % of each sensor's diffuse sky: about 1.1 % of total
+  irradiance on open ground, about 30 % of "direct" on a north wall (Eddy3D PR #960).
+  `irradiance.npy` and `t_surface.npy` change, so it is a new version, not an edit.
+  - `docs/thermal.md` has a Versions section, a Sky row naming the three `gendaymtx`
+    matrices, and the manifest's and telemetry's `radiance.gendaymtx` (sky, sun,
+    direct-sky flags) that a v2 node records.
+  - v1 is withdrawn. On 2026-09-29 production held no v1 case in any state and no
+    worker had declared it, so nothing is retired.
+  - `scripts/admit_thermal.py` posts v2, and refuses to post while a case of a
+    withdrawn version is still pending or leased, so two versions are never produced
+    side by side.
+
+## [0.24.0] - 2026-09-26
+
+### Added
+- **The campaign can be seen one recipe at a time.** Until now every recipe was a CFD
+  wind recipe and everything was pooled. The Radiance surface-temperature recipe
+  (`docs/thermal.md`) is a different training set with a different throughput: an hour
+  a case where CFD takes days.
+  - `GET /v1/status?recipe=` scopes the counts, the splits and the ETA. `by_recipe`
+    always lists every recipe's states.
+  - `GET /v1/cases?recipe=` filters the case browser.
+  - `GET /v1/dataset?recipe=` answers for one recipe's cases, from the same cached pass.
+  - A case's percentiles now rank it among its own recipe. Pooled, every thermal case
+    sat at the bottom of the run-time distribution.
+  - The dashboard has a recipe selector beside the ETA that scopes all four. It is hidden
+    while the campaign holds one recipe.
+- **The thermal recipe's phases are stages, with an ETA.** `scene`, `trace` and `surface`
+  are stages. `trace a/b chunks` counts chunks finished, as `dirs` does, and drives the
+  ETA. The dashboard labels them "Radiance" and "Surface temperatures".
+- **A thermal case's page shows its own report.** A "Surface temperatures" card, from
+  `telemetry.thermal` and `metrics.t_surface`, replaces Mesh & Solve. The pedestrian-wind
+  viewer is hidden, and the map link draws the sensed core with no mesh domain.
+- `docs/thermal.md`: the contract a node that runs the thermal recipe follows (recipe,
+  spec, progress, telemetry, metrics, archive, exit codes).
+- **`scripts/admit_thermal.py` admits the thermal pilot.** It puts a thermal case beside wind
+  sites, spread across LCZs and then across cities.
+  - Each case's weather is chosen at admission and written into its spec: the nearest
+    whole-record TMYx station in Eddy3D's climate catalogue (`E3D climate-index find`).
+  - It runs dry by default, and with `--post` it posts in batches of 25.
+  - It refuses to post while workers that declare no recipes would be handed thermal cases.
+  - `--any-state` samples wind sites that aren't finished. The campaign had 2 finished
+    sites of 5,000 when the pilot was set up.
+
 ## [0.23.0] - 2026-09-26
 
 ### Added
