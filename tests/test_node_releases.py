@@ -96,7 +96,17 @@ def test_the_recipe_filter_also_guards_a_resume(conn):
 # worker gives the case back with exit 69 and STOPS, which ends a PACE allocation.
 # The campaign names what an undeclared worker may take.
 
-THERMAL = "surf-1008/rad6R0P2-fft-v1"
+THERMAL = "surf-1008/rad6R0P2-fft-v2"
+THERMAL_V1 = "surf-1008/rad6R0P2-fft-v1"   # withdrawn 2026-09-29: docs/thermal.md, "Versions"
+
+
+def test_a_thermal_version_is_never_handed_to_a_node_on_another(conn):
+    # v2 differs from v1 only in the sky it traces, and that changes every number in
+    # the archive. A node on the old build still declares v1: it must not be handed v2,
+    # and a node on the new build must not be handed a v1 case left in the queue.
+    db.add_cases(conn, [case(1, THERMAL_V1), case(2, THERMAL)])
+    assert [g.case_id for g in db.lease(conn, "old-build", count=5, recipes=[THERMAL_V1])] == ["c001"]
+    assert [g.case_id for g in db.lease(conn, "new-build", count=5, recipes=[THERMAL])] == ["c002"]
 
 
 def test_an_undeclared_worker_takes_only_the_recipes_the_campaign_names(conn):
