@@ -2181,13 +2181,15 @@
       </div>
 
       <div class="field" style="margin-top:18px;">
-        <label for="fieldBase">Wind-field source <span class="label-hint">(where &lt;case&gt;.wfld files are served)</span></label>
+        <label for="fieldBase">Wind-field source <span class="label-hint">(fallback: where &lt;case&gt;.wfld files are served)</span></label>
         <input type="text" id="fieldBase" autocomplete="off" spellcheck="false"
                placeholder="http://localhost:8765" />
         <div class="panel-subtitle" style="margin-top:4px;">
-          An opened case fetches <span class="mono">&lt;source&gt;/&lt;case_id&gt;.wfld</span> from here. On the
-          master, <span class="mono">scripts/serve_fields.py</span> serves them; a bucket's public URL works the same
-          way. Empty: open a case's file from disk instead.
+          A case's field comes from the broker's own database when its node sent one (every node since
+          2026-09-28 does). For a case that has none there, the page fetches
+          <span class="mono">&lt;source&gt;/&lt;case_id&gt;.wfld</span> from here -- on the master,
+          <span class="mono">scripts/serve_fields.py</span> serves them; a bucket's public URL works the same
+          way. Empty: open such a case's file from disk instead.
         </div>
       </div>
     </section>
@@ -3114,15 +3116,20 @@
     wfAttach();
   }
 
-  // -- Wind at pedestrian height: the .wfld viewer -----------------------------
-  // One file per case (runner/lib/ped_field.py, `bundle`): |U| at 1.75 m above
-  // grade on the 2 m grid over the 1008 m core, one byte per point, for every
-  // wind direction, plus arrows every 16 m. The broker stores none of it -- its
-  // database is ~500 MB and a campaign of fields is tens of GB -- so the page
-  // fetches <source>/<case_id>.wfld from wherever the fields are served (the
-  // master's scripts/serve_fields.py today, a bucket later: same URL shape), or
-  // opens the file straight from disk. State lives here, keyed by case, because
-  // the panel's DOM is rebuilt on every refresh.
+  // -- Wind at pedestrian height: the field viewer ------------------------------
+  // |U| at 1.75 m above grade on the 2 m grid over the 1008 m core, per wind
+  // direction. Two sources, the broker first:
+  //   1. The broker's own database (GET /v1/cases/{id}/fields, then one
+  //      /fields/{direction} per direction as it is looked at): the umag/1 blob
+  //      the node sent the moment the direction was solved -- float32, exact,
+  //      no arrows. Since 2026-09-28, when the fleet's database stopped being
+  //      the constraint.
+  //   2. A <case_id>.wfld (runner/lib/ped_field.py, `bundle`) from a wind-field
+  //      source or from disk: one byte per point plus arrows every 16 m, for a
+  //      case that finished before the node sent fields.
+  // Both decode to the same shape ({h, dirs[{deg, mag, vec?, exact?}]}) so one
+  // drawer serves both. State lives here, keyed by case, because the panel's
+  // DOM is rebuilt on every refresh.
   const LS_FIELD_BASE = "casebroker.fieldBase";
   const wfStates = new Map();       // case_id -> {status, field, err, dir, mode, arrows, src}
   const WF_KEEP = 6;                // decoded fields held (~8 MB each); oldest dropped first
@@ -3181,10 +3188,97 @@
     return { h, dirs };
   }
 
+  // The umag/1 blob (MetaFOAM.Deploy.PedestrianField.Encode; the broker checked it):
+  // gzip( "UMAG" | u32 version | u32 header length | header JSON | float32 LE nx*ny ),
+  // row 0 = SOUTH, NaN = inside a building.
+  async function wfDecodeUmag(buf) {
+    let bytes = new Uint8Array(buf);
+    if (bytes[0] === 0x1f && bytes[1] === 0x8b) {
+      const ds = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("gzip"));
+      bytes = new Uint8Array(await new Response(ds).arrayBuffer());
+    }
+    if (String.fromCharCode(bytes[0], bytes[1], bytes[2], bytes[3]) !== "UMAG") throw new Error("not a wind-field blob (no UMAG header)");
+    const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const version = dv.getUint32(4, true), hlen = dv.getUint32(8, true);
+    if (version !== 1) throw new Error(`umag format version ${version}; this page reads version 1`);
+    const h = JSON.parse(new TextDecoder().decode(bytes.subarray(12, 12 + hlen)));
+    const n = h.nx * h.ny;
+    if (bytes.length !== 12 + hlen + 4 * n) throw new Error(`the blob is ${bytes.length} bytes; its header describes ${12 + hlen + 4 * n}`);
+    // slice(): a Float32Array needs a 4-byte-aligned offset, which 12 + hlen seldom is.
+    return { h, exact: new Float32Array(bytes.slice(12 + hlen, 12 + hlen + 4 * n).buffer) };
+  }
+
+  // The field as the drawer wants it, from the broker's listing: every direction
+  // known up front (angle, U_ref, coverage), its values fetched when it is looked
+  // at. The colour scale is shared across the case from the listing's per-direction
+  // 99.9th percentiles, so cycling directions never rescales.
+  function wfFromBroker(id, fields) {
+    const list = fields.filter((f) => Math.abs(f.height_m - 1.75) < 1e-6);
+    const f0 = list[0];
+    const vmax = Math.max(1e-3, ...list.map((f) => f.umag_p999 || 0));
+    const dirs = list.map((f) => ({ deg: f.deg ?? 0, case: f.direction, u_ref: f.u_ref, uref: null, zref: null, z0: null,
+                                    mag: null, vec: null, exact: null, bytes: f.bytes }));
+    const h = { format: "umag/1", case_id: id, nx: f0.nx, ny: f0.ny, x0: f0.x0, y0: f0.y0, spacing_m: f0.spacing_m,
+                height_m: f0.height_m, vmax, nodata: 255, vector: null, source: "broker",
+                directions: dirs.map((d) => ({ deg: d.deg, case: d.case })),
+                coverage: list.map((f) => f.coverage), checks: list.map(() => null), missing: [] };
+    return { h, dirs };
+  }
+
+  // One direction's values from the broker, quantised onto the case's shared scale
+  // for the picture and kept exact for the readout. The header fills in what the
+  // listing does not carry (the inlet profile, the height check).
+  async function wfFetchDir(id, k) {
+    const s = wfState(id);
+    const f = s.field, d = f && f.dirs[k];
+    if (!d || d.mag || d.loading) return;
+    d.loading = true; d.err = ""; wfRedraw(id);
+    try {
+      const { h, exact } = await wfFetchBlob(`/v1/cases/${encodeURIComponent(id)}/fields/${encodeURIComponent(d.case)}?height_m=1.75`);
+      if (h.nx !== f.h.nx || h.ny !== f.h.ny) throw new Error(`${d.case} is ${h.nx}×${h.ny}; the case's other directions are ${f.h.nx}×${f.h.ny}`);
+      const mag = new Uint8Array(exact.length), scale = 254 / f.h.vmax;
+      for (let i = 0; i < exact.length; i++) {
+        const v = exact[i];
+        mag[i] = Number.isFinite(v) ? Math.max(0, Math.min(254, Math.round(v * scale))) : 255;
+      }
+      Object.assign(d, { mag, exact, uref: h.uref, zref: h.zref, z0: h.z0, u_ref: h.u_ref ?? d.u_ref, deg: h.deg ?? d.deg, err: "" });
+      f.h.checks[k] = h.height_error || null;
+      if (h.coverage != null) f.h.coverage[k] = h.coverage;
+    } catch (e) {
+      d.err = e.message || String(e);
+    }
+    d.loading = false;
+    wfRedraw(id);
+  }
+
+  async function wfFetchBlob(path) {
+    const base = $("broker").value.replace(/\/+$/, "");
+    const token = $("token").value.trim();
+    const headers = {};
+    if (token) headers["Authorization"] = "Bearer " + token;
+    const r = await fetch(base + path, { headers });
+    if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+    return wfDecodeUmag(await r.arrayBuffer());
+  }
+
   async function wfFetch(id) {
     const s = wfState(id), base = fieldBase();
-    if (!base) return;
-    s.status = "loading"; s.src = `${base}/${id}.wfld`; wfRedraw(id);
+    s.status = "loading"; s.src = "the broker"; wfRedraw(id);
+    // The broker first: a case whose node sent its fields needs no source at all.
+    try {
+      const listing = await api(`/v1/cases/${encodeURIComponent(id)}/fields`);
+      const fields = (listing.fields || []).filter((f) => Math.abs(f.height_m - 1.75) < 1e-6);
+      if (fields.length) {
+        s.field = wfFromBroker(id, fields); s.status = "ready"; wfTrim();
+        wfRedraw(id);
+        return;
+      }
+    } catch (e) {
+      // A broker from before fields (404) or one that is down: the .wfld path below still works.
+      if (!(e.status === 404 || e.status === 405)) { s.brokerErr = e.message || String(e); }
+    }
+    if (!base) { s.status = "absent"; s.src = ""; s.err = ""; wfRedraw(id); return; }
+    s.src = `${base}/${id}.wfld`; wfRedraw(id);
     try {
       const r = await fetch(s.src, { cache: "force-cache" });
       if (r.status === 404) { s.status = "absent"; s.err = ""; }
@@ -3219,7 +3313,7 @@
   function wfAttach() {
     document.querySelectorAll(".wf-wrap").forEach((w) => {
       const s = wfState(w.dataset.case);
-      if (s.status === "idle" && fieldBase()) wfFetch(w.dataset.case);
+      if (s.status === "idle") wfFetch(w.dataset.case);
       else wfDraw(w);
     });
   }
@@ -3265,7 +3359,7 @@
   function wfDraw(wrap) {
     const id = wrap.dataset.case, s = wfState(id);
     const hint = wrap.parentElement && wrap.parentElement.querySelector(".wf-src");
-    if (hint) hint.textContent = s.status === "ready" ? `(${s.src})` : "";
+    if (hint) hint.textContent = s.status === "ready" ? (s.field.h.source === "broker" ? "(from the broker)" : `(${s.src})`) : "";
     const openBtn = `<button class="subtle wf-open" type="button">Open .wfld file…</button>`
       + `<input type="file" accept=".wfld" class="wf-file" hidden />`;
     if (s.status !== "ready") {
@@ -3273,14 +3367,15 @@
       let msg;
       if (s.status === "loading") msg = `Loading <span class="mono">${esc(s.src)}</span>…`;
       else if (s.status === "absent")
-        msg = `No field at <span class="mono">${esc(s.src)}</span>. Cases finished before the pedestrian sampler was fixed
-               have none until they are backfilled from their archive (<span class="mono">scripts/backfill_pedestrian.py</span>).`;
+        msg = `The broker holds no field for this case${s.src ? `, and there is none at <span class="mono">${esc(s.src)}</span>` : ""}.
+               A node built before fields went to the broker sent none; cases finished before the pedestrian
+               sampler was fixed have none until they are backfilled from their archive
+               (<span class="mono">scripts/backfill_pedestrian.py</span>), whose <span class="mono">.wfld</span> a
+               wind-field source (Settings → Preferences) or this box can open.`
+          + (s.brokerErr ? ` <span style="color:var(--warn)">The broker could not be asked: ${esc(s.brokerErr)}.</span>` : "");
       else if (s.status === "error")
         msg = `Could not read the field${s.src ? ` from <span class="mono">${esc(s.src)}</span>` : ""}: ${esc(s.err)}.`
           + (s.src && s.src.startsWith("http") ? " Check that the source is running and allows reads from this page." : "");
-      else if (!base)
-        msg = `No wind-field source is set. Set one under Settings → Preferences, or open this case's
-               <span class="mono">${esc(id)}.wfld</span> from disk (drag it here).`;
       else msg = "";
       wrap.innerHTML = `<div class="wf-empty">${msg}</div><div style="margin-top:8px;">${openBtn}</div>`;
       setBusy(wrap, s.status === "loading");
@@ -3309,13 +3404,13 @@
           <button type="button" class="wf-mode" data-mode="amp" aria-pressed="${s.mode === "amp"}" ${ampOk ? "" : "disabled"}
                   title="${ampOk ? "local speed over the undisturbed inlet speed at the same height" : "this case's file carries no reference speed"}">U / U<sub>ref</sub></button>
         </div>
-        <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;">
+        ${h.vector ? `<label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;">
           <input type="checkbox" class="wf-arrows" ${s.arrows ? "checked" : ""} /> arrows
-        </label>
+        </label>` : ""}
         ${openBtn}
       </div>
       <div class="wf-fig">
-        <div class="wf-plot"><canvas></canvas><div class="wf-tip"></div></div>
+        <div class="wf-plot"><canvas></canvas><div class="wf-tip"></div>${d.mag ? "" : `<div class="wf-empty" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;">${d.err ? `${esc(d.err)} <button class="subtle wf-retry" type="button">retry</button>` : `loading ${esc(d.case)}…`}</div>`}</div>
         <div class="wf-side">
           <div class="wf-legend"></div>
           <div>${h.height_m} m above grade · ${h.nx}×${h.ny} points at ${h.spacing_m} m ·
@@ -3341,9 +3436,11 @@
           })()}
           <div class="wf-note">OpenFOAM's cellPoint values on a surface ${h.height_m} m above the terrain,
             read onto the grid inside the surface's own triangles — what ParaView draws for the same slice.
+            ${h.source === "broker" ? "Exact values, as the node read them; the picture is on one scale for every direction." : ""}
             &larr; &rarr; change direction.</div>
         </div>
       </div>`;
+    if (!d.mag) { if (!d.err) wfFetchDir(id, s.dir); return; }
     wfPaint(wrap, s);
   }
 
@@ -3382,7 +3479,7 @@
     // it annotates. Length by speed. White with a dark halo, because inferno
     // runs from black to near-white and any single ink vanishes at one end.
     const W = canvas.width, v = h.vector, px = W / h.nx;
-    if (s.arrows) {
+    if (s.arrows && v && d.vec) {
       const shafts = new Path2D(), heads = new Path2D();
       const every = 2, cell = v.stride * every * px, vmax = h.vmax;
       for (let j = 0; j < v.ny; j += every) for (let i = 0; i < v.nx; i += every) {
@@ -3443,12 +3540,14 @@
     const i = Math.floor(fx * h.nx), j = h.ny - 1 - Math.floor(fy * h.ny);
     if (i < 0 || j < 0 || i >= h.nx || j >= h.ny) { tip.style.display = "none"; return; }
     const x = h.x0 + i * h.spacing_m, y = h.y0 + j * h.spacing_m;
+    if (!d.mag) { tip.style.display = "none"; return; }
     const q = d.mag[j * h.nx + i];
     const where = `<span class="k">${Math.abs(x).toFixed(0)} m ${x < 0 ? "W" : "E"}, ${Math.abs(y).toFixed(0)} m ${y < 0 ? "S" : "N"}</span>`;
     if (q === h.nodata) {
       tip.innerHTML = `${where}<br>inside a building`;
     } else {
-      const u = q * h.vmax / 254;
+      // The broker's field is exact; a .wfld's is a byte on the case's scale.
+      const u = d.exact ? d.exact[j * h.nx + i] : q * h.vmax / 254;
       tip.innerHTML = `${where}<br>|U| <b>${u.toFixed(2)}</b> m/s`
         + (d.u_ref ? `<br>U/U<sub>ref</sub> <b>${(u / d.u_ref).toFixed(2)}</b>` : "");
     }
@@ -3469,6 +3568,11 @@
   document.addEventListener("click", (e) => {
     const wrap = e.target.closest(".wf-wrap");
     if (!wrap) return;
+    if (e.target.classList.contains("wf-retry")) {
+      const st = wfState(wrap.dataset.case);
+      if (st.field) { st.field.dirs[st.dir].err = ""; wfDraw(wrap); }
+      return;
+    }
     const s = wfState(wrap.dataset.case);
     if (e.target.closest(".wf-prev")) wfStep(wrap, -1);
     else if (e.target.closest(".wf-next")) wfStep(wrap, 1);
