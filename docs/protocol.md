@@ -210,6 +210,25 @@ A case's `percentiles` are ranked against the same cached aggregate, exactly
 (from its sorted values): the share of cases below plus half the share equal,
 so the median of an odd set is 50 and the largest of 100 is 99.5.
 
+### Custody: what has arrived
+
+`done` is the node's word: `POST /v1/complete` names an archive on the node's own
+disk (`file:///C:/wind/done/<case>.tar.gz`) and its sha256. Whether it ever
+reached the Syncthing master intact, and whether every direction's pedestrian
+field reached the database, has a different answerer, so it is kept per
+artifact and never folded into `state` (DOMAIN.md, "Custody").
+
+| Call | Scope | What |
+| --- | --- | --- |
+| `POST /v1/cases/{id}/receipts` | write | `{kind: "archive", location: "master", sha256, bytes, path}` from the holder that hashed it. 409 when the case is not done or the hash is not the one the node reported (a corrupted or different archive); 422 for a malformed receipt. No lease; a second report of the same artifact replaces the first. |
+| `GET /v1/cases/{id}/receipts` | read | The case's receipts. Also on `GET /v1/cases/{id}` as `receipts`. |
+| `GET /v1/custody?recipe=&older_than_hours=&limit=` | read | `done`, `stored` (nothing missing), `missing_archive`, `missing_fields`, and the cases still missing something, oldest first: `missing` (`archive`, `fields`), `fields` against `fields_expected` (the case's telemetry `solve.directions_total`, else `mesh.directions`; none for a thermal case). `older_than_hours` leaves out what may still be syncing. |
+
+A field's receipt is its `case_fields` row: the broker stored it. The archive's
+comes from `scripts/report_receipts.py`, run on the master: it hashes only what
+`/v1/custody` lists, and only a case whose archive and every part its manifest
+names are present and verify (`casebroker.archives.status`).
+
 ## Three design decisions worth knowing
 
 **Lease expiry is the liveness mechanism.** A worker that dies without warning
