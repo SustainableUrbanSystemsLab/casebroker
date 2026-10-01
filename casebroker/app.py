@@ -1930,6 +1930,69 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         it cannot fetch."""
         return {"case_id": case_id, "dropped": db.reset_parts(conn, case_id, by=user["username"])}
 
+    # -- the pedestrian wind field: the answer, stored here ----------------------------------
+    #
+    # The broker used to hold POINTERS only (its database was 500 MB); the fleet's
+    # database now has room, and a case's published field -- |U| at 1.75 m above
+    # grade on the 2 m grid, per direction -- lands here the moment the node has
+    # read it off the solver's surface sample. What a browser or a model wants
+    # is then one GET away, with no archive to open and no master to reach.
+
+    @app.put("/v1/cases/{case_id}/fields/{direction}", dependencies=[WriteAuth])
+    async def put_field(case_id: str, direction: str, request: Request,
+                        lease_id: str = Query(min_length=1, max_length=128)) -> dict[str, Any]:
+        """One direction's pedestrian field, from the node solving the case: the body
+        is a umag/1 blob (gzip of "UMAG" | u32 version | u32 header length | header
+        JSON | float32 LE nx*ny, NaN where there is no fluid), sent as
+        application/octet-stream. Its header names the grid and the height; the
+        broker checks the container and stores it verbatim.
+
+        409 as /v1/parts: not this case's current lease, or not this credential's
+        -- the node stops sending fields for this case. 413 for a body past the
+        limit, 422 for a blob that is not a field. A second upload for the same
+        direction and height replaces the first."""
+        blob = await request.body()
+        if len(blob) > db.FIELD_MAX_BYTES:
+            raise HTTPException(413, f"the field is {len(blob)} bytes; the limit is {db.FIELD_MAX_BYTES}")
+        if not blob:
+            raise HTTPException(422, "the body is empty; send the umag/1 blob as application/octet-stream")
+        machine = _machine_principal(request)
+        worker_ok = None
+        if machine:
+            name = machine["name"]
+            worker_ok = lambda worker: bool(worker) and _may_lease_as(name, worker)  # noqa: E731
+        outcome = db.put_field(conn, lease_id, case_id, direction, blob, worker_ok=worker_ok)
+        if outcome == "ok":
+            return {"ok": True, "bytes": len(blob)}
+        if outcome == "gone":
+            raise HTTPException(409, "lease expired or superseded, or not this case's, or not "
+                                     "this credential's; stop sending fields for this case")
+        raise HTTPException(422, outcome)
+
+    @app.get("/v1/cases/{case_id}/fields", dependencies=[ReadAuth])
+    def get_fields(case_id: str) -> dict[str, Any]:
+        """Which fields a case has (direction, height, grid, coverage, size), without
+        the bytes; directions in order."""
+        return {"case_id": case_id, "fields": db.case_fields(conn, case_id)}
+
+    @app.get("/v1/cases/{case_id}/fields/{direction}", dependencies=[ReadAuth])
+    def get_field(case_id: str, direction: str, request: Request,
+                  height_m: float | None = None) -> Response:
+        """One direction's field, as the node sent it: the umag/1 blob, gzip inside
+        (the browser's DecompressionStream reads it; so does `gzip.decompress`).
+        Without height_m, the one nearest 1.75 m. A finished direction's field
+        never changes, so it is served with a strong ETag and a day of cache."""
+        row = db.case_field(conn, case_id, direction, height_m)
+        if row is None:
+            raise HTTPException(404, "no such field")
+        etag = '"' + row["sha256"] + '"'
+        headers = {"ETag": etag, "Cache-Control": "private, max-age=86400",
+                   "X-Field-Height-M": repr(float(row["height_m"])),
+                   "X-Field-Direction": row["direction"]}
+        if request.headers.get("if-none-match") == etag:
+            return Response(status_code=304, headers=headers)
+        return Response(content=row["blob"], media_type="application/octet-stream", headers=headers)
+
     @app.get("/v1/dataset", dependencies=[ReadAuth])
     def dataset_stats(recipe: str | None = Query(None, max_length=128)) -> dict[str, Any]:
         """The campaign as a dataset: counts by state, split, LCZ, recipe and
@@ -2261,6 +2324,9 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         # returned as the TEXT they are stored as, and the dashboard parses):
         # telemetry is new, so there is no reader to keep compatible, and {} is
         # "nothing reported" without a null check.
+        # The pedestrian fields this case holds (no bytes): what tells the page it
+        # can draw the wind without a field source of its own.
+        row["fields"] = db.case_fields(conn, case_id)
         row["telemetry"] = dataset.parse_obj(row.get("telemetry"))
         if db.nests_deeper(row["telemetry"], db.TELEMETRY_MAX_DEPTH + 1):
             # Deeper than post_telemetry now accepts (+1 for the kind level):

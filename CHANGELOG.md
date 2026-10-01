@@ -8,6 +8,35 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.25.0] - 2026-10-01
+
+### Added
+- **The broker holds the pedestrian wind field itself.** Every other artefact of a
+  case lives on the Syncthing master and the broker records where; the published
+  field -- |U| at 1.75 m above grade on the 2 m grid over the 1008 m core, per
+  direction -- is what the campaign is for, and at about a megabyte a direction it
+  fits the fleet's own database now that it is no longer a 500 MB plan (Patrick,
+  2026-09-28: a 6 TB Postgres on the server). `case_fields` (one row per case,
+  direction and height; the blob is the node's `umag/1` container, stored verbatim:
+  gzip of `"UMAG" | u32 version | u32 header length | header JSON | float32 LE
+  nx*ny`, NaN inside a building), `PUT /v1/cases/{id}/fields/{direction}?lease_id=`
+  from the node the moment a direction is solved (lease-gated as /v1/parts; 413 past
+  `CASEBROKER_FIELD_MAX_BYTES`, 422 for a blob that is not a field, with what is
+  wrong with it named), `GET /v1/cases/{id}/fields` (the records, no bytes; also on
+  the case record as `fields`) and `GET /v1/cases/{id}/fields/{direction}` (the blob,
+  strong ETag, a day of cache). The header fills the columns a browser filters and
+  sorts by -- grid, height, angle, coverage, U_ref, the 99.9th percentile of |U| --
+  so they cannot disagree with the bytes.
+- **Dashboard: the field viewer reads the broker first.** A done case's panel asks
+  `/v1/cases/{id}/fields` and fetches each direction as it is looked at: exact values
+  under the cursor (a `.wfld` carried a byte), one colour scale across every
+  direction of the case from the listing's percentiles, no arrows (|U| only). The
+  wind-field source and the open-from-disk box remain for cases that have no field
+  there -- a node built before this, or a case backfilled from its archive.
+
+### Changed
+- `scripts/serve_fields.py` and the `.wfld` are now the fallback, not the path.
+
 ## [0.24.1] - 2026-09-29
 
 0.24.0 below is PR #40. It was merged into the stacked branch of #39 seven seconds

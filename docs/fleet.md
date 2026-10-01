@@ -215,6 +215,15 @@ case has on record.
 
 ## The pedestrian field
 
+**Since 0.24.0 the field is also in the broker's own database.** The native node reads
+each direction's surface the moment the direction is solved (`MetaFOAM.Deploy.PedestrianField`,
+a port of `ped_field.py`) and `PUT`s |U| at 1.75 m as a `umag/1` blob to
+`/v1/cases/<id>/fields/<direction>` under its lease; the dashboard reads it back from
+there, exact, with no field source and no master in the way. Everything below -- `U.npz`
+in the archive, the `.wfld`, the backfill -- still holds, and is the path for a case whose
+node predates this. `GET /v1/cases/<id>/fields` lists what the broker holds;
+`metrics.pedestrian.fields` on the completion says what the node managed to send.
+
 U at 1.5 m and 1.75 m above grade, on a regular 2 m grid over the 1008 m core
 (504 x 504 points), for every direction: `pedestrian/U.npz` (`U[direction,
 height, y, x, (ux, uy, uz)]`, float32, NaN inside buildings, row 0 = south),
