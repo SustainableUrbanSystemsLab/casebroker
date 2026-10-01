@@ -341,6 +341,39 @@ CREATE TABLE IF NOT EXISTS case_parts (
     reported_at INTEGER NOT NULL,
     PRIMARY KEY (case_id, part)
 );
+
+-- The pedestrian wind field itself, per finished direction: |U| at height_m above
+-- grade on the case's regular grid (the 2 m lattice over the 1008 m core), as the
+-- node read it off OpenFOAM's own surface sample. One self-describing gzip blob
+-- per row (umag/1: b"UMAG" | u32 version | u32 header length | header JSON |
+-- float32 LE nx*ny, NaN where there was no fluid), about a megabyte each. The
+-- broker used to hold POINTERS only, because its database was 500 MB; it now
+-- holds the campaign's published field (Patrick, 2026-09-28), so a case's answer
+-- can be read without opening its archive, and a lost master costs no field.
+CREATE TABLE IF NOT EXISTS case_fields (
+    case_id     TEXT NOT NULL,
+    direction   TEXT NOT NULL,
+    height_m    REAL NOT NULL,
+    deg         REAL,
+    nx          INTEGER NOT NULL,
+    ny          INTEGER NOT NULL,
+    x0          REAL NOT NULL,
+    y0          REAL NOT NULL,
+    spacing_m   REAL NOT NULL,
+    -- Share of the grid with a value (outside buildings, mesh present).
+    coverage    REAL,
+    -- The inlet log law at height_m: the denominator of U/U_ref.
+    u_ref       REAL,
+    -- The 99.9th percentile of |U|: the top of a colour scale a viewer shares
+    -- across a case's directions without reading every field first.
+    umag_p999   REAL,
+    sha256      TEXT NOT NULL,
+    bytes       BIGINT NOT NULL,
+    blob        BLOB NOT NULL,
+    worker_id   TEXT,
+    reported_at INTEGER NOT NULL,
+    PRIMARY KEY (case_id, direction, height_m)
+);
 """
 
 # Same schema, Postgres-flavoured: no PRAGMAs (meaningless there), and the
@@ -631,6 +664,39 @@ CREATE TABLE IF NOT EXISTS case_parts (
     worker_id   TEXT,
     reported_at INTEGER NOT NULL,
     PRIMARY KEY (case_id, part)
+);
+
+-- The pedestrian wind field itself, per finished direction: |U| at height_m above
+-- grade on the case's regular grid (the 2 m lattice over the 1008 m core), as the
+-- node read it off OpenFOAM's own surface sample. One self-describing gzip blob
+-- per row (umag/1: b"UMAG" | u32 version | u32 header length | header JSON |
+-- float32 LE nx*ny, NaN where there was no fluid), about a megabyte each. The
+-- broker used to hold POINTERS only, because its database was 500 MB; it now
+-- holds the campaign's published field (Patrick, 2026-09-28), so a case's answer
+-- can be read without opening its archive, and a lost master costs no field.
+CREATE TABLE IF NOT EXISTS case_fields (
+    case_id     TEXT NOT NULL,
+    direction   TEXT NOT NULL,
+    height_m    REAL NOT NULL,
+    deg         REAL,
+    nx          INTEGER NOT NULL,
+    ny          INTEGER NOT NULL,
+    x0          REAL NOT NULL,
+    y0          REAL NOT NULL,
+    spacing_m   REAL NOT NULL,
+    -- Share of the grid with a value (outside buildings, mesh present).
+    coverage    REAL,
+    -- The inlet log law at height_m: the denominator of U/U_ref.
+    u_ref       REAL,
+    -- The 99.9th percentile of |U|: the top of a colour scale a viewer shares
+    -- across a case's directions without reading every field first.
+    umag_p999   REAL,
+    sha256      TEXT NOT NULL,
+    bytes       BIGINT NOT NULL,
+    blob        BYTEA NOT NULL,
+    worker_id   TEXT,
+    reported_at INTEGER NOT NULL,
+    PRIMARY KEY (case_id, direction, height_m)
 );
 """
 
@@ -2636,6 +2702,179 @@ def reset_parts(conn, case_id: str, by: str | None = None, now: int | None = Non
         conn.execute("ROLLBACK")
         raise
     return n
+
+
+
+# -- the pedestrian wind field: the answer itself, not a pointer to it -------------
+#
+# One row per (case, direction, height): |U| on the case's grid, as the node read it
+# off OpenFOAM's surface sample the moment the direction finished. The blob is the
+# umag/1 container the node built (self-describing, gzip), stored verbatim: what the
+# broker checks is that it IS one -- magic, version, a header naming a grid whose
+# nx*ny float32 values are exactly the bytes that follow -- and the header is what
+# fills the columns a browser filters and sorts by, so they cannot disagree with it.
+
+UMAG_MAGIC = b"UMAG"
+UMAG_VERSION = 1
+# A 504 x 504 float32 field is 1.0 MB; gzip takes it to ~0.8. A blob this far past
+# that is not a pedestrian field, whatever its header says.
+FIELD_MAX_BYTES = int(os.environ.get("CASEBROKER_FIELD_MAX_BYTES", str(64 * 1024 * 1024)))
+FIELD_MAX_POINTS = 4_000_000
+_FIELD_HEADER_KEYS = ("nx", "ny", "x0", "y0", "spacing_m", "height_m")
+
+
+def decode_umag(blob: bytes) -> dict[str, Any]:
+    """The header of a umag/1 blob, checked against its body; ValueError otherwise.
+
+    Reads the CONTAINER only -- header and byte count -- never the values: the
+    broker stores what the node sampled and does not re-derive it. Returns the
+    header with ``nbytes`` (the gzip size) added.
+    """
+    import gzip
+    import struct
+    if len(blob) > FIELD_MAX_BYTES:
+        raise ValueError(f"field is {len(blob)} bytes; the limit is {FIELD_MAX_BYTES}")
+    try:
+        raw = gzip.decompress(blob)
+    except (OSError, EOFError, ValueError) as exc:
+        raise ValueError(f"not a gzip stream: {exc}") from None
+    if len(raw) < 12 or raw[:4] != UMAG_MAGIC:
+        raise ValueError("not a wind-field blob (no UMAG header)")
+    version, hlen = struct.unpack("<II", raw[4:12])
+    if version != UMAG_VERSION:
+        raise ValueError(f"umag version {version}; this broker reads version {UMAG_VERSION}")
+    if hlen > 1_000_000 or 12 + hlen > len(raw):
+        raise ValueError("header length runs past the blob")
+    try:
+        header = json.loads(raw[12:12 + hlen].decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise ValueError(f"header is not JSON: {exc}") from None
+    if not isinstance(header, dict) or header.get("format") != "umag/1":
+        raise ValueError("header does not say format umag/1")
+    for k in _FIELD_HEADER_KEYS:
+        if k not in header:
+            raise ValueError(f"header has no {k!r}")
+    try:
+        nx, ny = int(header["nx"]), int(header["ny"])
+        for k in ("x0", "y0", "spacing_m", "height_m"):
+            header[k] = float(header[k])
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"header grid is not numeric: {exc}") from None
+    if nx <= 0 or ny <= 0 or nx * ny > FIELD_MAX_POINTS:
+        raise ValueError(f"grid {nx} x {ny} is not one this broker stores")
+    if header["spacing_m"] <= 0 or not math.isfinite(header["spacing_m"]):
+        raise ValueError("spacing_m must be a positive number")
+    body = len(raw) - 12 - hlen
+    if body != 4 * nx * ny:
+        raise ValueError(f"body is {body} bytes; a {nx} x {ny} float32 field is {4 * nx * ny}")
+    for k in ("deg", "coverage", "u_ref", "umag_p999"):
+        v = header.get(k)
+        if v is not None:
+            try:
+                header[k] = float(v)
+            except (TypeError, ValueError):
+                raise ValueError(f"header {k!r} is not a number") from None
+            if not math.isfinite(header[k]):
+                header[k] = None
+    header["nbytes"] = len(blob)
+    return header
+
+
+@_locked
+def put_field(conn, lease_id: str, case_id: str, direction: str, blob: bytes,
+              now: int | None = None,
+              worker_ok: Callable[[str | None], bool] | None = None) -> str:
+    """Store one direction's pedestrian field for the lease holder's case.
+
+    Returns ``"ok"``; ``"gone"`` (not this case's current lease, or not the
+    caller's -- the ownership rule of report_part); or ``"invalid: <why>"`` for
+    a direction name or blob that is not one. A second upload for the same
+    (case, direction, height) replaces the first: a direction solved again is a
+    different field.
+    """
+    if not PART_NAME.fullmatch(direction or "") or direction == "mesh":
+        return "invalid: not a direction name"
+    try:
+        header = decode_umag(blob)
+    except ValueError as exc:
+        return f"invalid: {exc}"
+    if header.get("direction") not in (None, direction):
+        return f"invalid: the blob says it is {header['direction']!r}, not {direction!r}"
+    if header.get("case_id") not in (None, case_id):
+        return f"invalid: the blob says it is {header['case_id']!r}, not {case_id!r}"
+    import hashlib
+    sha = hashlib.sha256(blob).hexdigest()
+    now = now or _now()
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        row = _by_lease(conn, lease_id)
+        if row is None or row["case_id"] != case_id \
+                or (worker_ok is not None and not worker_ok(row["lease_worker"])):
+            conn.execute("ROLLBACK")
+            return "gone"
+        conn.execute(
+            "INSERT INTO case_fields(case_id, direction, height_m, deg, nx, ny, x0, y0,"
+            " spacing_m, coverage, u_ref, umag_p999, sha256, bytes, blob, worker_id, reported_at)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+            " ON CONFLICT(case_id, direction, height_m) DO UPDATE SET deg=excluded.deg,"
+            " nx=excluded.nx, ny=excluded.ny, x0=excluded.x0, y0=excluded.y0,"
+            " spacing_m=excluded.spacing_m, coverage=excluded.coverage, u_ref=excluded.u_ref,"
+            " umag_p999=excluded.umag_p999, sha256=excluded.sha256, bytes=excluded.bytes,"
+            " blob=excluded.blob, worker_id=excluded.worker_id, reported_at=excluded.reported_at",
+            (case_id, direction, header["height_m"], header.get("deg"), int(header["nx"]),
+             int(header["ny"]), header["x0"], header["y0"], header["spacing_m"],
+             header.get("coverage"), header.get("u_ref"), header.get("umag_p999"), sha, len(blob), blob,
+             row["lease_worker"], now))
+        _event(conn, case_id, row["lease_worker"], "field_stored",
+               "%s @ %g m, %d bytes" % (direction, header["height_m"], len(blob)), now)
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    return "ok"
+
+
+@_locked
+def case_fields(conn, case_id: str) -> list[dict[str, Any]]:
+    """What fields a case has, without the bytes: one record per (direction, height),
+    directions in order, the lower height first."""
+    rows = conn.execute(
+        "SELECT direction, height_m, deg, nx, ny, x0, y0, spacing_m, coverage, u_ref, umag_p999,"
+        " sha256, bytes, worker_id, reported_at FROM case_fields WHERE case_id=?",
+        (case_id,)).fetchall()
+    out = [dict(r) for r in rows]
+    return sorted(out, key=lambda r: (r["direction"], r["height_m"]))
+
+
+@_locked
+def case_field(conn, case_id: str, direction: str, height_m: float | None = None):
+    """One field's blob and its record, or None. Without a height, the one nearest
+    1.75 m (the published pedestrian height)."""
+    rows = conn.execute(
+        "SELECT direction, height_m, deg, nx, ny, x0, y0, spacing_m, coverage, u_ref, umag_p999,"
+        " sha256, bytes, blob, worker_id, reported_at FROM case_fields"
+        " WHERE case_id=? AND direction=?", (case_id, direction)).fetchall()
+    if not rows:
+        return None
+    target = 1.75 if height_m is None else float(height_m)
+    best = min(rows, key=lambda r: abs(float(r["height_m"]) - target))
+    if height_m is not None and abs(float(best["height_m"]) - target) > 1e-6:
+        return None
+    d = dict(best)
+    d["blob"] = bytes(d["blob"])
+    return d
+
+
+@_locked
+def field_counts(conn, case_ids: Iterable[str]) -> dict[str, int]:
+    """How many field rows each of these cases has, for a case list."""
+    ids = [c for c in case_ids]
+    if not ids:
+        return {}
+    marks = ",".join("?" * len(ids))
+    return {r["case_id"]: int(r["n"]) for r in conn.execute(
+        f"SELECT case_id, COUNT(*) AS n FROM case_fields WHERE case_id IN ({marks})"
+        " GROUP BY case_id", tuple(ids)).fetchall()}
 
 
 # -- telemetry: what the node measured while it worked -------------------------
