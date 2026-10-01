@@ -329,10 +329,24 @@ def _unknown(value: Any) -> str:
 
 @dataclass
 class Aggregate:
-    """One computation: the public answer, and what exact percentiles need."""
+    """One computation: the public answer, and what exact percentiles need.
+
+    ``by_recipe`` holds the same answer for each recipe on its own, from the
+    same pass. A recipe is a training set, and since 2026-09 the campaign holds
+    two kinds: CFD wind and Radiance surface temperatures. Pooled, a thermal
+    case's run time would be ranked against week-long CFD solves, and every site
+    carrying both counts its urban form twice."""
     public: dict[str, Any]
     sorted_all: dict[str, array] = field(default_factory=dict)
     sorted_lcz: dict[str, dict[str, array]] = field(default_factory=dict)
+    by_recipe: dict[str, "Aggregate"] = field(default_factory=dict)
+
+    def for_recipe(self, recipe: str | None) -> "Aggregate":
+        """The aggregate over one recipe's cases; this one for None. A recipe no
+        case carries answers as an empty campaign, not as everything."""
+        if recipe is None:
+            return self
+        return self.by_recipe.get(recipe) or compute([], now=self.public.get("generated_at"))
 
     def percentiles(self, row: dict[str, Any]) -> dict[str, dict[str, Any]]:
         """For every metric this case has a value for: the value, its rank among
@@ -373,56 +387,78 @@ def stream_rows(conn) -> Iterator[dict[str, Any]]:
             return
 
 
+class _Tally:
+    """What one pass keeps for one population: counters and the numbers."""
+
+    def __init__(self) -> None:
+        self.total = 0
+        self.counts = {name: Counter() for name in ("state", "split", "lcz", "recipe", "country")}
+        # Flat arrays of doubles, not lists of Python numbers: 8 bytes a value
+        # where a list costs a pointer plus a ~24-byte object, and a campaign holds
+        # ~20 per case twice over (all, and its LCZ) for as long as it is cached.
+        self.per_all: dict[str, array] = {m.key: array("d") for m in METRICS}
+        self.per_lcz: dict[str, dict[str, array]] = {m.key: {} for m in METRICS}
+
+    def add(self, row: dict[str, Any], country: str | None, case: _Case,
+            values: dict[str, float | int]) -> None:
+        self.total += 1
+        self.counts["state"][_unknown(row.get("state"))] += 1
+        self.counts["split"][_unknown(row.get("split"))] += 1
+        self.counts["lcz"][_unknown(row.get("lcz"))] += 1
+        self.counts["recipe"][_unknown(row.get("recipe"))] += 1
+        self.counts["country"][country] += 1
+        for key, v in values.items():
+            self.per_all[key].append(v)
+            if case.lcz:
+                self.per_lcz[key].setdefault(case.lcz, array("d")).append(v)
+
+    def finish(self, now: float | None) -> Aggregate:
+        agg = Aggregate(public={})
+        metrics_out: dict[str, Any] = {}
+        for m in METRICS:
+            values = array("d", sorted(self.per_all[m.key]))
+            edges = bin_edges(values)
+            by_lcz = {}
+            agg.sorted_lcz[m.key] = {}
+            for lcz in sorted(self.per_lcz[m.key]):
+                group = array("d", sorted(self.per_lcz[m.key][lcz]))
+                agg.sorted_lcz[m.key][lcz] = group
+                by_lcz[lcz] = summary(group, edges)
+            agg.sorted_all[m.key] = values
+            metrics_out[m.key] = {"label": m.label, "unit": m.unit, "group": m.group,
+                                  "bins": edges, "all": summary(values, edges),
+                                  "by_lcz": by_lcz}
+        c = self.counts
+        agg.public = {
+            "generated_at": int(now if now is not None else time.time()),
+            "cases": self.total,
+            "counts": {"state": _counts(c["state"]), "split": _counts(c["split"]),
+                       "lcz": _counts(c["lcz"]), "recipe": _counts(c["recipe"]),
+                       "country": _top_countries(c["country"])},
+            "metrics": metrics_out,
+        }
+        return agg
+
+
 def compute(rows: Iterable[dict[str, Any]], now: float | None = None) -> Aggregate:
     """The whole dataset answer from the rows :func:`stream_rows` yields (or
     any iterable of rows shaped like :func:`casebroker.db.dataset_rows`').
 
     One pass, keeping only counters and the numbers: a row's JSON is parsed,
-    reduced and dropped before the next is read.
+    reduced and dropped before the next is read. Every row is counted twice,
+    into the campaign and into its recipe, from ONE parse.
     """
-    total = 0
-    counts = {name: Counter() for name in ("state", "split", "lcz", "recipe", "country")}
-    # Flat arrays of doubles, not lists of Python numbers: 8 bytes a value
-    # where a list costs a pointer plus a ~24-byte object, and a campaign holds
-    # ~20 per case twice over (all, and its LCZ) for as long as it is cached.
-    per_all: dict[str, array] = {m.key: array("d") for m in METRICS}
-    per_lcz: dict[str, dict[str, array]] = {m.key: {} for m in METRICS}
+    everything = _Tally()
+    per_recipe: dict[str, _Tally] = {}
     for row in rows:
-        total += 1
-        counts["state"][_unknown(row.get("state"))] += 1
-        counts["split"][_unknown(row.get("split"))] += 1
-        counts["lcz"][_unknown(row.get("lcz"))] += 1
-        counts["recipe"][_unknown(row.get("recipe"))] += 1
-        counts["country"][_country(parse_obj(row.get("spec"))) or None] += 1
         case = _case(row)
-        for key, v in values_of(case).items():
-            per_all[key].append(v)
-            if case.lcz:
-                per_lcz[key].setdefault(case.lcz, array("d")).append(v)
+        values = values_of(case)
+        country = _country(parse_obj(row.get("spec"))) or None
+        everything.add(row, country, case, values)
+        per_recipe.setdefault(_unknown(row.get("recipe")), _Tally()).add(row, country, case, values)
 
-    agg = Aggregate(public={})
-    metrics_out: dict[str, Any] = {}
-    for m in METRICS:
-        values = array("d", sorted(per_all[m.key]))
-        edges = bin_edges(values)
-        by_lcz = {}
-        agg.sorted_lcz[m.key] = {}
-        for lcz in sorted(per_lcz[m.key]):
-            group = array("d", sorted(per_lcz[m.key][lcz]))
-            agg.sorted_lcz[m.key][lcz] = group
-            by_lcz[lcz] = summary(group, edges)
-        agg.sorted_all[m.key] = values
-        metrics_out[m.key] = {"label": m.label, "unit": m.unit, "group": m.group,
-                              "bins": edges, "all": summary(values, edges),
-                              "by_lcz": by_lcz}
-    agg.public = {
-        "generated_at": int(now if now is not None else time.time()),
-        "cases": total,
-        "counts": {"state": _counts(counts["state"]), "split": _counts(counts["split"]),
-                   "lcz": _counts(counts["lcz"]), "recipe": _counts(counts["recipe"]),
-                   "country": _top_countries(counts["country"])},
-        "metrics": metrics_out,
-    }
+    agg = everything.finish(now)
+    agg.by_recipe = {recipe: tally.finish(now) for recipe, tally in per_recipe.items()}
     return agg
 
 

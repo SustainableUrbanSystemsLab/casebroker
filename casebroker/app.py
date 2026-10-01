@@ -1994,14 +1994,18 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         return Response(content=row["blob"], media_type="application/octet-stream", headers=headers)
 
     @app.get("/v1/dataset", dependencies=[ReadAuth])
-    def dataset_stats() -> dict[str, Any]:
+    def dataset_stats(recipe: str | None = Query(None, max_length=128)) -> dict[str, Any]:
         """The campaign as a dataset: counts by state, split, LCZ, recipe and
         country, and per metric of casebroker.dataset.METRICS its distribution
         over every case and per LCZ -- all on one set of histogram edges per
         metric, so the reference sets can be drawn on one axis. Computed from
-        every case and cached for 60 s (casebroker/dataset.py)."""
+        every case and cached for 60 s (casebroker/dataset.py).
+
+        `recipe` answers for that recipe's cases alone, from the same cached pass:
+        a recipe is a training set, and pooling CFD wind with Radiance surface
+        temperatures describes neither."""
         try:
-            return dataset_cache.get().public
+            return dataset_cache.get().for_recipe(recipe or None).public
         except dataset.Unavailable as exc:
             # The last computation failed and there is no earlier one to serve.
             # Remembered for the TTL, so this is one campaign read per minute,
@@ -2051,7 +2055,9 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         return out
 
     @app.get("/v1/status", dependencies=[ReadAuth])
-    def status() -> dict[str, Any]:
+    def status(recipe: str | None = Query(None, max_length=128)) -> dict[str, Any]:
+        # `recipe` scopes the counts, splits and ETA to one recipe; `by_recipe`
+        # always lists every recipe's states, and the workers stay fleet-wide.
         # `version` and `db` are carried here as well as on /healthz so a client
         # that can read status never needs a SECOND request to identify what it
         # is talking to. The dashboard previously took them from /healthz, which
@@ -2063,7 +2069,7 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         # Costs nothing: both values are already in this process's memory, and
         # this endpoint is read-authenticated, so it discloses strictly less
         # widely than /healthz already does unauthenticated.
-        return {**db.status(conn), "version": __version__, "commit": _commit(),
+        return {**db.status(conn, recipe=recipe or None), "version": __version__, "commit": _commit(),
                 "db": _redact_db_target(db_path)}
 
 
@@ -2335,9 +2341,11 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         # scale. peek() serves what there is, even a minute stale, and refreshes
         # it in the background; {} until the first one after a start is ready.
         # Never fatal, like `place`: a ranking that cannot be had is absent.
+        # Ranked among cases of its OWN recipe: a Radiance case's run time against
+        # CFD solves would place every one of them at the bottom.
         try:
             agg = dataset_cache.peek()
-            row["percentiles"] = agg.percentiles(row) if agg is not None else {}
+            row["percentiles"] = agg.for_recipe(row.get("recipe")).percentiles(row) if agg is not None else {}
         except Exception as exc:                     # noqa: BLE001
             print(f"[dataset] percentiles for {case_id} failed: {exc!r}", file=sys.stderr)
             row["percentiles"] = {}
@@ -2357,16 +2365,18 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
                    city_cluster: str | None = None, limit: int = 50,
                    offset: int = 0, sort: str | None = None,
                    direction: str = "desc", include_spec: bool = True,
-                   label: str | None = None) -> dict[str, Any]:
+                   label: str | None = None,
+                   recipe: str | None = Query(None, max_length=128)) -> dict[str, Any]:
         """A page of cases for the dashboard's case browser -- most recently
-        touched first, optionally filtered by state/split/city. Distinct from
-        ``GET /v1/cases/{case_id}`` (one case by id, used for a direct lookup).
+        touched first, optionally filtered by state/split/city/label/recipe.
+        Distinct from ``GET /v1/cases/{case_id}`` (one case by id, used for a
+        direct lookup).
 
         ``include_spec=false`` leaves out the largest column, which more than
         halves the page; a caller that wants one case's spec asks for that case."""
         return db.list_cases(conn, state=state, split=split, city_cluster=city_cluster,
                              limit=limit, offset=offset, sort=sort, direction=direction,
-                             include_spec=include_spec, label=label)
+                             include_spec=include_spec, label=label, recipe=recipe or None)
 
     return app
 

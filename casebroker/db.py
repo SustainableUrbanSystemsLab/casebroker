@@ -3331,7 +3331,9 @@ def _solve_fraction(line: str | None) -> float | None:
     if not line:
         return None
     head, _, rest = line.partition("\u00b7")
-    if not head.strip().lower().startswith("solve"):
+    # A Radiance surface-temperature case's long phase is the trace, "trace 12/36
+    # chunks" -- chunks FINISHED, like directions (docs/thermal.md).
+    if not head.strip().lower().startswith(("solve", "trace")):
         return None
     outer = _PAIR.search(head)
     if not outer:
@@ -3372,28 +3374,44 @@ def _solve_eta(conn, case_id: str, since: int | None) -> dict[str, Any] | None:
 
 
 @_locked
-def status(conn, now: int | None = None) -> dict[str, Any]:
+def status(conn, now: int | None = None, recipe: str | None = None) -> dict[str, Any]:
+    """The campaign at a glance. `recipe` scopes the counts, the splits and the
+    ETA to one recipe -- since 2026-09 the queue holds CFD wind and Radiance
+    surface temperatures, whose throughputs have nothing to do with each other,
+    so one pooled ETA describes neither. `by_recipe` always lists every recipe's
+    states, and the workers stay fleet-wide: a machine serves both."""
     now = now or _now()
     # A normal expired lease is claimable immediately by lease().  After 48
     # hours with no claimant, clear it here as well: status is polled by the
     # dashboard, giving abandoned rows a bounded lifetime even while the fleet
     # is idle.  The event records that this was timeout cleanup, not preemption.
     _release_stale_leases(conn, now)
-    by_state = {r["state"]: r["n"] for r in
-                conn.execute("SELECT state, COUNT(*) n FROM cases GROUP BY state")}
-    by_split = {r["split"] + "/" + r["state"]: r["n"] for r in
-                conn.execute("SELECT split, state, COUNT(*) n FROM cases GROUP BY split, state")}
+    only, only_params = (" AND recipe = ?", (recipe,)) if recipe else ("", ())
+    by_state = {r["state"]: r["n"] for r in conn.execute(
+        "SELECT state, COUNT(*) n FROM cases WHERE 1 = 1" + only + " GROUP BY state", only_params)}
+    by_split = {r["split"] + "/" + r["state"]: r["n"] for r in conn.execute(
+        "SELECT split, state, COUNT(*) n FROM cases WHERE 1 = 1" + only + " GROUP BY split, state",
+        only_params)}
+    by_recipe: dict[str, dict[str, int]] = {}
+    for r in conn.execute("SELECT recipe, state, COUNT(*) n FROM cases GROUP BY recipe, state"):
+        by_recipe.setdefault(r["recipe"], {})[r["state"]] = r["n"]
     stale = conn.execute(
-        "SELECT COUNT(*) n FROM cases WHERE state='leased' AND lease_expires < ?",
-        (now,)).fetchone()["n"]
+        "SELECT COUNT(*) n FROM cases WHERE state='leased' AND lease_expires < ?" + only,
+        (now, *only_params)).fetchone()["n"]
     next_stale_release = conn.execute(
         "SELECT MIN(lease_expires + ?) AS at FROM cases"
-        " WHERE state='leased' AND lease_expires < ?",
-        (STALE_LEASE_RELEASE_SECONDS, now),
+        " WHERE state='leased' AND lease_expires < ?" + only,
+        (STALE_LEASE_RELEASE_SECONDS, now, *only_params),
     ).fetchone()["at"]
-    done_24h = conn.execute(
-        "SELECT COUNT(*) n FROM events WHERE event='done' AND ts > ?",
-        (now - 86400,)).fetchone()["n"]
+    if recipe:
+        done_24h = conn.execute(
+            "SELECT COUNT(*) n FROM events e JOIN cases c ON c.case_id = e.case_id"
+            " WHERE e.event='done' AND e.ts > ? AND c.recipe = ?",
+            (now - 86400, recipe)).fetchone()["n"]
+    else:
+        done_24h = conn.execute(
+            "SELECT COUNT(*) n FROM events WHERE event='done' AND ts > ?",
+            (now - 86400,)).fetchone()["n"]
     remaining = by_state.get("pending", 0) + by_state.get("leased", 0)
     workers = [dict(r) for r in conn.execute(
             "SELECT w.*,"
@@ -3419,8 +3437,10 @@ def status(conn, now: int | None = None) -> dict[str, Any]:
             if w.get("current_case") else None
     return {
         "fleet": fleet(conn, now),
+        "recipe": recipe,
         "by_state": by_state,
         "by_split": by_split,
+        "by_recipe": by_recipe,
         "expired_leases": stale,
         # The earliest deadline is enough for the banner: it tells operators
         # when the first still-visible expired row will be cleared.
@@ -3472,7 +3492,7 @@ def list_cases(conn, state: str | None = None, split: str | None = None,
                city_cluster: str | None = None, limit: int = 50,
                offset: int = 0, sort: str | None = None,
                direction: str = "desc", include_spec: bool = True,
-               label: str | None = None) -> dict[str, Any]:
+               label: str | None = None, recipe: str | None = None) -> dict[str, Any]:
     """A page of cases for the dashboard's case browser, most-recently-touched
     first -- that ordering is what makes "what just happened" the default view
     rather than an arbitrary slice of a 40,000-row table.
@@ -3504,6 +3524,8 @@ def list_cases(conn, state: str | None = None, split: str | None = None,
         where.append("split = ?"); params.append(split)
     if city_cluster:
         where.append("city_cluster = ?"); params.append(city_cluster)
+    if recipe:
+        where.append("recipe = ?"); params.append(recipe)
     if label:
         # "key:value" is one label; "key" alone is every case carrying the key.
         key, _, value = label.partition(":")
