@@ -374,6 +374,23 @@ CREATE TABLE IF NOT EXISTS case_fields (
     reported_at INTEGER NOT NULL,
     PRIMARY KEY (case_id, direction, height_m)
 );
+
+-- What has ARRIVED where results are kept (DOMAIN.md, "Custody"). `state` says what
+-- became of the computation; a receipt says where its result is, proven by whoever
+-- holds it -- the Syncthing master's scan that hashed the archive. One row per
+-- (case, artifact, location); a second report of the same artifact replaces the
+-- first. A pedestrian field's receipt is its case_fields row: the broker stored it.
+CREATE TABLE IF NOT EXISTS case_artifacts (
+    case_id     TEXT NOT NULL,
+    kind        TEXT NOT NULL,
+    location    TEXT NOT NULL,
+    bytes       BIGINT,
+    sha256      TEXT NOT NULL,
+    path        TEXT,
+    received_at INTEGER NOT NULL,
+    reported_by TEXT,
+    PRIMARY KEY (case_id, kind, location)
+);
 """
 
 # Same schema, Postgres-flavoured: no PRAGMAs (meaningless there), and the
@@ -697,6 +714,23 @@ CREATE TABLE IF NOT EXISTS case_fields (
     worker_id   TEXT,
     reported_at INTEGER NOT NULL,
     PRIMARY KEY (case_id, direction, height_m)
+);
+
+-- What has ARRIVED where results are kept (DOMAIN.md, "Custody"). `state` says what
+-- became of the computation; a receipt says where its result is, proven by whoever
+-- holds it -- the Syncthing master's scan that hashed the archive. One row per
+-- (case, artifact, location); a second report of the same artifact replaces the
+-- first. A pedestrian field's receipt is its case_fields row: the broker stored it.
+CREATE TABLE IF NOT EXISTS case_artifacts (
+    case_id     TEXT NOT NULL,
+    kind        TEXT NOT NULL,
+    location    TEXT NOT NULL,
+    bytes       BIGINT,
+    sha256      TEXT NOT NULL,
+    path        TEXT,
+    received_at INTEGER NOT NULL,
+    reported_by TEXT,
+    PRIMARY KEY (case_id, kind, location)
 );
 """
 
@@ -2875,6 +2909,162 @@ def field_counts(conn, case_ids: Iterable[str]) -> dict[str, int]:
     return {r["case_id"]: int(r["n"]) for r in conn.execute(
         f"SELECT case_id, COUNT(*) AS n FROM case_fields WHERE case_id IN ({marks})"
         " GROUP BY case_id", tuple(ids)).fetchall()}
+
+
+
+# -- custody: what has arrived where results are kept ----------------------------
+#
+# `done` is the node's word: POST /v1/complete names an archive on the node's own
+# disk (result_uri is file:///C:/wind/done/... on a Windows node) and its sha256.
+# Whether that archive ever reached the Syncthing master, intact, the broker could
+# not say; nor whether every direction's field reached the database (a node from
+# before the fields endpoint, or one whose upload failed, finishes the case without
+# them). A RECEIPT is that missing half: written by whoever holds the artifact and
+# has checked it, kept per artifact, and never folded into `state`, which leasing,
+# every count and the reopen/respec rules read.
+
+ARTIFACT_KINDS = ("archive",)
+ARTIFACT_LOCATIONS = ("master",)
+# A field is stored at the published pedestrian height; case_fields may hold more.
+_FIELD_HEIGHT_BAND = (1.7, 1.8)
+
+
+class ReceiptRefused(ValueError):
+    """A receipt the broker will not record: ``status`` is the HTTP code the API answers."""
+
+    def __init__(self, status: int, message: str):
+        super().__init__(message)
+        self.status = status
+
+
+@_locked
+def record_receipt(conn, case_id: str, kind: str, location: str, sha256: str,
+                   size: int | None = None, path: str | None = None,
+                   by: str | None = None, now: int | None = None) -> dict[str, Any]:
+    """Record that an artifact of a case has arrived at ``location``, hashed to ``sha256``.
+
+    An ``archive`` receipt is for a DONE case, and its hash must be the one the node
+    reported at completion: a different hash is a transfer that corrupted the file,
+    or an archive of another attempt, and is refused (409) rather than recorded --
+    the case then stays on the custody list, which is where it belongs."""
+    kind, location = (kind or "").strip(), (location or "").strip()
+    sha = (sha256 or "").strip().lower()
+    if kind not in ARTIFACT_KINDS:
+        raise ReceiptRefused(422, f"kind must be one of {', '.join(ARTIFACT_KINDS)}")
+    if location not in ARTIFACT_LOCATIONS:
+        raise ReceiptRefused(422, f"location must be one of {', '.join(ARTIFACT_LOCATIONS)}")
+    if len(sha) != 64 or any(ch not in "0123456789abcdef" for ch in sha):
+        raise ReceiptRefused(422, "sha256 must be 64 hex characters")
+    if size is not None and size < 0:
+        raise ReceiptRefused(422, "bytes cannot be negative")
+    row = conn.execute("SELECT state, result_sha256 FROM cases WHERE case_id=?", (case_id,)).fetchone()
+    if row is None:
+        raise ReceiptRefused(404, "no such case")
+    if kind == "archive":
+        if row["state"] != "done":
+            raise ReceiptRefused(409, f"the case is {row['state']}, not done: there is no archive to receive")
+        expected = (row["result_sha256"] or "").strip().lower()
+        if expected and expected != sha:
+            raise ReceiptRefused(409, f"sha256 {sha} is not the {expected} the node reported at completion"
+                                      " -- a corrupted or different archive")
+    now = now or _now()
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        conn.execute(
+            "INSERT INTO case_artifacts(case_id, kind, location, bytes, sha256, path, received_at, reported_by)"
+            " VALUES (?,?,?,?,?,?,?,?)"
+            " ON CONFLICT(case_id, kind, location) DO UPDATE SET bytes=excluded.bytes,"
+            " sha256=excluded.sha256, path=excluded.path, received_at=excluded.received_at,"
+            " reported_by=excluded.reported_by",
+            (case_id, kind, location, size, sha, path, now, by))
+        _event(conn, case_id, None, "received",
+               "%s at %s%s" % (kind, location, (", %d bytes" % size) if size is not None else ""), now)
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    return {"case_id": case_id, "kind": kind, "location": location, "bytes": size, "sha256": sha,
+            "path": path, "received_at": now, "reported_by": by}
+
+
+@_locked
+def case_receipts(conn, case_id: str) -> list[dict[str, Any]]:
+    """The receipts a case has, by kind and location."""
+    rows = conn.execute(
+        "SELECT kind, location, bytes, sha256, path, received_at, reported_by FROM case_artifacts"
+        " WHERE case_id=? ORDER BY kind, location", (case_id,)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def expected_fields(recipe: str | None, telemetry: Any) -> int | None:
+    """How many pedestrian fields a done case should have reached the database with: one per
+    wind direction, as its telemetry counted them (solve.directions_total, else mesh.directions);
+    None for a recipe without fields (the thermal recipe) or a case that never said."""
+    if not recipe or recipe.startswith("surf-"):
+        return None
+    t = telemetry if isinstance(telemetry, dict) else {}
+    for block, key in (("solve", "directions_total"), ("mesh", "directions")):
+        v = (t.get(block) or {}).get(key) if isinstance(t.get(block), dict) else None
+        if isinstance(v, bool):
+            continue
+        if isinstance(v, int) and v > 0:
+            return v
+        if isinstance(v, list) and v:
+            return len(v)
+    return None
+
+
+@_locked
+def custody(conn, recipe: str | None = None, older_than: int = 0, limit: int = 200,
+            now: int | None = None) -> dict[str, Any]:
+    """The done cases whose result has not all arrived where results are kept: no archive
+    receipt from the master, or fewer pedestrian fields in the database than directions.
+
+    ``older_than`` (seconds since the case finished) leaves out what is still syncing, so the
+    list is what needs someone: a node that went away before its archive left it, a field
+    upload that failed. ``stored`` counts the done cases with nothing missing."""
+    now = now or _now()
+    where, params = ["state = 'done'"], []
+    if recipe:
+        where.append("recipe = ?"); params.append(recipe)
+    rows = conn.execute(
+        "SELECT case_id, recipe, updated_at, telemetry, result_uri, result_sha256 FROM cases WHERE "
+        + " AND ".join(where) + " ORDER BY updated_at", params).fetchall()
+    archived = {r["case_id"] for r in conn.execute(
+        "SELECT DISTINCT case_id FROM case_artifacts WHERE kind = 'archive'").fetchall()}
+    lo, hi = _FIELD_HEIGHT_BAND
+    fields = {r["case_id"]: int(r["n"]) for r in conn.execute(
+        "SELECT case_id, COUNT(DISTINCT direction) AS n FROM case_fields"
+        " WHERE height_m >= ? AND height_m <= ? GROUP BY case_id", (lo, hi)).fetchall()}
+    out: list[dict[str, Any]] = []
+    stored = no_archive = short_fields = 0
+    for r in rows:
+        try:
+            telemetry = json.loads(r["telemetry"]) if r["telemetry"] else {}
+        except (TypeError, ValueError):
+            telemetry = {}
+        want = expected_fields(r["recipe"], telemetry)
+        have = fields.get(r["case_id"], 0)
+        missing = []
+        if r["case_id"] not in archived:
+            missing.append("archive")
+        if want is not None and have < want:
+            missing.append("fields")
+        if not missing:
+            stored += 1
+            continue
+        no_archive += "archive" in missing
+        short_fields += "fields" in missing
+        age = now - int(r["updated_at"] or now)
+        if age < older_than:
+            continue
+        out.append({"case_id": r["case_id"], "recipe": r["recipe"], "done_at": r["updated_at"],
+                    "age_seconds": age, "missing": missing, "fields": have, "fields_expected": want,
+                    "result_uri": r["result_uri"]})
+    out.sort(key=lambda c: -c["age_seconds"])
+    return {"done": len(rows), "stored": stored, "missing_archive": no_archive,
+            "missing_fields": short_fields, "listed": len(out[:limit]), "total": len(out),
+            "cases": out[:limit]}
 
 
 # -- telemetry: what the node measured while it worked -------------------------

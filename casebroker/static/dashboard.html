@@ -7387,8 +7387,13 @@
     // Pending, not disabled: it is usually the button just pressed, and inside
     // an aria-modal drawer a disabled one dropped the focus behind the modal.
     setPending($("storageRefresh"), true);
-    let d;
-    try { d = await api("/v1/storage"); }
+    let d, custody = null;
+    try {
+      // Custody beside the bytes: which done cases' results have not all ARRIVED (the master's
+      // archive receipt, every direction's field). Never fatal to the storage answer.
+      [d, custody] = await Promise.all([api("/v1/storage"),
+        api("/v1/custody?limit=10&older_than_hours=1").catch(() => null)]);
+    }
     catch (e) {
       if (gen !== storageGen) return;          // a newer measurement owns the drawer
       storageDrawn = false;
@@ -7435,7 +7440,26 @@
       </table>
       <div class="note" style="color:var(--text-muted);font-size:11.5px;margin-top:10px">
         Size includes indexes${d.engine === "postgres" ? " and out-of-line (TOAST) data" : ""}.
-        ${d.tables.some((t) => t.bytes == null) ? "Per-table sizes need SQLite's dbstat, which this build lacks." : ""}</div>`;
+        ${d.tables.some((t) => t.bytes == null) ? "Per-table sizes need SQLite's dbstat, which this build lacks." : ""}</div>
+      ${custodyHtml(custody)}`;
+  }
+
+  // Custody (GET /v1/custody): `done` is the node's word; this is what has ARRIVED -- the
+  // master's receipt for the archive, a database row per direction's field. Cases finished
+  // less than an hour ago are left out of the list: they may still be syncing.
+  function custodyHtml(c) {
+    if (!c) return "";
+    const waiting = c.done - c.stored;
+    const list = (c.cases || []).map((x) => `<tr><td><code>${esc(x.case_id)}</code></td>`
+      + `<td>${esc(x.missing.map((m) => m === "fields" && x.fields_expected != null
+          ? `fields ${x.fields}/${x.fields_expected}` : m).join(", "))}</td>`
+      + `<td class="num">${esc(formatDuration(x.age_seconds))}</td></tr>`).join("");
+    return `<div class="storage-sub" style="margin-top:14px"><strong>Custody</strong> · `
+      + `${Number(c.stored).toLocaleString()} of ${Number(c.done).toLocaleString()} done cases stored`
+      + (waiting ? ` · ${Number(c.missing_archive).toLocaleString()} without the archive on the master`
+          + ` · ${Number(c.missing_fields).toLocaleString()} without every field` : "") + `</div>`
+      + (list ? `<table><thead><tr><th>Case (oldest first)</th><th>Missing</th><th class="num">Done for</th></tr></thead>`
+          + `<tbody>${list}</tbody></table>` : "");
   }
 
   // -- Dataset drawer -------------------------------------------------------------
