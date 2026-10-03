@@ -158,6 +158,16 @@ class CaseIn(BaseModel):
     labels: dict[str, str] | None = None
 
 
+class ReceiptIn(BaseModel):
+    """An artifact of a case that has arrived where results are kept (DOMAIN.md, "Custody")."""
+    kind: str = Field(default="archive", max_length=32)
+    location: str = Field(default="master", max_length=32)
+    sha256: str = Field(min_length=64, max_length=64)
+    size: int | None = Field(default=None, ge=0, alias="bytes")
+    path: str | None = Field(default=None, max_length=1024)
+    model_config = {"populate_by_name": True}
+
+
 class CancelIn(BaseModel):
     reason: str | None = Field(default=None, max_length=300)
     # Quarantine it with the reason instead of putting it back in the pool.
@@ -1993,6 +2003,45 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
             return Response(status_code=304, headers=headers)
         return Response(content=row["blob"], media_type="application/octet-stream", headers=headers)
 
+    # -- custody: what has arrived where results are kept -----------------------------
+    #
+    # `done` is the node's word (POST /v1/complete names an archive on its own disk). A
+    # receipt is the other half: the holder of an artifact -- the Syncthing master's scan
+    # that hashed the archive (scripts/report_receipts.py) -- says it has it, and the
+    # broker checks the hash against the one the node reported. Kept per artifact and
+    # outside `state`, which leasing and every count read.
+
+    @app.post("/v1/cases/{case_id}/receipts", dependencies=[WriteAuth])
+    def post_receipt(case_id: str, body: ReceiptIn, request: Request) -> dict[str, Any]:
+        """Record that an artifact of a done case has arrived (kind `archive`, location
+        `master`), with the sha256 the holder computed. 409 when the case is not done or the
+        hash is not the one the node reported at completion -- a corrupted or different
+        archive, which stays on /v1/custody until a good copy is reported. Reporting the same
+        artifact again replaces the receipt; no lease is involved."""
+        user = _session_principal(request)
+        machine = None if user else _machine_principal(request)
+        by = user["username"] if user else (machine["name"] if machine else None)
+        try:
+            return db.record_receipt(conn, case_id, body.kind, body.location, body.sha256,
+                                     size=body.size, path=body.path, by=by)
+        except db.ReceiptRefused as exc:
+            raise HTTPException(exc.status, str(exc))
+
+    @app.get("/v1/cases/{case_id}/receipts", dependencies=[ReadAuth])
+    def get_receipts(case_id: str) -> dict[str, Any]:
+        """The receipts a case has. Its pedestrian fields are their own receipts: GET .../fields."""
+        return {"case_id": case_id, "receipts": db.case_receipts(conn, case_id)}
+
+    @app.get("/v1/custody", dependencies=[ReadAuth])
+    def get_custody(recipe: str | None = Query(None, max_length=128),
+                    older_than_hours: float = Query(0, ge=0, le=24 * 365),
+                    limit: int = Query(200, ge=1, le=5000)) -> dict[str, Any]:
+        """The done cases whose result has not all arrived: no archive receipt from the master,
+        or fewer pedestrian fields in the database than the case had directions. Oldest first;
+        `older_than_hours` leaves out what may still be syncing. `stored` counts the done cases
+        with nothing missing."""
+        return db.custody(conn, recipe=recipe, older_than=int(older_than_hours * 3600), limit=limit)
+
     @app.get("/v1/dataset", dependencies=[ReadAuth])
     def dataset_stats(recipe: str | None = Query(None, max_length=128)) -> dict[str, Any]:
         """The campaign as a dataset: counts by state, split, LCZ, recipe and
@@ -2327,6 +2376,8 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         # The pedestrian fields this case holds (no bytes): what tells the page it
         # can draw the wind without a field source of its own.
         row["fields"] = db.case_fields(conn, case_id)
+        # And what has arrived where results are kept (custody): the master's receipts.
+        row["receipts"] = db.case_receipts(conn, case_id)
         row["telemetry"] = dataset.parse_obj(row.get("telemetry"))
         if db.nests_deeper(row["telemetry"], db.TELEMETRY_MAX_DEPTH + 1):
             # Deeper than post_telemetry now accepts (+1 for the kind level):
