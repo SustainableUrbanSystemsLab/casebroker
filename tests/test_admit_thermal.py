@@ -120,3 +120,37 @@ def test_a_finished_withdrawn_case_does_not_block_posting(monkeypatch):
     # with no finished wind site to pair, posts nothing and succeeds).
     held = [{"case_id": "t1", "recipe": V1, "state": "done", "spec": {}}]
     assert run_main(monkeypatch, held) == 0
+
+
+# -- the v6 move, and an E3D that fails ----------------------------------------------
+
+def test_a_site_is_linked_to_its_newest_wind_case_and_a_moved_one_is_left_out():
+    site = {"lat": 38.91964, "lon": 121.64291}
+    v4 = {"case_id": "v2-old", "recipe": "cyl-1008/of12-v4", "state": "quarantined", "spec": dict(site)}
+    v6 = {"case_id": "v2-new", "recipe": "cyl-1008/of12-v6", "state": "pending", "spec": dict(site)}
+    other = {"case_id": "v2-oth", "recipe": "cyl-1008/of12-v5", "state": "done", "spec": {"lat": 1.0, "lon": 2.0}}
+    assert sorted(c["case_id"] for c in admit.one_per_site([v4, v6, other])) == ["v2-new", "v2-oth"]
+    # A pending v4 next to a pending v6 of the same site: still one case, the v6 one.
+    v4p = dict(v4, state="pending")
+    assert [c["case_id"] for c in admit.one_per_site([v4p, v6])] == ["v2-new"]
+
+
+def test_an_e3d_that_printed_nothing_is_an_error_not_no_station(monkeypatch):
+    import subprocess
+    answers = {"out": ""}
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(
+        a[0], 1, stdout=answers["out"], stderr="error: .NET number values such as positive and negative infinity"))
+    find = admit.e3d_find("E3D")
+    try:
+        find(1.0, 2.0)
+        raise AssertionError("an E3D that crashed was read as no station")
+    except RuntimeError as e:
+        assert "nothing printed" in str(e)
+    answers["out"] = "[]"                     # exit 1 with an empty list IS no station
+    assert find(1.0, 2.0) == []
+
+
+def test_the_priority_is_the_callers():
+    station = {"key": "k", "url": "u", "distanceKm": 1.0}
+    assert admit.thermal_case(wind(1, "LCZ1", "c"), station, None, "p")["priority"] == admit.PRIORITY
+    assert admit.thermal_case(wind(1, "LCZ1", "c"), station, None, "p", priority=40)["priority"] == 40
