@@ -8,7 +8,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
-## [0.25.1] - 2026-10-01
+## [0.26.1] - 2026-10-01
 
 ### Changed
 - **`scripts/admit_thermal.py` links each thermal site to its v6 wind case.** The pending v4
@@ -22,6 +22,28 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
   #964 a station without statistics among the nearest 300 made `find` exit 1 with empty output,
   and the script read that as no TMYx station for every site: a `--post` run would have admitted
   nothing and said only "skipped". Exit 1 with `[]` is still "no station".
+
+## [0.26.0] - 2026-10-01
+
+### Added
+- **Custody: what has ARRIVED, kept beside `state` and never in it** (DOMAIN.md, "Custody").
+  `done` is the node's word; whether its archive reached the Syncthing master intact, and
+  whether every direction's pedestrian field reached the database, was nowhere. Two dev-built
+  nodes had just finished directions against a broker that did not take fields yet.
+  - `case_artifacts`: one receipt per (case, artifact, location), written by the holder that
+    checked it. `POST /v1/cases/{id}/receipts` (write scope, no lease) records an archive on the
+    master; a sha256 other than the one the node reported at completion is refused (409, a
+    corrupted or different archive), as is a case that is not done. A field's receipt is its
+    `case_fields` row.
+  - `GET /v1/custody` lists the done cases still missing their archive or fields (expected:
+    the case's telemetry `solve.directions_total`, else `mesh.directions`; none for thermal),
+    oldest first, with `older_than_hours` to leave out what may still be syncing, and counts
+    `done`, `stored`, `missing_archive` and `missing_fields`. `GET /v1/cases/{id}` carries
+    `receipts`.
+  - `scripts/report_receipts.py` runs on the master: it hashes only what `/v1/custody` lists,
+    and only a case whose archive and every part its manifest names are present and verify.
+  - The dashboard's storage drawer shows custody beside the bytes, with the oldest cases still
+    missing something.
 
 ## [0.25.0] - 2026-10-01
 
