@@ -46,7 +46,8 @@ RECIPE = "surf-1008/rad6R0P2-fft-v2"
 # Never posted again, and never produced beside RECIPE: a node on an older build still declares
 # one, so while a case of it is pending or leased that node keeps archiving it.
 WITHDRAWN = ("surf-1008/rad6R0P2-fft-v1",)
-WIND_RECIPES = ("cyl-1008/of12-v5", "cyl-1008/of12-v4")
+# Newest first: a site moved v4 -> v6 (POST /v1/cases/respec) holds both, and its wind case is the v6 one.
+WIND_RECIPES = ("cyl-1008/of12-v6", "cyl-1008/of12-v5", "cyl-1008/of12-v4")
 PRIORITY = 200
 BATCH = 25
 STATIONS = 300
@@ -99,9 +100,13 @@ def e3d_find(e3d: str) -> Callable[[float, float], list[dict[str, Any]]]:
         # nearest were all EnergyPlus TMY/TMY2/TMY3 and IWEC files, with its TMYx further out.
         out = subprocess.run([e3d, "climate-index", "find", "--lat", repr(lat), "--lon", repr(lon), "--limit", str(STATIONS)],
                              capture_output=True, text=True, timeout=300)
-        if out.returncode not in (0, 1):
-            raise RuntimeError(f"E3D climate-index find failed ({out.returncode}): {out.stderr.strip()[:300]}")
-        return json.loads(out.stdout or "[]")
+        # Exit 1 with "[]" is "no station"; exit 1 with NOTHING printed is E3D failing -- before
+        # Eddy3D #964 a station without statistics (NaN) among the 300 did exactly that, and reading
+        # it as "no station" skipped every site of the pilot without a word.
+        if out.returncode not in (0, 1) or not out.stdout.strip():
+            raise RuntimeError(f"E3D climate-index find failed (exit {out.returncode}, nothing printed): "
+                               f"{out.stderr.strip()[:300]}")
+        return json.loads(out.stdout)
     return find
 
 
@@ -114,6 +119,27 @@ def e3d_catalogue(e3d: str) -> str | None:
         return None
 
 
+def one_per_site(cases: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Each site's wind case: the one of the newest recipe in WIND_RECIPES. A site moved to a new
+    recipe keeps its old case in quarantine, pointing at the new one; linking the thermal case to
+    that, or proposing the site twice, would be wrong. Quarantined cases are left out for that reason."""
+    best: dict[tuple[float, float], tuple[int, dict[str, Any]]] = {}
+    for c in cases:
+        if c.get("state") == "quarantined":
+            continue
+        spec = c.get("spec") or {}
+        if isinstance(spec, str):
+            spec = json.loads(spec)
+        if spec.get("lat") is None or spec.get("lon") is None:
+            continue
+        key = (round(float(spec["lat"]), 5), round(float(spec["lon"]), 5))
+        recipe = c.get("recipe")
+        rank = WIND_RECIPES.index(recipe) if recipe in WIND_RECIPES else len(WIND_RECIPES)
+        if key not in best or rank < best[key][0]:
+            best[key] = (rank, c)
+    return [c for _, c in best.values()]
+
+
 def withdrawn_in_flight(cases: Iterable[dict[str, Any]]) -> dict[str, int]:
     """How many cases of each WITHDRAWN recipe are still pending or leased. A done or
     quarantined one is finished with: it stays its own training set and no node takes it."""
@@ -124,14 +150,15 @@ def withdrawn_in_flight(cases: Iterable[dict[str, Any]]) -> dict[str, int]:
     return dict(out)
 
 
-def thermal_case(wind: dict[str, Any], station: dict[str, Any], catalogue: str | None, campaign: str) -> dict[str, Any]:
+def thermal_case(wind: dict[str, Any], station: dict[str, Any], catalogue: str | None, campaign: str,
+                 priority: int = PRIORITY) -> dict[str, Any]:
     spec = wind.get("spec") or {}
     if isinstance(spec, str):
         spec = json.loads(spec)
     return {
         "lat": spec["lat"], "lon": spec["lon"], "recipe": RECIPE,
         "city_cluster": wind["city_cluster"], "lcz": wind.get("lcz"),
-        "priority": PRIORITY, "labels": {"campaign": campaign},
+        "priority": priority, "labels": {"campaign": campaign},
         "spec": {
             "lcz": wind.get("lcz"),
             "wind_case": wind["case_id"],
@@ -179,6 +206,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--e3d", required=True, help="the E3D executable whose climate catalogue picks the weather")
     ap.add_argument("--count", type=int, default=50)
     ap.add_argument("--campaign", default="thermal-pilot", help="the `campaign` label")
+    ap.add_argument("--priority", type=int, default=PRIORITY,
+                    help=f"lease order, lower first (default {PRIORITY}: after the wind cases, which sit at 50)")
     ap.add_argument("--any-state", action="store_true",
                     help="take wind sites in any state, not only finished ones (a thermal case never waits for its "
                          "wind case; this is for a campaign with too few finished sites to sample)")
@@ -203,8 +232,8 @@ def main(argv: list[str] | None = None) -> int:
     wanted = {} if a.any_state else {"state": "done"}
     # By case id and by recipe here as well: a broker from before `recipe` was a filter ignores
     # it and answers with every case, twice.
-    done = list({c["case_id"]: c for r in WIND_RECIPES for c in broker.cases(recipe=r, **wanted)
-                 if c.get("recipe") == r and (a.any_state or c.get("state") == "done")}.values())
+    done = one_per_site({c["case_id"]: c for r in WIND_RECIPES for c in broker.cases(recipe=r, **wanted)
+                         if c.get("recipe") == r and (a.any_state or c.get("state") == "done")}.values())
     already = [c for c in broker.cases(recipe=RECIPE) if c.get("recipe") == RECIPE]
     taken = set()
     for c in already:
@@ -227,12 +256,12 @@ def main(argv: list[str] | None = None) -> int:
         if station is None:
             print(f"  {wind['case_id']}: no TMYx station among the nearest {STATIONS}; skipped")
             continue
-        cases.append(thermal_case(wind, station, catalogue, a.campaign))
+        cases.append(thermal_case(wind, station, catalogue, a.campaign, a.priority))
         print(f"  {wind['case_id']} {wind.get('lcz') or '?':>6} {wind['city_cluster']:<24} "
               f"{station['key']} ({station['distanceKm']:.1f} km)")
 
     if not a.post:
-        print(f"dry run: {len(cases)} would be posted under {RECIPE} at priority {PRIORITY}; pass --post")
+        print(f"dry run: {len(cases)} would be posted under {RECIPE} at priority {a.priority}; pass --post")
         return 0
     added = 0
     for i in range(0, len(cases), BATCH):
