@@ -1,0 +1,68 @@
+# Self-hosted deployment on the lab Synology: Postgres and the broker in ONE
+# Container Manager project. See README.md in this folder for the runbook.
+#
+# How a push to main reaches this box: CI builds the image and pushes
+# ghcr.io/sustainableurbansystemslab/casebroker:latest, Watchtower (a separate
+# project on the NAS, WATCHTOWER_LABEL_ENABLE=true) sees the new digest within
+# its poll interval and recreates `broker` -- and only `broker`, because it is
+# the only service here carrying the enable label. Postgres is upgraded by
+# hand, deliberately: an unattended major-version bump cannot read the old
+# data directory.
+#
+# TLS is not terminated here. DSM's reverse proxy (Control Panel > Login
+# Portal > Advanced > Reverse Proxy) owns :443 for every hostname on
+# the NAS and forwards to 127.0.0.1:8010, which is why the broker binds
+# loopback only: nothing on the LAN reaches it except through the proxy.
+services:
+  postgres:
+    image: postgres:17
+    container_name: postgres
+    restart: unless-stopped
+    command: ["postgres", "-c", "timezone=America/New_York", "-c", "log_timezone=America/New_York"]
+    environment:
+      # Read by the image only when the data directory is EMPTY. The existing
+      # directory was initialised by the old standalone `postgres` project, so
+      # this must be that same password, not a new one -- changing it here
+      # changes nothing inside the database.
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: app
+      TZ: America/New_York
+    volumes:
+      - /volume1/docker/postgres/data:/var/lib/postgresql/data
+    ports:
+      # LAN access (psql, Metabase). 5432 on the host belongs to DSM's own
+      # built-in Postgres. The broker does not use this; it talks to
+      # postgres:5432 over the project network.
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admin -d casebroker"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  broker:
+    image: ghcr.io/sustainableurbansystemslab/casebroker:latest
+    container_name: casebroker
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
+    environment:
+      # The password goes into a URL, so any of  @ : / ? # [ ] %  in it must be
+      # percent-encoded here (python3 -c "import urllib.parse,sys;
+      # print(urllib.parse.quote(sys.argv[1], safe=''))" '<pw>').
+      CASEBROKER_DB: postgresql://admin:${POSTGRES_PASSWORD_URLENCODED:-${POSTGRES_PASSWORD}}@postgres:5432/casebroker
+      # The live fleet authenticates with the shared token Render has today;
+      # carry the same value(s) over or every worker gets 401 at cut-over.
+      CASEBROKER_WRITE_TOKENS: ${CASEBROKER_WRITE_TOKENS:-}
+      CASEBROKER_READ_TOKENS: ${CASEBROKER_READ_TOKENS:-}
+      CASEBROKER_SETUP_TOKEN: ${CASEBROKER_SETUP_TOKEN:-}
+      # Postgres on the NAS has no free-plan ceiling; this only labels the
+      # dashboard's storage page.
+      CASEBROKER_DB_QUOTA_MB: ${CASEBROKER_DB_QUOTA_MB:-}
+      TZ: America/New_York
+    ports:
+      - "127.0.0.1:8010:8000"

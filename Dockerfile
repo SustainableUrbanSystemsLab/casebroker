@@ -29,6 +29,12 @@ RUN python -c "import duckdb; duckdb.connect().execute('INSTALL httpfs; INSTALL 
 # nothing said so. Production points CASEBROKER_DB at Supabase Postgres; with
 # state external the service needs no disk at all. app.py warns loudly on
 # startup if this resolves to SQLite.
+# The commit this image was built from, for /healthz. Render sets
+# RENDER_GIT_COMMIT itself; an image pulled from GHCR has nothing else to say
+# which commit it is, so CI passes it as a build arg. Empty (a local build)
+# falls through to the other sources in app._commit().
+ARG CASEBROKER_COMMIT=""
+ENV CASEBROKER_COMMIT=${CASEBROKER_COMMIT}
 EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/healthz').status==200 else 1)"
 CMD ["uvicorn", "casebroker.app:app", "--host", "0.0.0.0", "--port", "8000"]

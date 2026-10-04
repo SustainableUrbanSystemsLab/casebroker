@@ -284,3 +284,71 @@ jobs:
           # not ship the code this workflow just tested.
           test "$ver" != "MISSING" -a "$ver" != "None"
 
+  publish-image:
+    name: push this commit's image to GHCR for the NAS
+    # The Synology does not build anything: it pulls. Watchtower on the NAS
+    # polls ghcr.io/...:latest and recreates the broker container when the
+    # digest moves. Same gate as the Render deploy -- the suites and the image
+    # smoke test above must pass first -- so the NAS never pulls a commit that
+    # failed CI. :sha-<full sha> is pushed alongside :latest so a roll back is
+    # just pinning the compose file to an older tag.
+    needs: [sqlite, docker, version]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push
+        run: |
+          # GHCR requires a lowercase repository path; the org name is not.
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          docker build --build-arg CASEBROKER_COMMIT="${{ github.sha }}" \
+            -t "$image:latest" -t "$image:sha-${{ github.sha }}" .
+          docker push "$image:sha-${{ github.sha }}"
+          docker push "$image:latest"
+
+  nas-deploy-check:
+    name: confirm the NAS picked up this commit
+    # Pull-based, so there is no deploy to trigger: wait for Watchtower's next
+    # poll and then check that /healthz reports THIS commit -- the same "is MY
+    # commit live" question the Render job asks, never "is something live".
+    # Skipped until the repo variable NAS_BROKER_URL is set, so this cannot go
+    # red before the NAS deployment exists.
+    #
+    # A newer push superseding this one is reported and passed rather than
+    # failed: the run for that newer commit is what verifies it.
+    needs: [publish-image]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.NAS_BROKER_URL != ''
+    env:
+      NAS_BROKER_URL: ${{ vars.NAS_BROKER_URL }}
+    steps:
+      - name: Wait for /healthz to report this commit
+        run: |
+          want="${GITHUB_SHA:0:8}"
+          # Watchtower polls every 10 minutes; allow two polls plus a restart.
+          for i in $(seq 1 50); do
+            # Never print the body: like the Render check, it carries
+            # infrastructure details that do not belong in public logs.
+            code=$(curl -s -o /tmp/h.json -w "%{http_code}" "$NAS_BROKER_URL/healthz" || true)
+            got=$(python3 -c "import json; print(json.load(open('/tmp/h.json')).get('commit'))" 2>/dev/null || echo none)
+            ok=$(python3 -c "import json; print(json.load(open('/tmp/h.json')).get('ok'))" 2>/dev/null || echo none)
+            echo "[$i] http=$code ok=$ok commit=$got (want $want)"
+            if [ "$code" = "200" ] && [ "$ok" = "True" ] && [ "$got" = "$want" ]; then
+              echo "NAS is serving $want"; exit 0
+            fi
+            sleep 30
+          done
+          head=$(git ls-remote "https://github.com/${GITHUB_REPOSITORY}" refs/heads/main | cut -c1-40)
+          if [ "$head" != "$GITHUB_SHA" ]; then
+            echo "::notice::main moved on to ${head:0:8} before the NAS picked up $want; that run verifies it"
+            exit 0
+          fi
+          echo "::error::NAS never reported commit $want within 25 minutes"; exit 1
