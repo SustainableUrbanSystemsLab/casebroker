@@ -8,6 +8,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.27.0] - 2026-10-04
+
+### Added
+- **Self-hosted deployment on the lab Synology** (`deploy/synology/`). Postgres and the broker run
+  as one Container Manager project; DSM's reverse proxy fronts it at `<broker-host>`.
+  The README there is the runbook, including moving the campaign off Supabase.
+- **CI publishes the image to GHCR** (`publish-image`): every push to `main` that passes the suites
+  and the image smoke test pushes `ghcr.io/sustainableurbansystemslab/casebroker:latest` and
+  `:sha-<sha>`. Watchtower on the NAS pulls it; `nas-deploy-check` then waits for `/healthz` to
+  report that commit. It is skipped until the repo variable `NAS_BROKER_URL` is set.
+- The image takes a `CASEBROKER_COMMIT` build arg, so `/healthz` names its commit off Render too.
+
 ## [0.26.1] - 2026-10-01
 
 ### Changed
