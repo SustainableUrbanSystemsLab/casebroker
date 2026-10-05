@@ -53,7 +53,13 @@ services:
       # The password goes into a URL, so any of  @ : / ? # [ ] %  in it must be
       # percent-encoded here (python3 -c "import urllib.parse,sys;
       # print(urllib.parse.quote(sys.argv[1], safe=''))" '<pw>').
-      CASEBROKER_DB: postgresql://admin:${POSTGRES_PASSWORD_URLENCODED:-${POSTGRES_PASSWORD}}@postgres:5432/casebroker
+      #
+      # sslmode=disable: db.py defaults to sslmode=require (right for Supabase,
+      # across the public internet), and this Postgres has no TLS -- so without
+      # it the handshake is refused and the broker crash-loops on "server closed
+      # the connection unexpectedly", with nothing in the Postgres log. The
+      # traffic never leaves the project's Docker network.
+      CASEBROKER_DB: postgresql://admin:${POSTGRES_PASSWORD_URLENCODED:-${POSTGRES_PASSWORD}}@postgres:5432/casebroker?sslmode=disable
       # The live fleet authenticates with the shared token Render has today;
       # carry the same value(s) over or every worker gets 401 at cut-over.
       CASEBROKER_WRITE_TOKENS: ${CASEBROKER_WRITE_TOKENS:-}
