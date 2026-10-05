@@ -8,6 +8,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.27.1] - 2026-10-04
+
+### Fixed
+- **The Synology broker crash-looped on connect.** `db.py` requires TLS unless the DSN names an
+  `sslmode`, and the project's Postgres has none; the compose DSN now says `sslmode=disable`. The
+  connection stays on the project's Docker network.
+
 ## [0.27.0] - 2026-10-04
 
 ### Added
