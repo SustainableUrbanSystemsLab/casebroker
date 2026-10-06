@@ -8,6 +8,26 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.28.5] - 2026-10-06
+
+### Fixed
+- **Reloading the dashboard no longer moves the page.** Its first-load skeletons guessed at a shape
+  -- seven one-line stat cards, 41 px table rows, two fleet cards -- and every miss moved what sat
+  below it when the answer landed. Each answer now records what it drew (row counts and heights, the
+  stat grid's and fleet strip's heights, the header badge's words, the progress and ETA lines with
+  their digits zeroed) in `localStorage`, and the next load at the same window width takes that
+  shape; nothing that names a case or a worker is kept. Measured in headless Chrome against a seeded
+  broker with ~350 ms round trips, at 1920, 1280, 768 and 375 px wide, at the top of the page and
+  scrolled to the fleet or the case table: every reload now scores a cumulative layout shift of 0,
+  where it scored 0.004 to 0.42. The worst were a 768 px window, whose header wrapped onto a second
+  row and back as the badge changed width (the whole page dropped 48 px and came back up), and a
+  phone reloaded at the fleet panel, which dropped 125 px. Also: skeleton rows are as tall as the
+  real ones (45 px, not 41), so a first load with nothing remembered shifts less too (0.019 to
+  0.011); the progress bar is drawn at its widths on arrival rather than grown into them; the header
+  badge keeps the auth mode that `/v1/status` does not carry, instead of losing it a moment after
+  `/healthz` drew it on every load and refresh; and the connection pill keeps one width from
+  "connecting…" to "connected".
+
 ## [0.28.4] - 2026-10-06
 
 ### Fixed

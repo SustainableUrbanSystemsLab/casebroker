@@ -259,6 +259,13 @@
     border: 1px solid var(--border);
     font-weight: 500;
   }
+  /* As wide as the widest word of a load, whichever it is showing: a reload
+     goes "connecting…", "refreshing…", "connected", and each narrower word
+     slid the pill and the buttons beside it sideways. The second grid row is
+     that word, invisible and zero-high; an answer longer than it ("auth
+     required", a 401) still widens the pill. */
+  #connText { display: inline-grid; }
+  #connText::after { content: "connecting…"; height: 0; overflow: hidden; visibility: hidden; }
   #connDot {
     width: 8px;
     height: 8px;
@@ -843,6 +850,9 @@
     height: 100%;
     transition: width 0.4s cubic-bezier(0.4, 0, 0.2, 1);
   }
+  /* The first answer after a skeleton: drawn at its widths, not grown to them
+     (renderStatus says why). */
+  .progress-bar-wrap.no-anim .progress-segment { transition: none; }
   .progress-bar-wrap.thin { height: 6px; box-shadow: none; }
   /* The unit under way. Not a fabricated fill: a translucent band the width of
      that one unit, with the barber-pole motion every progress indicator since
@@ -1312,7 +1322,7 @@
   }
   /* Forced colours (Windows High Contrast) repaint a background as Canvas and
      drop a gradient, so every bar was Canvas on Canvas -- gone -- and they force
-     `color` too, which put the masked words ("0 active", the badge's
+     `color` too, which put the masked words ("0 known", the badge's
      "version • database • auth") back on screen. A skeleton is a shape, not
      a colour scheme: it keeps a system colour that reads as one. */
   @media (forced-colors: active) {
@@ -1391,7 +1401,7 @@
     <div class="header-meta">
       <span class="conn-pill" id="connPill">
         <span id="connDot"></span>
-        <span id="connText">not connected</span>
+        <span id="connText">connecting…</span>
       </span>
 
       <div class="header-actions">
@@ -1600,7 +1610,7 @@
           Worker Fleet
         </h2>
       </div>
-      <span class="chip" id="workerCountBadge">0 active</span>
+      <span class="chip" id="workerCountBadge">0 known</span>
     </div>
 
     <div id="fleetQueue" class="fleet-queue" style="display:none"></div>
@@ -2208,6 +2218,7 @@
   const LS_AUTO = "casebroker.autoRefresh";
   const LS_NOTIFY = "casebroker.notifyDone";
   const LS_RECIPE = "casebroker.recipeScope";
+  const LS_SHAPE = "casebroker.reloadShape";
   // The one recipe the page is scoped to, or "" for the whole campaign. Since
   // 2026-09 the queue holds CFD wind and Radiance surface temperatures, whose
   // counts, throughput and statistics mean nothing pooled.
@@ -3857,13 +3868,17 @@
   ///   num: right-aligned like a .num cell }.
   /// Widths are px because a table sizes its columns from their content, and a
   /// percentage of a cell that is sizing itself from that percentage is zero.
-  /// A cell's tallest bar sets the row, so a column of 18-20 px chips makes the
-  /// ~40 px rows the real table draws and the swap does not jump.
-  function skelTableRows(rows, cols, tdStyle) {
+  /// A cell's tallest bar sets the row, so the bar in the tallest column has to
+  /// be as tall as what replaces it: 24 px for an ID cell, 22.5 for a chip,
+  /// inside 10 px of padding makes the 44-45 px rows the real tables draw. These
+  /// said 18-20 and drew 41 px rows, which put 100 px under a page of 25 cases.
+  /// `rowH`, when given, is the height the real rows had when this table was
+  /// last drawn (shapeOf), and outranks the bars.
+  function skelTableRows(rows, cols, tdStyle, rowH) {
     const spec = typeof cols === "number" ? Array.from({ length: cols }, () => ({ w: 80 })) : cols;
     let html = "";
     for (let r = 0; r < rows; r++) {
-      html += `<tr class="skel-row" aria-hidden="true">` + spec.map((c, i) => {
+      html += `<tr class="skel-row" aria-hidden="true"${rowH ? ` style="height:${rowH}px"` : ""}>` + spec.map((c, i) => {
         const w = typeof c.w === "string" ? c.w
           : Math.max(12, Math.round(c.w * SKEL_VARY[(r + i) % SKEL_VARY.length])) + "px";
         const bar = c.h
@@ -3892,6 +3907,78 @@
   /// A figure's footprint: the exact box the drawing will occupy.
   function skelFigure(w, h) {
     return skelBar(w + "px", h + "px", "skel-block", "flex:none;");
+  }
+
+  /// Words worn as their own placeholder, for a line whose length is known
+  /// (shapeText): masked, they take exactly the room the answer will and wrap
+  /// where it wraps, which a bar of a guessed width cannot.
+  function skelWords(text) {
+    return `<span class="skel skel-mask" aria-hidden="true" style="border-radius:4px;${skelPhase()}">${esc(text)}</span>`;
+  }
+
+  // -- The shape of the last load -------------------------------------------------
+  // A reload is the first load of a page that was on screen a moment ago, yet
+  // its skeletons guessed at a shape this file chose -- seven one-line stat
+  // cards, two fleet cards, 25 case rows -- where the page had just drawn the
+  // real one. Every miss moved what sat below it when the answer landed.
+  // Measured against a seeded broker with ~350 ms round trips (2026-10-06):
+  // at 1280x800 the stat cards grew from 99 px to 128 (a label wraps) and the
+  // fleet panel slid 38 px down the screen; at 375 px a worker row is 81 px,
+  // not 41, and the case table came in 963 px taller than its skeleton.
+  // So each answer records what it drew -- how many rows and how tall, how tall
+  // the stat grid and the fleet strip -- and the next first load takes that
+  // shape when the window is as wide as it was, which is what a reload is. A
+  // different width wraps differently and gets the defaults. Measured in
+  // headless Chrome at 1920, 1280, 768 and 375 px, at the top of the page and
+  // scrolled to the fleet or the case table: every reload now scores a
+  // cumulative layout shift of 0, where it scored 0.004 to 0.42 -- a phone
+  // reloaded at the fleet panel watched it drop 125 px. Kept: sizes, row
+  // counts, and the strings whose length decides a width or a wrap -- the
+  // header badge, which /healthz hands to anyone, and the progress and ETA
+  // lines with their digits zeroed. Nothing that names a case or a worker, and
+  // no campaign figure.
+  const reloadShape = (() => {
+    try {
+      const s = JSON.parse(localStorage.getItem(LS_SHAPE) || "null");
+      if (s && s.v === 1) return s;
+    } catch (e) {}
+    return { v: 1 };
+  })();
+
+  /// What the last answer drew for `key` at this width, for this broker; null
+  /// otherwise, and the skeleton keeps its defaults.
+  function shapeOf(key) {
+    if (reloadShape.w !== window.innerWidth) return null;
+    return shapeText(key);
+  }
+
+  /// The same for a string, at any width: masked, it wraps wherever the answer
+  /// it stands in for will.
+  function shapeText(key) {
+    return reloadShape.broker === brokerBase($("broker").value) ? (reloadShape[key] ?? null) : null;
+  }
+
+  function recordShape(fields) {
+    const s = reloadShape;
+    const broker = brokerBase($("broker").value);
+    if (s.broker !== broker || s.w !== window.innerWidth) {
+      // Another broker is another campaign, and another width wraps
+      // differently: none of the sizes carry over. The strings do, within a
+      // broker.
+      const keep = s.broker === broker ? { badge: s.badge, pct: s.pct, eta: s.eta } : {};
+      for (const k of Object.keys(s)) delete s[k];
+      Object.assign(s, keep, { v: 1, broker, w: window.innerWidth });
+    }
+    Object.assign(s, fields);
+    try { localStorage.setItem(LS_SHAPE, JSON.stringify(s)); } catch (e) {}
+  }
+
+  /// `[rows, mean height]` of a table body as drawn: the count a skeleton
+  /// repeats and the height it gives each of its rows.
+  function rowsShape(tbody, selector) {
+    const rows = [...tbody.querySelectorAll(selector || ":scope > tr")];
+    const h = rows.reduce((a, r) => a + r.getBoundingClientRect().height, 0);
+    return rows.length && h ? [rows.length, Math.round(h / rows.length * 10) / 10] : null;
   }
 
   /// A kv-list card, for a detail panel that has not arrived: a heading bar,
@@ -4088,21 +4175,31 @@
   // Fed by whichever payload arrived -- /healthz or the authenticated
   // /v1/status, which now carries the same version and db fields. Either can
   // fill the header badge, so one failing path no longer blanks it.
+  // Merged, not replaced: /v1/status does not carry the auth mode, so drawing
+  // each payload on its own dropped "auth required" a moment after /healthz
+  // had drawn it, and the badge went from 212 px to 114 on every load and every
+  // refresh. At 768 px that is the difference between a header on one row and
+  // on two: the whole page dropped 48 px and came back up, a layout shift of
+  // 0.42 per reload. forgetCampaign() empties it for another broker.
+  let badgeFrom = {};
   function setBadge(h) {
     if (!h) return;
+    for (const k of ["version", "commit", "db", "auth"]) if (h[k]) badgeFrom[k] = h[k];
+    const b = badgeFrom;
     const badge = $("brokerDbBadge");
     const parts = [];
-    if (h.version) parts.push(`v${h.version}`);
+    if (b.version) parts.push(`v${b.version}`);
     // The version moves once per commit now, and this says WHICH commit is live.
-    if (h.commit) parts.push(h.commit);
-    if (h.db) parts.push(h.db.startsWith("postgres") ? "Postgres" : "SQLite");
+    if (b.commit) parts.push(b.commit);
+    if (b.db) parts.push(b.db.startsWith("postgres") ? "Postgres" : "SQLite");
     // "accounts" is auth too. Comparing only against "token" labelled a broker
     // secured entirely by accounts as "open", which is the opposite of true.
-    if (h.auth) parts.push(h.auth === "OPEN" ? "open" : "auth required");
+    if (b.auth) parts.push(b.auth === "OPEN" ? "open" : "auth required");
     if (parts.length) {
       skelOnto(badge, false, true);
       badge.textContent = parts.join(" • ");
       badge.hidden = false;
+      recordShape({ badge: badge.textContent });
     }
   }
 
@@ -4113,7 +4210,9 @@
     const badge = $("brokerDbBadge");
     if (on) {
       if (!badge.hidden) return;
-      badge.textContent = "version • database • auth";   // masked: a width, not words
+      // Masked: a width, not words. The last load's words are the width the
+      // badge is about to have, so the header does not move when they land.
+      badge.textContent = shapeText("badge") || "version • database • auth";
       skelOnto(badge, true, true);
       badge.hidden = false;
     } else if (badge.classList.contains("skel")) {
@@ -4143,6 +4242,11 @@
 
   function renderStatus(st) {
     renderRecipeScope(st);
+    // The bar animates a change in the campaign, not the campaign's arrival.
+    // Grown from zero under a skeleton, every segment's width transition moved
+    // the segments after it on each frame for 0.4 s: a layout shift per frame,
+    // twenty to forty per load depending on the display.
+    const arriving = skelOn.status;
     statusSkeletonDone(true);          // every slot the skeleton used is overwritten below
     $("statusEmpty").style.display = "none";
     $("statusBody").style.display = "block";
@@ -4157,10 +4261,15 @@
     const pct = totalCases > 0 ? ((doneCount / totalCases) * 100).toFixed(1) : 0;
     $("progressPct").textContent = `${pct}% completed (${doneCount.toLocaleString()} / ${totalCases.toLocaleString()})`;
     if (totalCases > 0) {
+      const bar = $("campaignProgressBar");
+      bar.classList.toggle("no-anim", arriving);
       $("progDone").style.width = `${(doneCount / totalCases) * 100}%`;
       $("progLeased").style.width = `${(leasedCount / totalCases) * 100}%`;
       $("progPending").style.width = `${(pendingCount / totalCases) * 100}%`;
       $("progQuarantined").style.width = `${(quarantinedCount / totalCases) * 100}%`;
+      // Laid out at the new widths before the transition comes back, or it
+      // would run anyway.
+      if (arriving) { void bar.offsetWidth; bar.classList.remove("no-anim"); }
     }
 
     // KPI Stat cards
@@ -4429,6 +4538,16 @@
       $("workersTableWrap").style.display = "none";
       $("workersTable").style.display = "none";
     }
+
+    // What this answer drew, for the next load's skeletons (shapeOf).
+    recordShape({
+      pct: $("progressPct").textContent.replace(/\d/g, "0"),
+      eta: $("etaText").textContent.replace(/\d/g, "0"),
+      cards: Math.round($("stateStats").getBoundingClientRect().height),
+      split: rowsShape($("splitBody")),
+      fleet: cards.length ? [cards.length, Math.round(fq.getBoundingClientRect().height)] : null,
+      workers: workers.length ? rowsShape($("workersBody")) : null,
+    });
   }
 
   // -- Case Browser Logic ------------------------------------------------------
@@ -6038,6 +6157,9 @@
     // landed. Only a row click used to, so each auto-refresh put the bare
     // "Show building footprints" button back over a drawing the page already had.
     if (openDetailId) autoLoadGeometry();
+    // The next load's skeleton (shapeOf), from the rows alone: a reload opens
+    // no case.
+    if (defaultCaseQuery() && cases.length) recordShape({ cases: rowsShape($("casesBody"), ":scope > tr.caseRow") });
   }
 
   function renderPager() {
@@ -6146,13 +6268,21 @@
   // abandon before it ever reaches the case request) or the stamp of the user
   // request that put it up, which always settles through loadCases.
   const CASE_SKEL = [
-    { w: 150, h: 20 }, { w: 64, h: 18 }, { w: 48, h: 18 }, { w: 36 }, { w: 84 },
+    { w: 150, h: 24 }, { w: 64, h: 18 }, { w: 48, h: 18 }, { w: 36 }, { w: 84 },
     { w: 110 }, { w: 36 }, { w: 90 }, { w: 50 },
   ];
+
+  /// The question a fresh load asks of the case table -- no filter, first page,
+  /// nothing looked up -- whose answer is the shape the next load takes.
+  function defaultCaseQuery() {
+    const q = caseList;
+    return !q.state && !q.split && !q.city && !q.label && !q.offset && !q.singleId;
+  }
 
   function casesSkeleton(owner) {
     skelOn.cases = owner;
     const single = !!caseList.singleId;
+    const rows = defaultCaseQuery() ? shapeOf("cases") : null;
     $("casesEmpty").style.display = "none";
     $("casesTableWrap").classList.remove("is-stale");
     $("casesTableWrap").style.display = "block";
@@ -6182,6 +6312,7 @@
         + `<div style="margin-top:10px">${skelLines(5, 80)}</div></div></div></div>`
         + `<div style="display:flow-root;font-size:12px">${skelBar("260px")}</div>`
         + `</div></td></tr>`
+      : rows ? skelTableRows(rows[0], CASE_SKEL, "", rows[1])
       : skelTableRows(caseList.limit, CASE_SKEL)));
     if (single) {
       $("casesPager").style.display = "none";
@@ -7909,11 +8040,11 @@
   const skelOn = { status: false, workers: false, cases: null };   // cases: null | "refresh" | a request stamp
 
   // Split, progress, then five counts: the static head's seven columns.
-  const SPLIT_SKEL = [{ w: 52, h: 18 }, { w: "100%", h: 6 }, { w: 34, num: true }, { w: 30, num: true },
+  const SPLIT_SKEL = [{ w: 52, h: 22.5 }, { w: "100%", h: 6 }, { w: 34, num: true }, { w: 30, num: true },
                       { w: 38, num: true }, { w: 22, num: true }, { w: 40, num: true }];
   // WORKER_COLUMNS, in order: id, host, cluster, build, status, first seen,
   // last seen, working on, done, failed.
-  const WORKER_SKEL = [{ w: 150, h: 20 }, { w: 84, h: 18 }, { w: 64, h: 18 }, { w: 120, h: 20 },
+  const WORKER_SKEL = [{ w: 150, h: 24 }, { w: 84, h: 18 }, { w: 64, h: 18 }, { w: 120, h: 20 },
                        { w: 52, h: 18 }, { w: 44 }, { w: 44 }, { w: 150, h: 20 },
                        { w: 24, num: true }, { w: 14, num: true }];
 
@@ -7927,8 +8058,12 @@
     // Capped by the viewport: on a phone a fixed 220 px squeezed the title
     // beside it into three lines. The words beside it are for assistive tech:
     // the bars are aria-hidden, and what is left is a heading over nothing.
+    // After a first load, the last line itself, digits zeroed (skelWords): a
+    // bar wraps nowhere, and at 375 px this line grew from one row to two on
+    // arrival, as the ETA line below grew from one to three.
+    const pct = shapeText("pct");
     $("progressPct").innerHTML = `<span class="sr-only">Loading campaign status…</span>`
-      + skelBar("min(220px, 30vw)");
+      + (pct ? skelWords(pct) : skelBar("min(220px, 30vw)"));
     skelOnto($("campaignProgressBar"), true);
     // Nothing of an earlier campaign shows through: after Connect to another
     // broker these still hold the previous one's (a first load's are empty).
@@ -7936,8 +8071,14 @@
     $("expiredText").textContent = "";
     $("expiredBannerWrap").innerHTML = "";
     setHtml("stateStats", skelCards(7));
-    setHtml("splitBody", skelTableRows(3, SPLIT_SKEL));
-    $("etaText").innerHTML = skelBar("min(340px, 60vw)");
+    // As tall as the grid the last answer drew; the cards stretch to fill it.
+    const cards = shapeOf("cards");
+    $("stateStats").style.minHeight = cards ? cards + "px" : "";
+    const split = shapeOf("split");
+    setHtml("splitBody", split ? skelTableRows(split[0], SPLIT_SKEL, "", split[1])
+                               : skelTableRows(3, SPLIT_SKEL));
+    const eta = shapeText("eta");
+    $("etaText").innerHTML = eta ? skelWords(eta) : skelBar("min(340px, 60vw)");
     setBusy($("statusPanel"), true);
   }
 
@@ -7948,6 +8089,7 @@
     skelOn.status = false;
     skelOnto($("campaignProgressBar"), false);
     setBusy($("statusPanel"), false);
+    $("stateStats").style.minHeight = "";
     if (drawn) return;
     $("progressPct").textContent = "0%";
     setHtml("stateStats", "");
@@ -7961,10 +8103,14 @@
     skelOn.workers = true;
     const fq = $("fleetQueue");
     fq.style.display = "flex";
+    // As many cards as the last answer drew, in a strip as tall as the one it drew.
+    const fleet = shapeOf("fleet");
+    fq.style.minHeight = fleet ? fleet[1] + "px" : "";
     // Words first, for assistive tech: otherwise the panel is ten column
     // headers over no rows, which reads as "no workers".
     fq.innerHTML = `<span class="sr-only">Loading workers…</span>`
-      + [1, 0.8].map((v) => `<div class="fleet-card" aria-hidden="true">`
+      + Array.from({ length: fleet ? fleet[0] : 2 }, (_, i) => [1, 0.8][i % 2])
+        .map((v) => `<div class="fleet-card" aria-hidden="true">`
       + `<div class="fc-name">${skelBar(Math.round(96 * v) + "px")}${skelBar("40px")}</div>`
       + `<div class="fc-nums">${skelBar("70px", "22px", "skel-block")}${skelBar("62px", "22px", "skel-block")}</div>`
       + `</div>`).join("");
@@ -7974,7 +8120,9 @@
     // after Connect to another broker that may be the one on screen.
     $("workersTable").style.display = "";
     // Through setHtml: see its note on the workers tbody.
-    setHtml("workersBody", skelTableRows(4, WORKER_SKEL));
+    const rows = shapeOf("workers");
+    setHtml("workersBody", rows ? skelTableRows(rows[0], WORKER_SKEL, "", rows[1])
+                                : skelTableRows(4, WORKER_SKEL));
     skelOnto($("workerCountBadge"), true, true);
     setBusy($("workersPanel"), true);
   }
@@ -7984,6 +8132,7 @@
     skelOn.workers = false;
     skelOnto($("workerCountBadge"), false, true);
     setBusy($("workersPanel"), false);
+    $("fleetQueue").style.minHeight = "";
     setHtml("workersBody", "");
     if (!drawn) {
       $("fleetQueue").style.display = "none";
@@ -8054,6 +8203,7 @@
   /// states rather than back to the old numbers.
   function forgetCampaign() {
     lastStatus = null;
+    badgeFrom = {};          // the new broker's badge is drawn from its own payloads
     $("workersEmpty").textContent = "—";
     $("casesEmpty").textContent = "Connect to a broker to browse cases.";
     if (skelOn.cases === null) casesSkeleton("refresh");
