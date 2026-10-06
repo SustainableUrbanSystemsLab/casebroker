@@ -229,6 +229,34 @@ comes from `scripts/report_receipts.py`, run on the master: it hashes only what
 `/v1/custody` lists, and only a case whose archive and every part its manifest
 names are present and verify (`casebroker.archives.status`).
 
+### Parts the broker holds
+
+With `CASEBROKER_PARTS_DIR` set, a node can upload each part of a case to the broker as
+it ships it -- the mesh, every finished direction, the case's archive last -- instead
+of (or as well as) to the Syncthing master. The broker keeps the bytes as files named by
+their sha256 (`casebroker/partstore.py`), not in the database: a campaign case is ~8.5 GB
+of parts. The database holds which case, which part, the hash, the size and when.
+
+| Call | Scope | What |
+| --- | --- | --- |
+| `POST /v1/cases/{id}/parts/{part}/upload` | write | `{sha256, bytes}` of the file the node holds. `part` is `mesh`, `case_<dir>` (both reported first, `POST /v1/parts`) or `archive` (the case's own archive: the case must be done, and the hash is the completion's). Answers `state`: `stored` (nothing to send), `verifying` (all sent; ask again), `declined` (this broker does not keep that kind -- keep shipping it to the master), `absent` / `partial` with the `offset` to send from and the `chunk_bytes` to use. 409 for a hash or size that is not what was reported, 404 for an unreported part, 507 when the store would pass its limit or cut into its reserve of free space |
+| `PUT /v1/cases/{id}/parts/{part}/upload?offset=&bytes=` | write | One chunk (at most 64 MiB, under Cloudflare's 100 MB a request), written at `offset`; `bytes` is the whole part's size. 409 with the broker's `offset` when that is not where the upload stands, so the node resumes from there. A chunk is all or nothing. The last one starts the verification in the background (`verifying`): a 6.5 GB archive takes a minute to hash on the server, longer than the reverse proxy waits |
+| `GET /v1/cases/{id}/parts/{part}/blob` | read | The part's file. Byte ranges are answered, so a fetch resumes; the ETag is the sha256 |
+| `GET /v1/cases/{id}/blobs` | read | What of the case the broker holds, and `complete`: its archive and every part it reported |
+| `DELETE /v1/cases/{id}/parts/{part}/blob` | admin | Stop holding one part; its file goes when nothing else refers to the content |
+| `POST /v1/parts/sweep?dry_run=` | admin | Files no case refers to (a replaced mesh's parts) and stale uploads. Reports by default |
+
+A node that cannot fetch from a Syncthing master says `can_continue: false` on its lease and is
+not handed a case with a mesh on record; with `can_continue_from_broker: true` as well, it is
+still handed one whose mesh the broker holds -- which is what lets a node run with Syncthing off.
+
+Content is checked twice: the upload must hash to what the node reported, and the node
+fetching a part checks it against the same hash. `GET /v1/cases/{id}/parts` (and the
+parts on a lease) carry `at_broker`, so a node continuing a case knows it can fetch the
+mesh from the broker. When the broker holds the archive and every reported part, it writes
+the case's archive receipt at location `broker` -- the same `stored` the master's scan
+gives, so `/v1/custody` counts either.
+
 ## Three design decisions worth knowing
 
 **Lease expiry is the liveness mechanism.** A worker that dies without warning
