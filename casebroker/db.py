@@ -753,7 +753,7 @@ CREATE TABLE IF NOT EXISTS case_artifacts (
 # already existed, and only then build the indexes -- an index is very often the
 # thing that references the newly added column.
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 # A column definition that cannot be bolted onto a table that already exists.
 # Detected and reported by name, because the alternative -- quietly adding the
@@ -987,6 +987,34 @@ def widen_columns(conn, script: str, is_pg: bool) -> list[str]:
     return widened
 
 
+#: Postgres columns kept out of TOAST compression. A field is float32, which no
+#: general-purpose compressor shrinks: measured on the campaign's own fields, lz4
+#: saved 0% and pglz cannot do better, so trying is CPU spent on every write on a
+#: four-core Celeron. EXTERNAL keeps the value out of line and uncompressed, and
+#: lets substring() read a byte range of it without fetching the rest.
+UNCOMPRESSED_COLUMNS = (("case_fields", "blob"),)
+
+
+def set_column_storage(conn, is_pg: bool) -> list[str]:
+    """Postgres only: SET STORAGE EXTERNAL on UNCOMPRESSED_COLUMNS that are not
+    already. Read before writing, and a no-op repeated, like widen_columns. It
+    changes how NEW values are stored; rows already written keep their form."""
+    if not is_pg:
+        return []
+    changed = []
+    for table, column in UNCOMPRESSED_COLUMNS:
+        row = conn.execute(
+            "SELECT a.attstorage AS s FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid "
+            "JOIN pg_namespace n ON n.oid = c.relnamespace "
+            "WHERE n.nspname = current_schema() AND c.relname = ? AND a.attname = ? AND NOT a.attisdropped",
+            (table, column)).fetchone()
+        if row is None or row["s"] == "e":
+            continue
+        conn.execute("ALTER TABLE %s ALTER COLUMN %s SET STORAGE EXTERNAL" % (table, column))
+        changed.append("%s.%s" % (table, column))
+    return changed
+
+
 #: Settings rows a removed feature left behind. The ntfy push notifier (shipped
 #: in one release, then removed) wrote ``notify_cursor`` at every start, and an
 #: admin may have set the others from Settings -- a topic URL and a token among
@@ -1051,6 +1079,9 @@ def apply_schema(conn, script: str, is_pg: bool) -> list[str]:
         widened = widen_columns(conn, script, is_pg)
         if widened:
             print("[schema] widened to BIGINT: " + ", ".join(widened), file=sys.stderr)
+        stored = set_column_storage(conn, is_pg)
+        if stored:
+            print("[schema] stored without compression: " + ", ".join(stored), file=sys.stderr)
         conn.execute(
             "INSERT INTO schema_meta(key, value) VALUES ('version', ?) "
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -2755,29 +2786,60 @@ UMAG_VERSION = 1
 FIELD_MAX_BYTES = int(os.environ.get("CASEBROKER_FIELD_MAX_BYTES", str(64 * 1024 * 1024)))
 FIELD_MAX_POINTS = 4_000_000
 _FIELD_HEADER_KEYS = ("nx", "ny", "x0", "y0", "spacing_m", "height_m")
+_FIELD_HEADER_MAX = 1_000_000
+# The largest container a field can be: magic, version and header length, the
+# largest header, the largest grid. A gzip stream that inflates past it is
+# refused there, not after it has been inflated: 64 MB of gzip can be gigabytes.
+_FIELD_RAW_MAX = 12 + _FIELD_HEADER_MAX + 4 * FIELD_MAX_POINTS
+_GZIP_MAGIC = b"\x1f\x8b"
+
+
+def umag_container(blob: bytes) -> bytes:
+    """The umag/1 container of a blob as a node sends it -- gzip-wrapped (every
+    node so far) or as it is -- WITHOUT the gzip: the form the broker stores.
+
+    The broker keeps fields uncompressed (Patrick, 2026-10-06). Measured on the
+    campaign's own fields, gzip saved 13% of a float32 field and Postgres's own
+    compression nothing at all, while the uncompressed form can be read in place
+    -- numpy.frombuffer, or a single cell straight out of SQL with substring() --
+    without inflating a megabyte first.
+    """
+    import zlib
+    if len(blob) > FIELD_MAX_BYTES:
+        raise ValueError(f"field is {len(blob)} bytes; the limit is {FIELD_MAX_BYTES}")
+    if blob[:4] == UMAG_MAGIC:
+        return blob
+    if blob[:2] != _GZIP_MAGIC:
+        raise ValueError("not a gzip stream or a UMAG container")
+    inflate = zlib.decompressobj(16 + zlib.MAX_WBITS)
+    try:
+        raw = inflate.decompress(blob, _FIELD_RAW_MAX + 1)
+    except zlib.error as exc:
+        raise ValueError(f"not a gzip stream: {exc}") from None
+    if len(raw) > _FIELD_RAW_MAX or inflate.unconsumed_tail:
+        raise ValueError(f"the gzip stream inflates past {_FIELD_RAW_MAX} bytes, "
+                         "more than any field this broker stores")
+    if not inflate.eof:
+        raise ValueError("not a gzip stream: it ends before its end")
+    return raw
 
 
 def decode_umag(blob: bytes) -> dict[str, Any]:
     """The header of a umag/1 blob, checked against its body; ValueError otherwise.
 
     Reads the CONTAINER only -- header and byte count -- never the values: the
-    broker stores what the node sampled and does not re-derive it. Returns the
-    header with ``nbytes`` (the gzip size) added.
+    broker stores what the node sampled and does not re-derive it. Takes the blob
+    gzip-wrapped or not, and returns the header with ``nbytes`` (the size of the
+    container, uncompressed) added.
     """
-    import gzip
     import struct
-    if len(blob) > FIELD_MAX_BYTES:
-        raise ValueError(f"field is {len(blob)} bytes; the limit is {FIELD_MAX_BYTES}")
-    try:
-        raw = gzip.decompress(blob)
-    except (OSError, EOFError, ValueError) as exc:
-        raise ValueError(f"not a gzip stream: {exc}") from None
+    raw = umag_container(blob)
     if len(raw) < 12 or raw[:4] != UMAG_MAGIC:
         raise ValueError("not a wind-field blob (no UMAG header)")
     version, hlen = struct.unpack("<II", raw[4:12])
     if version != UMAG_VERSION:
         raise ValueError(f"umag version {version}; this broker reads version {UMAG_VERSION}")
-    if hlen > 1_000_000 or 12 + hlen > len(raw):
+    if hlen > _FIELD_HEADER_MAX or 12 + hlen > len(raw):
         raise ValueError("header length runs past the blob")
     try:
         header = json.loads(raw[12:12 + hlen].decode("utf-8"))
@@ -2810,7 +2872,7 @@ def decode_umag(blob: bytes) -> dict[str, Any]:
                 raise ValueError(f"header {k!r} is not a number") from None
             if not math.isfinite(header[k]):
                 header[k] = None
-    header["nbytes"] = len(blob)
+    header["nbytes"] = len(raw)
     return header
 
 
@@ -2825,11 +2887,16 @@ def put_field(conn, lease_id: str, case_id: str, direction: str, blob: bytes,
     a direction name or blob that is not one. A second upload for the same
     (case, direction, height) replaces the first: a direction solved again is a
     different field.
+
+    Stored UNCOMPRESSED (umag_container), whichever way it was sent; ``sha256``
+    and ``bytes`` describe what is stored. Rows from before are gzip-wrapped and
+    stay so -- the first two bytes say which, and the dashboard reads both.
     """
     if not PART_NAME.fullmatch(direction or "") or direction == "mesh":
         return "invalid: not a direction name"
     try:
         header = decode_umag(blob)
+        blob = umag_container(blob)
     except ValueError as exc:
         return f"invalid: {exc}"
     if header.get("direction") not in (None, direction):
