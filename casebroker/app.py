@@ -2064,10 +2064,11 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
     async def put_field(case_id: str, direction: str, request: Request,
                         lease_id: str = Query(min_length=1, max_length=128)) -> dict[str, Any]:
         """One direction's pedestrian field, from the node solving the case: the body
-        is a umag/1 blob (gzip of "UMAG" | u32 version | u32 header length | header
-        JSON | float32 LE nx*ny, NaN where there is no fluid), sent as
+        is a umag/1 blob ("UMAG" | u32 version | u32 header length | header JSON |
+        float32 LE nx*ny, NaN where there is no fluid), gzip-wrapped or not, sent as
         application/octet-stream. Its header names the grid and the height; the
-        broker checks the container and stores it verbatim.
+        broker checks the container and stores it UNCOMPRESSED (db.umag_container):
+        gzip saved 13% of a float32 field, and the plain form reads in place.
 
         409 as /v1/parts: not this case's current lease, or not this credential's
         -- the node stops sending fields for this case. 413 for a body past the
@@ -2100,10 +2101,11 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
     @app.get("/v1/cases/{case_id}/fields/{direction}", dependencies=[ReadAuth])
     def get_field(case_id: str, direction: str, request: Request,
                   height_m: float | None = None) -> Response:
-        """One direction's field, as the node sent it: the umag/1 blob, gzip inside
-        (the browser's DecompressionStream reads it; so does `gzip.decompress`).
-        Without height_m, the one nearest 1.75 m. A finished direction's field
-        never changes, so it is served with a strong ETag and a day of cache."""
+        """One direction's field: the umag/1 container, uncompressed -- or, for a row
+        stored before fields were kept that way, gzip-wrapped, which its first two
+        bytes (1f 8b) say. Without height_m, the one nearest 1.75 m. A finished
+        direction's field never changes, so it is served with a strong ETag and a
+        day of cache."""
         row = db.case_field(conn, case_id, direction, height_m)
         if row is None:
             raise HTTPException(404, "no such field")
@@ -2111,7 +2113,7 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         headers = {"ETag": etag, "Cache-Control": "private, max-age=86400",
                    "X-Field-Height-M": repr(float(row["height_m"])),
                    "X-Field-Direction": row["direction"]}
-        if request.headers.get("if-none-match") == etag:
+        if _if_none_match(request.headers.get("if-none-match"), etag):
             return Response(status_code=304, headers=headers)
         return Response(content=row["blob"], media_type="application/octet-stream", headers=headers)
 

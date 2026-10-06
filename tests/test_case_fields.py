@@ -30,15 +30,17 @@ W = {"Authorization": "Bearer w"}
 R = {"Authorization": "Bearer r"}
 
 
-def umag(values, nx=3, ny=2, height=1.75, direction="case_000", case_id=CASE, **extra) -> bytes:
-    """A umag/1 blob as the node writes it (MetaFOAM.Deploy.PedestrianField.Encode)."""
+def umag(values, nx=3, ny=2, height=1.75, direction="case_000", case_id=CASE, raw=False, **extra) -> bytes:
+    """A umag/1 blob as the node writes it (MetaFOAM.Deploy.PedestrianField.Encode):
+    gzip-wrapped, or with ``raw`` the container as the broker stores it."""
     header = {"format": "umag/1", "case_id": case_id, "direction": direction, "deg": 0.0,
               "height_m": height, "nx": nx, "ny": ny, "x0": -2.0, "y0": -1.0, "spacing_m": 2.0,
               "coverage": 0.8, "u_ref": 3.1, "umag_p999": 5.5}
     header.update(extra)
     hb = json.dumps(header, separators=(",", ":")).encode("utf-8")
     body = struct.pack("<%df" % len(values), *values)
-    return gzip.compress(b"UMAG" + struct.pack("<II", 1, len(hb)) + hb + body, mtime=0)
+    container = b"UMAG" + struct.pack("<II", 1, len(hb)) + hb + body
+    return container if raw else gzip.compress(container, mtime=0)
 
 
 def _case() -> dict:
@@ -69,13 +71,17 @@ def client(tmp_path):
 VALUES = [1.0, 2.0, float("nan"), 4.0, 5.5, 0.0]
 
 
-def test_the_lease_holder_stores_a_field_and_it_is_read_back_byte_for_byte(conn):
+def test_the_lease_holder_stores_a_field_and_it_is_kept_uncompressed(conn):
+    """Sent gzip-wrapped (every node so far), kept as the plain container: gzip
+    saved 13% of a float32 field, and the plain form reads in place."""
     lease = db.lease(conn, "foam-1")[0]
     blob = umag(VALUES)
     assert db.put_field(conn, lease.lease_id, CASE, "case_000", blob) == "ok"
 
     got = db.case_field(conn, CASE, "case_000")
-    assert got["blob"] == blob and got["bytes"] == len(blob)
+    plain = gzip.decompress(blob)
+    assert got["blob"] == plain and got["bytes"] == len(plain)
+    assert got["sha256"] == __import__("hashlib").sha256(plain).hexdigest(), "the hash is of what is stored"
     assert (got["nx"], got["ny"], got["x0"], got["y0"], got["spacing_m"]) == (3, 2, -2.0, -1.0, 2.0)
     assert (got["height_m"], got["coverage"], got["u_ref"], got["deg"], got["umag_p999"]) == (1.75, 0.8, 3.1, 0.0, 5.5)
     assert got["worker_id"] == "foam-1"
@@ -95,12 +101,32 @@ def test_a_stale_or_foreign_lease_is_refused_and_nothing_is_stored(conn):
     assert db.case_fields(conn, CASE) == []
 
 
+def test_a_field_sent_uncompressed_is_stored_as_it_came(conn):
+    lease = db.lease(conn, "foam-1")[0]
+    plain = umag(VALUES, raw=True)
+    assert db.put_field(conn, lease.lease_id, CASE, "case_000", plain) == "ok"
+    assert db.case_field(conn, CASE, "case_000")["blob"] == plain
+
+
+def test_a_gzip_stream_that_inflates_past_any_field_is_refused_unread(conn):
+    """64 MB of gzip may inflate to gigabytes. The stream is cut off at the
+    largest container a field can be, rather than inflated and then measured."""
+    lease = db.lease(conn, "foam-1")[0]
+    bomb = gzip.compress(b"UMAG" + b"\0" * (db._FIELD_RAW_MAX + 4096), compresslevel=1, mtime=0)
+    assert len(bomb) < db.FIELD_MAX_BYTES
+    out = db.put_field(conn, lease.lease_id, CASE, "case_000", bomb)
+    assert out.startswith("invalid:") and "inflates past" in out, out
+    truncated = umag(VALUES)[:-6]
+    assert db.put_field(conn, lease.lease_id, CASE, "case_000", truncated).startswith("invalid:")
+    assert db.case_fields(conn, CASE) == []
+
+
 def test_a_direction_solved_again_replaces_its_field(conn):
     lease = db.lease(conn, "foam-1")[0]
     assert db.put_field(conn, lease.lease_id, CASE, "case_000", umag(VALUES)) == "ok"
     again = umag([9.0] * 6)
     assert db.put_field(conn, lease.lease_id, CASE, "case_000", again) == "ok"
-    assert db.case_field(conn, CASE, "case_000")["blob"] == again
+    assert db.case_field(conn, CASE, "case_000")["blob"] == gzip.decompress(again)
     assert len(db.case_fields(conn, CASE)) == 1
 
 
@@ -116,6 +142,7 @@ def test_two_heights_are_two_rows_and_the_published_one_is_the_default(conn):
 
 @pytest.mark.parametrize("bad, why", [
     (b"not gzip at all", "gzip"),
+    (b"WFLD" + b"\0" * 20, "UMAG"),
     (gzip.compress(b"WFLD" + b"\0" * 20), "UMAG"),
     (gzip.compress(b"UMAG" + struct.pack("<II", 2, 0)), "version"),
     (gzip.compress(b"UMAG" + struct.pack("<II", 1, 3) + b"{}}"), "JSON"),
@@ -138,7 +165,7 @@ def test_a_body_that_does_not_match_its_header_is_refused(conn):
     assert db.put_field(conn, lease.lease_id, CASE, "mesh", umag(VALUES, direction="mesh")) == "invalid: not a direction name"
 
 
-def test_the_blob_is_stored_and_served_verbatim_over_http(client):
+def test_the_field_is_served_uncompressed_over_http(client):
     client, CASE, lease_id = client
     blob = umag(VALUES, case_id=CASE)
     r = client.put(f"/v1/cases/{CASE}/fields/case_000", params={"lease_id": lease_id},
@@ -150,17 +177,20 @@ def test_the_blob_is_stored_and_served_verbatim_over_http(client):
     assert client.get(f"/v1/cases/{CASE}", headers=R).json()["fields"] == listed, \
         "the case record says which fields it has"
 
-    got = client.get(f"/v1/cases/{CASE}/fields/case_000", headers=R)
-    assert got.status_code == 200 and got.content == blob
+    got = client.get(f"/v1/cases/{CASE}/fields/case_000", headers={**R, "Accept-Encoding": "gzip"})
+    assert got.status_code == 200 and got.content == gzip.decompress(blob)
     assert got.headers["content-type"].startswith("application/octet-stream")
+    assert "content-encoding" not in got.headers, "float32 is not worth gzipping on the way out either"
     assert got.headers["x-field-height-m"] == "1.75"
-    raw = gzip.decompress(got.content)
+    raw = got.content
     hlen = struct.unpack("<I", raw[8:12])[0]
     vals = struct.unpack("<6f", raw[12 + hlen:])
     assert vals[:2] == (1.0, 2.0) and math.isnan(vals[2]) and vals[3:] == (4.0, 5.5, 0.0)
 
     again = client.get(f"/v1/cases/{CASE}/fields/case_000", headers={**R, "If-None-Match": got.headers["etag"]})
     assert again.status_code == 304
+    weak = client.get(f"/v1/cases/{CASE}/fields/case_000", headers={**R, "If-None-Match": "W/" + got.headers["etag"]})
+    assert weak.status_code == 304, "a cache that weakened the tag still revalidates"
     assert client.get(f"/v1/cases/{CASE}/fields/case_045", headers=R).status_code == 404
 
 
@@ -191,3 +221,21 @@ def test_storage_reports_the_fields_table(client):
                content=umag(VALUES, case_id=CASE), headers=W)
     tables = {t["name"]: t for t in client.get("/v1/storage", headers=R).json()["tables"]}
     assert tables["case_fields"]["rows"] == 1
+
+
+def test_a_field_stored_gzip_wrapped_before_is_still_served_as_it_is(conn, tmp_path):
+    """Rows from before fields were kept uncompressed stay as they were; the
+    reader tells them apart by the first two bytes (the dashboard does)."""
+    lease = db.lease(conn, "foam-1")[0]
+    assert db.put_field(conn, lease.lease_id, CASE, "case_000", umag(VALUES)) == "ok"
+    old = umag([7.0] * 6)
+    conn.execute("UPDATE case_fields SET blob = ?, bytes = ? WHERE case_id = ?", (old, len(old), CASE))
+    got = db.case_field(conn, CASE, "case_000")
+    assert got["blob"] == old and got["blob"][:2] == b"\x1f\x8b"
+
+
+def test_the_dashboard_reads_both_forms():
+    src = (pathlib.Path(__file__).resolve().parents[1] / "casebroker" / "static" / "dashboard.html").read_text(encoding="utf-8")
+    start = src.index("async function wfDecodeUmag(buf)")
+    body = src[start:src.index("\n  }\n", start)]
+    assert "bytes[0] === 0x1f && bytes[1] === 0x8b" in body, "gzip only when the bytes say gzip"
