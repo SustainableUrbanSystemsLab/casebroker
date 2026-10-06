@@ -8,6 +8,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.28.1] - 2026-10-06
+
 ## [0.28.0] - 2026-10-06
 
 ### Added
@@ -24,8 +26,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
   Limits keep the store from crowding out the NAS: `CASEBROKER_PARTS_MAX_GB`, a reserve of free
   space (`CASEBROKER_PARTS_RESERVE_GB`), and which kinds to keep (`CASEBROKER_PARTS_KEEP`);
   past them a node is told 507 or `declined` and keeps shipping to the Syncthing master.
-  `/v1/storage` reports the store, `/healthz` whether there is one. No node uploads yet: the
-  Eddy3D side is separate.
+  `/v1/storage` reports the store, `/healthz` whether there is one. A lease may say
+  `can_continue_from_broker`: a node without a Syncthing master is then still handed a continued
+  case whose mesh the broker holds. No node uploads yet: the Eddy3D side is separate.
 - `scripts/part_sizes.py`: where a part archive spends its bytes, by kind of file.
 
 ## [0.27.2] - 2026-10-05

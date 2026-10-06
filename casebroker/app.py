@@ -229,6 +229,9 @@ class LeaseIn(BaseModel):
     # handed such a case. Absent (a node from before parts): handed anything, as
     # before -- it re-meshes, and reports no parts.
     can_continue: bool | None = None
+    # Whether the node can fetch a mesh from the BROKER (GET .../parts/mesh/blob). With
+    # can_continue false, it is still handed a case whose mesh the broker holds.
+    can_continue_from_broker: bool | None = None
 
 
 class SyncthingIn(BaseModel):
@@ -1656,7 +1659,8 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
                        resume_case_ids=body.resume_case_ids,
                        build=body.build, version=body.version,
                        platform=body.platform, recipes=body.recipes,
-                       syncthing_id=body.syncthing_id, can_continue=body.can_continue)
+                       syncthing_id=body.syncthing_id, can_continue=body.can_continue,
+                       can_continue_from_broker=body.can_continue_from_broker)
         return [LeaseOut(case_id=g.case_id, lease_id=g.lease_id, expires_at=g.expires_at,
                          attempt=g.attempt, spec=g.spec, parts=list(g.parts)) for g in got]
 

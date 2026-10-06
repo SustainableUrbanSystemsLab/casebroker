@@ -263,3 +263,27 @@ def test_without_a_store_the_routes_say_so_and_nodes_carry_on(tmp_path, monkeypa
     assert c.get("/healthz").json()["parts_store"] is False
     assert c.get("/v1/storage", headers=R).json()["parts_store"] == {"enabled": False}
     assert c.get(f"/v1/cases/{lease['case_id']}/parts", headers=R).json()["parts"][0]["at_broker"] is False
+
+
+def test_a_node_without_syncthing_continues_a_case_whose_mesh_the_broker_holds(broker):
+    """can_continue false (no Syncthing master to fetch from) used to rule out every case that
+    has a mesh on record. A node that can fetch from the broker is handed the ones whose mesh
+    the broker holds -- and still not the ones whose mesh only the master has."""
+    c, case, lease_id, _ = broker
+    r = c.post("/v1/cases", headers=W, json=[{"lat": 40.7, "lon": -74.0, "recipe": V4, "city_cluster": "nyc"}])
+    assert r.status_code == 200, r.text
+    other = c.post("/v1/lease", headers=W, json={"worker_id": "foam-2"}).json()[0]
+    mesh_a, mesh_b = os.urandom(20), os.urandom(20)
+    _report(c, case, lease_id, "mesh", mesh_a)
+    _report(c, other["case_id"], other["lease_id"], "mesh", mesh_b)
+    assert _upload(c, case, "mesh", mesh_a)["state"] == "stored"         # only the first is at the broker
+    for lid in (lease_id, other["lease_id"]):
+        c.post("/v1/release", headers=W, json={"lease_id": lid})
+
+    def lease(**flags):
+        return c.post("/v1/lease", headers=W, json={"worker_id": "pace-1", "count": 5, **flags}).json()
+
+    assert lease(can_continue=False) == [], "no master, no broker: neither"
+    got = lease(can_continue=False, can_continue_from_broker=True)
+    assert [g["case_id"] for g in got] == [case]
+    assert got[0]["parts"][0]["at_broker"] is True

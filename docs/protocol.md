@@ -246,6 +246,10 @@ of parts. The database holds which case, which part, the hash, the size and when
 | `DELETE /v1/cases/{id}/parts/{part}/blob` | admin | Stop holding one part; its file goes when nothing else refers to the content |
 | `POST /v1/parts/sweep?dry_run=` | admin | Files no case refers to (a replaced mesh's parts) and stale uploads. Reports by default |
 
+A node that cannot fetch from a Syncthing master says `can_continue: false` on its lease and is
+not handed a case with a mesh on record; with `can_continue_from_broker: true` as well, it is
+still handed one whose mesh the broker holds -- which is what lets a node run with Syncthing off.
+
 Content is checked twice: the upload must hash to what the node reported, and the node
 fetching a part checks it against the same hash. `GET /v1/cases/{id}/parts` (and the
 parts on a lease) carry `at_broker`, so a node continuing a case knows it can fetch the

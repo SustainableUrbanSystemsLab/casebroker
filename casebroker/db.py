@@ -1527,7 +1527,8 @@ def lease(conn, worker_id: str, count: int = 1,
           platform: str | None = None,
           recipes: list[str] | None = None,
           syncthing_id: str | None = None,
-          can_continue: bool | None = None) -> list[Lease]:
+          can_continue: bool | None = None,
+          can_continue_from_broker: bool | None = None) -> list[Lease]:
     """Atomically claim up to ``count`` cases.
 
     ``recipes`` are the exact recipes this worker can produce. When it declares
@@ -1582,6 +1583,15 @@ def lease(conn, worker_id: str, count: int = 1,
     continue_sql = ("" if can_continue is not False else
                     " AND NOT EXISTS (SELECT 1 FROM case_parts p WHERE p.case_id = cases.case_id"
                     " AND p.part = 'mesh')")
+    # A node that can fetch a mesh from the BROKER (it holds the parts, partstore.py)
+    # may continue a case whose mesh the broker holds as reported -- without any
+    # Syncthing master. This is what lets a node run with Syncthing off and still take
+    # its share of continued cases.
+    if can_continue is False and can_continue_from_broker:
+        continue_sql = (" AND (NOT EXISTS (SELECT 1 FROM case_parts p WHERE p.case_id = cases.case_id"
+                        " AND p.part = 'mesh') OR EXISTS (SELECT 1 FROM case_parts p JOIN case_blobs b"
+                        " ON b.case_id = p.case_id AND b.part = 'mesh' AND b.sha256 = p.sha256"
+                        " WHERE p.case_id = cases.case_id AND p.part = 'mesh'))")
 
     def claim(rows, resumed: bool) -> None:
         for row in rows:
