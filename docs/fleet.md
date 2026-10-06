@@ -223,6 +223,11 @@ there, exact, with no field source and no master in the way. Everything below --
 in the archive, the `.wfld`, the backfill -- still holds, and is the path for a case whose
 node predates this. `GET /v1/cases/<id>/fields` lists what the broker holds;
 `metrics.pedestrian.fields` on the completion says what the node managed to send.
+**Since 0.28.0 the broker stores it uncompressed**, whichever way the node sent it: gzip
+saved 13% of a float32 field and Postgres's own compression nothing, while the plain
+container reads in place (`numpy.frombuffer`, or one cell with SQL `substring()`; the
+column is `STORAGE EXTERNAL`). Rows stored before are gzip-wrapped; the first two bytes
+(`1f 8b`) say so, and the dashboard reads both.
 
 U at 1.5 m and 1.75 m above grade, on a regular 2 m grid over the 1008 m core
 (504 x 504 points), for every direction: `pedestrian/U.npz` (`U[direction,
