@@ -21,6 +21,9 @@ See ``docs/operations.md`` for the first-run sequence.
 
 from __future__ import annotations
 
+import email.utils
+import gzip
+import hashlib
 import hmac
 import json
 import contextlib
@@ -36,10 +39,10 @@ from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
-from fastapi.responses import FileResponse
+from starlette.middleware.gzip import DEFAULT_EXCLUDED_CONTENT_TYPES, GZipMiddleware
 from pydantic import BaseModel, Field
 
-from . import __version__, auth, dataset, db, footprints, ids, places
+from . import __version__, auth, dataset, db, footprints, ids, partstore, places
 
 MAX_LEASE_SECONDS = 24 * 3600
 
@@ -93,6 +96,12 @@ def _commit() -> str | None:
     sha = (os.environ.get("CASEBROKER_COMMIT") or os.environ.get("RENDER_GIT_COMMIT")
            or os.environ.get("GITHUB_SHA") or "").strip()
     return sha[:8] or None
+
+
+class UploadIn(BaseModel):
+    """The part a node is about to upload, or asking after: the file it holds."""
+    sha256: str = Field(min_length=64, max_length=64)
+    bytes: int = Field(ge=1, le=1 << 50)
 
 
 class LoginIn(BaseModel):
@@ -223,6 +232,9 @@ class LeaseIn(BaseModel):
     # handed such a case. Absent (a node from before parts): handed anything, as
     # before -- it re-meshes, and reports no parts.
     can_continue: bool | None = None
+    # Whether the node can fetch a mesh from the BROKER (GET .../parts/mesh/blob). With
+    # can_continue false, it is still handed a case whose mesh the broker holds.
+    can_continue_from_broker: bool | None = None
 
 
 class SyncthingIn(BaseModel):
@@ -476,20 +488,106 @@ def _if_none_match(header: str | None, etag: str) -> bool:
     """
     if not header:
         return False
+    opaque = etag[2:] if etag.startswith(("W/", "w/")) else etag
     for raw in header.split(","):
         candidate = raw.strip()
         if candidate == "*":
             return True
         if candidate.startswith(("W/", "w/")):
             candidate = candidate[2:]
-        if candidate == etag:
+        if candidate == opaque:
             return True
     return False
 
 
+# -- the dashboard, as the browser gets it -----------------------------------
+#
+# dashboard.html is one file on purpose: no build step, and the tests read the
+# SHIPPED JavaScript straight out of it. Served that way it was also the slowest
+# thing about the dashboard. Measured 2026-10-06 against the server deployment: the
+# app answers in 2 ms, but every load moved all 461,050 bytes from the server to
+# Cloudflare uncompressed (Cloudflare compressed it only on the way out), and
+# none of it could be cached at the edge, so a distant viewer waited on a
+# round trip to the origin for 417 KB of script and style that change only when
+# the broker is deployed.
+#
+# So the file stays one file, and the app splits it when it first serves it:
+# the <style> and the <script> become /assets/dashboard.<sha>.css and .js,
+# named by their content, and the page that remains is ~44 KB. A name that
+# changes whenever the content does is what makes `immutable` true: a browser
+# and Cloudflare's edge (which caches .css and .js by extension) keep them for a
+# year, and a deploy that changes either one publishes it under a new name. The
+# shell still revalidates on every load -- it is what names the current assets.
+_ASSET_CACHE = "public, max-age=31536000, immutable"
+
+
+class _DashboardBundle:
+    """dashboard.html split into a shell and content-named assets, each kept
+    plain and gzipped. Built once per process: the file only changes with a
+    deploy, which restarts the process."""
+
+    _SPLITS = (
+        ("style", "css", "text/css; charset=utf-8", '<link rel="stylesheet" href="{url}">'),
+        ("script", "js", "text/javascript; charset=utf-8", '<script src="{url}"></script>'),
+    )
+
+    def __init__(self, path: pathlib.Path):
+        html = path.read_text(encoding="utf-8")
+        self.assets: dict[str, tuple[bytes, bytes, str]] = {}
+        for tag, ext, media, link in self._SPLITS:
+            # Only a bare tag, and only when there is exactly one: anything else is
+            # left inline, which is slower but cannot be wrong.
+            blocks = re.findall(rf"<{tag}>(.*?)</{tag}>", html, re.S)
+            if len(blocks) != 1:
+                continue
+            body = blocks[0].encode("utf-8")
+            name = f"dashboard.{hashlib.sha256(body).hexdigest()[:12]}.{ext}"
+            html = html.replace(f"<{tag}>{blocks[0]}</{tag}>", link.format(url=f"/assets/{name}"), 1)
+            self.assets[name] = (body, gzip.compress(body, 9, mtime=0), media)
+        self.shell = html.encode("utf-8")
+        self.shell_gz = gzip.compress(self.shell, 9, mtime=0)
+        # WEAK, because the gzipped and the plain shell are two representations
+        # of one page -- a strong tag on both would claim they are byte-identical.
+        # And weak is what survives Cloudflare: measured against the server, the
+        # strong tag this page used to carry did not reach the browser at all.
+        self.etag = 'W/"' + hashlib.sha256(self.shell).hexdigest()[:20] + '"'
+        # When THIS process built the bundle, not the file's mtime. A rollback
+        # deploys an older file; judged by its mtime, a browser holding the newer
+        # shell would be told "not modified" and keep asking for assets that the
+        # older broker no longer has. Content served since this moment is this
+        # bundle, whatever the file says.
+        self.built_at = int(time.time())
+        self.last_modified = email.utils.formatdate(self.built_at, usegmt=True)
+
+    def not_modified(self, request: Request) -> bool:
+        inm = request.headers.get("if-none-match")
+        if inm is not None:
+            return _if_none_match(inm, self.etag)
+        ims = request.headers.get("if-modified-since")
+        if not ims:
+            return False
+        try:
+            when = email.utils.parsedate_to_datetime(ims)
+        except (TypeError, ValueError):
+            return False
+        return when is not None and when.timestamp() >= self.built_at
+
+
+def _accepts_gzip(request: Request) -> bool:
+    return "gzip" in request.headers.get("accept-encoding", "")
+
+
+def _encoded(request: Request, plain: bytes, gz: bytes, headers: dict) -> tuple[bytes, dict]:
+    headers = {**headers, "Vary": "Accept-Encoding"}
+    if _accepts_gzip(request):
+        return gz, {**headers, "Content-Encoding": "gzip"}
+    return plain, headers
+
+
 def create_app(db_path: str | None = None, tokens: list[str] | None = None,
                readonly_tokens: list[str] | None = None,
-               setup_token: str | None = None) -> FastAPI:
+               setup_token: str | None = None,
+               parts_dir: str | None = None) -> FastAPI:
     """Build an app bound to one database and token set(s).
 
     Two independent buckets, not one list with a flag on each entry: ``tokens``
@@ -550,6 +648,13 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
 
     app = FastAPI(title="E3D Simulation Broker", version=__version__,
                   lifespan=_lifespan)
+    # JSON and GeoJSON compress 5-10x and crossed from the server to Cloudflare as
+    # they were. A field blob does not: it is float32, which gzip takes to 87%,
+    # so it is left alone rather than paid for on a 4-core CPU. Level 6, not
+    # Starlette's 9, for the same reason; and a response that set its own
+    # Content-Encoding (the dashboard, precompressed) passes through untouched.
+    app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=6,
+                       exclude_content_types=(*DEFAULT_EXCLUDED_CONTENT_TYPES, "application/octet-stream"))
     conn = db.connect(db_path)
     app.state.db_path = db_path
     # Per app, not per module, for the reason this is a factory at all: a
@@ -864,6 +969,8 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
                 # exist is what an operator needs to answer "did my rotation
                 # actually land?", and it discloses nothing usable.
                 "scopes": {"write": len(tokens), "read": len(readonly_tokens)},
+                # Whether a node may upload parts here (POST .../parts/{part}/upload).
+                "parts_store": store is not None,
                 # kept for older dashboards that read this field by name
                 "readonly_auth": bool(readonly_tokens),
                 # Whether the broker can actually REACH its database, as opposed
@@ -946,31 +1053,48 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
                     "detail": "no tokens and no accounts; every caller has full access"}
         return {"scope": "none", "auth": "token"}
 
+    bundle: list[_DashboardBundle] = []
+
+    def _bundle() -> _DashboardBundle:
+        if not bundle:
+            bundle.append(_DashboardBundle(_STATIC_DIR / "dashboard.html"))
+        return bundle[0]
+
     @app.get("/", include_in_schema=False)
     def dashboard(request: Request) -> Response:
         """A minimal ops UI: campaign status, workers, one-case lookup. Vanilla HTML/JS,
         no build step, no external requests other than to this broker's own API.
 
-        The conditional request is answered HERE because `FileResponse` does not:
-        it computes an ETag and sends it, and then ignores the `If-None-Match`
-        the browser sends back, so every load re-downloaded the whole page.
-        Measured against the deployed broker: a request carrying the exact ETag
-        the server had just issued came back `200` with all 203,794 bytes. With
-        this, the same request is a `304` with no body.
+        The conditional request is answered HERE. `FileResponse` computed an ETag
+        and then ignored the `If-None-Match` the browser sent back, so every load
+        re-downloaded the whole page; measured against the deployed broker, a
+        request carrying the exact ETag the server had just issued came back
+        `200` with all 203,794 bytes. Both validators are honoured, because
+        `Last-Modified` is the one Cloudflare was seen to pass through.
 
-        `no-cache` rather than a max-age, deliberately: the page must never be
-        served stale from a cache after a deploy -- it is the thing that talks to
-        this broker's API. `no-cache` means "revalidate every time", which is the
-        round trip above, and the 304 makes that round trip carry no payload."""
-        path = _STATIC_DIR / "dashboard.html"
-        stat = path.stat()
-        # Strong enough for a file served off disk, and cheap: size plus mtime in
-        # nanoseconds changes on every deploy that changes the file.
-        etag = f'"{stat.st_size:x}-{stat.st_mtime_ns:x}"'
-        headers = {"ETag": etag, "Cache-Control": "no-cache"}
-        if _if_none_match(request.headers.get("if-none-match"), etag):
+        `no-cache` rather than a max-age, deliberately: the shell must never be
+        served stale from a cache after a deploy -- it names the current assets,
+        and talks to this broker's API. `no-cache` means "revalidate every time",
+        and the 304 makes that round trip carry no payload."""
+        b = _bundle()
+        headers = {"ETag": b.etag, "Last-Modified": b.last_modified, "Cache-Control": "no-cache"}
+        if b.not_modified(request):
             return Response(status_code=304, headers=headers)
-        return FileResponse(path, headers=headers)
+        body, headers = _encoded(request, b.shell, b.shell_gz, headers)
+        return Response(content=body, media_type="text/html; charset=utf-8", headers=headers)
+
+    @app.get("/assets/{name}", include_in_schema=False)
+    def dashboard_asset(name: str, request: Request) -> Response:
+        """The dashboard's script and style, under names that ARE their content
+        hash: cacheable for a year, at the edge and in the browser, because a
+        changed file is a different name. A name from an earlier deploy is a 404
+        -- the shell that asked for it was itself revalidated away."""
+        asset = _bundle().assets.get(name)
+        if asset is None:
+            raise HTTPException(404, "no such asset")
+        plain, gz, media = asset
+        body, headers = _encoded(request, plain, gz, {"Cache-Control": _ASSET_CACHE})
+        return Response(content=body, media_type=media, headers=headers)
 
 
     # -- identity: who you are, and which machine that is -------------------
@@ -1647,7 +1771,8 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
                        resume_case_ids=body.resume_case_ids,
                        build=body.build, version=body.version,
                        platform=body.platform, recipes=body.recipes,
-                       syncthing_id=body.syncthing_id, can_continue=body.can_continue)
+                       syncthing_id=body.syncthing_id, can_continue=body.can_continue,
+                       can_continue_from_broker=body.can_continue_from_broker)
         return [LeaseOut(case_id=g.case_id, lease_id=g.lease_id, expires_at=g.expires_at,
                          attempt=g.attempt, spec=g.spec, parts=list(g.parts)) for g in got]
 
@@ -1940,6 +2065,215 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         it cannot fetch."""
         return {"case_id": case_id, "dropped": db.reset_parts(conn, case_id, by=user["username"])}
 
+    # -- parts the broker holds: the case itself, not a pointer to it ---------------------
+    #
+    # With CASEBROKER_PARTS_DIR set, a node uploads each part of a case to the broker as
+    # it ships it: the mesh, every finished direction, the case's archive last. Chunks,
+    # because Cloudflare takes at most 100 MB a request and a part is up to ~450 MB; a
+    # chunk lands at the offset the broker says the upload stands at, so a node that
+    # stops anywhere resumes from there. The content must hash to what the node reported
+    # for the part (POST /v1/parts, or the completion's sha256 for the archive) -- the
+    # store holds nothing the broker did not already know the content of.
+    #
+    # Without the setting every route here answers 404, which a node reads as "a broker
+    # that stores no parts" and goes on shipping to the Syncthing master only.
+
+    parts_root = parts_dir if parts_dir is not None else (os.environ.get("CASEBROKER_PARTS_DIR", "").strip() or None)
+    store = None
+    if parts_root:
+        reserve_gb = float(os.environ.get("CASEBROKER_PARTS_RESERVE_GB", "100") or 100)
+        max_gb = float(os.environ.get("CASEBROKER_PARTS_MAX_GB", "0") or 0)
+        store = partstore.PartStore(parts_root, reserve_bytes=int(reserve_gb * 1024**3),
+                                    max_bytes=int(max_gb * 1024**3) or None)
+    app.state.parts = store
+    # Which parts this broker keeps: a campaign case is ~8.5 GB, 32 directions of it, and
+    # the volume may have room for the meshes and archives of every case but not for all
+    # of their directions. A part of a kind not kept is DECLINED (200, state "declined"):
+    # not an error, the node simply keeps shipping that kind to the master.
+    keep = {k.strip() for k in os.environ.get("CASEBROKER_PARTS_KEEP", "mesh,direction,archive").split(",")
+            if k.strip()}
+
+    def _parts_store() -> partstore.PartStore:
+        if store is None:
+            raise HTTPException(404, "this broker stores no parts (CASEBROKER_PARTS_DIR is not set)")
+        return store
+
+    def _kind(part: str) -> str:
+        return "mesh" if part == "mesh" else ("archive" if part == db.BLOB_ARCHIVE else "direction")
+
+    def _by(request: Request) -> str | None:
+        user = _session_principal(request)
+        machine = None if user else _machine_principal(request)
+        return user["username"] if user else (machine["name"] if machine else None)
+
+    def _expected(case_id: str, part: str) -> dict[str, Any]:
+        try:
+            return db.blob_expected(conn, case_id, part)
+        except db.ReceiptRefused as exc:
+            raise HTTPException(exc.status, str(exc))
+
+    def _stored(case_id: str, part: str, sha: str, size: int, by: str | None) -> None:
+        try:
+            db.record_blob(conn, case_id, part, sha, size, by=by)
+        except db.ReceiptRefused as exc:
+            # The case moved on while the bytes travelled (a new mesh, a reset). The
+            # file stays unreferenced, and the next sweep removes it.
+            print(f"[parts] {case_id} {part}: stored but not recorded: {exc}", file=sys.stderr)
+
+    def _refused(exc: partstore.PartStoreError) -> HTTPException:
+        detail: Any = str(exc)
+        if exc.extra:
+            detail = {"detail": str(exc), **exc.extra}
+        return HTTPException(exc.status, detail)
+
+    def _upload_state(case_id: str, part: str, sha: str, size: int, by: str | None) -> dict[str, Any]:
+        st = _parts_store()
+        held = db.blob_of(conn, case_id, part)
+        if held and held["sha256"] == sha:
+            return {"state": "stored", "offset": size}
+        if st.has(sha):
+            # The content is here already: an upload that finished before its row was
+            # written, or the same bytes under another name. Record it; nothing to send.
+            _stored(case_id, part, sha, size, by)
+            return {"state": "stored", "offset": size}
+        state = st.state(sha)
+        if state == "verifying":
+            return {"state": "verifying", "offset": size}
+        if _kind(part) not in keep:
+            return {"state": "declined", "offset": 0,
+                    "reason": f"this broker does not keep {_kind(part)} parts (CASEBROKER_PARTS_KEEP)"}
+        try:
+            offset = st.admit(sha, size)
+        except partstore.PartStoreError as exc:
+            raise _refused(exc)
+        if offset == size:
+            st.verify_in_background(sha, size, lambda s: _stored(case_id, part, s, size, by))
+            return {"state": "verifying", "offset": size}
+        out = {"state": "partial" if offset else "absent", "offset": offset,
+               "chunk_bytes": partstore.SUGGESTED_CHUNK, "max_chunk_bytes": partstore.MAX_CHUNK}
+        if state.startswith("failed: "):
+            out["last_failure"] = state[len("failed: "):]
+        return out
+
+    @app.post("/v1/cases/{case_id}/parts/{part}/upload", dependencies=[WriteAuth])
+    def start_part_upload(case_id: str, part: str, body: UploadIn, request: Request) -> dict[str, Any]:
+        """Begin, resume or ask after the upload of one part: ``{sha256, bytes}`` of the file
+        the node holds. Answers where the upload stands -- ``state`` is ``stored`` (nothing to
+        send), ``verifying`` (all sent; ask again), ``declined`` (this broker does not keep
+        that kind of part: keep shipping it to the master), ``absent`` or ``partial``, with
+        the ``offset`` to send from and the chunk size to use. 409 for a hash or size that is
+        not what the node reported for this part, 404 for a part with no report, 507 when
+        the store would cut into its reserve of free space (the node keeps the part)."""
+        want = _expected(case_id, part)
+        sha = body.sha256.lower()
+        if sha != want["sha256"]:
+            raise HTTPException(409, f"{sha} is not the sha256 reported for this part ({want['sha256']})")
+        if want["bytes"] is not None and body.bytes != want["bytes"]:
+            raise HTTPException(409, f"{body.bytes} bytes is not the size reported for this part ({want['bytes']})")
+        return _upload_state(case_id, part, sha, body.bytes, _by(request))
+
+    @app.put("/v1/cases/{case_id}/parts/{part}/upload", dependencies=[WriteAuth])
+    async def put_part_chunk(case_id: str, part: str, request: Request,
+                             offset: int = Query(ge=0), size: int = Query(alias="bytes", ge=1)) -> dict[str, Any]:
+        """One chunk of a part, written at ``offset`` (where the broker said the upload
+        stands); ``bytes`` is the size of the whole part. 409 with the broker's ``offset``
+        when that is not where it stands -- a retried chunk that had arrived, say -- so
+        the node resumes from there. The last chunk starts the verification in the
+        background: ``state`` comes back ``verifying``, and POST .../upload says when it is
+        ``stored``. A chunk is at most 64 MiB (413), and all or nothing."""
+        import anyio
+        st = _parts_store()
+        want = await anyio.to_thread.run_sync(_expected, case_id, part)
+        if want["bytes"] is not None and size != want["bytes"]:
+            raise HTTPException(409, f"{size} bytes is not the size reported for this part ({want['bytes']})")
+        if _kind(part) not in keep:
+            raise HTTPException(409, f"this broker does not keep {_kind(part)} parts")
+        body = bytearray()
+        async for piece in request.stream():
+            body += piece
+            if len(body) > partstore.MAX_CHUNK:
+                raise HTTPException(413, f"a chunk is at most {partstore.MAX_CHUNK} bytes")
+        if not body:
+            raise HTTPException(422, "the chunk is empty")
+        sha = want["sha256"]
+        by = _by(request)
+        try:
+            await anyio.to_thread.run_sync(st.admit, sha, size)
+            new = await anyio.to_thread.run_sync(st.append, sha, size, offset, [body])
+        except partstore.PartStoreError as exc:
+            raise _refused(exc)
+        if new < size:
+            return {"state": "partial", "offset": new}
+        st.verify_in_background(sha, size, lambda s: _stored(case_id, part, s, size, by))
+        return {"state": "verifying", "offset": new}
+
+    @app.get("/v1/cases/{case_id}/parts/{part}/blob", dependencies=[ReadAuth])
+    def get_part_blob(case_id: str, part: str, request: Request) -> Response:
+        """The part's file, as the node made it (a .tar.gz). Byte ranges are answered, so a
+        node fetching a mesh to continue a case resumes a download instead of starting
+        over; the ETag is the sha256, which is also what the node checks it against."""
+        st = _parts_store()
+        row = db.blob_of(conn, case_id, part)
+        if row is None:
+            raise HTTPException(404, "the broker does not hold this part")
+        path = st.object_path(row["sha256"])
+        if not path.is_file():
+            raise HTTPException(410, "the part's file is gone from the store")
+        etag = '"' + row["sha256"] + '"'
+        headers = {"ETag": etag, "Cache-Control": "private, no-cache", "X-Sha256": row["sha256"]}
+        if _if_none_match(request.headers.get("if-none-match"), etag):
+            return Response(status_code=304, headers=headers)
+        name = f"{case_id}.tar.gz" if part == db.BLOB_ARCHIVE else f"{case_id}.{part}.tar.gz"
+        # Imported here: the dashboard no longer uses FileResponse, so the module-level
+        # import may go (perf/dashboard-caching removes it), and this must not go with it.
+        from fastapi.responses import FileResponse as _FileResponse
+        return _FileResponse(path, media_type="application/gzip", filename=name, headers=headers)
+
+    @app.get("/v1/cases/{case_id}/blobs", dependencies=[ReadAuth])
+    def get_case_blobs(case_id: str) -> dict[str, Any]:
+        """What of a case the broker itself holds, and whether that is all of it."""
+        held = db.case_blobs(conn, case_id)
+        receipts = [r for r in db.case_receipts(conn, case_id) if r["location"] == "broker"]
+        return {"case_id": case_id, "enabled": store is not None, "parts": held,
+                "complete": bool(receipts)}
+
+    @app.delete("/v1/cases/{case_id}/parts/{part}/blob")
+    def delete_part_blob(case_id: str, part: str, user=AdminAuth) -> dict[str, Any]:
+        """Stop holding one part (and the case's broker receipt with it). Its file is
+        deleted when no other case refers to the same content."""
+        st = _parts_store()
+        dropped = db.drop_blob(conn, case_id, part, by=user["username"])
+        if dropped is None:
+            raise HTTPException(404, "the broker does not hold this part")
+        removed = False if dropped["still_referenced"] else st.remove(dropped["sha256"])
+        return {"case_id": case_id, "part": part, "bytes": dropped["bytes"], "file_removed": removed}
+
+    @app.post("/v1/parts/sweep")
+    def sweep_parts(dry_run: bool = Query(True), stale_hours: float = Query(72, ge=1),
+                    user=AdminAuth) -> dict[str, Any]:
+        """Files in the store no case refers to (the parts of a mesh that was replaced, an
+        upload whose case moved on) and uploads untouched for ``stale_hours``. Reports by
+        default; ``dry_run=false`` deletes them."""
+        st = _parts_store()
+        cutoff = time.time() - stale_hours * 3600
+        # A file verified a moment ago is in objects/ before its row is written: one
+        # younger than an hour is never an orphan yet.
+        settled = time.time() - 3600
+        keep_sha = db.referenced_blobs(conn)
+        orphans, stale = [], []
+        for p in st.objects.glob("*/*"):
+            if p.is_file() and p.name not in keep_sha and p.stat().st_mtime < settled:
+                orphans.append((p, p.stat().st_size))
+        for p in st.incoming.iterdir():
+            if p.is_file() and p.stat().st_mtime < cutoff:
+                stale.append((p, p.stat().st_size))
+        if not dry_run:
+            for p, _ in orphans + stale:
+                with contextlib.suppress(FileNotFoundError):
+                    p.unlink()
+        return {"dry_run": dry_run, "orphans": len(orphans), "orphan_bytes": sum(n for _, n in orphans),
+                "stale_uploads": len(stale), "stale_bytes": sum(n for _, n in stale)}
+
     # -- the pedestrian wind field: the answer, stored here ----------------------------------
     #
     # The broker used to hold POINTERS only (its database was 500 MB); the fleet's
@@ -1952,10 +2286,11 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
     async def put_field(case_id: str, direction: str, request: Request,
                         lease_id: str = Query(min_length=1, max_length=128)) -> dict[str, Any]:
         """One direction's pedestrian field, from the node solving the case: the body
-        is a umag/1 blob (gzip of "UMAG" | u32 version | u32 header length | header
-        JSON | float32 LE nx*ny, NaN where there is no fluid), sent as
+        is a umag/1 blob ("UMAG" | u32 version | u32 header length | header JSON |
+        float32 LE nx*ny, NaN where there is no fluid), gzip-wrapped or not, sent as
         application/octet-stream. Its header names the grid and the height; the
-        broker checks the container and stores it verbatim.
+        broker checks the container and stores it UNCOMPRESSED (db.umag_container):
+        gzip saved 13% of a float32 field, and the plain form reads in place.
 
         409 as /v1/parts: not this case's current lease, or not this credential's
         -- the node stops sending fields for this case. 413 for a body past the
@@ -1988,10 +2323,11 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
     @app.get("/v1/cases/{case_id}/fields/{direction}", dependencies=[ReadAuth])
     def get_field(case_id: str, direction: str, request: Request,
                   height_m: float | None = None) -> Response:
-        """One direction's field, as the node sent it: the umag/1 blob, gzip inside
-        (the browser's DecompressionStream reads it; so does `gzip.decompress`).
-        Without height_m, the one nearest 1.75 m. A finished direction's field
-        never changes, so it is served with a strong ETag and a day of cache."""
+        """One direction's field: the umag/1 container, uncompressed -- or, for a row
+        stored before fields were kept that way, gzip-wrapped, which its first two
+        bytes (1f 8b) say. Without height_m, the one nearest 1.75 m. A finished
+        direction's field never changes, so it is served with a strong ETag and a
+        day of cache."""
         row = db.case_field(conn, case_id, direction, height_m)
         if row is None:
             raise HTTPException(404, "no such field")
@@ -1999,7 +2335,7 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         headers = {"ETag": etag, "Cache-Control": "private, max-age=86400",
                    "X-Field-Height-M": repr(float(row["height_m"])),
                    "X-Field-Direction": row["direction"]}
-        if request.headers.get("if-none-match") == etag:
+        if _if_none_match(request.headers.get("if-none-match"), etag):
             return Response(status_code=304, headers=headers)
         return Response(content=row["blob"], media_type="application/octet-stream", headers=headers)
 
@@ -2101,6 +2437,16 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
             out["quota_source"] = "assumed: Supabase free plan (set CASEBROKER_DB_QUOTA_MB to override)"
         else:
             out["quota_bytes"], out["quota_source"] = None, None
+        # The part store is not in the database, and is most of what the broker keeps.
+        if store is None:
+            out["parts_store"] = {"enabled": False}
+        else:
+            u = store.usage()
+            out["parts_store"] = {"enabled": True, "objects": u.objects, "bytes": u.bytes,
+                                  "incoming_bytes": u.incoming_bytes, "free_bytes": u.free_bytes,
+                                  "reserve_bytes": u.reserve_bytes, "max_bytes": u.max_bytes,
+                                  "keep": sorted(keep),
+                                  "held": db.blob_totals(conn)}
         return out
 
     @app.get("/v1/status", dependencies=[ReadAuth])

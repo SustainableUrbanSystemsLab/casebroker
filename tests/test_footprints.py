@@ -15,6 +15,7 @@ import threading
 import time
 
 import pytest
+from dashboard_page import served_page
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
@@ -103,7 +104,7 @@ def test_dashboard_geometry_panel_says_what_it_draws(broker):
     release the runner meshes", counted "querying Overture…", and called GBA's
     predicted heights measured. And its counter wrote through one page-wide id,
     so two loads alternating in the same span made the time jump about."""
-    html = broker.get("/", headers={"Authorization": ""}).text
+    html = served_page(broker, headers={"Authorization": ""})
     assert "same release the runner meshes" not in html
     assert "querying Overture" not in html
     assert "mesh_source" in html, "the panel must name the mesh's source, not assume one"

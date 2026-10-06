@@ -55,10 +55,12 @@ _ALLOWED_UNLOCKED = {
     "_attach_labels",      # inside list_cases and get_case
     "_recipe_knowledge",   # inside list_releases and recipe_gaps
     "_parts_of",           # inside lease() and case_parts
+    "_blob_receipt",       # inside record_blob, in its transaction
     "_existing_tables",    # schema bring-forward, under _LOCK in connect()
     "_existing_columns",
     "reconcile_columns",
     "widen_columns",       # ditto: called only from apply_schema
+    "set_column_storage",  # ditto
     "drop_retired_settings",  # ditto
     "apply_schema",
     "schema_version",
