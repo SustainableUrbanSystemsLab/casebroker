@@ -165,11 +165,7 @@ CREATE TABLE IF NOT EXISTS workers (
     build_changed_at INTEGER,
     build_flips      INTEGER,
     id_conflict      TEXT,
-    id_conflict_at   INTEGER,
-    -- This machine's Syncthing device ID, as its node reported it with its last
-    -- lease. The fleet's Syncthing master accepts exactly these devices, so the
-    -- broker's credentials decide who may send it archives (GET /v1/syncthing).
-    syncthing_id     TEXT
+    id_conflict_at   INTEGER
 );
 -- What a SCHEDULER holds that has not reached the broker yet. A worker queued in
 -- SLURM has never contacted this service -- it does not exist here until its
@@ -322,10 +318,10 @@ CREATE TABLE IF NOT EXISTS build_stats (
     first_seen  INTEGER NOT NULL,
     last_seen   INTEGER NOT NULL
 );
--- What a node has already shipped of a case to the Syncthing master: the mesh
--- once meshing passed, each direction as it finished (Eddy3D CaseParts). A node
--- that takes the case over continues from the master's copy of THIS mesh and
--- solves only the directions not listed here. A direction is valid only with
+-- What a node has already shipped of a case: the mesh once meshing passed, each
+-- direction as it finished (Eddy3D CaseParts). A node that takes the case over
+-- continues from the broker's copy of THIS mesh (case_blobs) and solves only the
+-- directions not listed here. A direction is valid only with
 -- the mesh it was solved on, so every row carries that mesh's sha256, and a new
 -- mesh for the case deletes the rows of the old one (report_part).
 CREATE TABLE IF NOT EXISTS case_parts (
@@ -377,7 +373,7 @@ CREATE TABLE IF NOT EXISTS case_fields (
 
 -- What has ARRIVED where results are kept (DOMAIN.md, "Custody"). `state` says what
 -- became of the computation; a receipt says where its result is, proven by whoever
--- holds it -- the Syncthing master's scan that hashed the archive. One row per
+-- holds it -- the broker's own part store, or an operator's scan of a copy. One row per
 -- (case, artifact, location); a second report of the same artifact replaces the
 -- first. A pedestrian field's receipt is its case_fields row: the broker stored it.
 CREATE TABLE IF NOT EXISTS case_artifacts (
@@ -523,11 +519,7 @@ CREATE TABLE IF NOT EXISTS workers (
     build_changed_at INTEGER,
     build_flips      INTEGER,
     id_conflict      TEXT,
-    id_conflict_at   INTEGER,
-    -- This machine's Syncthing device ID, as its node reported it with its last
-    -- lease. The fleet's Syncthing master accepts exactly these devices, so the
-    -- broker's credentials decide who may send it archives (GET /v1/syncthing).
-    syncthing_id     TEXT
+    id_conflict_at   INTEGER
 );
 -- What a SCHEDULER holds that has not reached the broker yet. A worker queued in
 -- SLURM has never contacted this service -- it does not exist here until its
@@ -678,10 +670,10 @@ CREATE TABLE IF NOT EXISTS build_stats (
     first_seen  INTEGER NOT NULL,
     last_seen   INTEGER NOT NULL
 );
--- What a node has already shipped of a case to the Syncthing master: the mesh
--- once meshing passed, each direction as it finished (Eddy3D CaseParts). A node
--- that takes the case over continues from the master's copy of THIS mesh and
--- solves only the directions not listed here. A direction is valid only with
+-- What a node has already shipped of a case: the mesh once meshing passed, each
+-- direction as it finished (Eddy3D CaseParts). A node that takes the case over
+-- continues from the broker's copy of THIS mesh (case_blobs) and solves only the
+-- directions not listed here. A direction is valid only with
 -- the mesh it was solved on, so every row carries that mesh's sha256, and a new
 -- mesh for the case deletes the rows of the old one (report_part).
 CREATE TABLE IF NOT EXISTS case_parts (
@@ -733,7 +725,7 @@ CREATE TABLE IF NOT EXISTS case_fields (
 
 -- What has ARRIVED where results are kept (DOMAIN.md, "Custody"). `state` says what
 -- became of the computation; a receipt says where its result is, proven by whoever
--- holds it -- the Syncthing master's scan that hashed the archive. One row per
+-- holds it -- the broker's own part store, or an operator's scan of a copy. One row per
 -- (case, artifact, location); a second report of the same artifact replaces the
 -- first. A pedestrian field's receipt is its case_fields row: the broker stored it.
 CREATE TABLE IF NOT EXISTS case_artifacts (
@@ -1051,7 +1043,10 @@ def set_column_storage(conn, is_pg: bool) -> list[str]:
 #: them, which are secrets. Nothing reads any of them now, so they are deleted
 #: when a database is opened rather than left in the table for good.
 RETIRED_SETTINGS = ("notify_cursor", "notify_url", "notify_token",
-                    "notify_events", "notify_public_url")
+                    "notify_events", "notify_public_url",
+                    # The fleet's Syncthing master and folder, named on the dashboard
+                    # until Syncthing was retired (2026-10-06).
+                    "syncthing_master", "syncthing_folder")
 
 
 def drop_retired_settings(conn) -> list[str]:
@@ -1137,8 +1132,8 @@ class Lease:
     expires_at: int
     spec: dict[str, Any]
     attempt: int
-    # What earlier attempts already shipped to the Syncthing master (case_parts):
-    # a node continues from that mesh and skips those directions.
+    # What earlier attempts already shipped (case_parts): a node continues from
+    # that mesh and skips those directions.
     parts: tuple[dict[str, Any], ...] = ()
 
 
@@ -1557,7 +1552,6 @@ def lease(conn, worker_id: str, count: int = 1,
           build: str | None = None, version: str | None = None,
           platform: str | None = None,
           recipes: list[str] | None = None,
-          syncthing_id: str | None = None,
           can_continue: bool | None = None,
           can_continue_from_broker: bool | None = None) -> list[Lease]:
     """Atomically claim up to ``count`` cases.
@@ -1608,21 +1602,24 @@ def lease(conn, worker_id: str, count: int = 1,
         recipe_params = allowed
     # Not a case this machine failed within FAIL_COOLDOWN_SECONDS (see there).
     cooldown_params = [now - FAIL_COOLDOWN_SECONDS, worker_id, host]
-    # A node that cannot fetch a mesh from the master is not handed a case that
-    # has one on record: it would give it back, and take it again, forever. Its
-    # own case it may still resume -- the mesh is on its disk.
-    continue_sql = ("" if can_continue is not False else
-                    " AND NOT EXISTS (SELECT 1 FROM case_parts p WHERE p.case_id = cases.case_id"
-                    " AND p.part = 'mesh')")
-    # A node that can fetch a mesh from the BROKER (it holds the parts, partstore.py)
-    # may continue a case whose mesh the broker holds as reported -- without any
-    # Syncthing master. This is what lets a node run with Syncthing off and still take
-    # its share of continued cases.
-    if can_continue is False and can_continue_from_broker:
+    # A case another node started continues on THAT node's mesh, and the only place a
+    # node can fetch it from is the broker (the part store, partstore.py): the Syncthing
+    # master that used to offer meshes is gone. So a case with a mesh on record goes
+    # only to a node that says it can fetch from the broker, and only while the broker
+    # holds that mesh -- any other node would give it back, and take it again, forever.
+    # `can_continue` is the old "can fetch from the Syncthing master"; true no longer
+    # means it can. A node that says neither is from before parts: handed anything, as
+    # before (it meshes afresh). Its own case a node may always resume -- the mesh is on
+    # its disk, and resume_case_ids is claimed above this filter.
+    continue_sql = ""
+    if can_continue is not None or can_continue_from_broker is not None:
         continue_sql = (" AND (NOT EXISTS (SELECT 1 FROM case_parts p WHERE p.case_id = cases.case_id"
-                        " AND p.part = 'mesh') OR EXISTS (SELECT 1 FROM case_parts p JOIN case_blobs b"
-                        " ON b.case_id = p.case_id AND b.part = 'mesh' AND b.sha256 = p.sha256"
-                        " WHERE p.case_id = cases.case_id AND p.part = 'mesh'))")
+                        " AND p.part = 'mesh')")
+        if can_continue_from_broker:
+            continue_sql += (" OR EXISTS (SELECT 1 FROM case_parts p JOIN case_blobs b"
+                             " ON b.case_id = p.case_id AND b.part = 'mesh' AND b.sha256 = p.sha256"
+                             " WHERE p.case_id = cases.case_id AND p.part = 'mesh')")
+        continue_sql += ")"
 
     def claim(rows, resumed: bool) -> None:
         for row in rows:
@@ -1745,21 +1742,16 @@ def lease(conn, worker_id: str, count: int = 1,
         # write on every poll.
         # ...and so is the build: it changes under a worker_id every time the node
         # is updated, which is the whole point of recording it.
-        # The Syncthing device is kept when a lease does not name one (an older
-        # node, or an ID that failed validation): a machine does not stop being
-        # the master's peer because one request left it out.
         conn.execute(
             "INSERT INTO workers(worker_id, host, cluster, first_seen, last_seen,"
-            " build, version, platform, recipes, syncthing_id)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?)"
+            " build, version, platform, recipes)"
+            " VALUES (?,?,?,?,?,?,?,?,?)"
             " ON CONFLICT(worker_id) DO UPDATE SET"
             " last_seen=excluded.last_seen, host=excluded.host, cluster=excluded.cluster,"
             " build=excluded.build, version=excluded.version,"
-            " platform=excluded.platform, recipes=excluded.recipes,"
-            " syncthing_id=COALESCE(excluded.syncthing_id, workers.syncthing_id)",
+            " platform=excluded.platform, recipes=excluded.recipes",
             (worker_id, host, cluster, now, now, build, version, platform,
-             json.dumps(list(recipes)) if recipes else None,
-             normalize_device_id(syncthing_id)))
+             json.dumps(list(recipes)) if recipes else None))
         if known is not None and (known["build"] or None) != (build or None):
             _note_build_change(conn, worker_id, known, build, now)
         conn.execute("COMMIT")
@@ -1896,86 +1888,6 @@ def _set_setting(conn, key: str, value: str | None, by: str | None = None,
             " updated_at = excluded.updated_at, updated_by = excluded.updated_by",
             (key, value, now, by))
     _event(conn, None, by, "setting", "%s = %s" % (key, value if value is not None else "(cleared)"), now)
-
-
-# -- Syncthing ------------------------------------------------------------------
-
-# Finished archives travel from each workstation to ONE master over Syncthing
-# (docs/fleet.md), which needs every pair of devices to know each other's ID --
-# done by hand, on both sides, for every machine. On 2026-09-23 no remote machine
-# had ever been paired, so every archive a remote node finished was still on that
-# node's own disk. The broker is the rendezvous instead: an admin names the
-# master's device once, every node reports its own device with each lease, and
-# the master accepts exactly the devices listed here -- so the broker's
-# credentials decide who may send the master anything.
-SYNCTHING_FOLDER_DEFAULT = "wind-done"
-SYNCTHING_WORKER_WINDOW_SECONDS = 30 * 86400
-_DEVICE_ID = re.compile(r"^[A-Z2-7]{7}(?:-[A-Z2-7]{7}){7}$")
-_FOLDER_ID = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
-
-
-def normalize_device_id(value: str | None) -> str | None:
-    """A Syncthing device ID in its canonical form (eight groups of seven, upper
-    case, dash-separated), or None when it is not one. Accepts one pasted without
-    dashes or in lower case, as the GUI and `syncthing device-id` differ."""
-    if not value:
-        return None
-    raw = re.sub(r"[\s-]", "", str(value)).upper()
-    if len(raw) != 56:
-        return None
-    canon = "-".join(raw[i:i + 7] for i in range(0, 56, 7))
-    return canon if _DEVICE_ID.match(canon) else None
-
-
-@_locked
-def syncthing_view(conn, now: int | None = None) -> dict[str, Any]:
-    """The master an admin named (None until then) and every worker device a node
-    reported within SYNCTHING_WORKER_WINDOW_SECONDS: what a node pairs itself
-    with, and what the master accepts."""
-    now = now or _now()
-    master = _setting(conn, "syncthing_master")
-    folder = _setting(conn, "syncthing_folder") or SYNCTHING_FOLDER_DEFAULT
-    rows = conn.execute(
-        "SELECT worker_id, host, syncthing_id, last_seen FROM workers"
-        " WHERE syncthing_id IS NOT NULL AND last_seen > ? ORDER BY worker_id",
-        (now - SYNCTHING_WORKER_WINDOW_SECONDS,)).fetchall()
-    # The meshes the master should offer the fleet right now: every case that has
-    # a mesh on record and is waiting for, or being solved by, a node OTHER than
-    # the one that meshed it -- i.e. a case being continued. The master shares
-    # only these (a hardlink each, in its mesh folder), not the mesh of every
-    # case in flight, which its own node still holds.
-    continuations = conn.execute(
-        "SELECT p.case_id, p.archive, p.sha256 FROM case_parts p JOIN cases c ON c.case_id = p.case_id"
-        " WHERE p.part = 'mesh' AND (c.state = 'pending'"
-        "   OR (c.state = 'leased' AND (c.lease_worker IS NULL OR c.lease_worker <> p.worker_id)))"
-        " ORDER BY p.case_id").fetchall()
-    return {
-        "master": {"device_id": master, "folder": folder} if master else None,
-        "workers": [{"worker_id": r["worker_id"], "host": r["host"],
-                     "device_id": r["syncthing_id"], "last_seen": r["last_seen"]} for r in rows],
-        "continuations": [{"case_id": r["case_id"], "archive": r["archive"], "sha256": r["sha256"]}
-                          for r in continuations],
-    }
-
-
-@_locked
-def set_syncthing_master(conn, device_id: str | None, folder: str | None = None,
-                         by: str | None = None, now: int | None = None) -> dict[str, Any]:
-    """Name the fleet's Syncthing master, or with ``device_id=None`` forget it.
-    Raises ValueError for something that is not a device or folder ID -- a typo
-    here would pair the whole fleet with nobody."""
-    canon = None
-    if device_id is not None:
-        canon = normalize_device_id(device_id)
-        if canon is None:
-            raise ValueError("not a Syncthing device ID (eight groups of seven characters "
-                             "A-Z and 2-7, e.g. from `syncthing device-id`): %r" % device_id)
-    if folder is not None and not _FOLDER_ID.match(folder.strip()):
-        raise ValueError("a folder ID is 1-64 characters of A-Z a-z 0-9 . _ -")
-    _set_setting(conn, "syncthing_master", canon, by, now)
-    if folder is not None:
-        _set_setting(conn, "syncthing_folder", folder.strip(), by, now)
-    return syncthing_view(conn, now)
 
 
 @_locked
@@ -3032,7 +2944,7 @@ def field_counts(conn, case_ids: Iterable[str]) -> dict[str, int]:
 #
 # `done` is the node's word: POST /v1/complete names an archive on the node's own
 # disk (result_uri is file:///C:/wind/done/... on a Windows node) and its sha256.
-# Whether that archive ever reached the Syncthing master, intact, the broker could
+# Whether that archive ever reached a place it is kept, intact, the broker could
 # not say; nor whether every direction's field reached the database (a node from
 # before the fields endpoint, or one whose upload failed, finishes the case without
 # them). A RECEIPT is that missing half: written by whoever holds the artifact and
@@ -3105,12 +3017,13 @@ def record_receipt(conn, case_id: str, kind: str, location: str, sha256: str,
 
 # -- parts the broker holds (partstore.py) -------------------------------------------
 #
-# A node that uploads a part to the broker instead of (or as well as) shipping it to
-# the Syncthing master. The database says what each part should be -- the hash the
-# node reported for it -- and which of them have arrived; the bytes are files in the
-# part store. A case's archive receipt at location "broker" is written the moment
-# the broker holds its archive AND every part the case reported: that is "stored",
-# the same thing the master's scan says for location "master".
+# A node uploads each part it ships to the broker: the only copy that leaves the
+# machine since the Syncthing master is gone. The database says what each part should
+# be -- the hash the node reported for it -- and which of them have arrived; the bytes
+# are files in the part store. A case's archive receipt at location "broker" is
+# written the moment the broker holds its archive AND every part the case reported:
+# that is "stored", the same thing an operator's scan of a copy says for location
+# "master".
 
 BLOB_ARCHIVE = "archive"
 

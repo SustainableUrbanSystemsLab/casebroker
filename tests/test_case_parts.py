@@ -2,8 +2,9 @@
 
 COD-359-38 was switched off on 2026-09-24 with 7 of 32 directions of
 v2-00e76e426bea6d52 solved, and all 7 were lost with it. A node now ships the
-mesh and each finished direction to the Syncthing master as it goes, reports
-each one here, and the next node to lease the case is told what already exists.
+mesh and each finished direction as it goes (into its done folder, and to the
+broker's part store), reports each one here, and the next node to lease the case
+is told what already exists.
 """
 from __future__ import annotations
 
@@ -99,24 +100,9 @@ def test_parts_outlive_a_fresh_claim_and_can_be_reset(conn):
     _ship(conn, lease, "mesh", MESH)
     db.release(conn, lease.lease_id, reason="mesh unavailable")
     assert [p["part"] for p in db.lease(conn, "v")[0].parts] == ["mesh"], \
-        "a fresh claim forgets telemetry, never what reached the master"
+        "a fresh claim forgets telemetry, never what was shipped"
     assert db.reset_parts(conn, CASE, by="ada") == 1
     assert db.case_parts(conn, CASE) == []
-
-
-def test_the_master_is_told_to_offer_a_mesh_only_while_someone_else_continues_the_case(conn):
-    first = db.lease(conn, "cod-359-38")[0]
-    _ship(conn, first, "mesh", MESH)
-    assert db.syncthing_view(conn)["continuations"] == [], \
-        "its own node is still solving it, and holds the mesh itself"
-
-    conn.execute("UPDATE cases SET lease_expires=0 WHERE case_id=?", (CASE,))
-    db.lease(conn, "foam-1")
-    assert db.syncthing_view(conn)["continuations"] == [
-        {"case_id": CASE, "archive": f"{CASE}.mesh.tar.gz", "sha256": MESH}]
-
-    conn.execute("UPDATE cases SET state='done' WHERE case_id=?", (CASE,))
-    assert db.syncthing_view(conn)["continuations"] == [], "done: nobody needs it any more"
 
 
 def test_a_node_that_cannot_fetch_a_mesh_is_not_handed_a_case_that_has_one(conn):
@@ -124,7 +110,12 @@ def test_a_node_that_cannot_fetch_a_mesh_is_not_handed_a_case_that_has_one(conn)
     _ship(conn, lease, "mesh", MESH)
     db.release(conn, lease.lease_id)
     assert db.lease(conn, "pace-1", can_continue=False) == [], "it would give it back, forever"
-    assert [g.case_id for g in db.lease(conn, "foam-1", can_continue=True)] == [CASE]
+    # "Can fetch from the Syncthing master" -- which is gone, so it no longer counts.
+    assert db.lease(conn, "foam-1", can_continue=True) == []
+    # Without a part store nothing can give it the mesh: it waits for its own node.
+    assert db.lease(conn, "foam-1", can_continue=False, can_continue_from_broker=True) == []
+    assert [g.case_id for g in db.lease(conn, "cod-359-38", resume_case_ids=[CASE])] == [CASE], \
+        "the node that made the mesh resumes it from its own disk"
 
 
 def test_a_direction_carries_its_verdict_to_the_node_that_finishes_the_case(conn):

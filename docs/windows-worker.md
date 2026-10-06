@@ -81,20 +81,16 @@ and the same machine resumes it on the next lease.
 Finished cases are single `.tar.gz` files in `E:\wind\done`. Two ways, both
 without an inbound port on either side:
 
-- **Syncthing** (default for workstations). Install Syncthing on the worker,
-  share `E:\wind\done` as *Send Only* with the master's device ID (master:
-  *Receive Only*, `ignoreDelete`), folder id **`wind-done`**. Then make it
-  quiet: folder *Watch for Changes* off, *Rescan Interval* 0, and put
-  `WIND_SYNCTHING_URL/APIKEY/FOLDER` in `machine.env` -- the runner triggers
-  one scan per finished archive, so nothing else is ever hashed or sent.
-  Verified end to end on 2026-09-12; see `fleet.md`, "Setting it up on a
-  worker", for the exact field values.
+- **An E3D node** (`E3D node`) sends every part of a case to the broker
+  itself, as it ships it; nothing to set up on the worker. (Syncthing, the
+  way archives used to travel, was retired on 2026-10-06.)
 - **Manual/scripted pull** if the master can SSH to the worker
   (`scripts/pull_done.sh`), or a copy of `E:\wind\done` by hand -- the
   archives are self-contained.
 
-Delete a local archive only after the master has it (Syncthing shows the
-folder as *Up to Date* on both ends).
+Delete a local archive only once it is kept elsewhere: the broker's
+`GET /v1/cases/<case_id>/blobs` says `complete`, or your copy verifies
+(`casebroker archives <folder> --verify`).
 
 ## 5. When something is off
 

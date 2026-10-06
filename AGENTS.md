@@ -117,8 +117,8 @@ Eddy3D now fails that step unless snappy says `Finished meshing`.
 **Hooking any machine into the campaign as a worker -- Windows or Linux,
 Docker, Podman or native blueCFD -- is [`docs/fleet.md`](docs/fleet.md):**
 `machine.env` + `start_worker.sh`/`.ps1`, progress in the heartbeat,
-same-machine checkpoint/resume, one archive per finished case, Syncthing for
-workstations and `scripts/pull_done.sh` for PACE. Two invariants people will
+same-machine checkpoint/resume, one archive per finished case, collected by
+`scripts/pull_done.sh` (an E3D node sends its parts to the broker itself). Two invariants people will
 be tempted to "simplify": a case never moves between machines mid-solve
 (the checkpoint is local disk), and `CASEBROKER_WORKER_ID` is stable per
 machine (it is how a restarted worker gets its own case back).

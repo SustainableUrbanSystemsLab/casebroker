@@ -9,13 +9,13 @@ them into one place, the case archive last, gives the tree one archive used to.
 
 Before this, a node switched off mid-case took every finished direction with it
 (COD-359-38, 2026-09-24: 7 of 32 directions, lost). Parts without a case
-archive are now what such a case leaves on the master.
+archive are now what such a case leaves in a done folder.
 
 A case is in one of these states here:
 
 - ``complete``: the case archive and every part its manifest names;
 - ``waiting``: the case archive is here, but some of its parts are not yet --
-  Syncthing does not deliver files in the order they were written;
+  a copy (rsync, a sync tool) need not arrive in the order it was written;
 - ``partial``: parts and no case archive -- the node stopped, or is still
   solving;
 - ``corrupt``: a part is here but its sha256 is not the one the manifest names

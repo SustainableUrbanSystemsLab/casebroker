@@ -14,9 +14,9 @@
 # Everything runs on node-local scratch. OpenFOAM writes thousands of small files
 # per rank, which is the worst access pattern Lustre has. What leaves the node is
 # ONE archive per case -- the reconstructed last time step, the mesh, dictionaries,
-# logs and samples, ~250-300 MB at the 3.0 m default -- written to $WIND_DONE for
-# Syncthing (workstations) or a master-side pull over SSH (PACE) to collect. See
-# docs/fleet.md.
+# logs and samples, ~250-300 MB at the 3.0 m default -- written to $WIND_DONE,
+# where it stays: collected by a master-side pull over SSH (PACE,
+# scripts/pull_done.sh) or by hand. See docs/fleet.md.
 #
 # Three OpenFOAM runtimes, one runner (WIND_RUNTIME=auto picks the first found):
 #   podman   rootless, PACE ICE/Phoenix (no subuid range, handled below)
@@ -927,8 +927,8 @@ fi
 #   run.log build.json cfg.json spec.json preview_*.png manifest.json
 # gzip, not zstd: git-bash and the WSL image have no zstd, PACE and blueCFD do;
 # one format everywhere beats a faster one on three machines out of five.
-# Written under .tmp and renamed into place, so neither Syncthing nor a
-# master-side rsync ever picks up a half-written archive.
+# Written under .tmp and renamed into place, so a master-side rsync never picks
+# up a half-written archive.
 PACK="$SCRATCH/pack.list"
 : > "$PACK"
 cp "$SCRATCH"/run.log "$SCRATCH"/build.json "$SCRATCH"/cfg.json "$SCRATCH"/spec.json "$STUDY/" 2>/dev/null
@@ -1002,17 +1002,6 @@ tar -czf "$DONE_DIR/.tmp/$CASE_ID.tar.gz.part" -C "$SCRATCH" -T "$PACK" \
 mv -f "$DONE_DIR/.tmp/$CASE_ID.tar.gz.part" "$ARCHIVE" || retry_case "could not move archive into $DONE_DIR"
 # The checkpoint has served its purpose; the archive is the result now.
 rm -rf "$CKPT" 2>/dev/null
-# Syncthing, quiet mode: the client folder runs with its filesystem watcher off
-# and no periodic rescan (docs/fleet.md), so nothing is hashed or transferred
-# until this one scan announces the finished archive. Optional: unset, nothing
-# happens; a failed call is logged, never fatal -- the archive is on disk either
-# way and a manual rescan or the next case's scan picks it up.
-if [ -n "${WIND_SYNCTHING_APIKEY:-}" ] && [ -n "${WIND_SYNCTHING_FOLDER:-}" ]; then
-    if curl -sS -m 10 -X POST -H "X-API-Key: $WIND_SYNCTHING_APIKEY" \
-        "${WIND_SYNCTHING_URL:-http://127.0.0.1:8384}/rest/db/scan?folder=$WIND_SYNCTHING_FOLDER&sub=$CASE_ID.tar.gz" \
-        >/dev/null; then log "syncthing: scan requested for $CASE_ID.tar.gz"
-    else log "syncthing: scan request failed (archive is still in $DONE_DIR)"; fi
-fi
 [ -n "$PROGRESS_FILE" ] && rm -f "$PROGRESS_FILE" 2>/dev/null
 
 PED_STATUS="$PED_STATUS" PED_META="$STUDY/pedestrian/meta.json" \

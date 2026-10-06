@@ -103,8 +103,9 @@ its timings when it ends:
 
 ## The archive
 
-One `<case>.tar.gz` through the same Syncthing hand-off. It isn't shipped in
-parts, since a thermal case has no mesh to continue from.
+One `<case>.tar.gz`, into the node's done folder and to the broker like every
+archive. It isn't shipped in parts, since a thermal case has no mesh to continue
+from.
 
 | file | |
 | --- | --- |

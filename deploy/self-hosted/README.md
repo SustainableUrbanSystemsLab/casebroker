@@ -51,15 +51,18 @@ named by its sha256. One-time setup:
 **Capacity, measured 2026-10-06.** A case is ~8.5 GB of parts: the mesh ~185 MB, each
 of 32 directions ~260 MB. 5,000 cases are ~42 TB; this volume had a few TB free. The
 compose file caps the store at 1.5 TB and keeps 500 GB of the volume free whatever
-happens, so it holds the first ~170 complete cases. Past that a node is told 507 and
-keeps shipping that part to the Syncthing master, exactly as today, so nothing is lost --
-but Syncthing cannot be retired until there is room for what it carries. The levers:
+happens, so it holds the first ~170 complete cases. Past that a node is told 507,
+keeps the part in its own done folder and asks again an hour later: nothing is lost
+while that machine keeps its disk, but the broker is the only copy that leaves a node
+(Syncthing was retired on 2026-10-06), so a full store means parts that exist on one
+machine only. The levers:
 
 - `CASEBROKER_PARTS_KEEP=mesh,archive` keeps every case's mesh and archive (~1 TB for
-  the campaign) and leaves the directions to the master.
+  the campaign) and leaves the directions on the nodes' disks: what continuing a case
+  needs is the mesh, and the fields are in the database.
 - More disk.
 - Smaller parts: what fills a direction is worth measuring before buying disks --
-  `scripts/part_sizes.py` on the master says, per file type, where the 260 MB goes.
+  `scripts/part_sizes.py` on a done folder says, per file type, where the 260 MB goes.
 ## Speed: what the app does, and the Cloudflare settings around it
 
 Measured 2026-10-06: the app answers in ~2 ms and the host's TLS handshake costs ~67 ms;

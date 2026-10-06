@@ -1,7 +1,7 @@
 """The broker holds the pedestrian wind field itself, not a pointer to it.
 
-Every other artefact of a case lives on the Syncthing master and the broker
-records where; the published field -- |U| at 1.75 m above grade on the 2 m
+Every other artefact of a case is an archive (in the node's done folder and the
+broker's part store); the published field -- |U| at 1.75 m above grade on the 2 m
 grid, per direction -- is the one the campaign is FOR, and a megabyte per
 direction fits the fleet's own database now (Patrick, 2026-09-28). A node
 sends it the moment a direction finishes, under its lease; anyone with read

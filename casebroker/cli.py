@@ -922,9 +922,9 @@ def cmd_triage(args) -> int:
 
 
 def cmd_archives(args) -> int:
-    """What the master's done folder holds, per case: complete, waiting for parts
-    Syncthing has not delivered yet, or partial -- the parts a node shipped before
-    it stopped (casebroker/archives.py)."""
+    """What a folder of case archives holds, per case -- a node's done folder, or a
+    copy of one: complete, waiting for parts not copied yet, or partial -- the parts
+    a node shipped before it stopped (casebroker/archives.py)."""
     from . import archives
     done = pathlib.Path(args.done)
     if not done.is_dir():
@@ -1177,7 +1177,7 @@ def main(argv: list[str] | None = None) -> int:
                     help="also refuse the current target to every node at once (the kill switch)")
     rb.set_defaults(func=cmd_release_rollback)
 
-    pt = sub.add_parser("parts", help="what of a case already reached the Syncthing master "
+    pt = sub.add_parser("parts", help="what of a case its nodes already shipped "
                                       "(mesh, finished directions)").add_subparsers(
         dest="parts_cmd", required=True)
     pr = _release_admin(pt.add_parser(
@@ -1214,9 +1214,9 @@ def main(argv: list[str] | None = None) -> int:
     tr.add_argument("study", help="the study directory (holds mesh*/ and case_*/)")
     tr.set_defaults(func=cmd_triage)
 
-    ar = sub.add_parser("archives", help="per case in the master's done folder: complete, waiting "
+    ar = sub.add_parser("archives", help="per case in a folder of archives: complete, waiting "
                                           "for parts, or partial (shipped before its node stopped)")
-    ar.add_argument("done", help="the done folder Syncthing fills (e.g. E:/wind/done)")
+    ar.add_argument("done", help="a folder of case archives: a node's done folder, or a copy (e.g. E:/wind/done)")
     ar.add_argument("--state", choices=["complete", "waiting", "partial", "corrupt"],
                     help="only cases in this state")
     ar.add_argument("--verify", action="store_true",

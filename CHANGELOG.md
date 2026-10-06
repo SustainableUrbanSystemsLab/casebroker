@@ -8,6 +8,32 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.29.0] - 2026-10-06
+
+### Removed
+- **Syncthing.** The broker is no longer the rendezvous for a Syncthing master: `GET`/`PUT
+  /v1/syncthing`, the dashboard's *Syncthing master* panel and the `syncthing_id` a node reported
+  with every lease are gone. Every part of a case now goes to the broker's own part store
+  (`CASEBROKER_PARTS_DIR`, 0.28.2), the only copy that leaves a node. A node from before still
+  leases: `syncthing_id` is ignored like any unknown field, and to it the 404 reads as "no master".
+  The `syncthing_master` and `syncthing_folder` settings are deleted on the next connect, like the
+  notifier's before them; `workers.syncthing_id` is no longer in the schema, and a database that has
+  the column keeps it, unread (the reconciler only ever adds). The runner script no longer asks a
+  Syncthing to scan (`WIND_SYNCTHING_*`), and `bootstrap_worker.ps1` has no Syncthing step
+  (`-MasterDeviceId` and `-SkipSyncthing` are gone).
+
+### Changed
+- **A case another node started goes only to a node that can fetch its mesh from the broker**
+  (`can_continue_from_broker`), and only while the broker holds that mesh. `can_continue: true`
+  meant "can fetch it from the Syncthing master" and no longer counts: a node from before was
+  handed such a case, waited 30 minutes for a master that no longer offers meshes, and gave it
+  back, again and again. A node that says neither is from before parts and is handed anything, as
+  before; a node resumes its own case regardless.
+- Docs follow: `docs/fleet.md` "Where a finished case goes" replaces "Getting archives to the
+  master"; the release share is a folder on the node (`docs/releases.md`, and Eddy3D's
+  `scripts/node-update` for a machine that builds `dev` itself); custody's `location` is `broker`
+  or `master` (an operator's copy); the self-hosted capacity notes say what a full store now costs.
+
 ## [0.28.5] - 2026-10-06
 
 ### Fixed
