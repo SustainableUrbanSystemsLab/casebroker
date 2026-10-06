@@ -8,6 +8,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.28.0] - 2026-10-06
+
+### Changed
+- **Pedestrian fields are stored uncompressed.** `PUT /v1/cases/{id}/fields/{dir}` takes the
+  umag/1 container gzip-wrapped (every node so far) or not, and keeps it plain; `sha256` and
+  `bytes` describe what is stored. Measured on the campaign's fields: gzip saved 13%, Postgres's
+  lz4 0%. Kept plain, a field reads in place -- `numpy.frombuffer`, or one cell straight out of
+  SQL with `substring()` -- and on Postgres the column is `STORAGE EXTERNAL`, so no write spends
+  CPU trying to compress it. Rows stored before stay gzip-wrapped; readers tell by `1f 8b`.
+  No node change is needed. Schema version 7.
+
+### Fixed
+- **A gzip stream that inflates past any field is refused while inflating.** It used to be
+  inflated in full and measured afterwards: 64 MB of gzip can be gigabytes.
+- `GET /v1/cases/{id}/fields/{dir}` revalidates with a weakened ETag too.
 ## [0.27.3] - 2026-10-06
 
 ### Changed
