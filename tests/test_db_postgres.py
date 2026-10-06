@@ -146,6 +146,9 @@ def cleanup_after_module(preflight):
     conn = fresh_conn()
     like = f"pgtest-{RUN}-%"
     conn.execute("DELETE FROM events WHERE case_id LIKE ? OR worker_id LIKE ?", (like, like))
+    conn.execute("DELETE FROM case_blobs WHERE case_id LIKE ?", (like,))
+    conn.execute("DELETE FROM case_artifacts WHERE case_id LIKE ?", (like,))
+    conn.execute("DELETE FROM case_parts WHERE case_id LIKE ?", (like,))
     conn.execute("DELETE FROM cases WHERE case_id LIKE ?", (like,))
     conn.execute("DELETE FROM workers WHERE worker_id LIKE ?", (like,))
     conn.execute("DELETE FROM worker_tokens WHERE name LIKE ?", (like,))
@@ -933,3 +936,31 @@ def test_settings_a_removed_feature_left_behind_are_deleted_on_postgres():
         assert db.drop_retired_settings(fresh_conn()) == []  # idempotent
     finally:
         conn.execute("DELETE FROM settings WHERE key = ?", (keep,))
+
+
+
+# -- parts the broker holds ---------------------------------------------------
+
+def test_the_broker_records_the_parts_it_holds_and_the_receipt_they_make():
+    """record_blob and the receipt it writes, over a real Postgres row factory
+    (dict rows: a positional index anywhere here would be KeyError(0))."""
+    conn = fresh_conn()
+    recipe = prefix("blobrec")
+    [case_id] = seed(1, "blob", recipe=recipe)
+    lease = db.lease(conn, prefix("w-blob"), recipes=[recipe])[0]
+    mesh, archive = "aa" * 32, "bb" * 32
+    assert db.report_part(conn, lease.lease_id, case_id, "mesh", f"{case_id}.mesh.tar.gz", mesh, 10) == "ok"
+    assert db.blob_expected(conn, case_id, "mesh") == {"sha256": mesh, "bytes": 10,
+                                                        "archive": f"{case_id}.mesh.tar.gz"}
+    assert db.record_blob(conn, case_id, "mesh", mesh, 10, by="w") == {"stored": True, "complete": False}
+    assert db.complete(conn, lease.lease_id, f"file:///done/{case_id}.tar.gz", archive, 5, {}, case_id=case_id)
+    assert db.record_blob(conn, case_id, "archive", archive, 5, by="w")["complete"] is True
+    assert [p["part"] for p in db.case_blobs(conn, case_id)] == ["mesh", "archive"]
+    assert db.case_parts(conn, case_id)[0]["at_broker"] is True
+    receipt = [r for r in db.case_receipts(conn, case_id) if r["location"] == "broker"][0]
+    assert (receipt["sha256"], receipt["bytes"]) == (archive, 15)
+    totals = db.blob_totals(conn)
+    assert totals["parts"] >= 2 and totals["cases_complete"] >= 1
+    dropped = db.drop_blob(conn, case_id, "mesh", by="ada")
+    assert dropped == {"sha256": mesh, "bytes": 10, "still_referenced": False}
+    assert not [r for r in db.case_receipts(conn, case_id) if r["location"] == "broker"]

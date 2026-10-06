@@ -39,7 +39,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
-from . import __version__, auth, dataset, db, footprints, ids, places
+from . import __version__, auth, dataset, db, footprints, ids, partstore, places
 
 MAX_LEASE_SECONDS = 24 * 3600
 
@@ -93,6 +93,12 @@ def _commit() -> str | None:
     sha = (os.environ.get("CASEBROKER_COMMIT") or os.environ.get("RENDER_GIT_COMMIT")
            or os.environ.get("GITHUB_SHA") or "").strip()
     return sha[:8] or None
+
+
+class UploadIn(BaseModel):
+    """The part a node is about to upload, or asking after: the file it holds."""
+    sha256: str = Field(min_length=64, max_length=64)
+    bytes: int = Field(ge=1, le=1 << 50)
 
 
 class LoginIn(BaseModel):
@@ -489,7 +495,8 @@ def _if_none_match(header: str | None, etag: str) -> bool:
 
 def create_app(db_path: str | None = None, tokens: list[str] | None = None,
                readonly_tokens: list[str] | None = None,
-               setup_token: str | None = None) -> FastAPI:
+               setup_token: str | None = None,
+               parts_dir: str | None = None) -> FastAPI:
     """Build an app bound to one database and token set(s).
 
     Two independent buckets, not one list with a flag on each entry: ``tokens``
@@ -864,6 +871,8 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
                 # exist is what an operator needs to answer "did my rotation
                 # actually land?", and it discloses nothing usable.
                 "scopes": {"write": len(tokens), "read": len(readonly_tokens)},
+                # Whether a node may upload parts here (POST .../parts/{part}/upload).
+                "parts_store": store is not None,
                 # kept for older dashboards that read this field by name
                 "readonly_auth": bool(readonly_tokens),
                 # Whether the broker can actually REACH its database, as opposed
@@ -1940,6 +1949,212 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         it cannot fetch."""
         return {"case_id": case_id, "dropped": db.reset_parts(conn, case_id, by=user["username"])}
 
+    # -- parts the broker holds: the case itself, not a pointer to it ---------------------
+    #
+    # With CASEBROKER_PARTS_DIR set, a node uploads each part of a case to the broker as
+    # it ships it: the mesh, every finished direction, the case's archive last. Chunks,
+    # because Cloudflare takes at most 100 MB a request and a part is up to ~450 MB; a
+    # chunk lands at the offset the broker says the upload stands at, so a node that
+    # stops anywhere resumes from there. The content must hash to what the node reported
+    # for the part (POST /v1/parts, or the completion's sha256 for the archive) -- the
+    # store holds nothing the broker did not already know the content of.
+    #
+    # Without the setting every route here answers 404, which a node reads as "a broker
+    # that stores no parts" and goes on shipping to the Syncthing master only.
+
+    parts_root = parts_dir if parts_dir is not None else (os.environ.get("CASEBROKER_PARTS_DIR", "").strip() or None)
+    store = None
+    if parts_root:
+        reserve_gb = float(os.environ.get("CASEBROKER_PARTS_RESERVE_GB", "100") or 100)
+        max_gb = float(os.environ.get("CASEBROKER_PARTS_MAX_GB", "0") or 0)
+        store = partstore.PartStore(parts_root, reserve_bytes=int(reserve_gb * 1024**3),
+                                    max_bytes=int(max_gb * 1024**3) or None)
+    app.state.parts = store
+    # Which parts this broker keeps: a campaign case is ~8.5 GB, 32 directions of it, and
+    # the volume may have room for the meshes and archives of every case but not for all
+    # of their directions. A part of a kind not kept is DECLINED (200, state "declined"):
+    # not an error, the node simply keeps shipping that kind to the master.
+    keep = {k.strip() for k in os.environ.get("CASEBROKER_PARTS_KEEP", "mesh,direction,archive").split(",")
+            if k.strip()}
+
+    def _parts_store() -> partstore.PartStore:
+        if store is None:
+            raise HTTPException(404, "this broker stores no parts (CASEBROKER_PARTS_DIR is not set)")
+        return store
+
+    def _kind(part: str) -> str:
+        return "mesh" if part == "mesh" else ("archive" if part == db.BLOB_ARCHIVE else "direction")
+
+    def _by(request: Request) -> str | None:
+        user = _session_principal(request)
+        machine = None if user else _machine_principal(request)
+        return user["username"] if user else (machine["name"] if machine else None)
+
+    def _expected(case_id: str, part: str) -> dict[str, Any]:
+        try:
+            return db.blob_expected(conn, case_id, part)
+        except db.ReceiptRefused as exc:
+            raise HTTPException(exc.status, str(exc))
+
+    def _stored(case_id: str, part: str, sha: str, size: int, by: str | None) -> None:
+        try:
+            db.record_blob(conn, case_id, part, sha, size, by=by)
+        except db.ReceiptRefused as exc:
+            # The case moved on while the bytes travelled (a new mesh, a reset). The
+            # file stays unreferenced, and the next sweep removes it.
+            print(f"[parts] {case_id} {part}: stored but not recorded: {exc}", file=sys.stderr)
+
+    def _refused(exc: partstore.PartStoreError) -> HTTPException:
+        detail: Any = str(exc)
+        if exc.extra:
+            detail = {"detail": str(exc), **exc.extra}
+        return HTTPException(exc.status, detail)
+
+    def _upload_state(case_id: str, part: str, sha: str, size: int, by: str | None) -> dict[str, Any]:
+        st = _parts_store()
+        held = db.blob_of(conn, case_id, part)
+        if held and held["sha256"] == sha:
+            return {"state": "stored", "offset": size}
+        if st.has(sha):
+            # The content is here already: an upload that finished before its row was
+            # written, or the same bytes under another name. Record it; nothing to send.
+            _stored(case_id, part, sha, size, by)
+            return {"state": "stored", "offset": size}
+        state = st.state(sha)
+        if state == "verifying":
+            return {"state": "verifying", "offset": size}
+        if _kind(part) not in keep:
+            return {"state": "declined", "offset": 0,
+                    "reason": f"this broker does not keep {_kind(part)} parts (CASEBROKER_PARTS_KEEP)"}
+        try:
+            offset = st.admit(sha, size)
+        except partstore.PartStoreError as exc:
+            raise _refused(exc)
+        if offset == size:
+            st.verify_in_background(sha, size, lambda s: _stored(case_id, part, s, size, by))
+            return {"state": "verifying", "offset": size}
+        out = {"state": "partial" if offset else "absent", "offset": offset,
+               "chunk_bytes": partstore.SUGGESTED_CHUNK, "max_chunk_bytes": partstore.MAX_CHUNK}
+        if state.startswith("failed: "):
+            out["last_failure"] = state[len("failed: "):]
+        return out
+
+    @app.post("/v1/cases/{case_id}/parts/{part}/upload", dependencies=[WriteAuth])
+    def start_part_upload(case_id: str, part: str, body: UploadIn, request: Request) -> dict[str, Any]:
+        """Begin, resume or ask after the upload of one part: ``{sha256, bytes}`` of the file
+        the node holds. Answers where the upload stands -- ``state`` is ``stored`` (nothing to
+        send), ``verifying`` (all sent; ask again), ``declined`` (this broker does not keep
+        that kind of part: keep shipping it to the master), ``absent`` or ``partial``, with
+        the ``offset`` to send from and the chunk size to use. 409 for a hash or size that is
+        not what the node reported for this part, 404 for a part with no report, 507 when
+        the store would cut into its reserve of free space (the node keeps the part)."""
+        want = _expected(case_id, part)
+        sha = body.sha256.lower()
+        if sha != want["sha256"]:
+            raise HTTPException(409, f"{sha} is not the sha256 reported for this part ({want['sha256']})")
+        if want["bytes"] is not None and body.bytes != want["bytes"]:
+            raise HTTPException(409, f"{body.bytes} bytes is not the size reported for this part ({want['bytes']})")
+        return _upload_state(case_id, part, sha, body.bytes, _by(request))
+
+    @app.put("/v1/cases/{case_id}/parts/{part}/upload", dependencies=[WriteAuth])
+    async def put_part_chunk(case_id: str, part: str, request: Request,
+                             offset: int = Query(ge=0), size: int = Query(alias="bytes", ge=1)) -> dict[str, Any]:
+        """One chunk of a part, written at ``offset`` (where the broker said the upload
+        stands); ``bytes`` is the size of the whole part. 409 with the broker's ``offset``
+        when that is not where it stands -- a retried chunk that had arrived, say -- so
+        the node resumes from there. The last chunk starts the verification in the
+        background: ``state`` comes back ``verifying``, and POST .../upload says when it is
+        ``stored``. A chunk is at most 64 MiB (413), and all or nothing."""
+        import anyio
+        st = _parts_store()
+        want = await anyio.to_thread.run_sync(_expected, case_id, part)
+        if want["bytes"] is not None and size != want["bytes"]:
+            raise HTTPException(409, f"{size} bytes is not the size reported for this part ({want['bytes']})")
+        if _kind(part) not in keep:
+            raise HTTPException(409, f"this broker does not keep {_kind(part)} parts")
+        body = bytearray()
+        async for piece in request.stream():
+            body += piece
+            if len(body) > partstore.MAX_CHUNK:
+                raise HTTPException(413, f"a chunk is at most {partstore.MAX_CHUNK} bytes")
+        if not body:
+            raise HTTPException(422, "the chunk is empty")
+        sha = want["sha256"]
+        by = _by(request)
+        try:
+            await anyio.to_thread.run_sync(st.admit, sha, size)
+            new = await anyio.to_thread.run_sync(st.append, sha, size, offset, [body])
+        except partstore.PartStoreError as exc:
+            raise _refused(exc)
+        if new < size:
+            return {"state": "partial", "offset": new}
+        st.verify_in_background(sha, size, lambda s: _stored(case_id, part, s, size, by))
+        return {"state": "verifying", "offset": new}
+
+    @app.get("/v1/cases/{case_id}/parts/{part}/blob", dependencies=[ReadAuth])
+    def get_part_blob(case_id: str, part: str, request: Request) -> Response:
+        """The part's file, as the node made it (a .tar.gz). Byte ranges are answered, so a
+        node fetching a mesh to continue a case resumes a download instead of starting
+        over; the ETag is the sha256, which is also what the node checks it against."""
+        st = _parts_store()
+        row = db.blob_of(conn, case_id, part)
+        if row is None:
+            raise HTTPException(404, "the broker does not hold this part")
+        path = st.object_path(row["sha256"])
+        if not path.is_file():
+            raise HTTPException(410, "the part's file is gone from the store")
+        etag = '"' + row["sha256"] + '"'
+        headers = {"ETag": etag, "Cache-Control": "private, no-cache", "X-Sha256": row["sha256"]}
+        if _if_none_match(request.headers.get("if-none-match"), etag):
+            return Response(status_code=304, headers=headers)
+        name = f"{case_id}.tar.gz" if part == db.BLOB_ARCHIVE else f"{case_id}.{part}.tar.gz"
+        return FileResponse(path, media_type="application/gzip", filename=name, headers=headers)
+
+    @app.get("/v1/cases/{case_id}/blobs", dependencies=[ReadAuth])
+    def get_case_blobs(case_id: str) -> dict[str, Any]:
+        """What of a case the broker itself holds, and whether that is all of it."""
+        held = db.case_blobs(conn, case_id)
+        receipts = [r for r in db.case_receipts(conn, case_id) if r["location"] == "broker"]
+        return {"case_id": case_id, "enabled": store is not None, "parts": held,
+                "complete": bool(receipts)}
+
+    @app.delete("/v1/cases/{case_id}/parts/{part}/blob")
+    def delete_part_blob(case_id: str, part: str, user=AdminAuth) -> dict[str, Any]:
+        """Stop holding one part (and the case's broker receipt with it). Its file is
+        deleted when no other case refers to the same content."""
+        st = _parts_store()
+        dropped = db.drop_blob(conn, case_id, part, by=user["username"])
+        if dropped is None:
+            raise HTTPException(404, "the broker does not hold this part")
+        removed = False if dropped["still_referenced"] else st.remove(dropped["sha256"])
+        return {"case_id": case_id, "part": part, "bytes": dropped["bytes"], "file_removed": removed}
+
+    @app.post("/v1/parts/sweep")
+    def sweep_parts(dry_run: bool = Query(True), stale_hours: float = Query(72, ge=1),
+                    user=AdminAuth) -> dict[str, Any]:
+        """Files in the store no case refers to (the parts of a mesh that was replaced, an
+        upload whose case moved on) and uploads untouched for ``stale_hours``. Reports by
+        default; ``dry_run=false`` deletes them."""
+        st = _parts_store()
+        cutoff = time.time() - stale_hours * 3600
+        # A file verified a moment ago is in objects/ before its row is written: one
+        # younger than an hour is never an orphan yet.
+        settled = time.time() - 3600
+        keep_sha = db.referenced_blobs(conn)
+        orphans, stale = [], []
+        for p in st.objects.glob("*/*"):
+            if p.is_file() and p.name not in keep_sha and p.stat().st_mtime < settled:
+                orphans.append((p, p.stat().st_size))
+        for p in st.incoming.iterdir():
+            if p.is_file() and p.stat().st_mtime < cutoff:
+                stale.append((p, p.stat().st_size))
+        if not dry_run:
+            for p, _ in orphans + stale:
+                with contextlib.suppress(FileNotFoundError):
+                    p.unlink()
+        return {"dry_run": dry_run, "orphans": len(orphans), "orphan_bytes": sum(n for _, n in orphans),
+                "stale_uploads": len(stale), "stale_bytes": sum(n for _, n in stale)}
+
     # -- the pedestrian wind field: the answer, stored here ----------------------------------
     #
     # The broker used to hold POINTERS only (its database was 500 MB); the fleet's
@@ -2101,6 +2316,16 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
             out["quota_source"] = "assumed: Supabase free plan (set CASEBROKER_DB_QUOTA_MB to override)"
         else:
             out["quota_bytes"], out["quota_source"] = None, None
+        # The part store is not in the database, and is most of what the broker keeps.
+        if store is None:
+            out["parts_store"] = {"enabled": False}
+        else:
+            u = store.usage()
+            out["parts_store"] = {"enabled": True, "objects": u.objects, "bytes": u.bytes,
+                                  "incoming_bytes": u.incoming_bytes, "free_bytes": u.free_bytes,
+                                  "reserve_bytes": u.reserve_bytes, "max_bytes": u.max_bytes,
+                                  "keep": sorted(keep),
+                                  "held": db.blob_totals(conn)}
         return out
 
     @app.get("/v1/status", dependencies=[ReadAuth])

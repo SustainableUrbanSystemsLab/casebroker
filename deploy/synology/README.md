@@ -39,6 +39,32 @@ proxy :443 ─► `127.0.0.1:8010` ─► broker ─► `postgres:5432`.
    `https://<broker-host>`. Until it is set, `nas-deploy-check` is
    skipped.
 
+## The part store: the cases themselves
+
+Nodes can upload every part of a case to the broker (docs/protocol.md, "Parts the
+broker holds"), which keeps them in `/volume1/casebroker-parts`, one file per part,
+named by its sha256. One-time setup:
+
+1. **Control Panel ▸ Shared Folder ▸ Create** `casebroker-parts`: no recycle bin
+   (parts are replaced, not edited), and only `admin` with read/write. Not inside the
+   `docker` share, whose permissions let every share user write.
+2. Rebuild the `casebroker` project; `/v1/storage` then shows `parts_store`.
+3. Add the folder to **Hyper Backup**. Every file is written once and never changed,
+   so an incremental backup copies each part exactly once.
+
+**Capacity, measured 2026-10-06.** A case is ~8.5 GB of parts: the mesh ~185 MB, each
+of 32 directions ~260 MB. 5,000 cases are ~42 TB; this volume has 2.2 TB free. The
+compose file caps the store at 1.5 TB and keeps 500 GB of the volume free whatever
+happens, so it holds the first ~170 complete cases. Past that a node is told 507 and
+keeps shipping that part to the Syncthing master, exactly as today, so nothing is lost --
+but Syncthing cannot be retired until there is room for what it carries. The levers:
+
+- `CASEBROKER_PARTS_KEEP=mesh,archive` keeps every case's mesh and archive (~1 TB for
+  the campaign) and leaves the directions to the master.
+- More disk: the DS920+ takes one DX517 (five more bays).
+- Smaller parts: what fills a direction is worth measuring before buying disks --
+  `scripts/part_sizes.py` on the master says, per file type, where the 260 MB goes.
+
 ## Moving the campaign off Supabase
 
 Workers hold leases, so do this in a quiet window.

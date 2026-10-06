@@ -8,6 +8,26 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.28.0] - 2026-10-06
+
+### Added
+- **The broker can hold the cases themselves** (`CASEBROKER_PARTS_DIR`): a node uploads each
+  part -- the mesh, every finished direction, the archive -- in chunks of at most 64 MiB (under
+  Cloudflare's 100 MB a request), resumable at the offset the broker says it stands at, and the
+  content must hash to what the node reported for the part. The parts are files named by their
+  sha256 (`casebroker/partstore.py`), not database values: a campaign case is ~8.5 GB, which in
+  Postgres would be written twice, dumped nightly, and capped at 1 GB a value. The database
+  records which parts the broker holds (`case_blobs`); a case whose archive and every reported
+  part are held gets its archive receipt at location `broker`, so `/v1/custody` counts it as
+  stored. A part is fetched back with byte ranges (`GET .../parts/{part}/blob`), and the parts
+  on a lease say `at_broker`, so a node continuing a case can take the mesh from the broker.
+  Limits keep the store from crowding out the NAS: `CASEBROKER_PARTS_MAX_GB`, a reserve of free
+  space (`CASEBROKER_PARTS_RESERVE_GB`), and which kinds to keep (`CASEBROKER_PARTS_KEEP`);
+  past them a node is told 507 or `declined` and keeps shipping to the Syncthing master.
+  `/v1/storage` reports the store, `/healthz` whether there is one. No node uploads yet: the
+  Eddy3D side is separate.
+- `scripts/part_sizes.py`: where a part archive spends its bytes, by kind of file.
+
 ## [0.27.2] - 2026-10-05
 
 ### Changed
