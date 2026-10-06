@@ -109,11 +109,12 @@ jobs:
           CASEBROKER_TEST_PG_DSN: ${{ secrets.DBSTRING }}
 
   docker:
-    name: the image Render actually builds
+    name: the image the server runs
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # Nothing validated the Dockerfile. Render builds from it, so the first
+      # Nothing validated the Dockerfile. Production runs the image built from
+      # it (Render built it until 2026-10-06; GHCR + the server since), so the first
       # thing that ever ran it was a deploy -- which means a dependency change
       # that broke the image was discovered with the break already merged to
       # main and production still serving the previous version. This job runs on
@@ -183,112 +184,11 @@ jobs:
         if: always()
         run: docker logs cb || true
 
-  deploy-smoke-test:
-    name: deploy this commit to Render and confirm it came up healthy
-    # Render's GitHub App integration turned out NOT to include this repo in its
-    # "selected repositories" list (this repo was born from a git subtree split
-    # into a brand-new repo, never connected through Render's own "Connect a
-    # repo" UI flow) -- autoDeploy showed "yes" in the service config, but no
-    # webhook delivery ever reached GitHub for it (confirmed empty via
-    # `gh api repos/.../hooks`), so pushes silently did not deploy anything
-    # while this job kept reporting green. It was checking `deploys?limit=1`
-    # and accepting whatever status that returned -- true even when the "latest"
-    # deploy was a STALE one from a previous commit, which is exactly what
-    # happened: three real pushes in a row went undetected as un-deployed.
-    # So this job now TRIGGERS its own deploy of the commit that triggered this
-    # workflow run, and polls that specific deploy id -- never trusting "the
-    # latest deploy is live" as a proxy for "MY commit is live".
-    # sqlite only. The postgres job hits a SHARED, third-party database, so its
-    # failures are not all statements about this commit: Supabase answering a
-    # burst of connections with ECIRCUITBREAKER blocked a deploy of code that was
-    # entirely fine. The sqlite suite covers the same logic with no external
-    # dependency, and the step below verifies the deployed service's health
-    # against the real database anyway -- so a genuinely broken database still
-    # fails this job, just at the point where it is actually evidence.
-    needs: [sqlite, docker, version]
-    runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    env:
-      # From https://dashboard.render.com/web/srv-dafe8kdg1s2s73e703tg -- if the
-      # service is ever recreated, update this to the new srv-... id from the
-      # dashboard URL.
-      RENDER_SERVICE_ID: srv-dafe8kdg1s2s73e703tg
-      RENDER_URL: https://casebroker.onrender.com
-    steps:
-      - name: Trigger a deploy and capture its commit + id
-        id: deploy
-        run: |
-          resp=$(curl -s -X POST -H "Authorization: Bearer ${{ secrets.RENDERAPIKEY }}" \
-            -H "Content-Type: application/json" \
-            "https://api.render.com/v1/services/$RENDER_SERVICE_ID/deploys" -d '{}')
-          deploy_id=$(echo "$resp" | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
-          deployed_sha=$(echo "$resp" | python3 -c "import json,sys; print(json.load(sys.stdin)['commit']['id'])")
-          echo "deploy_id=$deploy_id" >> "$GITHUB_OUTPUT"
-          echo "triggered deploy $deploy_id for commit $deployed_sha"
-          # Render deploys the branch HEAD, which -- for a push-triggered run on
-          # main -- IS github.sha; if it ever disagrees, something is racing
-          # (another push landed between this one and the trigger call above)
-          # and that is worth knowing rather than silently checking the wrong
-          # commit's health.
-          if [ "$deployed_sha" != "${{ github.sha }}" ]; then
-            echo "::warning::Render deployed $deployed_sha, but this workflow run is for ${{ github.sha }} -- another push likely landed first"
-          fi
-
-      - name: Wait for that specific deploy to reach a terminal state
-        run: |
-          deploy_id="${{ steps.deploy.outputs.deploy_id }}"
-          for i in $(seq 1 40); do
-            status=$(curl -s -H "Authorization: Bearer ${{ secrets.RENDERAPIKEY }}" \
-              "https://api.render.com/v1/services/$RENDER_SERVICE_ID/deploys/$deploy_id" \
-              | python3 -c "import json,sys; print(json.load(sys.stdin).get('status',''))")
-            echo "[$i] deploy $deploy_id status: $status"
-            case "$status" in
-              live) exit 0 ;;
-              canceled)
-                # Render cancels a deploy when a NEWER one supersedes it, which
-                # is what two pushes a few minutes apart look like. That says
-                # nothing about THIS commit, and failing on it puts a red X on a
-                # commit that is fine -- exactly the "trains people to ignore a
-                # red X" failure this job was rewritten to avoid.
-                #
-                # Superseded is not unverified: the push that superseded it has
-                # its own run of this workflow, against a commit that contains
-                # this one, and that run is what gates. So this reports and
-                # passes rather than crying wolf.
-                echo "::notice::deploy $deploy_id was superseded by a newer"\
-                     "deploy; the run for that newer commit is what verifies it"
-                exit 0 ;;
-              build_failed|update_failed|deactivated)
-                echo "::error::Render deploy $deploy_id ended in status '$status'"; exit 1 ;;
-            esac
-            sleep 15
-          done
-          echo "::error::Timed out waiting for deploy $deploy_id to go live"; exit 1
-
-      - name: Hit the live /healthz and check it, without ever printing the response
-        run: |
-          # Never echo this response: for a Postgres CASEBROKER_DB it is the
-          # connection string with only the password masked, so host/user/db
-          # name are still real infrastructure details worth keeping out of a
-          # public repo's public Action logs even though they are not secrets.
-          code=$(curl -s -o /tmp/healthz.json -w "%{http_code}" "$RENDER_URL/healthz")
-          ok=$(python3 -c "import json; print(json.load(open('/tmp/healthz.json')).get('ok'))")
-          # `version` is public (it is in the repo and in the OpenAPI document),
-          # so unlike `db` it is safe to echo -- and it is the only field that
-          # says WHAT is serving traffic rather than merely that something is.
-          ver=$(python3 -c "import json; print(json.load(open('/tmp/healthz.json')).get('version','MISSING'))")
-          echo "http_status=$code ok=$ok version=$ver"
-          test "$code" = "200" -a "$ok" = "True"
-          # A broker that cannot say its own version is one built before the
-          # single-source-of-truth wiring existed, which means this deploy did
-          # not ship the code this workflow just tested.
-          test "$ver" != "MISSING" -a "$ver" != "None"
-
   publish-image:
     name: push this commit's image to GHCR for the server
     # The self-hosted does not build anything: it pulls. Watchtower on the server
     # polls ghcr.io/...:latest and recreates the broker container when the
-    # digest moves. Same gate as the Render deploy -- the suites and the image
+    # digest moves. Gated on the suites and the image
     # smoke test above must pass first -- so the server never pulls a commit that
     # failed CI. :sha-<full sha> is pushed alongside :latest so a roll back is
     # just pinning the compose file to an older tag.
@@ -318,9 +218,9 @@ jobs:
     name: confirm the server picked up this commit
     # Pull-based, so there is no deploy to trigger: wait for Watchtower's next
     # poll and then check that /healthz reports THIS commit -- the same "is MY
-    # commit live" question the Render job asks, never "is something live".
-    # Skipped until the repo variable BROKER_URL is set, so this cannot go
-    # red before the server deployment exists.
+    # commit live" question, never "is something live". This is the production
+    # deploy check since the broker moved off Render (2026-10-06); the repo
+    # variable BROKER_URL names it, and the job is skipped if it is unset.
     #
     # A newer push superseding this one is reported and passed rather than
     # failed: the run for that newer commit is what verifies it.
@@ -335,7 +235,7 @@ jobs:
           want="${GITHUB_SHA:0:8}"
           # Watchtower polls every 10 minutes; allow two polls plus a restart.
           for i in $(seq 1 50); do
-            # Never print the body: like the Render check, it carries
+            # Never print the body: it carries
             # infrastructure details that do not belong in public logs.
             code=$(curl -s -o /tmp/h.json -w "%{http_code}" "$BROKER_URL/healthz" || true)
             got=$(python3 -c "import json; print(json.load(open('/tmp/h.json')).get('commit'))" 2>/dev/null || echo none)
