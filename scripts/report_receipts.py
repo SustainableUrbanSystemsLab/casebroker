@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Tell the broker which finished cases' archives have arrived on the master (DOMAIN.md, "Custody").
+"""Tell the broker which finished cases' archives have arrived in a folder (DOMAIN.md, "Custody").
 
-Run on the machine holding the Syncthing master's done folder. For every case the broker lists
+Run on the machine holding a copy of the archives: a node's done folder, or one pulled from a
+cluster (scripts/pull_done.sh). The broker's own part store writes its receipts itself. For every case the broker lists
 as done but without an archive receipt (GET /v1/custody), it looks in the folder: a case whose
 archive and every part its manifest names are here, and whose parts hash to what the manifest
 says (casebroker.archives.status, verify), is hashed and reported (POST /v1/cases/{id}/receipts).
@@ -88,7 +89,7 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--broker", required=True)
     ap.add_argument("--token", default=os.environ.get("CASEBROKER_TOKEN"))
-    ap.add_argument("--done", required=True, help="the Syncthing master's done folder")
+    ap.add_argument("--done", required=True, help="the folder holding the archives")
     ap.add_argument("--post", action="store_true", help="report them (default: say what would be reported)")
     a = ap.parse_args(argv)
     if not a.token:

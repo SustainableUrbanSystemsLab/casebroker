@@ -1,10 +1,10 @@
 """The broker keeps a case's parts itself, uploaded in chunks by the node that made them.
 
-A part (the mesh, a finished direction, the case's archive) used to reach the
-Syncthing master only, the broker holding its hash and name. With a part store
-configured the node uploads it here, through Cloudflare (100 MB a request at
-most, hence chunks) and the host's reverse proxy, and the next node to continue the
-case can fetch the mesh from the broker instead of waiting on the master.
+A part (the mesh, a finished direction, the case's archive) used to reach a
+Syncthing master only, the broker holding its hash and name; that master is gone
+(2026-10-06). With a part store configured the node uploads it here, through
+Cloudflare (100 MB a request at most, hence chunks) and the host's reverse proxy,
+and the next node to continue the case fetches the mesh from the broker.
 """
 from __future__ import annotations
 
@@ -265,10 +265,10 @@ def test_without_a_store_the_routes_say_so_and_nodes_carry_on(tmp_path, monkeypa
     assert c.get(f"/v1/cases/{lease['case_id']}/parts", headers=R).json()["parts"][0]["at_broker"] is False
 
 
-def test_a_node_without_syncthing_continues_a_case_whose_mesh_the_broker_holds(broker):
-    """can_continue false (no Syncthing master to fetch from) used to rule out every case that
-    has a mesh on record. A node that can fetch from the broker is handed the ones whose mesh
-    the broker holds -- and still not the ones whose mesh only the master has."""
+def test_a_continued_case_goes_only_to_a_node_that_can_fetch_its_mesh_from_the_broker(broker):
+    """A case with a mesh on record can be continued only from the broker's copy of that mesh:
+    a node that can fetch from the broker is handed the ones whose mesh the broker holds -- and
+    not the ones whose mesh it never got, which nobody can give."""
     c, case, lease_id, _ = broker
     r = c.post("/v1/cases", headers=W, json=[{"lat": 40.7, "lon": -74.0, "recipe": V4, "city_cluster": "nyc"}])
     assert r.status_code == 200, r.text
@@ -283,7 +283,8 @@ def test_a_node_without_syncthing_continues_a_case_whose_mesh_the_broker_holds(b
     def lease(**flags):
         return c.post("/v1/lease", headers=W, json={"worker_id": "pace-1", "count": 5, **flags}).json()
 
-    assert lease(can_continue=False) == [], "no master, no broker: neither"
+    assert lease(can_continue=False) == [], "no broker: neither"
+    assert lease(can_continue=True) == [], "the Syncthing master is gone: true no longer counts"
     got = lease(can_continue=False, can_continue_from_broker=True)
     assert [g["case_id"] for g in got] == [case]
     assert got[0]["parts"][0]["at_broker"] is True

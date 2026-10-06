@@ -125,7 +125,7 @@ refund) is exempt, because that machine holds the checkpoint.
 and the reopen/respec rules read it. Where the RESULT is, is a different question
 with a different answerer: a case is `done` the moment its node says so
 (`POST /v1/complete`, naming an archive on the node's own disk), and nothing in
-`state` can say whether that archive later reached the Syncthing master, or
+`state` can say whether that archive later reached a place it is kept, or
 whether every direction's pedestrian field reached the database. On 2026-10-01
 two dev-built nodes finished directions against a broker that did not yet take
 fields; their cases would have gone `done` with no field stored and no way to
@@ -133,7 +133,8 @@ see it.
 
 So custody is kept per artifact, beside `state` and never inside it (Patrick,
 2026-10-01): a **receipt** (`case_artifacts`) is written by whoever holds the
-artifact and has checked it, the archive's by the master's scan
+artifact and has checked it -- the archive's by the broker itself once its part
+store holds the archive and every part, or by an operator's scan of a copy
 (`scripts/report_receipts.py`), whose hash the broker compares with the one
 the node reported. A field's receipt is its `case_fields` row. `GET /v1/custody`
 lists the done cases still missing something; a case that never arrives is one
@@ -142,7 +143,7 @@ someone has to look at, not a state the queue acts on.
 | Field | Meaning |
 | --- | --- |
 | `kind` | `archive` (the case's `<case>.tar.gz`, with every part its manifest names). |
-| `location` | `master`: the Syncthing master's done folder. |
+| `location` | `broker`: the broker's own part store. `master`: a copy an operator holds, scanned by `scripts/report_receipts.py` (until 2026-10-06, the Syncthing master's done folder). |
 | `sha256`, `bytes`, `path` | What the holder found, as it found it. |
 | `received_at`, `reported_by` | When the broker heard it, and from which credential. |
 

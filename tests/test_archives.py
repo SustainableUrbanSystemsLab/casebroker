@@ -78,7 +78,7 @@ def test_a_case_is_complete_when_every_part_its_manifest_names_is_here(tmp_path)
 
 
 def test_a_case_archive_that_arrived_before_its_parts_is_waiting(tmp_path):
-    # Syncthing does not deliver in the order the node wrote.
+    # A copy need not arrive in the order the node wrote.
     done = tmp_path / "done"
     done.mkdir()
     sha = _mesh(done)

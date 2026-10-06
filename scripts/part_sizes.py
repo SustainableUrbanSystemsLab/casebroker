@@ -2,11 +2,12 @@
 """Where a case's parts spend their bytes, by kind of file.
 
 A campaign case is ~8.5 GB of parts (2026-10-06: the mesh ~185 MB, each of 32
-directions ~260 MB, all gzip). Before buying disks for 42 TB, or retiring
-Syncthing on a store that cannot hold it, it is worth knowing what those
-260 MB are: solver fields (which ones -- `phi`, a face flux, is several times
-a cell field), logs, post-processing, decomposed copies. This reads part
-archives on the master and prints, per kind, the size unpacked and gzip'd.
+directions ~260 MB, all gzip). Before buying disks for 42 TB, or keeping every
+direction in the broker's part store, it is worth knowing what those 260 MB
+are: solver fields (which ones -- `phi`, a face flux, is several times a cell
+field), logs, post-processing, decomposed copies. This reads part archives (a
+node's done folder, or the part store) and prints, per kind, the size unpacked
+and gzip'd.
 
     python3 scripts/part_sizes.py /path/to/done/<case>.case_000.tar.gz [more ...]
     python3 scripts/part_sizes.py --sample 5 /path/to/done        # five direction parts

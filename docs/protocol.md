@@ -135,9 +135,7 @@ than silent. Creating the first account closes it.
 | `GET /v1/storage` | How much space the database uses: the total, per table (rows, size, index share) largest first, bytes per case, and the plan's limit when known -- `CASEBROKER_DB_QUOTA_MB`, or for a Supabase DSN an assumed 500 MB free plan, labelled as the assumption it is. What the dashboard's header **storage** button shows |
 | `GET /v1/dataset` | The campaign as a dataset: `counts` by state, split, LCZ, recipe and country (the 40 largest listed by name, ties broken alphabetically, then `unknown` for sites no country claims and `other` for the rest), and per metric its distribution over every case and per LCZ -- see [Telemetry and the dataset](#telemetry-and-the-dataset). Computed from every case, read a page at a time, and cached 60 s; while one request recomputes it, others are served the previous answer rather than waiting. `503` with `Retry-After` when the computation failed and there is no earlier answer to serve (a failure is remembered for the 60 s too). **Read scope** |
 | `GET /v1/errors` | Every case that carries an error, in one answer: `last_error` in full, the site's coordinates, and each failed attempt with the worker, host and cluster it failed on. Quarantined first, then most recent; `limit` (default 2000, max 5000) and `truncated` says when it bit. What the dashboard's **Copy all errors** button turns into text for a bug report |
-| `POST /v1/lease` | Claim up to N cases. Empty list = drained, not an error. Workers report their `host`/`cluster` here (optional) so "what machine produced this" stays answerable later. A node also reports its Syncthing device as `syncthing_id` (optional). One that is not a device ID is ignored, never refused |
-| `GET /v1/syncthing` | The Syncthing rendezvous: `{master: {device_id, folder} \| null, workers: [{worker_id, host, device_id, last_seen}]}`. It lists workers that reported a device in the last 30 days. A node pairs itself with `master`; the master accepts exactly `workers`. **Read scope**, because a device ID is a public-key fingerprint, not a credential |
-| `PUT /v1/syncthing` | Name the fleet's Syncthing master: `{device_id, folder}`. `device_id: null` forgets it; an omitted `folder` is unchanged (default `wind-done`). Anything that is not a device ID is `422`. **Admin session**, audited as a `setting` |
+| `POST /v1/lease` | Claim up to N cases. Empty list = drained, not an error. Workers report their `host`/`cluster` here (optional) so "what machine produced this" stays answerable later. A node says `can_continue_from_broker` when it can fetch a mesh from the broker's part store; only such a node is handed a case another node started, and only while the broker holds its mesh. `syncthing_id` and `can_continue: true` from nodes before 2026-10-06 are ignored |
 | `GET /v1/node/release` | What this node should be running: the fleet's (or its canary) target, the file and sha256 for its platform, when to switch, whether it is draining. Asked before every lease and at every heartbeat; carries `build`, `platform`, `state` (what it is doing about the target) and `failed_build` (it tried and rolled back). See [releases.md](releases.md) |
 | `POST /v1/heartbeat` | Extend the lease. **409 means stop working on that case**. Refused once the lease is older than `CASEBROKER_MAX_LEASE_AGE` (7 days), which releases the case: a heartbeat proves the worker is alive, not that it is progressing |
 | `POST /v1/complete` | Report a result pointer + metrics. Send `case_id` alongside `lease_id`: it scopes the retry-safety check to this case, so a runner whose `result_uri` is not unique per case cannot have one case's retry confirmed by another's row. Optional, so older workers keep working |
@@ -226,41 +224,43 @@ so the median of an odd set is 50 and the largest of 100 is 99.5.
 
 `done` is the node's word: `POST /v1/complete` names an archive on the node's own
 disk (`file:///C:/wind/done/<case>.tar.gz`) and its sha256. Whether it ever
-reached the Syncthing master intact, and whether every direction's pedestrian
+reached a place it is kept intact, and whether every direction's pedestrian
 field reached the database, has a different answerer, so it is kept per
 artifact and never folded into `state` (DOMAIN.md, "Custody").
 
 | Call | Scope | What |
 | --- | --- | --- |
-| `POST /v1/cases/{id}/receipts` | write | `{kind: "archive", location: "master", sha256, bytes, path}` from the holder that hashed it. 409 when the case is not done or the hash is not the one the node reported (a corrupted or different archive); 422 for a malformed receipt. No lease; a second report of the same artifact replaces the first. |
+| `POST /v1/cases/{id}/receipts` | write | `{kind: "archive", location: "master", sha256, bytes, path}` from the holder of a copy that hashed it (location `broker` is the broker's own, written when its part store holds the case). 409 when the case is not done or the hash is not the one the node reported (a corrupted or different archive); 422 for a malformed receipt. No lease; a second report of the same artifact replaces the first. |
 | `GET /v1/cases/{id}/receipts` | read | The case's receipts. Also on `GET /v1/cases/{id}` as `receipts`. |
 | `GET /v1/custody?recipe=&older_than_hours=&limit=` | read | `done`, `stored` (nothing missing), `missing_archive`, `missing_fields`, and the cases still missing something, oldest first: `missing` (`archive`, `fields`), `fields` against `fields_expected` (the case's telemetry `solve.directions_total`, else `mesh.directions`; none for a thermal case). `older_than_hours` leaves out what may still be syncing. |
 
 A field's receipt is its `case_fields` row: the broker stored it. The archive's
-comes from `scripts/report_receipts.py`, run on the master: it hashes only what
+comes from the part store, or from `scripts/report_receipts.py` run where a copy is: it hashes only what
 `/v1/custody` lists, and only a case whose archive and every part its manifest
 names are present and verify (`casebroker.archives.status`).
 
 ### Parts the broker holds
 
-With `CASEBROKER_PARTS_DIR` set, a node can upload each part of a case to the broker as
-it ships it -- the mesh, every finished direction, the case's archive last -- instead
-of (or as well as) to the Syncthing master. The broker keeps the bytes as files named by
+With `CASEBROKER_PARTS_DIR` set, a node uploads each part of a case to the broker as
+it ships it -- the mesh, every finished direction, the case's archive last. Since the
+Syncthing master was retired (2026-10-06) this is the only copy that leaves the node. The broker keeps the bytes as files named by
 their sha256 (`casebroker/partstore.py`), not in the database: a campaign case is ~8.5 GB
 of parts. The database holds which case, which part, the hash, the size and when.
 
 | Call | Scope | What |
 | --- | --- | --- |
-| `POST /v1/cases/{id}/parts/{part}/upload` | write | `{sha256, bytes}` of the file the node holds. `part` is `mesh`, `case_<dir>` (both reported first, `POST /v1/parts`) or `archive` (the case's own archive: the case must be done, and the hash is the completion's). Answers `state`: `stored` (nothing to send), `verifying` (all sent; ask again), `declined` (this broker does not keep that kind -- keep shipping it to the master), `absent` / `partial` with the `offset` to send from and the `chunk_bytes` to use. 409 for a hash or size that is not what was reported, 404 for an unreported part, 507 when the store would pass its limit or cut into its reserve of free space |
+| `POST /v1/cases/{id}/parts/{part}/upload` | write | `{sha256, bytes}` of the file the node holds. `part` is `mesh`, `case_<dir>` (both reported first, `POST /v1/parts`) or `archive` (the case's own archive: the case must be done, and the hash is the completion's). Answers `state`: `stored` (nothing to send), `verifying` (all sent; ask again), `declined` (this broker does not keep that kind -- the node keeps it on its own disk), `absent` / `partial` with the `offset` to send from and the `chunk_bytes` to use. 409 for a hash or size that is not what was reported, 404 for an unreported part, 507 when the store would pass its limit or cut into its reserve of free space |
 | `PUT /v1/cases/{id}/parts/{part}/upload?offset=&bytes=` | write | One chunk (at most 64 MiB, under Cloudflare's 100 MB a request), written at `offset`; `bytes` is the whole part's size. 409 with the broker's `offset` when that is not where the upload stands, so the node resumes from there. A chunk is all or nothing. The last one starts the verification in the background (`verifying`): a 6.5 GB archive takes a minute to hash on the server, longer than the reverse proxy waits |
 | `GET /v1/cases/{id}/parts/{part}/blob` | read | The part's file. Byte ranges are answered, so a fetch resumes; the ETag is the sha256 |
 | `GET /v1/cases/{id}/blobs` | read | What of the case the broker holds, and `complete`: its archive and every part it reported |
 | `DELETE /v1/cases/{id}/parts/{part}/blob` | admin | Stop holding one part; its file goes when nothing else refers to the content |
 | `POST /v1/parts/sweep?dry_run=` | admin | Files no case refers to (a replaced mesh's parts) and stale uploads. Reports by default |
 
-A node that cannot fetch from a Syncthing master says `can_continue: false` on its lease and is
-not handed a case with a mesh on record; with `can_continue_from_broker: true` as well, it is
-still handed one whose mesh the broker holds -- which is what lets a node run with Syncthing off.
+A case with a mesh on record goes only to a node that leases with `can_continue_from_broker:
+true`, and only while the broker holds that mesh: nothing else can give a node another node's
+mesh. A node that says nothing about continuing (neither field: from before parts) is handed
+anything, as before, and meshes afresh. `can_continue` was "can fetch from the Syncthing
+master"; `true` no longer counts.
 
 Content is checked twice: the upload must hash to what the node reported, and the node
 fetching a part checks it against the same hash. `GET /v1/cases/{id}/parts` (and the

@@ -2,9 +2,11 @@
 # Master-side collector for the PACE clusters: pull finished case archives out
 # of each cluster's $WIND_DONE into the master's done/ folder over SSH.
 #
-# Why pull rather than push: PACE compute nodes can open connections OUT but
-# cannot be reached, and a long-running Syncthing daemon does not fit shared
-# login nodes or job-lifetime compute nodes. The master already has SSH access
+# A node on a cluster uploads its parts to the broker itself (it waits up to
+# 20 min for them when its job drains); this is the fallback for what a broker
+# without a part store, or with a full one, did not take. Why pull rather than
+# push: PACE compute nodes can open connections OUT but cannot be reached. The
+# master already has SSH access
 # to the login nodes (Windows: through the native OpenSSH client, see
 # docs/pace-hpc.md), and the archives are single files written into place
 # atomically, so a plain rsync is safe and resumable.

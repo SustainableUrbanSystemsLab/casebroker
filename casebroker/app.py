@@ -223,25 +223,15 @@ class LeaseIn(BaseModel):
     version: str | None = Field(default=None, max_length=64)
     platform: str | None = Field(default=None, max_length=32)
     recipes: list[str] | None = Field(default=None, max_length=64)
-    # This machine's Syncthing device ID, so the fleet's master can accept it
-    # (GET /v1/syncthing). Optional and additive like the rest; one that is not a
-    # device ID is ignored rather than refused -- a lease must never fail over it.
-    syncthing_id: str | None = Field(default=None, max_length=80)
-    # Whether the node can fetch a mesh back from the Syncthing master and so
-    # continue a case another node started (db.report_part). False: it is not
-    # handed such a case. Absent (a node from before parts): handed anything, as
-    # before -- it re-meshes, and reports no parts.
+    # Whether the node could fetch a mesh from the Syncthing master, which is gone
+    # (2026-10-06): read only to tell a node that says nothing about continuing (from
+    # before parts: handed anything, as before -- it re-meshes, and reports no parts)
+    # from one that does. True no longer means it can. A node from before the removal
+    # also sends `syncthing_id`, which is ignored like any unknown field.
     can_continue: bool | None = None
-    # Whether the node can fetch a mesh from the BROKER (GET .../parts/mesh/blob). With
-    # can_continue false, it is still handed a case whose mesh the broker holds.
+    # Whether the node can fetch a mesh from the BROKER (GET .../parts/mesh/blob): it is
+    # then handed a case another node started, while the broker holds its mesh.
     can_continue_from_broker: bool | None = None
-
-
-class SyncthingIn(BaseModel):
-    """The fleet's Syncthing master: its device ID (null forgets it) and the
-    folder ID every worker shares with it (unchanged when omitted)."""
-    device_id: str | None = Field(default=None, max_length=80)
-    folder: str | None = Field(default=None, max_length=64)
 
 
 class ReleaseIn_(BaseModel):
@@ -301,15 +291,14 @@ class LeaseOut(BaseModel):
     expires_at: int
     attempt: int
     spec: dict[str, Any]
-    # What earlier attempts already shipped to the Syncthing master (db.report_part):
-    # the mesh to continue from and the directions not to solve again. Empty for a
+    # What earlier attempts already shipped (db.report_part): the mesh to continue
+    # from and the directions not to solve again. Empty for a
     # case nobody has shipped anything of; a node from before parts ignores it.
     parts: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class PartIn(BaseModel):
-    """One archive a node shipped to the master while the case ran; see
-    db.report_part."""
+    """One archive a node shipped while the case ran; see db.report_part."""
     lease_id: str = Field(min_length=1, max_length=128)
     case_id: str = Field(min_length=1, max_length=128)
     part: str = Field(min_length=1, max_length=40)
@@ -1771,7 +1760,7 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
                        resume_case_ids=body.resume_case_ids,
                        build=body.build, version=body.version,
                        platform=body.platform, recipes=body.recipes,
-                       syncthing_id=body.syncthing_id, can_continue=body.can_continue,
+                       can_continue=body.can_continue,
                        can_continue_from_broker=body.can_continue_from_broker)
         return [LeaseOut(case_id=g.case_id, lease_id=g.lease_id, expires_at=g.expires_at,
                          attempt=g.attempt, spec=g.spec, parts=list(g.parts)) for g in got]
@@ -1780,10 +1769,10 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
     # -- node releases -----------------------------------------------------
     #
     # The broker says WHICH build a node should run and what its file must hash
-    # to. It never serves the file: nodes take it from their own release share
-    # (Syncthing, next to the folder their archives already travel through) and
-    # verify it against the hash given here, over the one channel that is
-    # already authenticated per machine.
+    # to. It never serves the file: nodes take it from their own release share (a
+    # folder on the node, filled by whoever runs the fleet) and verify it against
+    # the hash given here, over the one channel that is already authenticated per
+    # machine.
 
     @app.get("/v1/node/release", dependencies=[WriteAuth])
     def node_release(request: Request, worker_id: str, platform: str | None = None,
@@ -1803,24 +1792,6 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
                                failed_build=(failed_build or "")[:96] or None,
                                failed_reason=failed_reason,
                                state=(state or "")[:200] or None)
-
-    @app.get("/v1/syncthing", dependencies=[ReadAuth])
-    def syncthing() -> dict[str, Any]:
-        """The Syncthing rendezvous: the master an admin named, and every worker
-        device a node reported with its leases in the last 30 days. A node pairs
-        itself with the master from this, and the master accepts exactly these
-        workers. A device ID is a public-key fingerprint, not a credential, so
-        read scope is enough."""
-        return db.syncthing_view(conn)
-
-    @app.put("/v1/syncthing")
-    def set_syncthing(body: SyncthingIn, user=AdminAuth) -> dict[str, Any]:
-        """Name the fleet's Syncthing master. Admin only: every node pairs with
-        whatever device this names, so it decides where the campaign's archives go."""
-        try:
-            return db.set_syncthing_master(conn, body.device_id, body.folder, by=user["username"])
-        except ValueError as e:
-            raise HTTPException(422, str(e))
 
     @app.get("/v1/releases", dependencies=[ReadAuth])
     def releases() -> dict[str, Any]:
@@ -2027,8 +1998,8 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
 
     @app.post("/v1/parts", dependencies=[WriteAuth])
     def report_part(body: PartIn, request: Request) -> dict[str, bool]:
-        """A part of the case the node shipped to the Syncthing master: the mesh
-        once meshing passed, or one finished direction. See db.report_part.
+        """A part of the case the node shipped: the mesh once meshing passed, or one
+        finished direction. See db.report_part.
 
         409 when the lease is not this case's current one or not this
         credential's (as /v1/telemetry), and when a direction was solved on a mesh
@@ -2076,7 +2047,7 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
     # store holds nothing the broker did not already know the content of.
     #
     # Without the setting every route here answers 404, which a node reads as "a broker
-    # that stores no parts" and goes on shipping to the Syncthing master only.
+    # that stores no parts": its parts then stay on its own disk only.
 
     parts_root = parts_dir if parts_dir is not None else (os.environ.get("CASEBROKER_PARTS_DIR", "").strip() or None)
     store = None
@@ -2089,7 +2060,7 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
     # Which parts this broker keeps: a campaign case is ~8.5 GB, 32 directions of it, and
     # the volume may have room for the meshes and archives of every case but not for all
     # of their directions. A part of a kind not kept is DECLINED (200, state "declined"):
-    # not an error, the node simply keeps shipping that kind to the master.
+    # not an error, the node simply keeps that kind on its own disk.
     keep = {k.strip() for k in os.environ.get("CASEBROKER_PARTS_KEEP", "mesh,direction,archive").split(",")
             if k.strip()}
 
@@ -2350,8 +2321,8 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
     # -- custody: what has arrived where results are kept -----------------------------
     #
     # `done` is the node's word (POST /v1/complete names an archive on its own disk). A
-    # receipt is the other half: the holder of an artifact -- the Syncthing master's scan
-    # that hashed the archive (scripts/report_receipts.py) -- says it has it, and the
+    # receipt is the other half: the holder of an artifact -- the broker's own part store,
+    # or an operator's scan of a copy (scripts/report_receipts.py) -- says it has it, and the
     # broker checks the hash against the one the node reported. Kept per artifact and
     # outside `state`, which leasing and every count read.
 

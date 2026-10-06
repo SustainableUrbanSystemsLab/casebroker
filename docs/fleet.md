@@ -2,7 +2,7 @@
 
 How any Linux or Windows machine becomes a worker that pulls cases from the
 broker, solves them, reports progress, survives being stopped, and gets its
-finished cases back to the master. For the cluster-specific traps (SSH,
+finished cases to where they are kept. For the cluster-specific traps (SSH,
 quotas, Podman, billing) see [`pace-hpc.md`](pace-hpc.md).
 
 ## The shape
@@ -17,9 +17,10 @@ quotas, Podman, billing) see [`pace-hpc.md`](pace-hpc.md).
      |                                          |
      |  SIGTERM: checkpoint to $WIND_CASES      |  done: <case_id>.tar.gz -> $WIND_DONE
      v                                          v
-   resume.json (asked for on next lease)     Syncthing (workstations) /
-                                             scripts/pull_done.sh over SSH (PACE)
-                                                          -> master done/
+   resume.json (asked for on next lease)     E3D node: every part to the broker's
+                                               part store, as it is shipped /
+                                             runner script: scripts/pull_done.sh
+                                               over SSH (PACE) -> a done/ folder
 ```
 
 One runner, three OpenFOAM runtimes. The solve is the same inner script in
@@ -141,8 +142,7 @@ turns them into `U.npz` and the `.wfld`. Archives from before it carry no field:
 
 Full field data, last time step only, reconstructed on the client -- rank
 counts differ per machine, so a decomposed result would be unusable anywhere
-else. About 250-300 MB at the 3.0 m default; ~1.5 TB for 5,000 cases on the
-master. `case_*/constant/polyMesh` is deliberately not in the archive (it is a
+else. About 250-300 MB at the 3.0 m default; ~1.5 TB for 5,000 cases. `case_*/constant/polyMesh` is deliberately not in the archive (it is a
 link to `mesh/`); relink it to open a case in ParaView. The broker's
 `result_uri` is the archive's path on the machine that made it, and
 `result_sha256`/`result_bytes` are the archive's.
@@ -162,7 +162,8 @@ ships each piece of a case the moment it is done (Eddy3D `CaseParts`):
 
 All of them unpack under the same `<case_id>/`, and unpacked together, the case
 archive last, they are exactly the single archive above. The broker's
-`result_uri` is still `<case>.tar.gz`. On the master:
+`result_uri` is still `<case>.tar.gz`. On a folder of them -- a node's done
+folder, or a copy pulled from one:
 
 ```
 uv run casebroker archives E:/wind/done               # every case: complete / waiting / partial
@@ -171,8 +172,8 @@ uv run casebroker archives E:/wind/done --verify      # also hash every part aga
 ```
 
 - **complete**: the case archive and every part its manifest names;
-- **waiting**: the case archive arrived before some of its parts (Syncthing does
-  not deliver in write order);
+- **waiting**: the case archive arrived before some of its parts (a copy need not
+  arrive in write order);
 - **partial**: parts and no case archive -- the node stopped, or is still solving.
   The mesh and the finished directions are here and unpack
   (`casebroker.archives.extract_case`); `scripts/backfill_pedestrian.py` takes
@@ -187,27 +188,23 @@ Each part is also reported to the broker (`POST /v1/parts`, lease-scoped like
 telemetry): the mesh with its sha256, each direction with the sha256 of the mesh
 it was solved on and its convergence verdict. The broker keeps them in
 `case_parts` and hands them out with the next lease of the case, so the node that
-takes it over continues on the **same** mesh -- fetched back from the master --
-and solves only the directions not listed. One case is never answered on two
+takes it over continues on the **same** mesh -- fetched from the broker's part
+store (below) -- and solves only the directions not listed. One case is never answered on two
 meshes:
 
 - a direction reported against a mesh that is no longer the case's is refused (409);
 - a NEW mesh for a case (the site changed, or an admin reset it) drops every
   part of the old one, with a `parts_reset` event.
 
-The mesh comes back through a second Syncthing folder, `<folder>-mesh`, never
-the done folder, which stays receive-only on the master. The master offers in it
-only what `GET /v1/syncthing` lists under `continuations` (a mesh on record, and
-the case pending or leased by a node other than the one that meshed it), as
-hardlinks; each worker receives into it ignoring everything but the one file it
-asked for. Eddy3D's `docs/SIMULATION_NODE.md` has the node's side.
-
-A node that cannot fetch a mesh (Syncthing off, a cluster) leases with
-`can_continue: false` and is not handed a case that has one. If the master that
-holds a case's mesh is gone for good:
+A node leases with `can_continue_from_broker: true` when it can fetch a mesh from
+the broker, and the broker hands a case that has a mesh on record only to such a
+node, and only while its part store holds that mesh. A case whose mesh it never
+got -- shipped before the store existed, or refused by a full one -- waits for the
+node that made it, which resumes it from its own disk. If that node is gone for
+good:
 
 ```
-uv run casebroker parts reset <case_id> --broker https://casebroker.onrender.com
+uv run casebroker parts reset <case_id> --broker <broker url>
 ```
 
 and the next node meshes it afresh. `GET /v1/cases/<case_id>/parts` shows what a
@@ -227,7 +224,7 @@ node predates this. `GET /v1/cases/<id>/fields` lists what the broker holds;
 saved 13% of a float32 field and Postgres's own compression nothing, while the plain
 container reads in place (`numpy.frombuffer`, or one cell with SQL `substring()`; the
 column is `STORAGE EXTERNAL`). Rows stored before are gzip-wrapped; the first two bytes
-(`1f 8b`) say so, and the dashboard reads both. **Since 0.29.0 each listed field carries
+(`1f 8b`) say so, and the dashboard reads both. **Since 0.30.0 each listed field carries
 `lambda_f`**, the frontal area index of the direction it was solved for, read off the
 site report the node sent (protocol.md, "Telemetry and the dataset").
 
@@ -276,141 +273,33 @@ set); put that URL in Settings -> Preferences -> Wind-field source. A bucket's
 public URL works the same way once there is one. Or drag a `.wfld` onto an
 opened case.
 
-## Getting archives to the master
+## Where a finished case goes
 
-**Pairing is the broker's job now, and needs no admin rights on any machine.**
-Syncthing only moves a file between two devices that know each other's device
-ID, so every machine had to be paired by hand on both sides. On 2026-09-23 no
-remote machine had ever been paired: every archive a remote node finished was
-still on that node's own disk. Now:
+**An Eddy3D node sends every part to the broker** as it ships it -- the mesh, each
+finished direction, the case archive once `/v1/complete` has taken it -- in
+resumable chunks, into the broker's part store (docs/protocol.md, "Parts the broker
+holds"; on the broker, `CASEBROKER_PARTS_DIR`). The files also stay in the node's
+done folder. A broker without a store, or with a full one, leaves them there only:
+enable the store before relying on it. `GET /v1/cases/<case_id>/blobs` shows what the
+broker holds of a case, and its archive receipt at location `broker` says the whole
+case is there.
 
-1. **The master is named once**, in the dashboard (Settings, then Machines, then
-   *Syncthing master*) or with `PUT /v1/syncthing {device_id, folder}`, admin
-   session. The master node prints its device ID when it starts.
-2. **Each E3D node pairs itself.** It runs Syncthing as the logged-in user. It
-   adopts one already installed, or downloads the pinned release and checks its
-   hash. It creates the send-only `wind-done` folder at its done directory,
-   adds the master named by the broker, and reports its own device with every
-   lease (`syncthing_id`).
-3. **The master accepts exactly the devices the broker lists**
-   (`GET /v1/syncthing`). The broker's credentials decide who may send the
-   master anything.
+**Syncthing is gone (2026-10-06).** Archives used to travel from every node to one
+master over Syncthing, paired through the broker (`/v1/syncthing`). That endpoint,
+the dashboard's *Syncthing master* panel and the `syncthing_id` a node sent with its
+leases are removed; a node from before still leases (the field is ignored, and the
+404 reads as "no master"). A Syncthing that an earlier node build started keeps
+running until it is stopped; what it already delivered stays where it is.
 
-Workers only dial out, so they need no firewall rule. A rule on the master
-(which does need admin) makes transfers direct, and so faster; without one,
-Syncthing still connects through NAT traversal or its relays.
+**A runner-script worker** (runner/run_case.sh) writes `<case>.tar.gz` into
+`$WIND_DONE` and leaves it there; collect it with `scripts/pull_done.sh` or by hand,
+and `scripts/report_receipts.py` tells the broker it arrived.
 
-The rest of this section covers what the node does, and the manual setup for a
-runner that is not an E3D node.
-
-**Workstations: Syncthing.** Share `$WIND_DONE` -- *only* that folder, never a
-live case tree; a solve writes thousands of files per rank per step and
-Syncthing would spend its life hashing them.
-
-- client folder **Send Only**, master folder **Receive Only** with
-  `ignoreDelete` on, so a client may delete its local archive after upload
-  without that deleting the master's copy;
-- add `.tmp` to the folder's ignore patterns (the in-progress archive);
-- no inbound port is needed on the master: every device connects out to the
-  discovery/relay network. Direct connections (port 22000 reachable on at
-  least one side) are much faster than public relays for GB-scale archives.
-
-**Keep it quiet.** A default Syncthing folder watches the filesystem, rescans
-every hour, and keeps discovery/relay chatter going -- on a solving machine
-that is constant background traffic for nothing. Since a case finishes at
-one known moment, the runner announces it instead:
-
-- on the client folder: *Watch for Changes* off, *Rescan Interval* 0
-  (`fsWatcherEnabled=false`, `rescanIntervalS=0`), so Syncthing hashes and
-  sends nothing on its own;
-- in `machine.env`: `WIND_SYNCTHING_APIKEY` (Actions > Settings > General) and
-  `WIND_SYNCTHING_FOLDER` (the folder ID); the runner then calls
-  `POST /rest/db/scan?folder=<id>&sub=<case>.tar.gz` right after the archive
-  is renamed into place, and only that file is hashed and transferred.
-
-Unset, the runner does nothing and Syncthing behaves as configured. On a
-machine that should be silent between cases you can also pause the folder
-and have a cron unpause/pause it; the scan call is simpler and enough.
-
-**The same variables drive the Windows node.** An Eddy3D node (`E3D node`,
-`run-sim-node`) makes the same scan call right after its archive is renamed
-into place -- from Eddy3D 7c4229cb (#937) on -- when `WIND_SYNCTHING_APIKEY`
-and `WIND_SYNCTHING_FOLDER` (and `WIND_SYNCTHING_URL` if its GUI is not on
-127.0.0.1:8384) are in the node's environment: `setx` them for the account
-the node runs as, then restart the node. **Quiet mode with neither the
-variables nor a build that has the call ships nothing, silently.** Until a
-node runs such a build, give its folder a periodic rescan instead
-(`rescanIntervalS` 900): the done folder holds only finished archives, never
-a live case tree, so a rescan costs a directory listing.
-
-What that cost, found 2026-09-23 on the master (COD-PKAST-7865): its
-Syncthing had been down since 14 Sep -- the instances were started by a
-logon trigger, and an RDP reconnect is not a logon -- no remote machine had
-ever been paired with it, and its own worker folder was in quiet mode under
-an Eddy3D node that never announced a file. The master held one 23 MB test
-archive from 11 Sep and none of the campaign's results; every finished case
-existed only on the disk of the machine that solved it.
-`install_master_autostart.ps1` now also restarts both instances every 15
-minutes if they are not running.
-
-**Change a folder through the GUI or the REST API, never by rewriting
-`config.xml`.** The same night, the 900 s rescan was set by loading the
-worker's `config.xml` into an XML library and saving it back. The
-pretty-printer turned every empty `<encryptionPassword></encryptionPassword>`
-into one holding a newline and indentation. Syncthing takes that whitespace
-as a real password, so it treated the master as an *untrusted, encrypted*
-peer. Both instances then connected every 20 s and dropped within a second:
-`remote expects to exchange plain data, but local data is encrypted` on one
-side, `remote device missing in cluster config` on the other. The master
-received nothing, and no error was visible outside the Syncthing log. Use
-`PATCH /rest/config/folders/wind-done` (or the GUI), which validates the change
-and writes the file itself. To repair a damaged file, `GET /rest/config`, blank
-every whitespace-only string, `PUT` it back and restart.
-
-**Checklist for a machine that solves cases** -- all four, or its results
-stay on its own disk:
-
-1. Syncthing running there, with the `wind-done` folder Send Only at its
-   done directory and `.tmp` ignored;
-2. the master's device ID added there AND that machine's device ID added on
-   the master, with the folder shared to it (step 2-3 below);
-3. the scan variables in the environment of whatever runs cases (or, for a
-   node on an older build, a 900 s rescan);
-4. proof, not configuration: `GET /rest/system/connections` there shows the
-   master `"connected": true` for longer than a minute, and after an archive
-   lands, `GET /rest/db/completion?folder=wind-done&device=<master id>` reaches
-   100. A pairing that connects and drops every 20 s shows as *configured* in
-   every listing, which is how it went unnoticed.
-
-**Measured, 2026-09-12** (two Syncthing v2.1.5 instances, one standing in for a
-remote worker, `C:\rc2\syncthing\`): a 23 MB case archive replicated
-worker -> master over a direct QUIC connection with identical SHA-256 and
-`needBytes 0`; a new 5 MB file then sat in `$WIND_DONE` for **45 s with
-nothing transferred** (watcher off, `rescanIntervalS 0`), and appeared on the
-master **2 s** after the runner's
-`POST /rest/db/scan?folder=wind-done&sub=<case>.tar.gz`. No inbound port was
-opened on either side.
-
-### Setting it up on a worker
-
-1. Run Syncthing (no admin needed: the release zip is a single binary,
-   `syncthing --home=<dir> --gui-address=127.0.0.1:8384 --no-browser --no-upgrade`;
-   v2 dropped `--no-default-folder`, so delete the auto-created folder).
-2. Add the master's device ID; the master adds the worker's.
-3. Create folder id **`wind-done`** on both -- worker: path `$WIND_DONE`,
-   `type sendonly`, `fsWatcherEnabled false`, `rescanIntervalS 0`; master:
-   its aggregation directory, `type receiveonly`, `ignoreDelete true`. Ignore
-   pattern `.tmp` on both. One folder id is shared by EVERY worker: case ids
-   are unique, so many send-only workers accumulate into one receive-only
-   master directory with no collisions and no per-worker folder admin.
-4. Put `WIND_SYNCTHING_URL/APIKEY/FOLDER` in `machine.env`.
-
-`C:\rc2\syncthing\configure.ps1` does steps 2-3 over the REST API and is the
-reference for the exact field values.
-
-**PACE: the master pulls.** A daemon does not fit shared login nodes or
-job-lifetime compute nodes, and compute nodes cannot be reached from outside
-anyway. The master already has SSH to the login nodes, so
+**PACE: pull what the broker did not take.** An E3D node in a job uploads its
+parts itself and waits up to 20 min for them when it drains. For a runner-script
+worker, or a broker without room: compute nodes cannot be reached from outside,
+and a long-running daemon does not fit shared login nodes or job-lifetime compute
+nodes. The master already has SSH to the login nodes, so
 `scripts/pull_done.sh <master done dir> ice:<WIND_DONE> phoenix:<WIND_DONE>`
 on a timer collects finished archives; `PULL_REMOVE=1` deletes on the cluster
 after a size-verified copy, which is what keeps ICE's 300 GB scratch from
@@ -492,8 +381,8 @@ mkdir -p E:/wind/repro/node
 echo '{"broker": "http://127.0.0.1:8799", "name": "repro", "token": "repro-local-token", "paired_at": "2026-01-01T00:00:00+00:00"}' \
   > E:/wind/repro/node/credential.json
 
-# 4. one case, then exit. Separate work and done folders: done must NOT be the
-#    Syncthing folder, or a reproduction's archive reaches the master.
+# 4. one case, then exit. Separate work and done folders, so nothing of the
+#    reproduction mixes with what a live node on this machine ships.
 EDDY3D_NODE_DIR='E:\wind\repro\node' E3D.exe run-simulation-node \
   --work 'E:\wind\repro\work' --done 'E:\wind\repro\done' \
   --cpus 12 --engine bluecfd --max-cases 1 --drain --max-idle-polls 1
