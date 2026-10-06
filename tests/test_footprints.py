@@ -1,8 +1,10 @@
 """The case inspector: the footprints endpoint, and the dashboard panel that draws it.
 
-No network. The building and terrain reads are replaced, because what these pin
-is the broker's own behaviour around them -- which reads run together, how many
-run for one case -- and what the page claims about the picture it draws.
+No network. The building, terrain and canopy reads are replaced, because what
+these pin is the broker's own behaviour around them -- which reads run together,
+how many run for one case -- and what the page claims about the picture it draws.
+A layer left unreplaced is not a slower test but a flaky one: it reads the real
+remote raster, and the endpoint caches nothing when that read fails.
 """
 
 from __future__ import annotations
@@ -64,6 +66,11 @@ def test_concurrent_opens_of_one_case_share_one_building_query(broker, monkeypat
 
     monkeypatch.setattr(footprints, "fetch_gba", slow_gba)
     monkeypatch.setattr(footprints, "terrain", lambda lat, lon: {"source": "flat"})
+    # Unreplaced, this read the Meta/WRI canopy COG from S3 after the release:
+    # ~2.5 s on a good network, past the 10 s joins below on a slow one. And a
+    # read that fails is "unavailable", never cached, so the second request
+    # queried again.
+    monkeypatch.setattr(footprints, "canopy", lambda lat, lon: {"source": "none"})
     monkeypatch.setattr(footprints, "fetch", _no_overture)
     url = f"/v1/cases/{_one_case(broker)}/footprints"
 
@@ -79,6 +86,11 @@ def test_concurrent_opens_of_one_case_share_one_building_query(broker, monkeypat
     release.set()
     first.join(10)
     second.join(10)
+    # A join that times out returns quietly, and the request it gave up on has
+    # not stored its response yet: this used to fail as KeyError: 'first'.
+    assert not first.is_alive() and not second.is_alive(), \
+        "a request was still running 10 s after the building read returned: " \
+        "something else it calls is slow -- a layer reading the network?"
 
     assert len(calls) == 1
     assert got["first"].status_code == 200 and got["second"].status_code == 200

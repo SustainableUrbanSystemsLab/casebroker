@@ -8,6 +8,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.27.3] - 2026-10-06
+
+### Fixed
+- **The concurrent-footprints test read the real canopy raster.**
+  `test_concurrent_opens_of_one_case_share_one_building_query` replaced the building and terrain
+  reads but not `footprints.canopy`, so each run fetched the Meta/WRI canopy COG from S3 once the
+  fake building read was released. On a slow network that outlasted the 10 s joins, and the test
+  failed as `KeyError: 'first'` (3 of 5 local runs on 2026-10-06, 15-20 s each); with no network the
+  read is `unavailable`, which is never cached, so the second request queried again. The canopy
+  read is replaced like the others, and the test asserts both requests finished before reading
+  their responses, so a slow layer now fails by saying so. 20 of 20 runs pass in 0.52 s -- the
+  test's own 0.5 s wait -- including under a sandbox that kills the process on any outbound
+  connection.
+
 ## [0.27.2] - 2026-10-05
 
 ### Changed
