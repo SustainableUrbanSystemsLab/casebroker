@@ -64,8 +64,9 @@ Workers hold leases, so do this in a quiet window.
 4. Point every worker's `CASEBROKER_URL` (machine.env, SLURM scripts) at the
    new URL. Accounts and per-machine tokens moved with the data; the shared
    `CASEBROKER_WRITE_TOKENS` moved via `.env`.
-5. Keep Render and Supabase for a week, then retire the `deploy-smoke-test`
-   job and the Render service.
+5. Keep Supabase for a week as the fallback, then retire it. (Done for
+   Render on 2026-10-06: the service and its `deploy-smoke-test` CI job are
+   gone; `nas-deploy-check` is the production deploy check.)
 
 ## Roll back
 
