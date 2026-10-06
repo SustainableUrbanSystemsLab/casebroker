@@ -136,7 +136,7 @@ Started as `E3D run-sim-node` (or `run-simulation-node`) it never switches, and
 says so at start-up: *"started directly, so it will not switch builds by
 itself"*. The broker never ships a file. It names the build and its SHA-256,
 and the node installs that file from its **release share**, by default
-`%LOCALAPPDATA%\Eddy3D\node\releases` (point Syncthing at it on a real fleet).
+`%LOCALAPPDATA%\Eddy3D\node\releases` (a folder on that machine: copy the file in).
 The whole model, with the guards and badges, is in
 [docs/releases.md](docs/releases.md).
 

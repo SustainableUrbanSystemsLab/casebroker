@@ -18,9 +18,9 @@ requirement is unchanged.
 
 Since 2026-09-21 a simulation node **is** `E3D.exe`. `E3D node` pairs with the
 broker (device code in a browser, the broker keeps only the token's hash),
-leases, builds the site geometry natively, solves, drops the archive into the
-Syncthing folder the master collects from, reports, and updates itself when
-the broker names a build. That contract is Eddy3D's own —
+leases, builds the site geometry natively, solves, sends every part of the
+case to the broker's part store (and keeps it in its done folder), reports,
+and updates itself when the broker names a build. That contract is Eddy3D's own —
 `docs/SIMULATION_NODE.md` in the Eddy3D repository — and what the broker asks
 of such a node is the protocol in [`protocol.md`](protocol.md) and, for
 updates, [`releases.md`](releases.md). In short, an E3D node:

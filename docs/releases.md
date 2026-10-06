@@ -26,8 +26,13 @@ against the hash it was given.
    publishes `E3D.exe`, `E3D-linux-x64` and `E3D-macos-arm64` to the rolling
    `e3d-node-latest` GitHub release, with `SHA256SUMS.txt` and `release.json`
    (`[{build, platform, file, sha256}]`).
-2. **Share.** Put the files on the release share: the receive-only Syncthing
-   folder each node has next to the one its archives leave through.
+2. **Share.** Put the files on each node's release share: a folder on that machine
+   (`<node dir>/releases` unless the node names another), filled by whoever runs the
+   fleet -- a copy, a network share. Until 2026-10-06 it was a receive-only Syncthing
+   folder; nothing fills it by itself now. A machine can instead build `dev` itself
+   (Eddy3D `scripts/node-update`), which installs and switches to that build without
+   the broker; clear the fleet target while machines update that way, or it moves
+   them back.
 3. **Register.** From a terminal or a CI step:
 
    ```bash

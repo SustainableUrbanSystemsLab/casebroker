@@ -1,5 +1,8 @@
 # Starting the fleet — morning checklist
 
+> Syncthing, which this note sets up, was retired on 2026-10-06: an E3D node now sends every
+> part of a case to the broker's part store (docs/fleet.md, "Where a finished case goes").
+
 Everything below was verified on the night of 2026-09-12, against production,
 not by reading the code.
 

@@ -73,8 +73,8 @@ services:
       # "Parts the broker holds"). Measured 2026-10-06: a case is ~8.5 GB of parts
       # (mesh ~185 MB, 32 directions ~260 MB each), so 5,000 cases are ~42 TB --
       # far past this volume. The limits keep the store from crowding out
-      # everything else on the server; past them a node is told 507 and keeps
-      # shipping to the Syncthing master, as it does today.
+      # everything else on the server; past them a node is told 507, keeps the
+      # part in its own done folder, and asks again an hour later.
       CASEBROKER_PARTS_DIR: /parts
       CASEBROKER_PARTS_MAX_GB: ${CASEBROKER_PARTS_MAX_GB:-1500}
       CASEBROKER_PARTS_RESERVE_GB: ${CASEBROKER_PARTS_RESERVE_GB:-500}

@@ -1,7 +1,7 @@
 """Custody: what has ARRIVED where results are kept, beside what the node said it did.
 
 `done` is the node's word -- POST /v1/complete names an archive on the node's own disk
-and its sha256. Whether the archive reached the Syncthing master intact, and whether every
+and its sha256. Whether the archive reached a place it is kept intact, and whether every
 direction's pedestrian field reached the database, is a different question with a
 different answerer, so it is kept per artifact (case_artifacts) and never folded into
 `state` (Patrick, 2026-10-01). Found the night it was decided: two dev-built nodes had

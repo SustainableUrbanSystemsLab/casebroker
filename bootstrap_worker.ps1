@@ -15,7 +15,6 @@
 #   3. copies e3d.exe from the master share, or builds it if the SDK is present
 #   4. runs setup_windows.ps1, which writes machine.env and proves the token
 #   5. optionally runs one smoke case end to end
-#   6. optionally pairs Syncthing with the master so finished cases come home
 #
 # Safe to re-run: every step is idempotent, and an existing machine.env is
 # rewritten from the arguments rather than merged, so the profile is always
@@ -26,12 +25,10 @@ param(
     [string]$BrokerUrl = "https://casebroker.onrender.com",
     [string]$Root = "E:\wind",
     [string]$SrcDir = "C:\src",
-    [string]$MasterDeviceId = "DW2QZ5L-CFGJL7D-X4VRTG5-SZ6535Q-Y2JGKT6-RFCZ6AN-RBRFEXB-IQ54MQ7",
     [string]$E3dSource = "",
     [string]$RealCitiesBranch = "main",
     [int]$Np = 0,
-    [switch]$Smoke,
-    [switch]$SkipSyncthing
+    [switch]$Smoke
 )
 # "Continue", not "Stop": in Windows PowerShell 5.1 any stderr line from a
 # native command (git, uv, docker) is a terminating NativeCommandError under
@@ -147,22 +144,6 @@ if ($Np -gt 0) { $setupArgs["Np"] = $Np }
 if ($Smoke) { $setupArgs["Smoke"] = $true }
 & $setup @setupArgs
 if ($LASTEXITCODE -ne 0) { Die "setup_windows.ps1 reported a problem (see above)" }
-
-if (-not $SkipSyncthing) {
-    Step "syncthing"
-    $st = Get-Command syncthing -ErrorAction SilentlyContinue
-    if (-not $st -and -not (Test-Path "C:\tools\syncthing\syncthing.exe")) {
-        Warn @"
-Syncthing is not installed, so finished archives will stay on this machine.
-Install it (a single binary from github.com/syncthing/syncthing/releases),
-then share $Root\done as folder id 'wind-done', Send Only, with master device
-  $MasterDeviceId
-and set WIND_SYNCTHING_URL/APIKEY/FOLDER in machine.env. See docs/fleet.md.
-"@
-    } else {
-        Pass "syncthing present -- pair it with the master as described in docs/fleet.md"
-    }
-}
 
 Write-Host "`nready. start the worker with:" -ForegroundColor Green
 Write-Host "  cd $repo; .\start_worker.ps1"

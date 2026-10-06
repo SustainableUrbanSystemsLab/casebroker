@@ -2,9 +2,10 @@
 
 A node ships a case in parts as it runs (archives.py): ``<case>.mesh.tar.gz``,
 one ``<case>.case_NNN.tar.gz`` per finished direction, and ``<case>.tar.gz``
-last. Until now every part went to the Syncthing master and the broker held a
-pointer. With a store configured (``CASEBROKER_PARTS_DIR``), a node can upload
-each part to the broker instead, in chunks, and the broker keeps it here.
+last. Every part used to go to a Syncthing master while the broker held a
+pointer; that master is gone (2026-10-06). With a store configured
+(``CASEBROKER_PARTS_DIR``), a node uploads each part to the broker, in chunks,
+and the broker keeps it here -- the only copy that leaves the node.
 
 Why a directory and not the database, although the database is right beside
 it: a campaign case is ~8.5 GB of parts (measured 2026-10-06: the mesh ~185 MB,
