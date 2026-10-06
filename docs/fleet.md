@@ -224,7 +224,9 @@ node predates this. `GET /v1/cases/<id>/fields` lists what the broker holds;
 saved 13% of a float32 field and Postgres's own compression nothing, while the plain
 container reads in place (`numpy.frombuffer`, or one cell with SQL `substring()`; the
 column is `STORAGE EXTERNAL`). Rows stored before are gzip-wrapped; the first two bytes
-(`1f 8b`) say so, and the dashboard reads both.
+(`1f 8b`) say so, and the dashboard reads both. **Since 0.30.0 each listed field carries
+`lambda_f`**, the frontal area index of the direction it was solved for, read off the
+site report the node sent (protocol.md, "Telemetry and the dataset").
 
 U at 1.5 m and 1.75 m above grade, on a regular 2 m grid over the 1008 m core
 (504 x 504 points), for every direction: `pedestrian/U.npz` (`U[direction,

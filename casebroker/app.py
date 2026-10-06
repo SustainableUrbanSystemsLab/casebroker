@@ -2288,8 +2288,16 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
     @app.get("/v1/cases/{case_id}/fields", dependencies=[ReadAuth])
     def get_fields(case_id: str) -> dict[str, Any]:
         """Which fields a case has (direction, height, grid, coverage, size), without
-        the bytes; directions in order."""
-        return {"case_id": case_id, "fields": db.case_fields(conn, case_id)}
+        the bytes; directions in order. Each carries `lambda_f`, the frontal area
+        index of the direction it was solved for, from the site report the node
+        sent (None where there is none)."""
+        fields = db.case_fields(conn, case_id)
+        row = db.get_case(conn, case_id) if fields else None
+        if row is not None:
+            row = dict(row)
+            dataset.attach_lambda_f(fields, dataset.parse_obj(row.get("telemetry")),
+                                    dataset.parse_obj(row.get("metrics")))
+        return {"case_id": case_id, "fields": fields}
 
     @app.get("/v1/cases/{case_id}/fields/{direction}", dependencies=[ReadAuth])
     def get_field(case_id: str, direction: str, request: Request,
@@ -2703,6 +2711,9 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
             print(f"[telemetry] {case_id}: stored telemetry nests too deep to serve",
                   file=sys.stderr)
             row["telemetry"] = {}
+        # The one urban column that depends on the wind direction, hung on the field
+        # solved for that direction (the viewer shows it beside U_ref).
+        dataset.attach_lambda_f(row["fields"], row["telemetry"], dataset.parse_obj(row.get("metrics")))
         # Where this case sits in the campaign, from the same cached aggregate
         # /v1/dataset serves -- but never WAITING for it: the record does not
         # depend on the aggregate, and a cold one is seconds of work at campaign

@@ -302,6 +302,23 @@ def test_telemetry_first_then_the_completion_metrics(env):
     assert m["n_buildings"]["all"]["n"] == 0
 
 
+def test_the_frontal_area_extremes_rank_and_the_per_direction_table_does_not(env):
+    """A case ranks by its most open and most blocked direction. The table per
+    direction is not one number per case, so it is no metric: it goes on the
+    fields (test_case_fields), not on a histogram."""
+    c, conn, _ = env
+    _seed(conn, [
+        {"case_id": "a", "telemetry": _site(lambda_f_min=0.12, lambda_f_max=0.30,
+                                            lambda_f_by_direction={"000": 0.30, "090": 0.12})},
+        {"case_id": "b", "state": "done", "metrics": {"urban_form": {"lambda_f_min": 0.2, "lambda_f_max": 0.25}}},
+    ])
+    m = c.get("/v1/dataset").json()["metrics"]
+    assert (m["lambda_f_min"]["all"]["min"], m["lambda_f_min"]["all"]["max"]) == (0.12, 0.2)
+    assert (m["lambda_f_max"]["all"]["min"], m["lambda_f_max"]["all"]["max"]) == (0.25, 0.30)
+    assert "lambda_f_by_direction" not in m
+    assert m["lambda_f_min"]["group"] == "urban"
+
+
 def test_site_metrics_come_from_the_site_report(env):
     c, conn, _ = env
     _seed(conn, [{"case_id": "s", "lcz": "LCZ5", "telemetry": {"site": {

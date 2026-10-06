@@ -165,6 +165,11 @@ METRICS: tuple[Metric, ...] = (
     Metric("rar", "Road area ratio", None, "urban", _urban("rar")),
     Metric("svf", "Sky view factor (cosine-weighted)", None, "urban", _urban("svf")),
     Metric("svf_dome", "Sky view factor (unweighted dome)", None, "urban", _urban("svf_dome")),
+    # The frontal area index is per wind direction (lambda_f_by_direction, hung on
+    # each field by attach_lambda_f); a case ranks by its extremes. Not its mean:
+    # averaged over every direction it is vr_exposed / pi, a column already here.
+    Metric("lambda_f_min", "Frontal area index (most open direction)", None, "urban", _urban("lambda_f_min")),
+    Metric("lambda_f_max", "Frontal area index (most blocked direction)", None, "urban", _urban("lambda_f_max")),
     Metric("n_buildings", "Buildings", None, "site", _site("n_buildings")),
     Metric("terrain_relief_m", "Terrain relief", "m", "site", _site("terrain_relief_m")),
     Metric("canopy_fraction", "Tree canopy fraction", None, "site", _site("canopy_fraction")),
@@ -192,6 +197,58 @@ def _case(row: dict[str, Any]) -> _Case:
     return _Case(state=row.get("state"), lcz=row.get("lcz") or None,
                  telemetry=parse_obj(row.get("telemetry")),
                  metrics=parse_obj(row.get("metrics")))
+
+
+# -- the frontal area index, per wind direction -------------------------------------
+
+def lambda_f_by_direction(telemetry: dict[str, Any], metrics: dict[str, Any]) -> dict[float, float]:
+    """The frontal area index per wind direction that the node reported for this
+    case's site, by bearing (wind FROM, degrees): ``urban_form.lambda_f_by_direction``,
+    keyed like ``z0_by_direction`` ("000", "011.25", ...). The site telemetry first
+    and the completion metrics second, as every urban column is read (:func:`_urban`).
+    {} for a site built before the node computed it."""
+    site = telemetry.get("site")
+    for form in (site.get("urban_form") if isinstance(site, dict) else None, metrics.get("urban_form")):
+        table = form.get("lambda_f_by_direction") if isinstance(form, dict) else None
+        if not isinstance(table, dict):
+            continue
+        out: dict[float, float] = {}
+        for key, value in table.items():
+            try:
+                bearing = float(key) % 360.0
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(bearing) and (v := _num(value)) is not None:
+                out[bearing] = float(v)
+        if out:
+            return out
+    return {}
+
+
+def lambda_f_at(table: dict[float, float], deg: Any) -> float | None:
+    """λf for the field solved with the wind from `deg`: the entry at that bearing,
+    matched by angle rather than by spelling ("045" is 45.0), or None. Never the
+    nearest entry -- a direction the table does not hold has no value, and its
+    neighbour's would be a different site's answer to a different wind."""
+    d = _num(deg)
+    if d is None:
+        return None
+    d = float(d) % 360.0
+    for bearing, value in table.items():
+        if abs((bearing - d + 180.0) % 360.0 - 180.0) < 1e-6:
+            return value
+    return None
+
+
+def attach_lambda_f(fields: list[dict[str, Any]], telemetry: dict[str, Any],
+                    metrics: dict[str, Any]) -> list[dict[str, Any]]:
+    """Each field record with the frontal area index of the direction it was solved
+    for (``lambda_f``; None where the site report has none for it), so a reader of
+    the per-direction results has the one per-direction urban column beside them."""
+    table = lambda_f_by_direction(telemetry, metrics)
+    for f in fields:
+        f["lambda_f"] = lambda_f_at(table, f.get("deg"))
+    return fields
 
 
 # -- statistics ------------------------------------------------------------------
