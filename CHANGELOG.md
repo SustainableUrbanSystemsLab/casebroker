@@ -8,6 +8,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.27.2] - 2026-10-05
+
+### Changed
+- **The broker runs on the lab Synology now; Render is retired.** The `deploy-smoke-test` job,
+  which triggered and checked a Render deploy, is gone with the service. `nas-deploy-check` is the
+  production deploy check: it waits for `$NAS_BROKER_URL/healthz` to report the pushed commit.
+
 ## [0.27.1] - 2026-10-04
 
 ### Fixed
