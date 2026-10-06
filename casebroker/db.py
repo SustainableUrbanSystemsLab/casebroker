@@ -391,6 +391,21 @@ CREATE TABLE IF NOT EXISTS case_artifacts (
     reported_by TEXT,
     PRIMARY KEY (case_id, kind, location)
 );
+-- The parts the BROKER holds (partstore.py), uploaded by the node that made them:
+-- one row per (case, part), `part` being 'mesh', 'case_<dir>' or 'archive' (the
+-- case's own <case>.tar.gz). The bytes are a file named by `sha256` in the part
+-- store, not a value here: a campaign case is ~8.5 GB of parts. Every row is a
+-- part whose whole content was hashed and matched the hash the node reported.
+CREATE TABLE IF NOT EXISTS case_blobs (
+    case_id     TEXT NOT NULL,
+    part        TEXT NOT NULL,
+    sha256      TEXT NOT NULL,
+    bytes       BIGINT NOT NULL,
+    stored_at   INTEGER NOT NULL,
+    stored_by   TEXT,
+    PRIMARY KEY (case_id, part)
+);
+CREATE INDEX IF NOT EXISTS idx_case_blobs_sha ON case_blobs(sha256);
 """
 
 # Same schema, Postgres-flavoured: no PRAGMAs (meaningless there), and the
@@ -732,6 +747,21 @@ CREATE TABLE IF NOT EXISTS case_artifacts (
     reported_by TEXT,
     PRIMARY KEY (case_id, kind, location)
 );
+-- The parts the BROKER holds (partstore.py), uploaded by the node that made them:
+-- one row per (case, part), `part` being 'mesh', 'case_<dir>' or 'archive' (the
+-- case's own <case>.tar.gz). The bytes are a file named by `sha256` in the part
+-- store, not a value here: a campaign case is ~8.5 GB of parts. Every row is a
+-- part whose whole content was hashed and matched the hash the node reported.
+CREATE TABLE IF NOT EXISTS case_blobs (
+    case_id     TEXT NOT NULL,
+    part        TEXT NOT NULL,
+    sha256      TEXT NOT NULL,
+    bytes       BIGINT NOT NULL,
+    stored_at   INTEGER NOT NULL,
+    stored_by   TEXT,
+    PRIMARY KEY (case_id, part)
+);
+CREATE INDEX IF NOT EXISTS idx_case_blobs_sha ON case_blobs(sha256);
 """
 
 
@@ -1528,7 +1558,8 @@ def lease(conn, worker_id: str, count: int = 1,
           platform: str | None = None,
           recipes: list[str] | None = None,
           syncthing_id: str | None = None,
-          can_continue: bool | None = None) -> list[Lease]:
+          can_continue: bool | None = None,
+          can_continue_from_broker: bool | None = None) -> list[Lease]:
     """Atomically claim up to ``count`` cases.
 
     ``recipes`` are the exact recipes this worker can produce. When it declares
@@ -1583,6 +1614,15 @@ def lease(conn, worker_id: str, count: int = 1,
     continue_sql = ("" if can_continue is not False else
                     " AND NOT EXISTS (SELECT 1 FROM case_parts p WHERE p.case_id = cases.case_id"
                     " AND p.part = 'mesh')")
+    # A node that can fetch a mesh from the BROKER (it holds the parts, partstore.py)
+    # may continue a case whose mesh the broker holds as reported -- without any
+    # Syncthing master. This is what lets a node run with Syncthing off and still take
+    # its share of continued cases.
+    if can_continue is False and can_continue_from_broker:
+        continue_sql = (" AND (NOT EXISTS (SELECT 1 FROM case_parts p WHERE p.case_id = cases.case_id"
+                        " AND p.part = 'mesh') OR EXISTS (SELECT 1 FROM case_parts p JOIN case_blobs b"
+                        " ON b.case_id = p.case_id AND b.part = 'mesh' AND b.sha256 = p.sha256"
+                        " WHERE p.case_id = cases.case_id AND p.part = 'mesh'))")
 
     def claim(rows, resumed: bool) -> None:
         for row in rows:
@@ -2673,9 +2713,14 @@ def _parts_of(conn, case_id: str) -> list[dict[str, Any]]:
     rows = conn.execute(
         "SELECT part, archive, sha256, bytes, mesh_sha256, verdict, worker_id, reported_at"
         " FROM case_parts WHERE case_id=?", (case_id,)).fetchall()
+    # Which of them the broker itself holds, as reported: a node continuing the case
+    # can then fetch the mesh from the broker rather than wait on the master.
+    held = {(r["part"], r["sha256"]) for r in conn.execute(
+        "SELECT part, sha256 FROM case_blobs WHERE case_id=?", (case_id,)).fetchall()}
     out = []
     for r in rows:
         d = dict(r)
+        d["at_broker"] = (d["part"], (d["sha256"] or "").lower()) in held
         try:
             d["verdict"] = json.loads(d["verdict"]) if d["verdict"] else None
         except (TypeError, ValueError):
@@ -2729,6 +2774,9 @@ def report_part(conn, lease_id: str, case_id: str, part: str, archive: str,
                 gone = conn.execute("SELECT COUNT(*) AS n FROM case_parts WHERE case_id=?",
                                     (case_id,)).fetchone()["n"]
                 conn.execute("DELETE FROM case_parts WHERE case_id=?", (case_id,))
+                # What the broker holds of the old mesh is no longer this case's;
+                # its files go at the next sweep (unreferenced_blobs).
+                conn.execute("DELETE FROM case_blobs WHERE case_id=? AND part != 'archive'", (case_id,))
                 _event(conn, case_id, row["lease_worker"], "parts_reset",
                        "a new mesh; %d part(s) of the old one dropped" % gone, now)
             mesh_sha256 = sha256
@@ -2760,6 +2808,7 @@ def reset_parts(conn, case_id: str, by: str | None = None, now: int | None = Non
         n = conn.execute("SELECT COUNT(*) AS n FROM case_parts WHERE case_id=?",
                          (case_id,)).fetchone()["n"]
         conn.execute("DELETE FROM case_parts WHERE case_id=?", (case_id,))
+        conn.execute("DELETE FROM case_blobs WHERE case_id=? AND part != 'archive'", (case_id,))
         if n:
             _event(conn, case_id, by, "parts_reset", "%d part(s) dropped by an admin" % n, now)
         conn.execute("COMMIT")
@@ -2991,7 +3040,7 @@ def field_counts(conn, case_ids: Iterable[str]) -> dict[str, int]:
 # every count and the reopen/respec rules read.
 
 ARTIFACT_KINDS = ("archive",)
-ARTIFACT_LOCATIONS = ("master",)
+ARTIFACT_LOCATIONS = ("master", "broker")
 # A field is stored at the published pedestrian height; case_fields may hold more.
 _FIELD_HEIGHT_BAND = (1.7, 1.8)
 
@@ -3052,6 +3101,170 @@ def record_receipt(conn, case_id: str, kind: str, location: str, sha256: str,
         raise
     return {"case_id": case_id, "kind": kind, "location": location, "bytes": size, "sha256": sha,
             "path": path, "received_at": now, "reported_by": by}
+
+
+# -- parts the broker holds (partstore.py) -------------------------------------------
+#
+# A node that uploads a part to the broker instead of (or as well as) shipping it to
+# the Syncthing master. The database says what each part should be -- the hash the
+# node reported for it -- and which of them have arrived; the bytes are files in the
+# part store. A case's archive receipt at location "broker" is written the moment
+# the broker holds its archive AND every part the case reported: that is "stored",
+# the same thing the master's scan says for location "master".
+
+BLOB_ARCHIVE = "archive"
+
+
+def blob_part_ok(part: str) -> bool:
+    return part == BLOB_ARCHIVE or bool(PART_NAME.fullmatch(part or ""))
+
+
+@_locked
+def blob_expected(conn, case_id: str, part: str) -> dict[str, Any]:
+    """What the broker expects ``part`` of ``case_id`` to be: ``sha256``, ``bytes``
+    (None when the node did not say) and ``archive`` (its file name). Raises
+    ReceiptRefused: 422 for a part name that is not one, 404 for a case or part the
+    broker has no record of, 409 for a case's archive before the case is done.
+
+    Only a part the node REPORTED can be uploaded, and only as the bytes it
+    reported: the upload is checked against this hash, so the store never holds
+    anything the broker did not already know the content of."""
+    if not blob_part_ok(part):
+        raise ReceiptRefused(422, "part must be 'mesh', 'case_<dir>' or 'archive'")
+    if part == BLOB_ARCHIVE:
+        row = conn.execute("SELECT state, result_sha256, result_bytes FROM cases WHERE case_id=?",
+                           (case_id,)).fetchone()
+        if row is None:
+            raise ReceiptRefused(404, "no such case")
+        if row["state"] != "done":
+            raise ReceiptRefused(409, f"the case is {row['state']}, not done: it has no archive yet")
+        sha = (row["result_sha256"] or "").strip().lower()
+        if not _SHA256.fullmatch(sha):
+            raise ReceiptRefused(409, "the node reported no sha256 for this case's archive")
+        size = row["result_bytes"]
+        return {"sha256": sha, "bytes": int(size) if size is not None else None,
+                "archive": f"{case_id}.tar.gz"}
+    row = conn.execute("SELECT archive, sha256, bytes FROM case_parts WHERE case_id=? AND part=?",
+                       (case_id, part)).fetchone()
+    if row is None:
+        raise ReceiptRefused(404, f"the case has no part {part!r} on record: report it first (POST /v1/parts)")
+    return {"sha256": row["sha256"].lower(), "bytes": int(row["bytes"]) if row["bytes"] is not None else None,
+            "archive": row["archive"]}
+
+
+@_locked
+def record_blob(conn, case_id: str, part: str, sha256: str, size: int, by: str | None = None,
+                now: int | None = None) -> dict[str, Any]:
+    """The broker now holds ``part`` of ``case_id`` (the part store hashed it). Checked
+    again against what is expected, because the case may have moved on while the
+    bytes travelled -- a new mesh, a reset: then the part is not recorded (409), and
+    its file is left for the sweep. Returns ``{"stored": True, "complete": bool}``,
+    ``complete`` meaning this made the case's archive receipt at "broker"."""
+    sha = (sha256 or "").lower()
+    want = blob_expected(conn, case_id, part)
+    if want["sha256"] != sha:
+        raise ReceiptRefused(409, f"the case's {part} is now {want['sha256']}, not {sha}")
+    now = now or _now()
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        conn.execute(
+            "INSERT INTO case_blobs(case_id, part, sha256, bytes, stored_at, stored_by) VALUES (?,?,?,?,?,?)"
+            " ON CONFLICT(case_id, part) DO UPDATE SET sha256=excluded.sha256, bytes=excluded.bytes,"
+            " stored_at=excluded.stored_at, stored_by=excluded.stored_by",
+            (case_id, part, sha, int(size), now, by))
+        _event(conn, case_id, None, "stored", "%s at the broker, %d bytes" % (part, size), now)
+        complete = _blob_receipt(conn, case_id, by, now)
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    return {"stored": True, "complete": complete}
+
+
+def _blob_receipt(conn, case_id: str, by: str | None, now: int) -> bool:
+    """Write the archive receipt at "broker" when the broker holds the case's archive
+    and every part the case reported, each as reported. Inside the caller's
+    transaction. Returns whether it did."""
+    held = {r["part"]: r for r in conn.execute(
+        "SELECT part, sha256, bytes FROM case_blobs WHERE case_id=?", (case_id,)).fetchall()}
+    archive = held.get(BLOB_ARCHIVE)
+    if archive is None:
+        return False
+    case = conn.execute("SELECT state, result_sha256 FROM cases WHERE case_id=?", (case_id,)).fetchone()
+    if case is None or case["state"] != "done" or (case["result_sha256"] or "").lower() != archive["sha256"]:
+        return False
+    for p in conn.execute("SELECT part, sha256 FROM case_parts WHERE case_id=?", (case_id,)).fetchall():
+        have = held.get(p["part"])
+        if have is None or have["sha256"] != p["sha256"].lower():
+            return False
+    total = sum(int(r["bytes"]) for r in held.values())
+    conn.execute(
+        "INSERT INTO case_artifacts(case_id, kind, location, bytes, sha256, path, received_at, reported_by)"
+        " VALUES (?,?,?,?,?,?,?,?)"
+        " ON CONFLICT(case_id, kind, location) DO UPDATE SET bytes=excluded.bytes,"
+        " sha256=excluded.sha256, path=excluded.path, received_at=excluded.received_at,"
+        " reported_by=excluded.reported_by",
+        (case_id, "archive", "broker", total, archive["sha256"], "parts:%d" % len(held), now, by))
+    _event(conn, case_id, None, "received", "archive at broker, %d part(s), %d bytes" % (len(held), total), now)
+    return True
+
+
+@_locked
+def case_blobs(conn, case_id: str) -> list[dict[str, Any]]:
+    """What of a case the broker holds, the mesh first, the archive last."""
+    rows = [dict(r) for r in conn.execute(
+        "SELECT part, sha256, bytes, stored_at, stored_by FROM case_blobs WHERE case_id=?",
+        (case_id,)).fetchall()]
+    return sorted(rows, key=lambda r: (r["part"] == BLOB_ARCHIVE, r["part"] != "mesh", r["part"]))
+
+
+@_locked
+def blob_of(conn, case_id: str, part: str) -> dict[str, Any] | None:
+    row = conn.execute("SELECT part, sha256, bytes, stored_at FROM case_blobs WHERE case_id=? AND part=?",
+                       (case_id, part)).fetchone()
+    return dict(row) if row else None
+
+
+@_locked
+def drop_blob(conn, case_id: str, part: str, by: str | None = None, now: int | None = None) -> dict[str, Any] | None:
+    """Forget that the broker holds ``part`` of ``case_id`` (and the case's broker
+    receipt, which no longer holds). Returns the row and whether any other row still
+    refers to the same content, so the caller deletes the file only when none does."""
+    now = now or _now()
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        row = conn.execute("SELECT sha256, bytes FROM case_blobs WHERE case_id=? AND part=?",
+                           (case_id, part)).fetchone()
+        if row is None:
+            conn.execute("ROLLBACK")
+            return None
+        conn.execute("DELETE FROM case_blobs WHERE case_id=? AND part=?", (case_id, part))
+        conn.execute("DELETE FROM case_artifacts WHERE case_id=? AND kind='archive' AND location='broker'",
+                     (case_id,))
+        others = conn.execute("SELECT COUNT(*) AS n FROM case_blobs WHERE sha256=?",
+                              (row["sha256"],)).fetchone()["n"]
+        _event(conn, case_id, by, "dropped", "%s at the broker" % part, now)
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    return {"sha256": row["sha256"], "bytes": int(row["bytes"]), "still_referenced": int(others) > 0}
+
+
+@_locked
+def referenced_blobs(conn) -> set[str]:
+    """Every content hash some case's row refers to: what a sweep must keep."""
+    return {r["sha256"] for r in conn.execute("SELECT DISTINCT sha256 FROM case_blobs").fetchall()}
+
+
+@_locked
+def blob_totals(conn) -> dict[str, Any]:
+    row = conn.execute("SELECT COUNT(*) AS n, COALESCE(SUM(bytes), 0) AS b, COUNT(DISTINCT case_id) AS c"
+                       " FROM case_blobs").fetchone()
+    complete = conn.execute("SELECT COUNT(*) AS n FROM case_artifacts WHERE kind='archive' AND location='broker'"
+                            ).fetchone()["n"]
+    return {"parts": int(row["n"]), "bytes": int(row["b"]), "cases": int(row["c"]),
+            "cases_complete": int(complete)}
 
 
 @_locked

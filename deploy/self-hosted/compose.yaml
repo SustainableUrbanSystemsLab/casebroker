@@ -69,5 +69,19 @@ services:
       # dashboard's storage page.
       CASEBROKER_DB_QUOTA_MB: ${CASEBROKER_DB_QUOTA_MB:-}
       TZ: America/New_York
+      # The part store: nodes upload each part of a case here (docs/protocol.md,
+      # "Parts the broker holds"). Measured 2026-10-06: a case is ~8.5 GB of parts
+      # (mesh ~185 MB, 32 directions ~260 MB each), so 5,000 cases are ~42 TB --
+      # far past this volume. The limits keep the store from crowding out
+      # everything else on the server; past them a node is told 507 and keeps
+      # shipping to the Syncthing master, as it does today.
+      CASEBROKER_PARTS_DIR: /parts
+      CASEBROKER_PARTS_MAX_GB: ${CASEBROKER_PARTS_MAX_GB:-1500}
+      CASEBROKER_PARTS_RESERVE_GB: ${CASEBROKER_PARTS_RESERVE_GB:-500}
+      # Which kinds to keep: mesh, direction, archive. Meshes and archives of every
+      # case fit in ~1 TB; the directions are what does not.
+      CASEBROKER_PARTS_KEEP: ${CASEBROKER_PARTS_KEEP:-mesh,direction,archive}
+    volumes:
+      - /srv/casebroker-parts:/parts
     ports:
       - "127.0.0.1:8010:8000"
