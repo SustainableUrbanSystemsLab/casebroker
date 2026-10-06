@@ -8,6 +8,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.27.3] - 2026-10-06
+
+### Changed
+- **The dashboard loads from Cloudflare's edge.** The app splits `dashboard.html` when it first
+  serves it: the script and style become `/assets/dashboard.<sha>.js` and `.css`, named by their
+  content and served `immutable` for a year, and the page that remains is ~44 KB. Measured
+  against the NAS deployment, every load had moved all 461,050 bytes from the NAS to Cloudflare
+  uncompressed, and none of it could be cached. The file in the repository is still one file.
+- **The app compresses its own responses**: the dashboard shell and assets precompressed, JSON
+  and GeoJSON through gzip level 6. Field blobs (float32, which gzip takes only to 87%) are left
+  alone.
+- **Revalidation works through Cloudflare.** The shell carries a weak ETag, which is what
+  survives Cloudflare, and also answers `If-Modified-Since`, the validator Cloudflare was seen to
+  pass through. `Last-Modified` is when the running process built the page, so a rollback to an
+  older file cannot be answered "not modified".
+
 ## [0.27.2] - 2026-10-05
 
 ### Changed

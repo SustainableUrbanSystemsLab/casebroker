@@ -18,6 +18,7 @@ import threading
 import time
 
 import pytest
+from dashboard_page import served_page
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
@@ -306,7 +307,7 @@ def test_dashboard_token_field_is_discoverable_as_a_password_field(broker):
     submit control -- a bare input, even one typed "password", is frequently
     not enough on its own. Pinned so a future edit cannot silently drop the
     <form> wrapper or the autocomplete hint and lose that behaviour."""
-    html = broker.get("/", headers={"Authorization": ""}).text
+    html = served_page(broker, headers={"Authorization": ""})
     assert '<form id="connectForm"' in html
     assert 'id="token"' in html and 'type="password"' in html
     assert 'autocomplete="current-password"' in html
@@ -322,7 +323,7 @@ def test_dashboard_token_field_is_discoverable_as_a_password_field(broker):
 def test_dashboard_auto_refresh_defaults_to_checked(broker):
     """auto-refresh must be ON out of the box, not something a first-time
     visitor has to notice and enable."""
-    html = broker.get("/", headers={"Authorization": ""}).text
+    html = served_page(broker, headers={"Authorization": ""})
     i = html.index('id="autoRefresh"')
     tag = html[html.rindex("<", 0, i):html.index(">", i) + 1]
     assert "checked" in tag
@@ -333,7 +334,7 @@ def test_dashboard_serves_a_case_browser(broker):
     """The click-through case list this dashboard exists to provide: a table
     of cases plus the id-lookup fallback, both wired to real element ids the
     script binds event listeners to."""
-    html = broker.get("/", headers={"Authorization": ""}).text
+    html = served_page(broker, headers={"Authorization": ""})
     for needed in ('id="casesTable"', 'id="casesBody"', 'id="caseState"',
                   'id="casesPrev"', 'id="casesNext"', 'id="caseId"', 'id="lookup"'):
         assert needed in html, needed
@@ -344,7 +345,7 @@ def test_dashboard_notification_toggle_is_present_and_off_by_default(broker):
     a user gesture, and a dashboard that asked on load would be denied by default
     in every modern browser AND be obnoxious. So the checkbox must exist, must be
     unchecked, and the request must hang off its change event."""
-    html = broker.get("/", headers={"Authorization": ""}).text
+    html = served_page(broker, headers={"Authorization": ""})
     i = html.index('id="notifyDone"')
     tag = html[html.rindex("<", 0, i):html.index(">", i) + 1]
     assert "checked" not in tag, "notifications must be opt-in, not on by default"
@@ -360,7 +361,7 @@ def test_dashboard_notifier_baselines_before_it_announces_anything(broker):
     enabling only records what is already done; only what finishes AFTER that is
     news -- so the enable path must reset the baseline to null, and the poll must
     return early when it is."""
-    html = broker.get("/", headers={"Authorization": ""}).text
+    html = served_page(broker, headers={"Authorization": ""})
     assert "notifySeen = null" in html
     assert "if (notifySeen === null)" in html
 
@@ -449,7 +450,7 @@ def test_dashboard_serves_a_shareable_readonly_deep_link(broker):
     test process to actually load the page and click through it. The actual
     read-only ENFORCEMENT is server-side (see test_readonly_token_can_read_but_not_write);
     this only checks that the page can consume the link that feature exists for."""
-    html = broker.get("/", headers={"Authorization": ""}).text
+    html = served_page(broker, headers={"Authorization": ""})
     assert 'id="roBanner"' in html
     assert "URLSearchParams(location.search)" in html
     assert 'urlParams.get("token")' in html
@@ -468,7 +469,7 @@ def test_dashboard_has_a_favicon(broker):
     """A bookmarked/shared dashboard tab is otherwise indistinguishable from
     every other blank-icon browser tab -- pinned so a future edit to <head>
     cannot silently drop it."""
-    html = broker.get("/", headers={"Authorization": ""}).text
+    html = served_page(broker, headers={"Authorization": ""})
     head = html[:html.index("</head>")]
     assert 'rel="icon"' in head
 
@@ -748,7 +749,7 @@ def test_dashboard_offers_login_rather_than_only_a_token_box(broker):
     and the token that could read it was the same worker-grade secret that can
     delete the campaign. The login panel has to actually be in the page, wired
     to the endpoints, or the UI silently falls back to that."""
-    html = broker.get("/", headers={"Authorization": ""}).text
+    html = served_page(broker, headers={"Authorization": ""})
     for needed in ('id="authPanel"', 'id="authForm"', 'id="authUsername"',
                    'id="authPassword"', 'id="logoutBtn"'):
         assert needed in html, needed
@@ -762,7 +763,7 @@ def test_dashboard_offers_login_rather_than_only_a_token_box(broker):
 def test_dashboard_lets_an_admin_manage_accounts(broker):
     """Adding a colleague used to need shell access to a box holding the DSN --
     which is a large part of why every account ended up an admin."""
-    html = broker.get("/", headers={"Authorization": ""}).text
+    html = served_page(broker, headers={"Authorization": ""})
     for needed in ('id="users"', 'id="newUsername"', 'id="newUserPassword"',
                    'id="newUserRole"', 'id="addUserBtn"', 'id="userList"'):
         assert needed in html, needed
@@ -783,7 +784,7 @@ def test_dashboard_lets_an_admin_manage_accounts(broker):
 def test_the_dashboard_sends_cookies_on_its_auth_calls(broker):
     """A session cookie that the fetch() calls do not carry is a login that
     appears to work and then does nothing."""
-    html = broker.get("/", headers={"Authorization": ""}).text
+    html = served_page(broker, headers={"Authorization": ""})
     auth_calls = [ln for ln in html.splitlines() if "/v1/auth/login" in ln or "/v1/workers/tokens" in ln]
     assert auth_calls, "expected the dashboard to call the auth endpoints"
     assert 'credentials: "include"' in html
