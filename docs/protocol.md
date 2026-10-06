@@ -185,7 +185,7 @@ kinds the node sends:
 
 | Kind | When | `data` |
 | --- | --- | --- |
-| `site` | once the site geometry is built (a resumed case: from the site report on disk) | `urban_form` (the flat indices of the completion metrics: `bcr`, `bht_m`, `bdr_m`, `vr_ring`, `vr_exposed`, `ar`, `open_space_width_m`, `bht_sigma_m`, `rar`, `svf`, `svf_dome` -- whichever exist), `n_buildings`, `terrain_relief_m`, `canopy_fraction`, `dem` |
+| `site` | once the site geometry is built (a resumed case: from the site report on disk) | `urban_form` (the flat indices of the completion metrics: `bcr`, `bht_m`, `bdr_m`, `vr_ring`, `vr_exposed`, `ar`, `open_space_width_m`, `bht_sigma_m`, `rar`, `svf`, `svf_dome`, `lambda_f_min`, `lambda_f_max` -- whichever exist -- and one table, `lambda_f_by_direction`, below), `n_buildings`, `terrain_relief_m`, `canopy_fraction`, `dem` |
 | `mesh` | once the mesh verdict is in, fresh and resumed | `meshes` (per mesh: `ok`, `failed_checks`, `negative_volume_cells`, `max_skewness`, `max_non_orthogonality`, `cells`), `total_cells`, `all_ok`, `mesh_seconds` (null on resume), `ranks`, `cells_per_rank`, `engine`, `build`, `recipe`, `directions` |
 | `solve` | from the solve watcher, only on change and at most every 300 s, plus once per finished direction | `directions_total`, `directions_done`, `current`, `iteration`, `end_time`, `residuals`, `finished` (per direction: `iterations`, `status`) |
 
@@ -201,10 +201,22 @@ to overflow the statistics. Where the values come from:
 
 | Group | Metrics | Source |
 | --- | --- | --- |
-| urban | the eleven `urban_form` indices | `telemetry.site.urban_form`, else the completion metrics' `urban_form` |
+| urban | the thirteen `urban_form` indices | `telemetry.site.urban_form`, else the completion metrics' `urban_form` |
 | site | `n_buildings`, `terrain_relief_m`, `canopy_fraction` | `telemetry.site` |
 | mesh | `total_cells`, `max_skewness`, `max_non_orthogonality` | `telemetry.mesh` (the worst mesh of the case), else `mesh_cells` for `total_cells` |
 | run | `case_seconds`, `mesh_seconds`, `solve_seconds` | the completion metrics, `done` cases only |
+
+**The frontal area index is per wind direction.** `urban_form.lambda_f_by_direction`
+is λf -- the façade a wind meets, projected across it, per unit of the core's plan
+area -- keyed like the node's `z0_by_direction`: wind FROM, `"000"`, `"011.25"`, …
+(Eddy3D `docs/DOMAIN_MODEL.md`, "Urban form indices"). A table is not one number per
+case, so the dataset ranks its extremes, `lambda_f_min` and `lambda_f_max`, and not
+its mean, which is `vr_exposed`/π and already a column. The values themselves go
+where the per-direction results are: every field record (`GET /v1/cases/{id}`'s
+`fields`, and `GET /v1/cases/{id}/fields`) carries `lambda_f`, the value at the
+angle that field was solved for (`deg`), matched by angle and never by the nearest
+bearing; `null` where the site report has none for it (a site built before the node
+computed it), never 0, which is a site with no buildings.
 
 A case's `percentiles` are ranked against the same cached aggregate, exactly
 (from its sorted values): the share of cases below plus half the share equal,

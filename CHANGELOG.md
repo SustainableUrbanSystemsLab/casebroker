@@ -8,6 +8,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.29.0] - 2026-10-06
+
+### Added
+- **The frontal area index, per wind direction.** Eddy3D nodes now report λf -- the façade
+  a wind meets, projected across it, per unit of the core's plan area (Raupach 1992;
+  Grimmond & Oke 1999) -- for each of the 32 bearings of `z0_by_direction`, in the site
+  telemetry and the completion metrics (`urban_form.lambda_f_by_direction`). The pedestrian
+  fields are solved per direction, and until now every urban column was the same for all
+  of them. Every field record (`GET /v1/cases/{id}` and `GET /v1/cases/{id}/fields`)
+  carries `lambda_f` for the direction it was solved for, matched by angle, `null` where
+  the site report has none; the wind-field viewer shows it beside U_ref. `/v1/dataset` and a
+  case's `percentiles` rank the extremes, `lambda_f_min` and `lambda_f_max` -- not the mean
+  over directions, which is `vr_exposed`/π and already a column. Cases built before the
+  node computed it have none; only re-fetching their buildings can give it them.
+
 ## [0.28.5] - 2026-10-06
 
 ### Fixed

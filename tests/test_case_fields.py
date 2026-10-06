@@ -21,7 +21,7 @@ from fastapi.testclient import TestClient
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
-from casebroker import db  # noqa: E402
+from casebroker import dataset, db  # noqa: E402
 from casebroker.app import create_app  # noqa: E402
 
 V4 = "cyl-1008/of12-v4"
@@ -232,6 +232,66 @@ def test_a_field_stored_gzip_wrapped_before_is_still_served_as_it_is(conn, tmp_p
     conn.execute("UPDATE case_fields SET blob = ?, bytes = ? WHERE case_id = ?", (old, len(old), CASE))
     got = db.case_field(conn, CASE, "case_000")
     assert got["blob"] == old and got["blob"][:2] == b"\x1f\x8b"
+
+
+# -- the frontal area index of each field's direction ---------------------------------
+
+# The node's urban_form.lambda_f_by_direction, keyed like z0_by_direction (wind FROM).
+LAMBDA_F = {"000": 0.24, "011.25": 0.25, "045": 0.31, "090": 0.21, "180": 0.24, "225": 0.31}
+
+
+def _put(client, case_id, lease_id, name, deg):
+    r = client.put(f"/v1/cases/{case_id}/fields/{name}", params={"lease_id": lease_id},
+                   content=umag(VALUES, direction=name, case_id=case_id, deg=deg),
+                   headers={**W, "Content-Type": "application/octet-stream"})
+    assert r.status_code == 200, r.text
+
+
+def _site(client, case_id, lease_id, urban_form):
+    r = client.post("/v1/telemetry", json={"lease_id": lease_id, "case_id": case_id, "kind": "site",
+                                           "data": {"urban_form": urban_form}}, headers=W)
+    assert r.status_code == 200, r.text
+
+
+def test_each_field_carries_the_frontal_area_index_of_its_own_direction(client):
+    """The one urban column that depends on the wind direction, hung on the field
+    solved for that direction -- matched by ANGLE ("045" is 45.0), never by the
+    field's name, and never the nearest bearing: 30 degrees is no key here, and
+    its neighbours' values would answer a different wind."""
+    client, case_id, lease_id = client
+    _site(client, case_id, lease_id, {"lambda_f_min": 0.21, "lambda_f_max": 0.31, "lambda_f_by_direction": LAMBDA_F})
+    for name, deg in (("case_045", 45.0), ("case_090", 90.0), ("case_030", 30.0)):
+        _put(client, case_id, lease_id, name, deg)
+
+    for fields in (client.get(f"/v1/cases/{case_id}", headers=R).json()["fields"],
+                   client.get(f"/v1/cases/{case_id}/fields", headers=R).json()["fields"]):
+        assert {f["direction"]: f["lambda_f"] for f in fields} == {"case_030": None, "case_045": 0.31, "case_090": 0.21}
+
+
+def test_a_site_reported_before_the_frontal_area_existed_leaves_its_fields_without_one(client):
+    """Null, not zero: zero is a site with no buildings."""
+    client, case_id, lease_id = client
+    _site(client, case_id, lease_id, {"bcr": 0.3})
+    _put(client, case_id, lease_id, "case_000", 0.0)
+    fields = client.get(f"/v1/cases/{case_id}/fields", headers=R).json()["fields"]
+    assert [f["lambda_f"] for f in fields] == [None]
+    assert client.get("/v1/cases/v2-nonesuch/fields", headers=R).json() == {"case_id": "v2-nonesuch", "fields": []}
+
+
+def test_the_frontal_area_table_is_read_like_every_urban_column():
+    """Telemetry first, the completion metrics second; a key that is no bearing or
+    a value that is no number is dropped, not fatal; bearings wrap."""
+    tel = {"site": {"urban_form": {"lambda_f_by_direction": {"045": 0.3}}}}
+    met = {"urban_form": {"lambda_f_by_direction": {"045": 0.9, "090": 0.8}}}
+    assert dataset.lambda_f_by_direction(tel, met) == {45.0: 0.3}
+    assert dataset.lambda_f_by_direction({}, met) == {45.0: 0.9, 90.0: 0.8}
+    assert dataset.lambda_f_by_direction({"site": "garbage"}, {"urban_form": []}) == {}
+    odd = {"x": 1.0, "nan": 0.5, "090": "0.2", "180": True, "270": 0.1}
+    assert dataset.lambda_f_by_direction({"site": {"urban_form": {"lambda_f_by_direction": odd}}}, {}) == {270.0: 0.1}
+    assert dataset.lambda_f_at({0.0: 0.4}, 360.0) == 0.4
+    assert dataset.lambda_f_at({348.75: 0.4}, -11.25) == 0.4
+    assert dataset.lambda_f_at({45.0: 0.4}, None) is None
+    assert dataset.lambda_f_at({}, 45.0) is None
 
 
 def test_the_dashboard_reads_both_forms():

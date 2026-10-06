@@ -3229,7 +3229,7 @@
     const f0 = list[0];
     const vmax = Math.max(1e-3, ...list.map((f) => f.umag_p999 || 0));
     const dirs = list.map((f) => ({ deg: f.deg ?? 0, case: f.direction, u_ref: f.u_ref, uref: null, zref: null, z0: null,
-                                    mag: null, vec: null, exact: null, bytes: f.bytes }));
+                                    lambda_f: f.lambda_f ?? null, mag: null, vec: null, exact: null, bytes: f.bytes }));
     const h = { format: "umag/1", case_id: id, nx: f0.nx, ny: f0.ny, x0: f0.x0, y0: f0.y0, spacing_m: f0.spacing_m,
                 height_m: f0.height_m, vmax, nodata: 255, vector: null, source: "broker",
                 directions: dirs.map((d) => ({ deg: d.deg, case: d.case })),
@@ -3429,6 +3429,8 @@
                north up, the 1008 m sampled core</div>
           <div>U<sub>ref</sub> ${d.u_ref ? `${d.u_ref.toFixed(2)} m/s` : "—"}
                <span style="color:var(--text-muted)">(inlet ${d.uref ?? "?"} m/s at ${d.zref ?? "?"} m, z₀ ${d.z0 ?? "?"} m)</span></div>
+          ${Number.isFinite(d.lambda_f) ? `<div title="the façade this wind meets, projected across it, per unit of the core's plan area">λ<sub>f</sub> ${d.lambda_f.toFixed(3)}
+               <span style="color:var(--text-muted)">(frontal area index, this direction)</span></div>` : ""}
           ${cov != null ? `<div>${(cov * 100).toFixed(1)}% of the core is air here; blank is inside a building</div>` : ""}
           ${(() => {
             // A defect of the SOLVE this sample exposed: mesh under the terrain
@@ -5447,6 +5449,8 @@
     rar: ["Road area ratio", null, "urban"],
     svf: ["Sky view factor (cosine-weighted)", null, "urban"],
     svf_dome: ["Sky view factor (unweighted dome)", null, "urban"],
+    lambda_f_min: ["Frontal area index (most open direction)", null, "urban"],
+    lambda_f_max: ["Frontal area index (most blocked direction)", null, "urban"],
     n_buildings: ["Buildings", null, "site"],
     terrain_relief_m: ["Terrain relief", "m", "site"],
     canopy_fraction: ["Tree canopy fraction", null, "site"],
