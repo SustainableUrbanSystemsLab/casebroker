@@ -35,6 +35,27 @@ proxy :443 ─► `127.0.0.1:8010` ─► broker ─► `postgres:5432`.
    `https://<broker-host>`. Until it is set, `deploy-check` is
    skipped.
 
+## Speed: what the app does, and the Cloudflare settings around it
+
+Measured 2026-10-06: the app answers in ~2 ms and the host's TLS handshake costs ~67 ms;
+everything else was transfer. The app now serves the dashboard as a ~44 KB shell
+plus content-named `/assets/dashboard.<sha>.{js,css}` (`immutable`, one year),
+gzips HTML and JSON itself, and answers `If-None-Match` and `If-Modified-Since`
+with 304. What is left is configuration, in the broker's DNS zone:
+
+- **Caching ▸ Configuration ▸ Browser Cache TTL: Respect Existing Headers.** The
+  assets say a year, the shell says `no-cache`, the API says nothing.
+- **Caching ▸ Tiered Cache ▸ Smart Tiered Caching: on** (free). One upper tier
+  fetches from the server, so an asset crosses to the origin once, not once per edge.
+- **Speed ▸ Optimization: HTTP/3 and 0-RTT on**; **Rocket Loader off** (it rewrites
+  the dashboard's script tags).
+- **Never "Cache Everything"** for this hostname: `/v1/*` answers depend on who is
+  asking. JSON is not cached by default, which is what keeps it safe.
+- Optional, paid: **Argo Smart Routing** shortens the long origin
+  leg for the uncacheable API calls.
+- On the server: an **ECDSA** certificate (`acme.sh --keylength ec-256`) makes the host's
+  TLS handshake far cheaper on its CPU than the RSA 2048 one it has now.
+
 ## Moving the campaign off Supabase
 
 Workers hold leases, so do this in a quiet window.
