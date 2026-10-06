@@ -145,24 +145,88 @@ def test_the_dashboard_answers_a_conditional_request_with_304(tmp_path):
     assert stale.status_code == 200
 
 
-def test_a_weak_etag_still_matches(tmp_path):
-    """Cloudflare gzips the dashboard and rewrites the strong ETag into a weak
-    one, so the browser sends back `W/"..."` for an entity tagged `"..."`. An
-    exact comparison refuses every one of those -- a 304 path that passes every
-    test against the app and can never fire in production. Measured after
-    deploying exactly that: HTTP 200 and 212,087 bytes for a request carrying
-    the server's own tag back.
-
-    RFC 7232 specifies weak comparison for If-None-Match, which is also the
-    right question for a cache revalidation."""
+def test_the_etag_matches_in_either_form(tmp_path):
+    """The page's tag is WEAK (the gzipped and the plain shell are two
+    representations of one page), and it must match however a cache hands it
+    back: as sent, without its `W/` (a cache that normalised it), or in a list.
+    Cloudflare once rewrote a strong tag into a weak one, and an exact
+    comparison then refused every revalidation -- HTTP 200 and 212,087 bytes for
+    a request carrying the server's own tag back. RFC 7232 specifies weak
+    comparison for If-None-Match, which is also the right question here."""
     client = _seeded_client(tmp_path)
     etag = client.get("/").headers["etag"]
+    assert etag.startswith('W/"'), etag
+    strong_form = etag[2:]
 
-    assert client.get("/", headers={"If-None-Match": f"W/{etag}"}).status_code == 304
     assert client.get("/", headers={"If-None-Match": etag}).status_code == 304
+    assert client.get("/", headers={"If-None-Match": strong_form}).status_code == 304
     # A list, as a browser with several cached representations sends.
-    assert client.get("/", headers={"If-None-Match": f'"other", W/{etag}'}).status_code == 304
+    assert client.get("/", headers={"If-None-Match": f'"other", {etag}'}).status_code == 304
     assert client.get("/", headers={"If-None-Match": "*"}).status_code == 304
     # And it still says no to a tag that is not ours.
     assert client.get("/", headers={"If-None-Match": 'W/"nope-0"'}).status_code == 200
+
+
+def test_last_modified_revalidates_too(tmp_path):
+    """Measured against the NAS deployment, Cloudflare passed the page's
+    Last-Modified to the browser and not its ETag, so If-Modified-Since is the
+    validator that actually comes back. It is when this PROCESS built the page,
+    not the file's mtime: after a rollback to an older file, an mtime would tell
+    a browser holding the newer page that it is current."""
+    import email.utils
+
+    client = _seeded_client(tmp_path)
+    first = client.get("/")
+    lm = first.headers["last-modified"]
+    assert client.get("/", headers={"If-Modified-Since": lm}).status_code == 304
+    older = email.utils.formatdate(email.utils.parsedate_to_datetime(lm).timestamp() - 3600, usegmt=True)
+    assert client.get("/", headers={"If-Modified-Since": older}).status_code == 200
+    assert client.get("/", headers={"If-Modified-Since": "not a date"}).status_code == 200
+    # When both are sent, If-None-Match decides (RFC 7232 section 6).
+    assert client.get("/", headers={"If-None-Match": 'W/"nope-0"', "If-Modified-Since": lm}).status_code == 200
+
+
+def test_the_script_and_style_are_content_named_and_immutable(tmp_path):
+    """417 KB of the page is script and style that change only with a deploy.
+    Served inside the HTML, none of it could be cached: every load crossed from
+    the NAS, uncompressed, to Cloudflare. As files named by their content they
+    are cacheable for a year -- at Cloudflare's edge (which caches .js and .css
+    by extension) and in the browser -- and the shell that names them stays
+    small enough that revalidating it costs nothing."""
+    import hashlib
+    import re
+
+    client = _seeded_client(tmp_path)
+    shell = client.get("/")
+    names = re.findall(r'"/assets/(dashboard\.([0-9a-f]{12})\.(css|js))"', shell.text)
+    assert {ext for _, _, ext in names} == {"css", "js"}, names
+    assert len(shell.content) < 64 * 1024, f"the shell is {len(shell.content)} bytes: is the script inline again?"
+    for name, digest, ext in names:
+        r = client.get(f"/assets/{name}")
+        assert r.status_code == 200
+        assert r.headers["cache-control"] == "public, max-age=31536000, immutable"
+        assert r.headers["content-type"].startswith("text/css" if ext == "css" else "text/javascript")
+        # The name IS the content: the property that makes `immutable` true.
+        assert hashlib.sha256(r.content).hexdigest()[:12] == digest
+    assert client.get("/assets/dashboard.000000000000.js").status_code == 404
+    assert client.get("/assets/..%2Fapp.py").status_code == 404
+
+
+def test_the_page_and_the_api_go_out_compressed(tmp_path):
+    """Nothing the app sent was compressed: Cloudflare took the full 461 KB page
+    from the NAS on every load. A field blob stays as it is -- float32, which
+    gzip barely shrinks -- rather than spending the NAS's CPU on it."""
+    client = _seeded_client(tmp_path)
+    gz = {"Accept-Encoding": "gzip"}
+    page = client.get("/", headers=gz)
+    assert page.headers.get("content-encoding") == "gzip"
+    assert "accept-encoding" in page.headers.get("vary", "").lower()
+    assert "<title>E3D Simulation Broker</title>" in page.text   # decoded by the client
+    plain = client.get("/", headers={"Accept-Encoding": "identity"})
+    assert "content-encoding" not in plain.headers
+    assert plain.text == page.text
+
+    cases = client.get("/v1/cases?limit=50", headers=gz)
+    assert cases.status_code == 200
+    assert cases.headers.get("content-encoding") == "gzip"
 
