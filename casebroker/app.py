@@ -2112,7 +2112,10 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         if _if_none_match(request.headers.get("if-none-match"), etag):
             return Response(status_code=304, headers=headers)
         name = f"{case_id}.tar.gz" if part == db.BLOB_ARCHIVE else f"{case_id}.{part}.tar.gz"
-        return FileResponse(path, media_type="application/gzip", filename=name, headers=headers)
+        # Imported here: the dashboard no longer uses FileResponse, so the module-level
+        # import may go (perf/dashboard-caching removes it), and this must not go with it.
+        from fastapi.responses import FileResponse as _FileResponse
+        return _FileResponse(path, media_type="application/gzip", filename=name, headers=headers)
 
     @app.get("/v1/cases/{case_id}/blobs", dependencies=[ReadAuth])
     def get_case_blobs(case_id: str) -> dict[str, Any]:
