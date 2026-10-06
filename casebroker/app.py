@@ -21,6 +21,9 @@ See ``docs/operations.md`` for the first-run sequence.
 
 from __future__ import annotations
 
+import email.utils
+import gzip
+import hashlib
 import hmac
 import json
 import contextlib
@@ -36,7 +39,7 @@ from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
-from fastapi.responses import FileResponse
+from starlette.middleware.gzip import DEFAULT_EXCLUDED_CONTENT_TYPES, GZipMiddleware
 from pydantic import BaseModel, Field
 
 from . import __version__, auth, dataset, db, footprints, ids, partstore, places
@@ -485,15 +488,100 @@ def _if_none_match(header: str | None, etag: str) -> bool:
     """
     if not header:
         return False
+    opaque = etag[2:] if etag.startswith(("W/", "w/")) else etag
     for raw in header.split(","):
         candidate = raw.strip()
         if candidate == "*":
             return True
         if candidate.startswith(("W/", "w/")):
             candidate = candidate[2:]
-        if candidate == etag:
+        if candidate == opaque:
             return True
     return False
+
+
+# -- the dashboard, as the browser gets it -----------------------------------
+#
+# dashboard.html is one file on purpose: no build step, and the tests read the
+# SHIPPED JavaScript straight out of it. Served that way it was also the slowest
+# thing about the dashboard. Measured 2026-10-06 against the NAS deployment: the
+# app answers in 2 ms, but every load moved all 461,050 bytes from the NAS to
+# Cloudflare uncompressed (Cloudflare compressed it only on the way out), and
+# none of it could be cached at the edge, so a viewer in Atlanta waited on a
+# round trip to Germany for 417 KB of script and style that change only when
+# the broker is deployed.
+#
+# So the file stays one file, and the app splits it when it first serves it:
+# the <style> and the <script> become /assets/dashboard.<sha>.css and .js,
+# named by their content, and the page that remains is ~44 KB. A name that
+# changes whenever the content does is what makes `immutable` true: a browser
+# and Cloudflare's edge (which caches .css and .js by extension) keep them for a
+# year, and a deploy that changes either one publishes it under a new name. The
+# shell still revalidates on every load -- it is what names the current assets.
+_ASSET_CACHE = "public, max-age=31536000, immutable"
+
+
+class _DashboardBundle:
+    """dashboard.html split into a shell and content-named assets, each kept
+    plain and gzipped. Built once per process: the file only changes with a
+    deploy, which restarts the process."""
+
+    _SPLITS = (
+        ("style", "css", "text/css; charset=utf-8", '<link rel="stylesheet" href="{url}">'),
+        ("script", "js", "text/javascript; charset=utf-8", '<script src="{url}"></script>'),
+    )
+
+    def __init__(self, path: pathlib.Path):
+        html = path.read_text(encoding="utf-8")
+        self.assets: dict[str, tuple[bytes, bytes, str]] = {}
+        for tag, ext, media, link in self._SPLITS:
+            # Only a bare tag, and only when there is exactly one: anything else is
+            # left inline, which is slower but cannot be wrong.
+            blocks = re.findall(rf"<{tag}>(.*?)</{tag}>", html, re.S)
+            if len(blocks) != 1:
+                continue
+            body = blocks[0].encode("utf-8")
+            name = f"dashboard.{hashlib.sha256(body).hexdigest()[:12]}.{ext}"
+            html = html.replace(f"<{tag}>{blocks[0]}</{tag}>", link.format(url=f"/assets/{name}"), 1)
+            self.assets[name] = (body, gzip.compress(body, 9, mtime=0), media)
+        self.shell = html.encode("utf-8")
+        self.shell_gz = gzip.compress(self.shell, 9, mtime=0)
+        # WEAK, because the gzipped and the plain shell are two representations
+        # of one page -- a strong tag on both would claim they are byte-identical.
+        # And weak is what survives Cloudflare: measured against the NAS, the
+        # strong tag this page used to carry did not reach the browser at all.
+        self.etag = 'W/"' + hashlib.sha256(self.shell).hexdigest()[:20] + '"'
+        # When THIS process built the bundle, not the file's mtime. A rollback
+        # deploys an older file; judged by its mtime, a browser holding the newer
+        # shell would be told "not modified" and keep asking for assets that the
+        # older broker no longer has. Content served since this moment is this
+        # bundle, whatever the file says.
+        self.built_at = int(time.time())
+        self.last_modified = email.utils.formatdate(self.built_at, usegmt=True)
+
+    def not_modified(self, request: Request) -> bool:
+        inm = request.headers.get("if-none-match")
+        if inm is not None:
+            return _if_none_match(inm, self.etag)
+        ims = request.headers.get("if-modified-since")
+        if not ims:
+            return False
+        try:
+            when = email.utils.parsedate_to_datetime(ims)
+        except (TypeError, ValueError):
+            return False
+        return when is not None and when.timestamp() >= self.built_at
+
+
+def _accepts_gzip(request: Request) -> bool:
+    return "gzip" in request.headers.get("accept-encoding", "")
+
+
+def _encoded(request: Request, plain: bytes, gz: bytes, headers: dict) -> tuple[bytes, dict]:
+    headers = {**headers, "Vary": "Accept-Encoding"}
+    if _accepts_gzip(request):
+        return gz, {**headers, "Content-Encoding": "gzip"}
+    return plain, headers
 
 
 def create_app(db_path: str | None = None, tokens: list[str] | None = None,
@@ -560,6 +648,13 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
 
     app = FastAPI(title="E3D Simulation Broker", version=__version__,
                   lifespan=_lifespan)
+    # JSON and GeoJSON compress 5-10x and crossed from the NAS to Cloudflare as
+    # they were. A field blob does not: it is float32, which gzip takes to 87%,
+    # so it is left alone rather than paid for on a 4-core Celeron. Level 6, not
+    # Starlette's 9, for the same reason; and a response that set its own
+    # Content-Encoding (the dashboard, precompressed) passes through untouched.
+    app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=6,
+                       exclude_content_types=(*DEFAULT_EXCLUDED_CONTENT_TYPES, "application/octet-stream"))
     conn = db.connect(db_path)
     app.state.db_path = db_path
     # Per app, not per module, for the reason this is a factory at all: a
@@ -958,31 +1053,48 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
                     "detail": "no tokens and no accounts; every caller has full access"}
         return {"scope": "none", "auth": "token"}
 
+    bundle: list[_DashboardBundle] = []
+
+    def _bundle() -> _DashboardBundle:
+        if not bundle:
+            bundle.append(_DashboardBundle(_STATIC_DIR / "dashboard.html"))
+        return bundle[0]
+
     @app.get("/", include_in_schema=False)
     def dashboard(request: Request) -> Response:
         """A minimal ops UI: campaign status, workers, one-case lookup. Vanilla HTML/JS,
         no build step, no external requests other than to this broker's own API.
 
-        The conditional request is answered HERE because `FileResponse` does not:
-        it computes an ETag and sends it, and then ignores the `If-None-Match`
-        the browser sends back, so every load re-downloaded the whole page.
-        Measured against the deployed broker: a request carrying the exact ETag
-        the server had just issued came back `200` with all 203,794 bytes. With
-        this, the same request is a `304` with no body.
+        The conditional request is answered HERE. `FileResponse` computed an ETag
+        and then ignored the `If-None-Match` the browser sent back, so every load
+        re-downloaded the whole page; measured against the deployed broker, a
+        request carrying the exact ETag the server had just issued came back
+        `200` with all 203,794 bytes. Both validators are honoured, because
+        `Last-Modified` is the one Cloudflare was seen to pass through.
 
-        `no-cache` rather than a max-age, deliberately: the page must never be
-        served stale from a cache after a deploy -- it is the thing that talks to
-        this broker's API. `no-cache` means "revalidate every time", which is the
-        round trip above, and the 304 makes that round trip carry no payload."""
-        path = _STATIC_DIR / "dashboard.html"
-        stat = path.stat()
-        # Strong enough for a file served off disk, and cheap: size plus mtime in
-        # nanoseconds changes on every deploy that changes the file.
-        etag = f'"{stat.st_size:x}-{stat.st_mtime_ns:x}"'
-        headers = {"ETag": etag, "Cache-Control": "no-cache"}
-        if _if_none_match(request.headers.get("if-none-match"), etag):
+        `no-cache` rather than a max-age, deliberately: the shell must never be
+        served stale from a cache after a deploy -- it names the current assets,
+        and talks to this broker's API. `no-cache` means "revalidate every time",
+        and the 304 makes that round trip carry no payload."""
+        b = _bundle()
+        headers = {"ETag": b.etag, "Last-Modified": b.last_modified, "Cache-Control": "no-cache"}
+        if b.not_modified(request):
             return Response(status_code=304, headers=headers)
-        return FileResponse(path, headers=headers)
+        body, headers = _encoded(request, b.shell, b.shell_gz, headers)
+        return Response(content=body, media_type="text/html; charset=utf-8", headers=headers)
+
+    @app.get("/assets/{name}", include_in_schema=False)
+    def dashboard_asset(name: str, request: Request) -> Response:
+        """The dashboard's script and style, under names that ARE their content
+        hash: cacheable for a year, at the edge and in the browser, because a
+        changed file is a different name. A name from an earlier deploy is a 404
+        -- the shell that asked for it was itself revalidated away."""
+        asset = _bundle().assets.get(name)
+        if asset is None:
+            raise HTTPException(404, "no such asset")
+        plain, gz, media = asset
+        body, headers = _encoded(request, plain, gz, {"Cache-Control": _ASSET_CACHE})
+        return Response(content=body, media_type=media, headers=headers)
 
 
     # -- identity: who you are, and which machine that is -------------------
@@ -2174,10 +2286,11 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
     async def put_field(case_id: str, direction: str, request: Request,
                         lease_id: str = Query(min_length=1, max_length=128)) -> dict[str, Any]:
         """One direction's pedestrian field, from the node solving the case: the body
-        is a umag/1 blob (gzip of "UMAG" | u32 version | u32 header length | header
-        JSON | float32 LE nx*ny, NaN where there is no fluid), sent as
+        is a umag/1 blob ("UMAG" | u32 version | u32 header length | header JSON |
+        float32 LE nx*ny, NaN where there is no fluid), gzip-wrapped or not, sent as
         application/octet-stream. Its header names the grid and the height; the
-        broker checks the container and stores it verbatim.
+        broker checks the container and stores it UNCOMPRESSED (db.umag_container):
+        gzip saved 13% of a float32 field, and the plain form reads in place.
 
         409 as /v1/parts: not this case's current lease, or not this credential's
         -- the node stops sending fields for this case. 413 for a body past the
@@ -2210,10 +2323,11 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
     @app.get("/v1/cases/{case_id}/fields/{direction}", dependencies=[ReadAuth])
     def get_field(case_id: str, direction: str, request: Request,
                   height_m: float | None = None) -> Response:
-        """One direction's field, as the node sent it: the umag/1 blob, gzip inside
-        (the browser's DecompressionStream reads it; so does `gzip.decompress`).
-        Without height_m, the one nearest 1.75 m. A finished direction's field
-        never changes, so it is served with a strong ETag and a day of cache."""
+        """One direction's field: the umag/1 container, uncompressed -- or, for a row
+        stored before fields were kept that way, gzip-wrapped, which its first two
+        bytes (1f 8b) say. Without height_m, the one nearest 1.75 m. A finished
+        direction's field never changes, so it is served with a strong ETag and a
+        day of cache."""
         row = db.case_field(conn, case_id, direction, height_m)
         if row is None:
             raise HTTPException(404, "no such field")
@@ -2221,7 +2335,7 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         headers = {"ETag": etag, "Cache-Control": "private, max-age=86400",
                    "X-Field-Height-M": repr(float(row["height_m"])),
                    "X-Field-Direction": row["direction"]}
-        if request.headers.get("if-none-match") == etag:
+        if _if_none_match(request.headers.get("if-none-match"), etag):
             return Response(status_code=304, headers=headers)
         return Response(content=row["blob"], media_type="application/octet-stream", headers=headers)
 

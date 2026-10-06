@@ -3189,8 +3189,9 @@
   }
 
   // The umag/1 blob (MetaFOAM.Deploy.PedestrianField.Encode; the broker checked it):
-  // gzip( "UMAG" | u32 version | u32 header length | header JSON | float32 LE nx*ny ),
-  // row 0 = SOUTH, NaN = inside a building.
+  // "UMAG" | u32 version | u32 header length | header JSON | float32 LE nx*ny,
+  // row 0 = SOUTH, NaN = inside a building. The broker stores it uncompressed; a
+  // row stored before that is gzip-wrapped, and the first two bytes say so.
   async function wfDecodeUmag(buf) {
     let bytes = new Uint8Array(buf);
     if (bytes[0] === 0x1f && bytes[1] === 0x8b) {

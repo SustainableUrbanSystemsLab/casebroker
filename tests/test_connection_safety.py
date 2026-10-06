@@ -60,6 +60,7 @@ _ALLOWED_UNLOCKED = {
     "_existing_columns",
     "reconcile_columns",
     "widen_columns",       # ditto: called only from apply_schema
+    "set_column_storage",  # ditto
     "drop_retired_settings",  # ditto
     "apply_schema",
     "schema_version",

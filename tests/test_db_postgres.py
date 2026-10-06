@@ -149,6 +149,7 @@ def cleanup_after_module(preflight):
     conn.execute("DELETE FROM case_blobs WHERE case_id LIKE ?", (like,))
     conn.execute("DELETE FROM case_artifacts WHERE case_id LIKE ?", (like,))
     conn.execute("DELETE FROM case_parts WHERE case_id LIKE ?", (like,))
+    conn.execute("DELETE FROM case_fields WHERE case_id LIKE ?", (like,))
     conn.execute("DELETE FROM cases WHERE case_id LIKE ?", (like,))
     conn.execute("DELETE FROM workers WHERE worker_id LIKE ?", (like,))
     conn.execute("DELETE FROM worker_tokens WHERE name LIKE ?", (like,))
@@ -964,3 +965,39 @@ def test_the_broker_records_the_parts_it_holds_and_the_receipt_they_make():
     dropped = db.drop_blob(conn, case_id, "mesh", by="ada")
     assert dropped == {"sha256": mesh, "bytes": 10, "still_referenced": False}
     assert not [r for r in db.case_receipts(conn, case_id) if r["location"] == "broker"]
+# -- the pedestrian field, kept uncompressed ---------------------------------
+
+def test_a_field_blob_is_stored_uncompressed_and_a_cell_reads_in_place():
+    """case_fields.blob is STORAGE EXTERNAL: out of line and never compressed
+    (float32 does not compress; trying costs CPU on every write), and what that
+    buys is a byte range read straight out of SQL -- one cell of a megabyte
+    field, without fetching or inflating the rest."""
+    import gzip
+    import json
+    import struct
+
+    conn = fresh_conn()
+    storage = conn.execute(
+        "SELECT a.attstorage AS s FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid "
+        "JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = current_schema() "
+        "AND c.relname = 'case_fields' AND a.attname = 'blob'").fetchone()
+    assert storage["s"] == "e", storage
+    assert db.set_column_storage(conn, is_pg=True) == [], "repeated, it changes nothing"
+
+    recipe = prefix("fieldrec")
+    [case_id] = seed(1, "field", recipe=recipe)
+    lease = db.lease(conn, prefix("w-field"), recipes=[recipe])[0]
+    nx, ny = 4, 3
+    header = {"format": "umag/1", "case_id": case_id, "direction": "case_000", "height_m": 1.75,
+              "nx": nx, "ny": ny, "x0": 0.0, "y0": 0.0, "spacing_m": 2.0}
+    hb = json.dumps(header).encode()
+    values = [float(i) / 4 for i in range(nx * ny)]
+    container = b"UMAG" + struct.pack("<II", 1, len(hb)) + hb + struct.pack("<%df" % len(values), *values)
+    assert db.put_field(conn, lease.lease_id, case_id, "case_000", gzip.compress(container)) == "ok"
+
+    k = 7                                              # row 1, column 3
+    cell = conn.execute(
+        "SELECT substring(blob from ? for 4) AS v FROM case_fields WHERE case_id = ?",
+        (12 + len(hb) + 4 * k + 1, case_id)).fetchone()["v"]
+    assert struct.unpack("<f", bytes(cell))[0] == values[k]
+    conn.execute("DELETE FROM case_fields WHERE case_id = ?", (case_id,))
