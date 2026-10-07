@@ -3347,13 +3347,14 @@
 
   function wfCss(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
 
-  // The site's trees over the field: where the Meta/WRI canopy model has crowns of at least
-  // min_canopy_m (2 m), on the /footprints grid the Site Geometry panel draws -- the same 1008 m
-  // core, ~21 m cells. Outlined, not filled: a tint would change the colour the field is read by.
-  // One green with a dark halo, the same in both themes like the field itself, and a hue
-  // neither ramp uses.
-  const WF_TREE = "#3ee08f";
-  const wfOutlines = new WeakMap();   // canopy payload -> its outline segments
+  // The site's trees over the field, in green: where the Meta/WRI canopy model has crowns of at
+  // least min_canopy_m (2 m), on the /footprints grid the Site Geometry panel draws -- the same
+  // 1008 m core, ~21 m cells. A see-through green with a solid green edge: the field under a crown
+  // is air the solve computed (the crowns are porous), so it stays visible through the tint, and
+  // the "trees" toggle takes the tint off to read it bare. The same in both themes like the field
+  // itself, and a hue neither ramp uses.
+  const WF_TREE = "#3ee08f", WF_TREE_FILL = "rgba(46, 204, 113, 0.62)";
+  const wfOutlines = new WeakMap();   // canopy payload -> its outline, as closed loops
 
   /// The outline of the cells at or over the 2 m cut, as segments [[x, y], [x, y]] in metres east
   /// and north of the site centre. Marching squares through the cell CENTRES on the canopy MASK,
@@ -3387,6 +3388,34 @@
     return segs;
   }
 
+
+  /// The outline's segments joined into closed loops of points, for filling (even-odd, so a
+  /// clearing inside a wood stays a hole). Every point of the outline is shared by exactly two
+  /// segments, so each walk comes back to where it started.
+  function wfCanopyLoops(segs) {
+    const key = ([x, y]) => x.toFixed(4) + "," + y.toFixed(4);
+    const ends = new Map();
+    segs.forEach((sg, i) => {
+      for (const p of sg) { const k = key(p); if (!ends.has(k)) ends.set(k, []); ends.get(k).push(i); }
+    });
+    const used = new Array(segs.length).fill(false), loops = [];
+    for (let i = 0; i < segs.length; i++) {
+      if (used[i]) continue;
+      used[i] = true;
+      const loop = [segs[i][0]];
+      let at = segs[i][1];
+      for (let guard = 0; guard <= segs.length; guard++) {
+        loop.push(at);
+        const next = (ends.get(key(at)) || []).find((j) => !used[j]);
+        if (next === undefined) break;
+        used[next] = true;
+        const [a, b] = segs[next];
+        at = key(a) === key(at) ? b : a;
+      }
+      loops.push(loop);
+    }
+    return loops;
+  }
 
   /// The canopy height in metres at a point (metres east and north of the centre), 0 outside it.
   function wfCanopyAt(can, x, y) {
@@ -3461,7 +3490,7 @@
           <input type="checkbox" class="wf-arrows" ${s.arrows ? "checked" : ""} /> arrows
         </label>` : ""}
         ${can ? `<label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;"
-                        title="outline where the canopy model has crowns of ${can.min_canopy_m || 2} m or more">
+                        title="green where the canopy model has crowns of ${can.min_canopy_m || 2} m or more">
           <input type="checkbox" class="wf-veg" ${s.veg ? "checked" : ""} /> trees
         </label>` : ""}
         ${openBtn}
@@ -3486,7 +3515,7 @@
               : solved === "0" ? "<b>not</b> in this solve: drawn for reference, the case was solved without trees"
               : "whether this solve included them is not recorded";
             const cell = Math.round(2 * can.half_m / can.n);
-            return `<div><span style="display:inline-block;width:14px;border-top:2px solid ${WF_TREE};box-shadow:0 0 0 1px rgba(0,0,0,0.45);vertical-align:middle;margin-right:6px"></span>trees
+            return `<div><span style="display:inline-block;width:12px;height:12px;background:${WF_TREE_FILL};border:1.5px solid ${WF_TREE};border-radius:2px;vertical-align:-2px;margin-right:6px"></span>trees
               ${(can.frac_canopy * 100).toFixed(0)}% of the core, tallest ${can.max_height_m} m
               <span style="color:var(--text-muted)">(canopy ≥ ${can.min_canopy_m || 2} m, Meta/WRI, ${cell} m cells)</span> — ${how}</div>`;
           })() : ""}
@@ -3550,21 +3579,22 @@
     const W = canvas.width, v = h.vector, px = W / h.nx;
     const can = s.veg ? wfCanopy(wrap) : null;
     if (can) {
-      if (!wfOutlines.has(can)) wfOutlines.set(can, wfCanopyOutline(can));
+      if (!wfOutlines.has(can)) wfOutlines.set(can, wfCanopyLoops(wfCanopyOutline(can)));
       const sp = h.spacing_m || 2, spanX = h.nx * sp, spanY = h.ny * sp, H = canvas.height;
       const west = Number.isFinite(h.x0) ? h.x0 - sp / 2 : -spanX / 2;
       const north = (Number.isFinite(h.y0) ? h.y0 - sp / 2 : -spanY / 2) + spanY;
       const path = new Path2D();
-      for (const [[ax, ay], [bx, by]] of wfOutlines.get(can)) {
-        path.moveTo((ax - west) / spanX * W, (north - ay) / spanY * H);
-        path.lineTo((bx - west) / spanX * W, (north - by) / spanY * H);
+      for (const loop of wfOutlines.get(can)) {
+        loop.forEach(([x, y], k) => (k ? path.lineTo : path.moveTo).call(path, (x - west) / spanX * W, (north - y) / spanY * H));
+        path.closePath();
       }
       ctx.save();
       ctx.beginPath(); ctx.rect(0, 0, W, H); ctx.clip();
-      ctx.lineJoin = "round"; ctx.lineCap = "round";
-      // Wide enough to read over the dark, slow air inside a crown -- which is where it sits.
-      ctx.strokeStyle = "rgba(0,0,0,0.5)"; ctx.lineWidth = 4 * dpr; ctx.stroke(path);
-      ctx.strokeStyle = WF_TREE; ctx.lineWidth = 2 * dpr; ctx.stroke(path);
+      ctx.fillStyle = WF_TREE_FILL; ctx.fill(path, "evenodd");
+      ctx.lineJoin = "round";
+      // A dark halo under the edge, so it reads over the pale fast air as well as the dark slow.
+      ctx.strokeStyle = "rgba(0,0,0,0.45)"; ctx.lineWidth = 3.5 * dpr; ctx.stroke(path);
+      ctx.strokeStyle = WF_TREE; ctx.lineWidth = 1.6 * dpr; ctx.stroke(path);
       ctx.restore();
     }
 

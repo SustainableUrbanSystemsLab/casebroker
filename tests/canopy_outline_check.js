@@ -12,8 +12,8 @@ const slice = (name) => {
 };
 const ctx = {};
 vm.createContext(ctx);
-vm.runInContext(slice('wfCanopyOutline') + slice('wfCanopyAt')
-  + '\nthis.outline = wfCanopyOutline; this.at = wfCanopyAt;', ctx);
+vm.runInContext(slice('wfCanopyOutline') + slice('wfCanopyLoops') + slice('wfCanopyAt')
+  + '\nthis.outline = wfCanopyOutline; this.loops = wfCanopyLoops; this.at = wfCanopyAt;', ctx);
 
 const n = 6, half = 60, step = 2 * half / n;          // 20 m cells over +-60 m
 const grid = (cells) => { const g = new Array(n * n).fill(0); for (const [r, c, h] of cells) g[r * n + c] = h; return g; };
@@ -59,5 +59,18 @@ assert.ok(block.flat().every(([x, y]) => x > -60 && x < 20 && y > -20 && y < 60)
 assert.strictEqual(ctx.at(can([[2, 3, 4]]), cx, cy), 4);
 assert.strictEqual(ctx.at(can([[2, 3, 4]]), cx + step, cy), 0);
 assert.strictEqual(ctx.at(can([[2, 3, 4]]), 500, 0), 0, 'outside the grid is no tree');
+
+// Filled as loops: one crown is one loop of four corners (and back to the start); a block is one
+// loop; two separate crowns are two; a clearing inside a wood is a second loop, the hole.
+const loops = (cells) => ctx.loops(ctx.outline(can(cells)));
+const single = loops([[2, 3, 4]]);
+assert.strictEqual(single.length, 1);
+assert.strictEqual(single[0].length, 5, 'four corners, closed back on the first');
+assert.deepStrictEqual(single[0][0].slice(), single[0][4].slice());
+assert.strictEqual(loops([[1, 1, 10], [1, 2, 10], [2, 1, 10], [2, 2, 10]]).length, 1);
+assert.strictEqual(loops([[0, 0, 8], [4, 4, 8]]).length, 2);
+const wood = [];
+for (let r = 1; r <= 4; r++) for (let c = 1; c <= 4; c++) if (!(r === 2 && c === 2) && !(r === 3 && c === 3) && !(r === 2 && c === 3) && !(r === 3 && c === 2)) wood.push([r, c, 9]);
+assert.strictEqual(loops(wood).length, 2, 'the wood and its clearing');
 
 console.log('canopy outlines are closed, north up, and at the 2 m cut');
