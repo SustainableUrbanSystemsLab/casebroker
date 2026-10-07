@@ -3416,6 +3416,50 @@ def _blob_receipt(conn, case_id: str, by: str | None, now: int) -> bool:
     return True
 
 
+#: How many cases one parts_wanted call answers for. A node with a long backlog asks in batches.
+PARTS_WANTED_MAX = 500
+
+
+@_locked
+def parts_wanted(conn, case_ids: list[str]) -> dict[str, dict[str, Any]]:
+    """For each of ``case_ids`` the broker has, the parts it knows the content of and does not
+    hold yet: every reported part (case_parts) not in case_blobs with that hash, and a done
+    case's archive by the completion's hash. ``{case_id: {"state": ..., "wanted": [{part,
+    sha256, bytes, archive}]}}``; a case the broker has never heard of is left out.
+
+    What a node asks when it sweeps its done folder: the parts that reached nobody -- shipped
+    before the broker kept parts, or while it could not be reached -- go up in bulk the next
+    time it can, each checked against this hash on arrival as any upload is."""
+    ids = list(dict.fromkeys(i for i in case_ids if isinstance(i, str) and i))[:PARTS_WANTED_MAX]
+    if not ids:
+        return {}
+    marks = ",".join("?" for _ in ids)
+    out: dict[str, dict[str, Any]] = {}
+    for r in conn.execute("SELECT case_id, state, result_sha256, result_bytes FROM cases"
+                          " WHERE case_id IN (%s)" % marks, ids).fetchall():
+        out[r["case_id"]] = {"state": r["state"], "wanted": [],
+                             "_archive": (r["result_sha256"] or "").strip().lower(),
+                             "_bytes": r["result_bytes"]}
+    if not out:
+        return {}
+    held = {(r["case_id"], r["part"]): (r["sha256"] or "").lower() for r in conn.execute(
+        "SELECT case_id, part, sha256 FROM case_blobs WHERE case_id IN (%s)" % marks, ids).fetchall()}
+    for r in conn.execute("SELECT case_id, part, archive, sha256, bytes FROM case_parts"
+                          " WHERE case_id IN (%s) ORDER BY case_id, part" % marks, ids).fetchall():
+        sha = (r["sha256"] or "").lower()
+        if r["case_id"] in out and held.get((r["case_id"], r["part"])) != sha:
+            out[r["case_id"]]["wanted"].append({"part": r["part"], "sha256": sha, "archive": r["archive"],
+                                                "bytes": int(r["bytes"]) if r["bytes"] is not None else None})
+    for case_id, row in out.items():
+        sha, size = row.pop("_archive"), row.pop("_bytes")
+        if row["state"] == "done" and _SHA256.fullmatch(sha) and held.get((case_id, BLOB_ARCHIVE)) != sha:
+            row["wanted"].append({"part": BLOB_ARCHIVE, "sha256": sha, "archive": f"{case_id}.tar.gz",
+                                  "bytes": int(size) if size is not None else None})
+        # The mesh first: it is what a node continuing the case needs; the archive last.
+        row["wanted"].sort(key=lambda w: (w["part"] == BLOB_ARCHIVE, w["part"] != "mesh", w["part"]))
+    return out
+
+
 @_locked
 def case_blobs(conn, case_id: str) -> list[dict[str, Any]]:
     """What of a case the broker holds, the mesh first, the archive last."""

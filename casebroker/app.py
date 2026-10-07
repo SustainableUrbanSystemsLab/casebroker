@@ -106,6 +106,11 @@ class UploadIn(BaseModel):
     bytes: int = Field(ge=1, le=1 << 50)
 
 
+class WantedIn(BaseModel):
+    """The cases a node holds archives of (its done folder): which parts does the broker want?"""
+    case_ids: list[str] = Field(max_length=500)
+
+
 class LoginIn(BaseModel):
     username: str = Field(min_length=1, max_length=64)
     password: str = Field(min_length=1, max_length=256)
@@ -2219,6 +2224,21 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         # import may go (perf/dashboard-caching removes it), and this must not go with it.
         from fastapi.responses import FileResponse as _FileResponse
         return _FileResponse(path, media_type="application/gzip", filename=name, headers=headers)
+
+    @app.post("/v1/parts/wanted", dependencies=[WriteAuth])
+    def parts_wanted(body: WantedIn) -> dict[str, Any]:
+        """Which parts of these cases the broker would take: those it knows the content of
+        (reported, or a done case's archive by its completion's hash), does not hold yet, and
+        keeps (CASEBROKER_PARTS_KEEP). A node asks this when it sweeps its done folder -- at
+        start, after each case, after an outage -- and uploads what it has of them, so parts
+        that reached nobody (shipped before the broker kept parts, or while it was down) go up
+        in bulk the next time it can. Without a part store: ``enabled`` false and nothing wanted."""
+        if store is None:
+            return {"enabled": False, "cases": {}}
+        found = db.parts_wanted(conn, body.case_ids)
+        for row in found.values():
+            row["wanted"] = [w for w in row["wanted"] if _kind(w["part"]) in keep]
+        return {"enabled": True, "cases": found}
 
     @app.get("/v1/cases/{case_id}/blobs", dependencies=[ReadAuth])
     def get_case_blobs(case_id: str) -> dict[str, Any]:
