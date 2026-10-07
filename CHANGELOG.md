@@ -8,6 +8,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.31.0] - 2026-10-06
+
+### Added
+- **`scripts/move_recipe.py` moves a whole queue to another recipe.** `POST /v1/cases/respec`
+  selects by case id or failure text, never by recipe, so moving a queue meant scripting the paging
+  by hand. The script takes the first page of the old recipe's PENDING cases, moves it, and repeats
+  until none is left; a leased case is never selected and finishes under the recipe it was leased
+  as, a done one keeps its result. Batches of 100 with a pause, a dry run of the first batch by
+  default, `--post` to move, and it stops on a pass that moved nothing.
+
 ## [0.30.1] - 2026-10-06
 
 ### Fixed

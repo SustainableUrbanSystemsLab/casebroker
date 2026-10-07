@@ -66,8 +66,12 @@ def test_repro_names_itself(sent):
     assert agent(sent[0]) == USER_AGENT
 
 
-@pytest.mark.parametrize("script", ["admit_thermal", "report_receipts"])
+@pytest.mark.parametrize("script", ["admit_thermal", "report_receipts", "move_recipe"])
 def test_the_scripts_name_themselves(sent, script):
-    load(script).Broker("https://b", "t").call("GET", "/v1/status")
+    broker = load(script).Broker("https://b", "t")
+    if script == "move_recipe":                        # its call takes the query as a dict
+        broker.call("GET", "/v1/status", {})
+    else:
+        broker.call("GET", "/v1/status")
     ua = agent(sent[0])
     assert ua and ua.startswith("casebroker") and "urllib" not in ua.lower()
