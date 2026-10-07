@@ -32,7 +32,7 @@ from typing import Any
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
-from casebroker import archives  # noqa: E402
+from casebroker import USER_AGENT, archives  # noqa: E402
 
 
 class Broker:
@@ -44,7 +44,8 @@ class Broker:
         data = json.dumps(body).encode() if body is not None else None
         req = urllib.request.Request(self.url + path, data=data, method=method,
                                      headers={"Authorization": f"Bearer {self.token}",
-                                              "Content-Type": "application/json"})
+                                              "Content-Type": "application/json",
+                                              "User-Agent": USER_AGENT})
         with urllib.request.urlopen(req, timeout=300) as r:
             return json.loads(r.read() or b"null")
 

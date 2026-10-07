@@ -31,7 +31,7 @@ import sys
 import urllib.error
 import urllib.request
 
-from . import __version__
+from . import USER_AGENT, __version__
 
 # 32 bytes of urandom, base64url -> 43 chars. Same generator the .env.example has
 # always recommended; having it in the tool means nobody has to remember it, and
@@ -45,7 +45,7 @@ SCOPE_ENV = {
 
 
 def _get(broker: str, path: str, token: str | None, timeout: float = 30.0):
-    req = urllib.request.Request(broker.rstrip("/") + path)
+    req = urllib.request.Request(broker.rstrip("/") + path, headers={"User-Agent": USER_AGENT})
     if token:
         req.add_header("Authorization", f"Bearer {token}")
     with urllib.request.urlopen(req, timeout=timeout) as r:
@@ -185,7 +185,8 @@ def cmd_fleet(args) -> int:
     body = json.dumps({"cluster": args.cluster, "queued": queued, "running": running,
                        "detail": args.detail}).encode("utf-8")
     req = urllib.request.Request(args.broker.rstrip("/") + "/v1/fleet", data=body,
-                                 headers={"Content-Type": "application/json"},
+                                 headers={"Content-Type": "application/json",
+                                          "User-Agent": USER_AGENT},
                                  method="POST")
     if token:
         req.add_header("Authorization", f"Bearer {token}")
@@ -600,7 +601,7 @@ def _call(opener, broker: str, method: str, path: str, payload=None,
     data = json.dumps(payload).encode() if payload is not None else None
     req = urllib.request.Request(
         broker.rstrip("/") + path, data=data, method=method,
-        headers={"Content-Type": "application/json"})
+        headers={"Content-Type": "application/json", "User-Agent": USER_AGENT})
     try:
         with opener.open(req, timeout=timeout) as r:
             return r.status, json.loads(r.read().decode() or "{}")

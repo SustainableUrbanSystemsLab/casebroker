@@ -34,6 +34,8 @@ import time
 import urllib.error
 import urllib.request
 
+from . import USER_AGENT
+
 # --- triage: the signatures ----------------------------------------------------
 
 _REGIONS = re.compile(r"Number of regions:\s*(\d+)")
@@ -152,7 +154,7 @@ def case_input(case: dict) -> list[dict]:
 
 def _http(url: str, token: str, method: str = "GET", payload=None, timeout: float = 60.0):
     data = None if payload is None else json.dumps(payload).encode()
-    req = urllib.request.Request(url, data=data, method=method)
+    req = urllib.request.Request(url, data=data, method=method, headers={"User-Agent": USER_AGENT})
     req.add_header("Authorization", f"Bearer {token}")
     if data is not None:
         req.add_header("Content-Type", "application/json")

@@ -8,6 +8,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.30.1] - 2026-10-06
+
+### Fixed
+- **The CLI, `casebroker repro` and the scripts send a User-Agent of their own.** A proxy in front
+  of a broker may refuse urllib's default, `Python-urllib/3.x`, outright, and then every urllib
+  client here failed before the broker saw the request: the CLI's status, releases and fleet
+  reports, `casebroker repro`, `scripts/admit_thermal.py` and `scripts/report_receipts.py`. They now
+  send `casebroker/<version>` (`casebroker.USER_AGENT`). The node worker uses httpx and was never
+  affected.
+
 ## [0.30.0] - 2026-10-06
 
 ### Added

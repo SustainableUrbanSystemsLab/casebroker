@@ -183,7 +183,10 @@ class Broker:
         data = json.dumps(body).encode() if body is not None else None
         req = urllib.request.Request(self.url + path, data=data, method=method,
                                      headers={"Authorization": f"Bearer {self.token}",
-                                              "Content-Type": "application/json"})
+                                              "Content-Type": "application/json",
+                                              # Not urllib's own, which a proxy in front of the broker may refuse
+                                              # (casebroker.USER_AGENT; this script imports nothing from there).
+                                              "User-Agent": "casebroker-admit-thermal"})
         with urllib.request.urlopen(req, timeout=300) as r:
             return json.loads(r.read() or b"null")
 

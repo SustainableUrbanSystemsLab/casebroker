@@ -24,4 +24,10 @@ except PackageNotFoundError:
     # Running from source tree without the package installed (e.g. bare python -m)
     __version__ = "0.0.0+dev"
 
-__all__ = ["__version__"]
+# What every urllib client here says it is. A proxy in front of a broker may refuse
+# urllib's own `Python-urllib/3.x` outright, so a request that leaves the default in
+# place can fail before the broker sees it. The node worker uses httpx and is not
+# affected.
+USER_AGENT = f"casebroker/{__version__}"
+
+__all__ = ["USER_AGENT", "__version__"]
