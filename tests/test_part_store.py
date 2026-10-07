@@ -343,4 +343,5 @@ def test_a_kind_the_broker_does_not_keep_is_not_wanted_and_without_a_store_nothi
     monkeypatch.delenv("CASEBROKER_PARTS_DIR", raising=False)
     bare = TestClient(create_app(db_path=str(tmp_path / "k.sqlite"), tokens=["w"], readonly_tokens=["r"]))
     assert bare.post("/v1/parts/wanted", headers=W, json={"case_ids": [lease["case_id"]]}).json() == \
-        {"enabled": False, "cases": {}}
+        {"enabled": False, "cases": {lease["case_id"]: {"state": "leased", "wanted": [], "fields": []}}}, \
+        "no part wanted without a store; the fields are still listed, for a backfill"

@@ -2232,13 +2232,15 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         keeps (CASEBROKER_PARTS_KEEP). A node asks this when it sweeps its done folder -- at
         start, after each case, after an outage -- and uploads what it has of them, so parts
         that reached nobody (shipped before the broker kept parts, or while it was down) go up
-        in bulk the next time it can. Without a part store: ``enabled`` false and nothing wanted."""
-        if store is None:
-            return {"enabled": False, "cases": {}}
+        in bulk the next time it can. Each case also lists the directions whose field the
+        broker holds (``fields``), for the node to backfill the rest. Without a part store:
+        ``enabled`` false and no part wanted, the fields still listed."""
         found = db.parts_wanted(conn, body.case_ids)
         for row in found.values():
-            row["wanted"] = [w for w in row["wanted"] if _kind(w["part"]) in keep]
-        return {"enabled": True, "cases": found}
+            # Without a store no part is wanted -- but the fields it holds still are listed:
+            # a node backfills those into the database, store or not.
+            row["wanted"] = [w for w in row["wanted"] if store is not None and _kind(w["part"]) in keep]
+        return {"enabled": store is not None, "cases": found}
 
     @app.get("/v1/cases/{case_id}/blobs", dependencies=[ReadAuth])
     def get_case_blobs(case_id: str) -> dict[str, Any]:
