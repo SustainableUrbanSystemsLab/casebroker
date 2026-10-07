@@ -3132,7 +3132,7 @@
   function wfState(id) {
     let s = wfStates.get(id);
     if (!s) {
-      s = { status: "idle", field: null, err: "", dir: 0, mode: "speed", arrows: true, src: "" };
+      s = { status: "idle", field: null, err: "", dir: 0, mode: "speed", arrows: true, veg: true, src: "" };
       wfStates.set(id, s);
     }
     return s;
@@ -3347,6 +3347,96 @@
 
   function wfCss(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
 
+  // The site's trees over the field, in green: where the Meta/WRI canopy model has crowns of at
+  // least min_canopy_m (2 m), on the /footprints grid the Site Geometry panel draws -- the same
+  // 1008 m core, ~21 m cells. A see-through green with a solid green edge: the field under a crown
+  // is air the solve computed (the crowns are porous), so it stays visible through the tint, and
+  // the "trees" toggle takes the tint off to read it bare. The same in both themes like the field
+  // itself, and a hue neither ramp uses.
+  const WF_TREE = "#3ee08f", WF_TREE_FILL = "rgba(46, 204, 113, 0.62)";
+  const wfOutlines = new WeakMap();   // canopy payload -> its outline, as closed loops
+
+  /// The outline of the cells at or over the 2 m cut, as segments [[x, y], [x, y]] in metres east
+  /// and north of the site centre. Marching squares through the cell CENTRES on the canopy MASK,
+  /// so every line runs midway between a canopy cell and a bare one -- interpolating the heights
+  /// instead pushed a tall crown's line most of a cell into bare ground. The grid is padded with
+  /// bare ground so a crown at the core's edge still closes, and a diagonal pair of crown cells
+  /// is drawn as one region, the way their crowns touch.
+  function wfCanopyOutline(can) {
+    if (!can || !Array.isArray(can.grid) || !(can.n > 1) || !(can.half_m > 0)) return [];
+    const n = can.n, half = can.half_m, step = 2 * half / n, cut = can.min_canopy_m || 2;
+    const at = (r, c) => (r < 0 || c < 0 || r >= n || c >= n) ? 0 : (can.grid[r * n + c] || 0) >= cut ? 1 : 0;
+    const X = (c) => -half + (c + 0.5) * step, Y = (r) => half - (r + 0.5) * step;
+    const segs = [];
+    for (let r = -1; r < n; r++) for (let c = -1; c < n; c++) {
+      const k = at(r, c) * 8 + at(r, c + 1) * 4 + at(r + 1, c + 1) * 2 + at(r + 1, c);   // tl tr br bl
+      if (k === 0 || k === 15) continue;
+      const x0 = X(c), x1 = X(c + 1), y0 = Y(r), y1 = Y(r + 1);      // y0 is the northern edge
+      const xm = (x0 + x1) / 2, ym = (y0 + y1) / 2;
+      const top = [xm, y0], bottom = [xm, y1], left = [x0, ym], right = [x1, ym];
+      switch (k) {
+        case 1: case 14: segs.push([left, bottom]); break;
+        case 2: case 13: segs.push([bottom, right]); break;
+        case 3: case 12: segs.push([left, right]); break;
+        case 4: case 11: segs.push([top, right]); break;
+        case 6: case 9: segs.push([top, bottom]); break;
+        case 7: case 8: segs.push([left, top]); break;
+        case 5: segs.push([left, top], [bottom, right]); break;      // tr + bl: joined across the saddle
+        case 10: segs.push([top, right], [left, bottom]); break;     // tl + br: likewise
+      }
+    }
+    return segs;
+  }
+
+
+  /// The outline's segments joined into closed loops of points, for filling (even-odd, so a
+  /// clearing inside a wood stays a hole). Every point of the outline is shared by exactly two
+  /// segments, so each walk comes back to where it started.
+  function wfCanopyLoops(segs) {
+    const key = ([x, y]) => x.toFixed(4) + "," + y.toFixed(4);
+    const ends = new Map();
+    segs.forEach((sg, i) => {
+      for (const p of sg) { const k = key(p); if (!ends.has(k)) ends.set(k, []); ends.get(k).push(i); }
+    });
+    const used = new Array(segs.length).fill(false), loops = [];
+    for (let i = 0; i < segs.length; i++) {
+      if (used[i]) continue;
+      used[i] = true;
+      const loop = [segs[i][0]];
+      let at = segs[i][1];
+      for (let guard = 0; guard <= segs.length; guard++) {
+        loop.push(at);
+        const next = (ends.get(key(at)) || []).find((j) => !used[j]);
+        if (next === undefined) break;
+        used[next] = true;
+        const [a, b] = segs[next];
+        at = key(a) === key(at) ? b : a;
+      }
+      loops.push(loop);
+    }
+    return loops;
+  }
+
+  /// The canopy height in metres at a point (metres east and north of the centre), 0 outside it.
+  function wfCanopyAt(can, x, y) {
+    const n = can.n, half = can.half_m, step = 2 * half / n;
+    const c = Math.floor((x + half) / step), r = Math.floor((half - y) / step);
+    return r < 0 || c < 0 || r >= n || c >= n ? 0 : (can.grid[r * n + c] || 0);
+  }
+
+  /// This case's canopy, from the /footprints load the Site Geometry panel shares (one request
+  /// per case for both). Null while it loads -- the field is drawn again when it lands -- and for
+  /// a site with no trees, or none known.
+  function wfCanopy(wrap) {
+    const g = footprintsFor(wrap.dataset.case, wrap.dataset.state);
+    if (!g.data && !g.error && !g.wfWaiting) {
+      g.wfWaiting = true;
+      g.promise.then(() => wfRedraw(wrap.dataset.case));
+    }
+    const can = g.data && g.data.canopy;
+    return can && Array.isArray(can.grid) && can.frac_canopy > 0 ? can : null;
+  }
+
   function wfDraw(wrap) {
     const id = wrap.dataset.case, s = wfState(id);
     const hint = wrap.parentElement && wrap.parentElement.querySelector(".wf-src");
@@ -3380,6 +3470,7 @@
     const ampOk = dirs.every((x) => x.u_ref > 0);
     if (!ampOk && s.mode === "amp") s.mode = "speed";
     const cov = h.coverage && h.coverage[s.dir];
+    const can = wfCanopy(wrap);
     wrap.innerHTML = `
       <div class="wf-bar">
         <div class="wf-dir">
@@ -3398,6 +3489,10 @@
         ${h.vector ? `<label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;">
           <input type="checkbox" class="wf-arrows" ${s.arrows ? "checked" : ""} /> arrows
         </label>` : ""}
+        ${can ? `<label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;"
+                        title="green where the canopy model has crowns of ${can.min_canopy_m || 2} m or more">
+          <input type="checkbox" class="wf-veg" ${s.veg ? "checked" : ""} /> trees
+        </label>` : ""}
         ${openBtn}
       </div>
       <div class="wf-fig">
@@ -3411,6 +3506,19 @@
           ${Number.isFinite(d.lambda_f) ? `<div title="the façade this wind meets, projected across it, per unit of the core's plan area">λ<sub>f</sub> ${d.lambda_f.toFixed(3)}
                <span style="color:var(--text-muted)">(frontal area index, this direction)</span></div>` : ""}
           ${cov != null ? `<div>${(cov * 100).toFixed(1)}% of the core is air here; blank is inside a building</div>` : ""}
+          ${can ? (() => {
+            // Whether the crowns were IN this solve: the node records it (trees_modelled); v5
+            // and earlier recipes solved every site treeless, and a tree drawn over such a field
+            // must not read as the reason the wind is slow there.
+            const solved = wrap.dataset.trees;
+            const how = solved === "1" ? "in this solve as porous crowns"
+              : solved === "0" ? "<b>not</b> in this solve: drawn for reference, the case was solved without trees"
+              : "whether this solve included them is not recorded";
+            const cell = Math.round(2 * can.half_m / can.n);
+            return `<div><span style="display:inline-block;width:12px;height:12px;background:${WF_TREE_FILL};border:1.5px solid ${WF_TREE};border-radius:2px;vertical-align:-2px;margin-right:6px"></span>trees
+              ${(can.frac_canopy * 100).toFixed(0)}% of the core, tallest ${can.max_height_m} m
+              <span style="color:var(--text-muted)">(canopy ≥ ${can.min_canopy_m || 2} m, Meta/WRI, ${cell} m cells)</span> — ${how}</div>`;
+          })() : ""}
           ${(() => {
             // A defect of the SOLVE this sample exposed: mesh under the terrain
             // (a domain the terrain sheet did not seal). The field shown is the
@@ -3467,11 +3575,33 @@
     ctx.imageSmoothingEnabled = false;          // 2 m cells stay 2 m cells
     ctx.drawImage(off, 0, 0, canvas.width, canvas.height);
 
+    // The trees (wfCanopyOutline), under the arrows: those are what the field is read by.
+    const W = canvas.width, v = h.vector, px = W / h.nx;
+    const can = s.veg ? wfCanopy(wrap) : null;
+    if (can) {
+      if (!wfOutlines.has(can)) wfOutlines.set(can, wfCanopyLoops(wfCanopyOutline(can)));
+      const sp = h.spacing_m || 2, spanX = h.nx * sp, spanY = h.ny * sp, H = canvas.height;
+      const west = Number.isFinite(h.x0) ? h.x0 - sp / 2 : -spanX / 2;
+      const north = (Number.isFinite(h.y0) ? h.y0 - sp / 2 : -spanY / 2) + spanY;
+      const path = new Path2D();
+      for (const loop of wfOutlines.get(can)) {
+        loop.forEach(([x, y], k) => (k ? path.lineTo : path.moveTo).call(path, (x - west) / spanX * W, (north - y) / spanY * H));
+        path.closePath();
+      }
+      ctx.save();
+      ctx.beginPath(); ctx.rect(0, 0, W, H); ctx.clip();
+      ctx.fillStyle = WF_TREE_FILL; ctx.fill(path, "evenodd");
+      ctx.lineJoin = "round";
+      // A dark halo under the edge, so it reads over the pale fast air as well as the dark slow.
+      ctx.strokeStyle = "rgba(0,0,0,0.45)"; ctx.lineWidth = 3.5 * dpr; ctx.stroke(path);
+      ctx.strokeStyle = WF_TREE; ctx.lineWidth = 1.6 * dpr; ctx.stroke(path);
+      ctx.restore();
+    }
+
     // Arrows: every other one of the file's 16 m lattice -- one per 32 m, which
     // at this size is about one per street; the full lattice buried the field
     // it annotates. Length by speed. White with a dark halo, because inferno
     // runs from black to near-white and any single ink vanishes at one end.
-    const W = canvas.width, v = h.vector, px = W / h.nx;
     if (s.arrows && v && d.vec) {
       const shafts = new Path2D(), heads = new Path2D();
       const every = 2, cell = v.stride * every * px, vmax = h.vmax;
@@ -3541,8 +3671,10 @@
     } else {
       // The broker's field is exact; a .wfld's is a byte on the case's scale.
       const u = d.exact ? d.exact[j * h.nx + i] : q * h.vmax / 254;
+      const can = s.veg ? wfCanopy(wrap) : null, crown = can ? wfCanopyAt(can, x, y) : 0;
       tip.innerHTML = `${where}<br>|U| <b>${u.toFixed(2)}</b> m/s`
-        + (d.u_ref ? `<br>U/U<sub>ref</sub> <b>${(u / d.u_ref).toFixed(2)}</b>` : "");
+        + (d.u_ref ? `<br>U/U<sub>ref</sub> <b>${(u / d.u_ref).toFixed(2)}</b>` : "")
+        + (crown >= (can && can.min_canopy_m || 2) ? `<br>trees, canopy ~${Math.round(crown)} m` : "");
     }
     tip.style.display = "block";
     const px = e.clientX - r.left, py = e.clientY - r.top;
@@ -3580,6 +3712,7 @@
     const s = wfState(wrap.dataset.case);
     if (e.target.classList.contains("wf-range")) { s.dir = Number(e.target.value); wfDraw(wrap); wrap.querySelector(".wf-range").focus(); }
     else if (e.target.classList.contains("wf-arrows")) { s.arrows = e.target.checked; wfPaint(wrap, s); }
+    else if (e.target.classList.contains("wf-veg")) { s.veg = e.target.checked; wfPaint(wrap, s); }
   });
   document.addEventListener("change", (e) => {
     if (!e.target.classList || !e.target.classList.contains("wf-file")) return;
@@ -5784,7 +5917,8 @@
           <h3>Wind at pedestrian height
             <span class="label-hint wf-src" style="font-weight:400; text-transform:none; letter-spacing:0;"></span>
           </h3>
-          <div class="wf-wrap" tabindex="0" data-case="${esc(c.case_id)}"
+          <div class="wf-wrap" tabindex="0" data-case="${esc(c.case_id)}" data-state="${esc(c.state)}"
+               data-trees="${metrics && metrics.trees_modelled === true ? "1" : metrics && metrics.trees_modelled === false ? "0" : ""}"
                aria-label="Pedestrian wind field for ${esc(c.case_id)}; left and right arrow keys change the wind direction"></div>
         </div>` : ""}
 
