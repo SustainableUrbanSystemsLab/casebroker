@@ -8,6 +8,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.35.0] - 2026-10-07
+
+### Added
+- **A node can backfill the pedestrian field of a case it finished.**
+  `PUT /v1/cases/{id}/fields/{direction}/backfill` takes the umag/1 field of a DONE case that has
+  none for that direction -- finished by a build from before fields went to the broker, or whose
+  field did not get through -- read by the node from the archive still on its disk. No lease; a
+  machine may send it for a case it completed or a direction it reported, never over a field the
+  case has (a solve's own is never replaced), and the event says it was backfilled. The answer to
+  `POST /v1/parts/wanted` lists each case's stored fields (`fields`), so the node's sweep of its
+  done folder sends the rest: "The broker holds no field for this case" goes away for every case
+  whose archive still carries its pedestrian surfaces (Eddy3D nodes since #935).
+
 ## [0.34.0] - 2026-10-07
 
 ### Added

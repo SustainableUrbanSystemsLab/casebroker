@@ -2939,24 +2939,91 @@ def _store_field(conn, lease_id: str, case_id: str, direction: str, header: dict
                 or (worker_ok is not None and not worker_ok(row["lease_worker"])):
             conn.execute("ROLLBACK")
             return "gone"
-        extra = ", ".join(_FIELD_SUMMARY_COLUMNS)
-        conn.execute(
-            "INSERT INTO case_fields(case_id, direction, height_m, deg, nx, ny, x0, y0,"
-            " spacing_m, coverage, u_ref, umag_p999, sha256, bytes, blob, worker_id, reported_at, "
-            + extra + ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?"
-            + ",?" * len(_FIELD_SUMMARY_COLUMNS) + ")"
-            " ON CONFLICT(case_id, direction, height_m) DO UPDATE SET deg=excluded.deg,"
-            " nx=excluded.nx, ny=excluded.ny, x0=excluded.x0, y0=excluded.y0,"
-            " spacing_m=excluded.spacing_m, coverage=excluded.coverage, u_ref=excluded.u_ref,"
-            " umag_p999=excluded.umag_p999, sha256=excluded.sha256, bytes=excluded.bytes,"
-            " blob=excluded.blob, worker_id=excluded.worker_id, reported_at=excluded.reported_at, "
-            + ", ".join("%s=excluded.%s" % (c, c) for c in _FIELD_SUMMARY_COLUMNS),
-            (case_id, direction, header["height_m"], header.get("deg"), int(header["nx"]),
-             int(header["ny"]), header["x0"], header["y0"], header["spacing_m"],
-             header.get("coverage"), header.get("u_ref"), header.get("umag_p999"), sha, len(blob), blob,
-             row["lease_worker"], now) + tuple(summary[c] for c in _FIELD_SUMMARY_COLUMNS))
+        _insert_field(conn, case_id, direction, header, blob, sha, summary, row["lease_worker"], now)
         _event(conn, case_id, row["lease_worker"], "field_stored",
                "%s @ %g m, %d bytes" % (direction, header["height_m"], len(blob)), now)
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    return "ok"
+
+
+def _insert_field(conn, case_id: str, direction: str, header: dict[str, Any], blob: bytes, sha: str,
+                  summary: dict[str, Any], worker_id: str | None, now: int) -> None:
+    """One field row, replacing the same (case, direction, height). Inside the caller's transaction."""
+    extra = ", ".join(_FIELD_SUMMARY_COLUMNS)
+    conn.execute(
+        "INSERT INTO case_fields(case_id, direction, height_m, deg, nx, ny, x0, y0,"
+        " spacing_m, coverage, u_ref, umag_p999, sha256, bytes, blob, worker_id, reported_at, "
+        + extra + ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?"
+        + ",?" * len(_FIELD_SUMMARY_COLUMNS) + ")"
+        " ON CONFLICT(case_id, direction, height_m) DO UPDATE SET deg=excluded.deg,"
+        " nx=excluded.nx, ny=excluded.ny, x0=excluded.x0, y0=excluded.y0,"
+        " spacing_m=excluded.spacing_m, coverage=excluded.coverage, u_ref=excluded.u_ref,"
+        " umag_p999=excluded.umag_p999, sha256=excluded.sha256, bytes=excluded.bytes,"
+        " blob=excluded.blob, worker_id=excluded.worker_id, reported_at=excluded.reported_at, "
+        + ", ".join("%s=excluded.%s" % (c, c) for c in _FIELD_SUMMARY_COLUMNS),
+        (case_id, direction, header["height_m"], header.get("deg"), int(header["nx"]),
+         int(header["ny"]), header["x0"], header["y0"], header["spacing_m"],
+         header.get("coverage"), header.get("u_ref"), header.get("umag_p999"), sha, len(blob), blob,
+         worker_id, now) + tuple(summary[c] for c in _FIELD_SUMMARY_COLUMNS))
+
+
+def backfill_field(conn, case_id: str, direction: str, blob: bytes,
+                   may_act_as: Callable[[str | None], bool] | None = None,
+                   now: int | None = None) -> str:
+    """Store the pedestrian field of a DONE case that has none for this direction, from
+    the archive the node that solved it still holds -- a case finished by a build from
+    before fields went to the broker, or whose field did not get through.
+
+    Returns ``"ok"``; ``"exists"`` (the case has this field: a solve's own is never
+    replaced); ``"not_done"``; ``"no_case"``; ``"forbidden"`` (``may_act_as`` accepts
+    neither the worker that completed the case nor the one that reported this
+    direction's part -- the machines whose disk holds it); or ``"invalid: <why>"``.
+    ``may_act_as`` None is a caller who may (an admin, the fleet's shared token)."""
+    if not PART_NAME.fullmatch(direction or "") or direction == "mesh":
+        return "invalid: not a direction name"
+    try:
+        header = decode_umag(blob)
+        blob = umag_container(blob)
+    except ValueError as exc:
+        return f"invalid: {exc}"
+    if header.get("direction") not in (None, direction):
+        return f"invalid: the blob says it is {header['direction']!r}, not {direction!r}"
+    if header.get("case_id") not in (None, case_id):
+        return f"invalid: the blob says it is {header['case_id']!r}, not {case_id!r}"
+    import hashlib
+    sha = hashlib.sha256(blob).hexdigest()
+    summary = field_summary(blob)
+    return _backfill_field(conn, case_id, direction, header, blob, sha, summary, may_act_as, now or _now())
+
+
+@_locked
+def _backfill_field(conn, case_id: str, direction: str, header: dict[str, Any], blob: bytes, sha: str,
+                    summary: dict[str, Any], may_act_as: Callable[[str | None], bool] | None, now: int) -> str:
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        case = conn.execute("SELECT state FROM cases WHERE case_id=?", (case_id,)).fetchone()
+        if case is None or case["state"] != "done":
+            conn.execute("ROLLBACK")
+            return "no_case" if case is None else "not_done"
+        if conn.execute("SELECT 1 FROM case_fields WHERE case_id=? AND direction=? AND height_m=?",
+                        (case_id, direction, header["height_m"])).fetchone():
+            conn.execute("ROLLBACK")
+            return "exists"
+        done = conn.execute("SELECT worker_id FROM events WHERE case_id=? AND event='done'"
+                            " ORDER BY id DESC LIMIT 1", (case_id,)).fetchone()
+        part = conn.execute("SELECT worker_id FROM case_parts WHERE case_id=? AND part=?",
+                            (case_id, direction)).fetchone()
+        holders = [r["worker_id"] for r in (done, part) if r is not None and r["worker_id"]]
+        if may_act_as is not None and not any(may_act_as(w) for w in holders):
+            conn.execute("ROLLBACK")
+            return "forbidden"
+        worker = next((w for w in holders if may_act_as is None or may_act_as(w)), None)
+        _insert_field(conn, case_id, direction, header, blob, sha, summary, worker, now)
+        _event(conn, case_id, worker, "field_stored",
+               "%s @ %g m, %d bytes, backfilled from the archive" % (direction, header["height_m"], len(blob)), now)
         conn.execute("COMMIT")
     except Exception:
         conn.execute("ROLLBACK")
@@ -3450,7 +3517,15 @@ def parts_wanted(conn, case_ids: list[str]) -> dict[str, dict[str, Any]]:
         if r["case_id"] in out and held.get((r["case_id"], r["part"])) != sha:
             out[r["case_id"]]["wanted"].append({"part": r["part"], "sha256": sha, "archive": r["archive"],
                                                 "bytes": int(r["bytes"]) if r["bytes"] is not None else None})
+    fields: dict[str, list[str]] = {}
+    for r in conn.execute("SELECT case_id, direction FROM case_fields WHERE case_id IN (%s)"
+                          " AND ABS(height_m - ?) < 1e-6 ORDER BY case_id, direction" % marks,
+                          [*ids, FIELD_HEIGHT_M]).fetchall():
+        fields.setdefault(r["case_id"], []).append(r["direction"])
     for case_id, row in out.items():
+        # The directions whose field the broker holds: what a node can backfill is the rest
+        # (backfill_field), from the archives of a done case on its disk.
+        row["fields"] = fields.get(case_id, [])
         sha, size = row.pop("_archive"), row.pop("_bytes")
         if row["state"] == "done" and _SHA256.fullmatch(sha) and held.get((case_id, BLOB_ARCHIVE)) != sha:
             row["wanted"].append({"part": BLOB_ARCHIVE, "sha256": sha, "archive": f"{case_id}.tar.gz",

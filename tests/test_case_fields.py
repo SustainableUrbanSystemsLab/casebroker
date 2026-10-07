@@ -299,3 +299,70 @@ def test_the_dashboard_reads_both_forms():
     start = src.index("async function wfDecodeUmag(buf)")
     body = src[start:src.index("\n  }\n", start)]
     assert "bytes[0] === 0x1f && bytes[1] === 0x8b" in body, "gzip only when the bytes say gzip"
+
+
+# -- backfill: the field of a done case, from the archive its node still holds --------------
+
+def test_a_done_case_without_a_field_is_backfilled_once_and_never_over_a_solves_own(tmp_path):
+    c = db.connect(str(tmp_path / "b.sqlite"))
+    db.add_cases(c, [_case()])
+    lease = db.lease(c, "foam-1")[0]
+    assert db.backfill_field(c, CASE, "case_000", umag([1.0] * 6)) == "not_done", \
+        "a case in flight sends its fields under its lease"
+    assert db.put_field(c, lease.lease_id, CASE, "case_001", umag([2.0] * 6, direction="case_001")) == "ok"
+    assert db.complete(c, lease.lease_id, f"file:///done/{CASE}.tar.gz", "ab" * 32, 10, {}) is True
+
+    mine = lambda w: w == "foam-1"                                  # noqa: E731
+    other = lambda w: w == "cod-9"                                  # noqa: E731
+    assert db.backfill_field(c, CASE, "case_000", umag([1.0] * 6), may_act_as=other) == "forbidden"
+    assert db.backfill_field(c, CASE, "case_000", umag([1.0] * 6), may_act_as=mine) == "ok"
+    assert db.backfill_field(c, CASE, "case_000", umag([1.0] * 6), may_act_as=mine) == "exists"
+    assert db.backfill_field(c, CASE, "case_001", umag([9.0] * 6, direction="case_001")) == "exists", \
+        "the solve's own field is never replaced"
+    assert db.backfill_field(c, "v2-nobody", "case_000", umag([1.0] * 6, case_id="v2-nobody")) == "no_case"
+    assert db.backfill_field(c, CASE, "case_002", umag([1.0] * 6, direction="case_009")).startswith("invalid")
+    got = {f["direction"]: f for f in db.case_fields(c, CASE)}
+    assert sorted(got) == ["case_000", "case_001"] and got["case_000"]["worker_id"] == "foam-1"
+    events = [r["detail"] for r in c.execute("SELECT detail FROM events WHERE case_id=? AND event='field_stored'", (CASE,))]
+    assert any("backfilled from the archive" in e for e in events)
+
+
+def test_the_machine_that_shipped_a_direction_may_backfill_it_too(tmp_path):
+    # A continued case: foam-2 finished it, but cod-1 solved case_000 and holds its archive.
+    c = db.connect(str(tmp_path / "b.sqlite"))
+    db.add_cases(c, [_case()])
+    first = db.lease(c, "cod-1")[0]
+    mesh = "aa" * 32
+    assert db.report_part(c, first.lease_id, CASE, "mesh", f"{CASE}.mesh.tar.gz", mesh, 10) == "ok"
+    assert db.report_part(c, first.lease_id, CASE, "case_000", f"{CASE}.case_000.tar.gz", "bb" * 32, 10, mesh) == "ok"
+    db.release(c, first.lease_id)
+    second = db.lease(c, "foam-2")[0]
+    assert db.complete(c, second.lease_id, f"file:///done/{CASE}.tar.gz", "ab" * 32, 10, {}) is True
+    assert db.backfill_field(c, CASE, "case_000", umag([1.0] * 6), may_act_as=lambda w: w == "cod-1") == "ok"
+    assert db.backfill_field(c, CASE, "case_003", umag([1.0] * 6, direction="case_003"),
+                             may_act_as=lambda w: w == "cod-1") == "forbidden", "not a direction it shipped"
+
+
+def test_the_route_answers_as_a_node_reads_it(tmp_path, monkeypatch):
+    monkeypatch.setenv("CASEBROKER_PARTS_RESERVE_GB", "0")
+    c = TestClient(create_app(db_path=str(tmp_path / "r.sqlite"), tokens=["w"], readonly_tokens=["r"],
+                              parts_dir=str(tmp_path / "parts")))
+    assert c.post("/v1/cases", headers=W, json=[{"lat": 33.8, "lon": -84.4, "recipe": V4, "city_cluster": "atl"}]).status_code == 200
+    lease = c.post("/v1/lease", headers=W, json={"worker_id": "foam-1"}).json()[0]
+    case = lease["case_id"]
+    put = lambda d, body, h=W: c.put(f"/v1/cases/{case}/fields/{d}/backfill", headers=h, content=body)  # noqa: E731
+    blob = umag([1.0] * 6, case_id=case)
+    assert put("case_000", blob).status_code == 409, "not done yet: fields go under the lease"
+    r = c.post("/v1/complete", headers=W, json={"lease_id": lease["lease_id"], "case_id": case,
+                                                 "result_uri": f"file:///done/{case}.tar.gz", "metrics": {}})
+    assert r.status_code == 200, r.text
+    assert put("case_000", blob).status_code == 200
+    assert put("case_000", blob).status_code == 409, "held: never replaced"
+    assert put("case_001", b"").status_code == 422
+    assert put("case_000", blob, R).status_code in (401, 403), "write scope"
+    assert c.put("/v1/cases/v2-nobody/fields/case_000/backfill", headers=W,
+                 content=umag([1.0] * 6, case_id="v2-nobody")).status_code == 404
+    got = c.get(f"/v1/cases/{case}/fields", headers=R).json()["fields"]
+    assert [f["direction"] for f in got] == ["case_000"]
+    wanted = c.post("/v1/parts/wanted", headers=W, json={"case_ids": [case]}).json()
+    assert wanted["cases"][case]["fields"] == ["case_000"], "what a sweeping node backfills is the rest"

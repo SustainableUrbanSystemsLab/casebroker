@@ -263,6 +263,15 @@ pass, ten at a time); until then it matches no `where` on them. A field stored
 gzip-wrapped (before 0.28.0) cannot be read in place and is read whole instead, with
 the same answers.
 
+**Backfill.** `PUT /v1/cases/{id}/fields/{direction}/backfill` (write) takes the same umag/1
+body for a DONE case that has no field for that direction -- one finished by a build from
+before fields went to the broker, or whose field did not get through -- read by a node from
+the archive it still holds. No lease: the case is finished. A machine may send it for a case
+it completed or a direction it reported (`POST /v1/parts`); 403 otherwise, 409 when the case
+is not done or already has the field (a solve's own is never replaced), 404 for no such case.
+`POST /v1/parts/wanted` lists, per case, the directions whose field the broker holds
+(`fields`), so a sweeping node backfills the rest.
+
 ### Parts the broker holds
 
 With `CASEBROKER_PARTS_DIR` set, a node uploads each part of a case to the broker as
