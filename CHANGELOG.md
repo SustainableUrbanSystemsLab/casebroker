@@ -8,6 +8,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.34.0] - 2026-10-07
+
+### Added
+- **`POST /v1/parts/wanted`: which parts of these cases the broker would still take.** A node
+  sends the case ids it holds archives of (its done folder, up to 500 a call) and gets back, per
+  case the broker has, every part it knows the content of and does not hold yet -- each reported
+  part, and a done case's archive by its completion's hash -- of a kind it keeps, mesh first. The
+  node sweeps its done folder with it at start, after every case and after an outage, so parts that
+  reached nobody (shipped before the store existed, or while the broker could not be reached) go up
+  in bulk the next time it can; each is checked against the same hash on arrival as any upload.
+
 ## [0.33.0] - 2026-10-07
 
 ### Added

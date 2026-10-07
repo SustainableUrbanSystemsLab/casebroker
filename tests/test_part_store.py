@@ -288,3 +288,59 @@ def test_a_continued_case_goes_only_to_a_node_that_can_fetch_its_mesh_from_the_b
     got = lease(can_continue=False, can_continue_from_broker=True)
     assert [g["case_id"] for g in got] == [case]
     assert got[0]["parts"][0]["at_broker"] is True
+
+
+def test_a_node_sweeping_its_done_folder_is_told_what_the_broker_still_wants(broker):
+    """Parts that reached nobody -- shipped before the broker kept parts, or while it was down --
+    are what a sweep asks after: every reported part not held, and a done case's archive."""
+    c, case, lease_id, _ = broker
+    mesh, d0 = os.urandom(30), os.urandom(30)
+    _report(c, case, lease_id, "mesh", mesh)
+    _report(c, case, lease_id, "case_000", d0, mesh_sha=_sha(mesh))
+
+    def wanted(*ids):
+        r = c.post("/v1/parts/wanted", headers=W, json={"case_ids": list(ids)})
+        assert r.status_code == 200, r.text
+        return r.json()
+
+    got = wanted(case, "v2-nobody-has-heard-of", case)
+    assert got["enabled"] is True and list(got["cases"]) == [case], "an unknown case is left out"
+    row = got["cases"][case]
+    assert row["state"] == "leased"
+    assert [(w["part"], w["sha256"], w["bytes"]) for w in row["wanted"]] == [
+        ("mesh", _sha(mesh), len(mesh)), ("case_000", _sha(d0), len(d0))], "mesh first; no archive before done"
+    assert row["wanted"][0]["archive"] == f"{case}.mesh.tar.gz"
+
+    assert _upload(c, case, "mesh", mesh)["state"] == "stored"
+    archive = os.urandom(25)
+    done = c.post("/v1/complete", headers=W, json={"lease_id": lease_id, "case_id": case,
+                                                    "result_uri": f"file:///C:/wind/done/{case}.tar.gz",
+                                                    "sha256": _sha(archive), "bytes": len(archive), "metrics": {}})
+    assert done.status_code == 200, done.text
+    row = wanted(case)["cases"][case]
+    assert [(w["part"], w["sha256"]) for w in row["wanted"]] == [("case_000", _sha(d0)), ("archive", _sha(archive))]
+
+    for part, content in (("case_000", d0), ("archive", archive)):
+        assert _upload(c, case, part, content)["state"] == "stored"
+    assert wanted(case)["cases"][case]["wanted"] == [], "everything it knows of is held"
+    assert c.post("/v1/parts/wanted", headers=R, json={"case_ids": [case]}).status_code in (401, 403), \
+        "a node's question: write scope, like the uploads it leads to"
+
+
+def test_a_kind_the_broker_does_not_keep_is_not_wanted_and_without_a_store_nothing_is(tmp_path, monkeypatch):
+    monkeypatch.setenv("CASEBROKER_PARTS_RESERVE_GB", "0")
+    monkeypatch.setenv("CASEBROKER_PARTS_KEEP", "mesh,archive")
+    c = TestClient(create_app(db_path=str(tmp_path / "k.sqlite"), tokens=["w"], readonly_tokens=["r"],
+                              parts_dir=str(tmp_path / "parts")))
+    c.post("/v1/cases", headers=W, json=[{"lat": 33.8, "lon": -84.4, "recipe": V4, "city_cluster": "atl"}])
+    lease = c.post("/v1/lease", headers=W, json={"worker_id": "foam-1"}).json()[0]
+    mesh, d0 = os.urandom(30), os.urandom(30)
+    _report(c, lease["case_id"], lease["lease_id"], "mesh", mesh)
+    _report(c, lease["case_id"], lease["lease_id"], "case_000", d0, mesh_sha=_sha(mesh))
+    row = c.post("/v1/parts/wanted", headers=W, json={"case_ids": [lease["case_id"]]}).json()["cases"][lease["case_id"]]
+    assert [w["part"] for w in row["wanted"]] == ["mesh"], "directions are not kept here"
+
+    monkeypatch.delenv("CASEBROKER_PARTS_DIR", raising=False)
+    bare = TestClient(create_app(db_path=str(tmp_path / "k.sqlite"), tokens=["w"], readonly_tokens=["r"]))
+    assert bare.post("/v1/parts/wanted", headers=W, json={"case_ids": [lease["case_id"]]}).json() == \
+        {"enabled": False, "cases": {}}
