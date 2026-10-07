@@ -8,6 +8,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.33.0] - 2026-10-07
+
+### Added
+- **The wind-field view outlines the site's trees.** Where the Meta/WRI canopy model has crowns of
+  2 m or more, a green outline is drawn over the pedestrian field, from the same `/footprints`
+  canopy grid the Site Geometry panel draws (one request serves both). It is traced midway between
+  canopy and bare cells, so it is as fine as that ~21 m grid and no finer, and it is an outline
+  rather than a fill so the field's colours still mean speed. A *trees* toggle sits next to
+  *arrows*, and the tooltip gives the canopy height under the pointer. The legend says whether the
+  crowns were in THIS solve (`trees_modelled`, which the node records): a case solved without
+  trees still gets the outline, labelled as drawn for reference only, because otherwise a tree over
+  a v5 field would read as the reason the wind is slow there.
+
 ## [0.32.0] - 2026-10-07
 
 ### Added
