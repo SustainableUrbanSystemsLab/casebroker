@@ -1001,3 +1001,47 @@ def test_a_field_blob_is_stored_uncompressed_and_a_cell_reads_in_place():
         (12 + len(hb) + 4 * k + 1, case_id)).fetchone()["v"]
     assert struct.unpack("<f", bytes(cell))[0] == values[k]
     conn.execute("DELETE FROM case_fields WHERE case_id = ?", (case_id,))
+
+
+def test_a_field_is_asked_questions_in_place_on_postgres():
+    """What differs by engine in the field queries: substr() of a bytea at an offset
+    computed from a column (CAST to integer, or Postgres finds no substr(bytea, bigint)),
+    the U/U_ref guard (Postgres raises on a division by zero where SQLite answers NULL),
+    and missing values sorting last either way."""
+    import gzip
+    import json
+    import struct
+
+    conn = fresh_conn()
+    recipe = prefix("fieldq")
+    case_ids = seed(2, "fieldq", recipe=recipe)
+    nx, ny = 4, 3
+    values = [float(i) for i in range(nx * ny)]
+    values[5] = float("nan")
+    for n, case_id in enumerate(case_ids):
+        lease = db.lease(conn, prefix("w-fieldq-%d" % n), recipes=[recipe])[0]
+        assert lease.case_id in case_ids
+        header = {"format": "umag/1", "direction": "case_000", "height_m": 1.75, "nx": nx, "ny": ny,
+                  "x0": 0.0, "y0": 0.0, "spacing_m": 2.0, "u_ref": 0.0 if n else 2.0}
+        hb = json.dumps(header).encode()
+        body = struct.pack("<%df" % len(values), *[v * (n + 1) for v in values])
+        container = b"UMAG" + struct.pack("<II", 1, len(hb)) + hb + body
+        assert db.put_field(conn, lease.lease_id, lease.case_id, "case_000", gzip.compress(container)) == "ok"
+    first = case_ids[0] if db.field_lattices(conn, case_ids[0])[0]["u_ref"] == 2.0 else case_ids[1]
+
+    k = 7                                              # row 1, column 3
+    got = db.field_ranges(conn, first, ["case_000"], [(4 * k, 4), (4 * (k + 4), 4)])
+    (parts,) = got.values()
+    assert struct.unpack("<f", parts[0])[0] == values[k] and struct.unpack("<f", parts[1])[0] == values[k + 4]
+    band, container = db.field_band(conn, first, "case_000", 1.75, 1, 2)
+    assert container is None and len(band) == 4 * nx * 2
+    assert struct.unpack("<f", band[8:12])[0] == values[6]
+
+    out = db.query_fields(conn, recipe=recipe, sort="-vr_max")
+    assert out["total"] == 2
+    assert out["fields"][0]["case_id"] == first, "the field without u_ref has no ratio and sorts last"
+    assert out["fields"][0]["n_valid"] == nx * ny - 1
+    assert db.query_fields(conn, recipe=recipe, where=["vr_max>5"])["total"] == 1
+    assert db.summarise_stored_fields(conn)["failed"] == 0
+    for case_id in case_ids:
+        conn.execute("DELETE FROM case_fields WHERE case_id = ?", (case_id,))

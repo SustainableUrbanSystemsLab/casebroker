@@ -239,6 +239,30 @@ comes from the part store, or from `scripts/report_receipts.py` run where a copy
 `/v1/custody` lists, and only a case whose archive and every part its manifest
 names are present and verify (`casebroker.archives.status`).
 
+### Asking the wind field
+
+The broker holds each finished direction's |U| at 1.75 m (`case_fields`: float32 on the
+case's 2 m lattice, metres east (+x) and north (+y) of the site centre, NaN inside a
+building). A case is 32 such fields and the campaign about 160,000, so nothing here hands
+over a field to answer a question about it: a point reads 16 bytes of each field and a
+region the band of rows it spans, in place (`substr()` of the blob, which Postgres reads
+from just those TOAST chunks: the column is `STORAGE EXTERNAL`), and a query across cases
+reads no field at all -- it filters on the statistics the broker computed when it stored
+each one. U/U_ref (`vr`) is |U| over the field's `u_ref`, the inlet log law at its height:
+the number that compares one site with another.
+
+| Call | Scope | What |
+| --- | --- | --- |
+| `GET /v1/fields?recipe=&lcz=&split=&city_cluster=&state=&label=&case_id=&direction=&height_m=&where=&sort=&limit=&offset=` | read | Fields across cases, one record per (case, direction) at 1.75 m (or exactly `height_m`): grid, `u_ref`, `coverage`, `n_valid` (cells with air), `umag_mean`, `umag_min`, `umag_p05` `p25` `p50` `p75` `p95` `p99`, `umag_max`, the node's `umag_p999`, each also as `vr_*`, and the case's `recipe`, `lcz`, `split`, `city_cluster`, `state`, `lat`, `lon`. `where` (repeatable, ANDed) is `<number><op><value>` over those numbers, `deg`, `height_m`, `coverage`, `u_ref` and `n_valid`, with `<` `<=` `=` `!=` `>=` `>`: `where=vr_p95>=1.2&where=deg<90`. `sort` is one of them, `-` first for descending, missing values last. `label` is `key:value` or `key`. 422 names a clause or key that is not one. `limit` at most 1000; `total` is the whole match |
+| `GET /v1/cases/{id}/umag?x=&y=` or `?lat=&lon=` (`&height_m=&direction=`) | read | \|U\| at one point in every direction the case has (or those named): `umag`, `vr`, `u_ref`, `nodes_valid`, per direction, and the point in both frames. Bilinear between the four lattice nodes around it; a node inside a building is left out and the rest reweighted, and `umag` is null where none of the four has air. `lat`/`lon` are placed by the site frame the node built the case in (110 540 m per degree of latitude, 111 320 cos(lat) per degree of longitude, around the case's own `lat`/`lon`). 422 for a point off the field (more than half a spacing past its outer nodes) |
+| `GET /v1/cases/{id}/umag/stats?bbox=xmin,ymin,xmax,ymax` and/or `?radius_m=&x=&y=` (or `&lat=&lon=`), `&above=&above_vr=&height_m=&direction=` | read | The same statistics over a region, per direction: a box in site metres, a disc, both (their intersection), or neither (the whole field, which matches the stored statistics). `above` (m/s) and `above_vr` (U/U_ref), repeatable, give the share of the region's air STRICTLY above each threshold, keyed by the threshold (`"5"`, `"1.2"`). `cells` counts the lattice nodes in the region, `n_valid` those with air; `region.area_m2` is `cells` times the spacing squared |
+
+`GET /v1/cases/{id}/fields` and a case's `fields` carry the stored statistics too. A field
+stored before the broker computed them gets them when the broker next starts (a background
+pass, ten at a time); until then it matches no `where` on them. A field stored
+gzip-wrapped (before 0.28.0) cannot be read in place and is read whole instead, with
+the same answers.
+
 ### Parts the broker holds
 
 With `CASEBROKER_PARTS_DIR` set, a node uploads each part of a case to the broker as

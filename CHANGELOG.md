@@ -8,6 +8,29 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.32.0] - 2026-10-07
+
+### Added
+- **Ask the stored wind field questions without downloading it.** The broker has held every
+  finished direction's |U| at 1.75 m since 0.24.0, but only as whole fields: a megabyte each, 32
+  a case, about 160 GB for the campaign. Now:
+  - **Every field is summarised when it is stored**: `n_valid` (cells with air), `umag_mean`,
+    `umag_min`, `umag_p05` .. `umag_p99`, `umag_max`, as `case_fields` columns, on
+    `GET /v1/cases/{id}/fields` and a case's `fields`. Fields stored before get them in a
+    background pass when the broker starts.
+  - **`GET /v1/fields`** finds fields across cases by what the case is (recipe, LCZ, split, city,
+    state, label, case, direction) and by what the field holds: `where=vr_p95>=1.2&where=deg<90`,
+    `sort=-umag_p99`. Every statistic also comes as U/U_ref (`vr_*`). It reads no field.
+  - **`GET /v1/cases/{id}/umag?lat=&lon=`** (or `x`,`y` in site metres): |U| and U/U_ref at one
+    point, per direction -- a speed rose of a street corner. Bilinear, with nodes inside a
+    building left out. Reads 16 bytes of each field.
+  - **`GET /v1/cases/{id}/umag/stats`**: the same statistics over a box or a disc, with the share
+    of the region's air above any threshold (`above=5`, `above_vr=1.2`). Reads only the rows the
+    region spans.
+  - The arithmetic is `casebroker/umag.py`; points are placed by the same site frame the node
+    builds the case in. A field stored gzip-wrapped (before 0.28.0) is read whole instead, with
+    the same answers. See docs/protocol.md, "Asking the wind field".
+
 ## [0.31.0] - 2026-10-06
 
 ### Added

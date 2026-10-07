@@ -30,6 +30,7 @@ import contextlib
 import os
 import re
 import secrets
+import struct
 import threading
 import time
 import pathlib
@@ -38,11 +39,12 @@ import weakref
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
+import numpy as np
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from starlette.middleware.gzip import DEFAULT_EXCLUDED_CONTENT_TYPES, GZipMiddleware
 from pydantic import BaseModel, Field
 
-from . import __version__, auth, dataset, db, footprints, ids, partstore, places
+from . import __version__, auth, dataset, db, footprints, ids, partstore, places, umag
 
 MAX_LEASE_SECONDS = 24 * 3600
 
@@ -633,6 +635,9 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
             dataset_cache.peek()
         except Exception as e:                           # noqa: BLE001
             print(f"[warn] could not start the dataset warm-up: {e}", file=sys.stderr)
+        # Fields stored before the broker summarised them on arrival get their
+        # statistics now, a few at a time so a lease never waits long behind them.
+        threading.Thread(target=_summarise_stored_fields, name="field-stats", daemon=True).start()
         yield
 
     app = FastAPI(title="E3D Simulation Broker", version=__version__,
@@ -651,6 +656,21 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
     # Exposed on app.state so a test can drive its clock.
     dataset_cache = dataset.DatasetCache(lambda: dataset.stream_rows(conn))
     app.state.dataset = dataset_cache
+
+    def _summarise_stored_fields() -> None:
+        try:
+            total = 0
+            while True:
+                out = db.summarise_stored_fields(conn, limit=10)
+                total += out["summarised"]
+                if not out["summarised"] or not out["remaining"]:
+                    break
+                time.sleep(0.2)
+            if total or out["remaining"]:
+                print(f"[fields] summarised {total} stored field(s); {out['remaining']} still without "
+                      "statistics", file=sys.stderr)
+        except Exception as e:                           # noqa: BLE001
+            print(f"[warn] could not summarise the stored fields: {e}", file=sys.stderr)
 
     def _supplied_token(request: Request) -> str:
         header = request.headers.get("authorization", "")
@@ -2317,6 +2337,212 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         if _if_none_match(request.headers.get("if-none-match"), etag):
             return Response(status_code=304, headers=headers)
         return Response(content=row["blob"], media_type="application/octet-stream", headers=headers)
+
+    # -- asking the wind field questions -------------------------------------------------
+    #
+    # A case's fields are 32 megabytes and the campaign's 160 GB: nobody should have to
+    # download them to ask how windy a street corner is, or which sites have the
+    # windiest five percent. These read only what a question needs (db.field_ranges,
+    # db.field_band: a few bytes or a band of rows, in place) or nothing at all (the
+    # statistics stored with each field). casebroker/umag.py does the arithmetic.
+
+    def _with_ratios(rec: dict[str, Any]) -> dict[str, Any]:
+        rec.update(umag.ratios(rec))
+        return rec
+
+    def _site(case_id: str) -> tuple[float, float]:
+        row = db.get_case(conn, case_id)
+        if row is None:
+            raise HTTPException(404, "no such case")
+        spec = dataset.parse_obj(row.get("spec"))
+        try:
+            return float(spec["lat"]), float(spec["lon"])
+        except (KeyError, TypeError, ValueError):
+            raise HTTPException(422, "the case's spec has no coordinates to place a point by") from None
+
+    def _point(case_id: str, x: float | None, y: float | None, lat: float | None,
+               lon: float | None) -> tuple[float, float, float, float]:
+        """(x, y, lat, lon) of a point given in either frame -- exactly one of them."""
+        local, geo = x is not None or y is not None, lat is not None or lon is not None
+        if local == geo or (local and (x is None or y is None)) or (geo and (lat is None or lon is None)):
+            raise HTTPException(422, "give the point as x and y (metres east and north of the site "
+                                     "centre) or as lat and lon, not both and not half of one")
+        site_lat, site_lon = _site(case_id)
+        if geo:
+            x, y = umag.to_local(lat, lon, site_lat, site_lon)
+        else:
+            lat, lon = umag.to_geographic(x, y, site_lat, site_lon)
+        return x, y, lat, lon
+
+    def _chosen(case_id: str, height_m: float | None, directions: list[str] | None,
+                rows: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+        rows = db.choose_heights(rows if rows is not None else db.field_lattices(conn, case_id), height_m)
+        if directions:
+            rows = [r for r in rows if r["direction"] in set(directions)]
+        if not rows:
+            if db.get_case(conn, case_id) is None:
+                raise HTTPException(404, "no such case")
+            raise HTTPException(404, "the case has no field" + (" at that height" if height_m is not None else "")
+                                + (" in those directions" if directions else ""))
+        return rows
+
+    @app.get("/v1/fields", dependencies=[ReadAuth])
+    def query_fields(recipe: str | None = Query(None, max_length=128),
+                     lcz: str | None = Query(None, max_length=32),
+                     split: str | None = Query(None, max_length=32),
+                     city_cluster: str | None = Query(None, max_length=128),
+                     state: str | None = Query(None, max_length=32),
+                     label: str | None = Query(None, max_length=200),
+                     case_id: list[str] | None = Query(None),
+                     direction: list[str] | None = Query(None),
+                     height_m: float | None = None,
+                     where: list[str] | None = Query(None),
+                     sort: str | None = Query(None, max_length=32),
+                     limit: int = Query(100, ge=1, le=1000),
+                     offset: int = Query(0, ge=0)) -> dict[str, Any]:
+        """Pedestrian fields across cases, by what the case is and by what its field
+        holds -- without a byte of any field. One record per (case, direction) at the
+        published height (or exactly `height_m`): the grid, `u_ref`, `coverage`, the
+        statistics the broker computed when it stored the field (`n_valid`, `umag_mean`,
+        `umag_min`, `umag_p05` .. `umag_p99`, `umag_max`, and the node's `umag_p999`),
+        each also as U/U_ref (`vr_*`), and the case's `recipe`, `lcz`, `split`,
+        `city_cluster`, `state`, `lat`, `lon`.
+
+        `where` (repeatable, ANDed) is `<number><op><value>` over those numbers, `deg`,
+        `height_m`, `coverage`, `u_ref` and `n_valid`: `where=vr_p95>=1.2&where=deg<90`.
+        `sort` is one of them, `-` first for descending; missing values sort last.
+        `label` is `key:value` or `key` (`v4_twin`). A field stored before the broker
+        computed statistics has none until it does, and matches no `where` on them."""
+        try:
+            out = db.query_fields(conn, recipe=recipe, lcz=lcz, split=split, city_cluster=city_cluster,
+                                  state=state, case_ids=case_id, directions=direction, label=label,
+                                  height_m=height_m, where=where or (), sort=sort, limit=limit, offset=offset)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from None
+        for rec in out["fields"]:
+            spec = dataset.parse_obj(rec.pop("spec", None))
+            rec["lat"], rec["lon"] = spec.get("lat"), spec.get("lon")
+            _with_ratios(rec)
+        return out
+
+    @app.get("/v1/cases/{case_id}/umag", dependencies=[ReadAuth])
+    def umag_at(case_id: str, x: float | None = None, y: float | None = None,
+                lat: float | None = Query(None, ge=-90, le=90), lon: float | None = Query(None, ge=-180, le=180),
+                height_m: float | None = None,
+                direction: list[str] | None = Query(None)) -> dict[str, Any]:
+        """|U| at one point, in every direction the case has a field for: a speed rose of
+        that spot. The point is `x`,`y` (metres east and north of the site centre, the
+        fields' own frame) or `lat`,`lon` (placed by the site frame the node built the
+        case in); the answer gives it in both. Bilinear between the four lattice nodes
+        around it; a node inside a building is left out and the others reweighted
+        (`nodes_valid` says how many were used), and `umag` is null where none of the
+        four has air. `vr` is U/U_ref. Reads 16 bytes of each field, in place."""
+        x, y, lat, lon = _point(case_id, x, y, lat, lon)
+        rows = _chosen(case_id, height_m, direction)
+        out = []
+        groups: dict[tuple, list[dict[str, Any]]] = {}
+        for r in rows:
+            groups.setdefault((r["nx"], r["ny"], r["x0"], r["y0"], r["spacing_m"], r["data_offset"] is None), []).append(r)
+        for (nx, ny, x0, y0, spacing, legacy), group in groups.items():
+            grid = umag.Lattice(x0, y0, spacing, nx, ny)
+            try:
+                i0, i1, j0, j1, fx, fy = umag.corners(grid, x, y)
+            except umag.OutsideGrid as exc:
+                raise HTTPException(422, str(exc)) from None
+            width = i1 - i0 + 1
+            if legacy:
+                read = {}
+                for r in group:
+                    got = db.case_field(conn, case_id, r["direction"], r["height_m"])
+                    _, field = umag.values(db.umag_container(got["blob"]))
+                    read[r["direction"]] = (field[j0, i0:i1 + 1].tobytes(), field[j1, i0:i1 + 1].tobytes())
+            else:
+                got = db.field_ranges(conn, case_id, [r["direction"] for r in group],
+                                      [(4 * (j0 * nx + i0), 4 * width), (4 * (j1 * nx + i0), 4 * width)])
+                read = {}
+                for r in group:
+                    for (d, h), parts in got.items():
+                        if d == r["direction"] and abs(h - float(r["height_m"])) < 1e-6:
+                            read[d] = tuple(parts)
+            for r in group:
+                parts = read.get(r["direction"])
+                if parts is None:
+                    continue
+                lo = struct.unpack("<%df" % width, parts[0])
+                hi = struct.unpack("<%df" % width, parts[1])
+                value, n = umag.bilinear(lo[0], lo[-1], hi[0], hi[-1], fx if width > 1 else 0.0,
+                                         fy if j1 > j0 else 0.0)
+                u_ref = r.get("u_ref")
+                out.append({"direction": r["direction"], "deg": r["deg"], "height_m": r["height_m"],
+                            "umag": value, "u_ref": u_ref, "nodes_valid": n,
+                            "vr": (value / u_ref) if value is not None and u_ref and u_ref > 0 else None})
+        out.sort(key=lambda d: d["direction"])
+        return {"case_id": case_id, "x": x, "y": y, "lat": lat, "lon": lon, "directions": out}
+
+    @app.get("/v1/cases/{case_id}/umag/stats", dependencies=[ReadAuth])
+    def umag_stats(case_id: str, bbox: str | None = Query(None, max_length=200),
+                   x: float | None = None, y: float | None = None,
+                   lat: float | None = Query(None, ge=-90, le=90), lon: float | None = Query(None, ge=-180, le=180),
+                   radius_m: float | None = Query(None, gt=0),
+                   above: list[float] | None = Query(None),
+                   above_vr: list[float] | None = Query(None),
+                   height_m: float | None = None,
+                   direction: list[str] | None = Query(None)) -> dict[str, Any]:
+        """|U| over part of a case's fields, per direction: the statistics a stored field
+        carries, over a region -- `bbox=xmin,ymin,xmax,ymax` in site metres, a disc
+        (`radius_m` around `x`,`y` or `lat`,`lon`), both (their intersection), or neither
+        (the whole field). `above` (m/s) and `above_vr` (U/U_ref), repeatable, add the
+        share of the region's air strictly above each threshold, under `above` and
+        `above_vr` keyed by the threshold. `cells` counts the lattice nodes in the
+        region, `n_valid` those with air. Reads the band of rows the region spans."""
+        box = None
+        if bbox is not None:
+            try:
+                box = tuple(float(v) for v in bbox.split(","))
+            except ValueError:
+                box = ()
+            if len(box) != 4:
+                raise HTTPException(422, "bbox is xmin,ymin,xmax,ymax in metres of the site frame")
+        centre = point = None
+        if radius_m is not None:
+            px, py, plat, plon = _point(case_id, x, y, lat, lon)
+            centre, point = (px, py), {"x": px, "y": py, "lat": plat, "lon": plon}
+        elif any(v is not None for v in (x, y, lat, lon)):
+            raise HTTPException(422, "a point here is the centre of a disc: give radius_m with it")
+        rows = _chosen(case_id, height_m, direction)
+        out = []
+        for r in rows:
+            grid = umag.Lattice.of(r)
+            try:
+                j0, j1, mask = umag.region(grid, bbox=box, centre=centre, radius_m=radius_m)
+            except umag.OutsideGrid as exc:
+                raise HTTPException(422, str(exc)) from None
+            got = db.field_band(conn, case_id, r["direction"], r["height_m"], j0, j1)
+            if got is None:
+                continue
+            band, container = got
+            if band is not None:
+                rows_ = np.frombuffer(band, dtype="<f4").reshape(j1 - j0 + 1, grid.nx)
+            else:
+                rows_ = umag.values(container)[1][j0:j1 + 1]
+            sel = rows_[mask]
+            rec = {"direction": r["direction"], "deg": r["deg"], "height_m": r["height_m"],
+                   "u_ref": r["u_ref"], "cells": int(mask.sum())}
+            rec.update(umag.stats(sel))
+            _with_ratios(rec)
+            if above:
+                rec["above"] = umag.exceedance(sel, above)
+            if above_vr:
+                u_ref = r["u_ref"]
+                rec["above_vr"] = (umag.exceedance(sel / u_ref, above_vr) if u_ref and u_ref > 0
+                                   else {umag.threshold_key(t): None for t in above_vr})
+            out.append(rec)
+        spacing = float(rows[0]["spacing_m"])
+        cells = out[0]["cells"] if out else 0
+        return {"case_id": case_id,
+                "region": {"bbox": list(box) if box else None, "centre": point, "radius_m": radius_m,
+                           "cells": cells, "area_m2": cells * spacing * spacing},
+                "directions": out}
 
     # -- custody: what has arrived where results are kept -----------------------------
     #

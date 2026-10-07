@@ -26,7 +26,7 @@ versions are never pooled.
 | `attempts` / `max_attempts` | Retry budget, default 3. |
 | `priority` | Lease order, ascending. Default 100. |
 | `result_uri`, `result_sha256`, `result_bytes` | Where the archive lives. The broker never opens it. |
-| `case_fields` rows | The pedestrian wind field itself, per direction: \|U\| at 1.75 m on the 2 m grid, sent by the node as each direction finishes. The one result the broker HOLDS rather than points at (since 0.24.0). |
+| `case_fields` rows | The pedestrian wind field itself, per direction: \|U\| at 1.75 m on the 2 m grid, sent by the node as each direction finishes. The one result the broker HOLDS rather than points at (since 0.24.0). The broker summarises each as it stores it (`n_valid`, `umag_mean` .. `umag_max`), and answers questions of it in place: across cases (`GET /v1/fields`), at a point (`/umag`), over a region (`/umag/stats`). |
 
 **A case id depends only on where and how, never on when or on how many exist.**
 That is what makes adding cases a pure append: no renumbering, no reshuffling,

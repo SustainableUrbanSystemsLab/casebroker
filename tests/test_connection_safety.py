@@ -56,6 +56,10 @@ _ALLOWED_UNLOCKED = {
     "_recipe_knowledge",   # inside list_releases and recipe_gaps
     "_parts_of",           # inside lease() and case_parts
     "_blob_receipt",       # inside record_blob, in its transaction
+    # Orchestrators that touch the connection only through locked helpers, so the
+    # arithmetic between them runs unlocked: a lease never waits behind numpy.
+    "put_field",           # validates and summarises the field, then _store_field
+    "summarise_stored_fields",  # one locked read and one locked write per field
     "_existing_tables",    # schema bring-forward, under _LOCK in connect()
     "_existing_columns",
     "reconcile_columns",

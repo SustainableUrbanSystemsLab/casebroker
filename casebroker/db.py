@@ -363,6 +363,25 @@ CREATE TABLE IF NOT EXISTS case_fields (
     -- The 99.9th percentile of |U|: the top of a colour scale a viewer shares
     -- across a case's directions without reading every field first.
     umag_p999   REAL,
+    -- Where the float32 values start in the stored container (12 + header
+    -- length): a cell or a band of rows is then substr() of the blob, read in
+    -- place. NULL for a row stored gzip-wrapped (before 2026-10-06), which has to
+    -- be read whole.
+    data_offset INTEGER,
+    -- The field summarised over its finite cells (casebroker/umag.py, `stats`),
+    -- computed by the broker when the field is stored, for GET /v1/fields to
+    -- filter and sort on. U/U_ref is each of them over u_ref. NULL until computed
+    -- (POST /v1/fields/stats fills rows stored before the columns existed).
+    n_valid     INTEGER,
+    umag_mean   REAL,
+    umag_min    REAL,
+    umag_p05    REAL,
+    umag_p25    REAL,
+    umag_p50    REAL,
+    umag_p75    REAL,
+    umag_p95    REAL,
+    umag_p99    REAL,
+    umag_max    REAL,
     sha256      TEXT NOT NULL,
     bytes       BIGINT NOT NULL,
     blob        BLOB NOT NULL,
@@ -715,6 +734,25 @@ CREATE TABLE IF NOT EXISTS case_fields (
     -- The 99.9th percentile of |U|: the top of a colour scale a viewer shares
     -- across a case's directions without reading every field first.
     umag_p999   REAL,
+    -- Where the float32 values start in the stored container (12 + header
+    -- length): a cell or a band of rows is then substr() of the blob, read in
+    -- place. NULL for a row stored gzip-wrapped (before 2026-10-06), which has to
+    -- be read whole.
+    data_offset INTEGER,
+    -- The field summarised over its finite cells (casebroker/umag.py, `stats`),
+    -- computed by the broker when the field is stored, for GET /v1/fields to
+    -- filter and sort on. U/U_ref is each of them over u_ref. NULL until computed
+    -- (POST /v1/fields/stats fills rows stored before the columns existed).
+    n_valid     INTEGER,
+    umag_mean   REAL,
+    umag_min    REAL,
+    umag_p05    REAL,
+    umag_p25    REAL,
+    umag_p50    REAL,
+    umag_p75    REAL,
+    umag_p95    REAL,
+    umag_p99    REAL,
+    umag_max    REAL,
     sha256      TEXT NOT NULL,
     bytes       BIGINT NOT NULL,
     blob        BYTEA NOT NULL,
@@ -2837,7 +2875,6 @@ def decode_umag(blob: bytes) -> dict[str, Any]:
     return header
 
 
-@_locked
 def put_field(conn, lease_id: str, case_id: str, direction: str, blob: bytes,
               now: int | None = None,
               worker_ok: Callable[[str | None], bool] | None = None) -> str:
@@ -2852,6 +2889,9 @@ def put_field(conn, lease_id: str, case_id: str, direction: str, blob: bytes,
     Stored UNCOMPRESSED (umag_container), whichever way it was sent; ``sha256``
     and ``bytes`` describe what is stored. Rows from before are gzip-wrapped and
     stay so -- the first two bytes say which, and the dashboard reads both.
+
+    The broker summarises the field as it stores it (``field_summary``: where its
+    values start, and its statistics), outside the lock every lease waits on.
     """
     if not PART_NAME.fullmatch(direction or "") or direction == "mesh":
         return "invalid: not a direction name"
@@ -2866,7 +2906,32 @@ def put_field(conn, lease_id: str, case_id: str, direction: str, blob: bytes,
         return f"invalid: the blob says it is {header['case_id']!r}, not {case_id!r}"
     import hashlib
     sha = hashlib.sha256(blob).hexdigest()
-    now = now or _now()
+    summary = field_summary(blob)
+    return _store_field(conn, lease_id, case_id, direction, header, blob, sha, summary,
+                        now or _now(), worker_ok)
+
+
+#: The columns field_summary fills, in INSERT order.
+_FIELD_SUMMARY_COLUMNS = ("data_offset", "n_valid") + tuple("umag_" + k for k in (
+    "mean", "min", "p05", "p25", "p50", "p75", "p95", "p99", "max"))
+
+
+def field_summary(blob: bytes) -> dict[str, Any]:
+    """What the broker derives from a stored field: ``data_offset`` (None for a
+    gzip-wrapped row, which cannot be read in place) and its statistics
+    (casebroker/umag.py, ``stats``). Takes the blob as it is stored."""
+    from . import umag
+    raw = umag_container(blob)
+    _, field = umag.values(raw)
+    out = umag.stats(field)
+    out["data_offset"] = umag.data_offset(raw) if blob[:4] == UMAG_MAGIC else None
+    return {k: out[k] for k in _FIELD_SUMMARY_COLUMNS}
+
+
+@_locked
+def _store_field(conn, lease_id: str, case_id: str, direction: str, header: dict[str, Any],
+                 blob: bytes, sha: str, summary: dict[str, Any], now: int,
+                 worker_ok: Callable[[str | None], bool] | None) -> str:
     conn.execute("BEGIN IMMEDIATE")
     try:
         row = _by_lease(conn, lease_id)
@@ -2874,19 +2939,22 @@ def put_field(conn, lease_id: str, case_id: str, direction: str, blob: bytes,
                 or (worker_ok is not None and not worker_ok(row["lease_worker"])):
             conn.execute("ROLLBACK")
             return "gone"
+        extra = ", ".join(_FIELD_SUMMARY_COLUMNS)
         conn.execute(
             "INSERT INTO case_fields(case_id, direction, height_m, deg, nx, ny, x0, y0,"
-            " spacing_m, coverage, u_ref, umag_p999, sha256, bytes, blob, worker_id, reported_at)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+            " spacing_m, coverage, u_ref, umag_p999, sha256, bytes, blob, worker_id, reported_at, "
+            + extra + ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?"
+            + ",?" * len(_FIELD_SUMMARY_COLUMNS) + ")"
             " ON CONFLICT(case_id, direction, height_m) DO UPDATE SET deg=excluded.deg,"
             " nx=excluded.nx, ny=excluded.ny, x0=excluded.x0, y0=excluded.y0,"
             " spacing_m=excluded.spacing_m, coverage=excluded.coverage, u_ref=excluded.u_ref,"
             " umag_p999=excluded.umag_p999, sha256=excluded.sha256, bytes=excluded.bytes,"
-            " blob=excluded.blob, worker_id=excluded.worker_id, reported_at=excluded.reported_at",
+            " blob=excluded.blob, worker_id=excluded.worker_id, reported_at=excluded.reported_at, "
+            + ", ".join("%s=excluded.%s" % (c, c) for c in _FIELD_SUMMARY_COLUMNS),
             (case_id, direction, header["height_m"], header.get("deg"), int(header["nx"]),
              int(header["ny"]), header["x0"], header["y0"], header["spacing_m"],
              header.get("coverage"), header.get("u_ref"), header.get("umag_p999"), sha, len(blob), blob,
-             row["lease_worker"], now))
+             row["lease_worker"], now) + tuple(summary[c] for c in _FIELD_SUMMARY_COLUMNS))
         _event(conn, case_id, row["lease_worker"], "field_stored",
                "%s @ %g m, %d bytes" % (direction, header["height_m"], len(blob)), now)
         conn.execute("COMMIT")
@@ -2896,14 +2964,22 @@ def put_field(conn, lease_id: str, case_id: str, direction: str, blob: bytes,
     return "ok"
 
 
+# What a field record carries, without its bytes: the grid, the node's own numbers,
+# and the statistics the broker computed (field_summary) -- not data_offset, which is
+# how the broker reads the blob and nobody else's business.
+_FIELD_STATS_COLUMNS = _FIELD_SUMMARY_COLUMNS[1:]
+_FIELD_RECORD = ("direction, height_m, deg, nx, ny, x0, y0, spacing_m, coverage, u_ref, umag_p999, "
+                 + ", ".join(_FIELD_STATS_COLUMNS) + ", sha256, bytes, worker_id, reported_at")
+#: The published pedestrian height, and how far from it a field is still "the" one.
+FIELD_HEIGHT_M = 1.75
+
+
 @_locked
 def case_fields(conn, case_id: str) -> list[dict[str, Any]]:
     """What fields a case has, without the bytes: one record per (direction, height),
     directions in order, the lower height first."""
-    rows = conn.execute(
-        "SELECT direction, height_m, deg, nx, ny, x0, y0, spacing_m, coverage, u_ref, umag_p999,"
-        " sha256, bytes, worker_id, reported_at FROM case_fields WHERE case_id=?",
-        (case_id,)).fetchall()
+    rows = conn.execute("SELECT " + _FIELD_RECORD + " FROM case_fields WHERE case_id=?",
+                        (case_id,)).fetchall()
     out = [dict(r) for r in rows]
     return sorted(out, key=lambda r: (r["direction"], r["height_m"]))
 
@@ -2913,18 +2989,236 @@ def case_field(conn, case_id: str, direction: str, height_m: float | None = None
     """One field's blob and its record, or None. Without a height, the one nearest
     1.75 m (the published pedestrian height)."""
     rows = conn.execute(
-        "SELECT direction, height_m, deg, nx, ny, x0, y0, spacing_m, coverage, u_ref, umag_p999,"
-        " sha256, bytes, blob, worker_id, reported_at FROM case_fields"
-        " WHERE case_id=? AND direction=?", (case_id, direction)).fetchall()
+        "SELECT " + _FIELD_RECORD + ", blob FROM case_fields WHERE case_id=? AND direction=?",
+        (case_id, direction)).fetchall()
     if not rows:
         return None
-    target = 1.75 if height_m is None else float(height_m)
-    best = min(rows, key=lambda r: abs(float(r["height_m"]) - target))
-    if height_m is not None and abs(float(best["height_m"]) - target) > 1e-6:
+    best = choose_heights([dict(r) for r in rows], height_m)
+    if not best:
         return None
-    d = dict(best)
+    d = best[0]
     d["blob"] = bytes(d["blob"])
     return d
+
+
+def choose_heights(rows: list[dict[str, Any]], height_m: float | None = None) -> list[dict[str, Any]]:
+    """One record per direction: the one at ``height_m`` exactly (directions without
+    one are left out), or without a height the one nearest the published 1.75 m.
+    Directions in order."""
+    target = FIELD_HEIGHT_M if height_m is None else float(height_m)
+    best: dict[str, dict[str, Any]] = {}
+    for r in rows:
+        d = abs(float(r["height_m"]) - target)
+        if height_m is not None and d > 1e-6:
+            continue
+        have = best.get(r["direction"])
+        if have is None or d < abs(float(have["height_m"]) - target):
+            best[r["direction"]] = r
+    return [best[k] for k in sorted(best)]
+
+
+# -- asking the field questions (casebroker/umag.py does the arithmetic) ----------------
+#
+# A field is a megabyte and a campaign is 160,000 of them, so nothing here reads more
+# of one than the question needs. A point is four float32 values and a region a band
+# of rows: substr() of the blob, which Postgres serves from the TOAST chunks that hold
+# those bytes because the column is STORAGE EXTERNAL (UNCOMPRESSED_COLUMNS). A row
+# stored gzip-wrapped (data_offset NULL) is read whole and inflated. Every call takes
+# the lock once per DIRECTION at most, so a lease never waits behind a whole case.
+
+@_locked
+def field_lattices(conn, case_id: str) -> list[dict[str, Any]]:
+    """Every field of a case as its grid and where its values start, without bytes."""
+    return [dict(r) for r in conn.execute(
+        "SELECT direction, height_m, deg, nx, ny, x0, y0, spacing_m, u_ref, data_offset"
+        " FROM case_fields WHERE case_id=?", (case_id,)).fetchall()]
+
+
+@_locked
+def field_ranges(conn, case_id: str, directions: list[str],
+                 ranges: list[tuple[int, int]]) -> dict[tuple[str, float], list[bytes]]:
+    """Byte ranges of the VALUES of several fields of a case at once: each range is
+    (offset from the first value, length). Rows without a data_offset are left out.
+    Keyed by (direction, height_m); every height of the named directions is read, so
+    the caller keeps the ones whose lattice the ranges were computed for."""
+    if not directions or not ranges:
+        return {}
+    cols = ", ".join("substr(blob, CAST(data_offset + ? AS INTEGER), ?) AS r%d" % k for k in range(len(ranges)))
+    params: list[Any] = []
+    for off, n in ranges:
+        params.extend([off + 1, n])                      # substr counts from 1
+    marks = ",".join("?" * len(directions))
+    rows = conn.execute(
+        "SELECT direction, height_m, " + cols + " FROM case_fields"
+        " WHERE case_id=? AND data_offset IS NOT NULL AND direction IN (" + marks + ")",
+        params + [case_id] + list(directions)).fetchall()
+    return {(r["direction"], float(r["height_m"])): [bytes(r["r%d" % k]) for k in range(len(ranges))]
+            for r in rows}
+
+
+@_locked
+def fields_without_stats(conn, limit: int = 200) -> list[dict[str, Any]]:
+    """Fields stored before the broker summarised them, oldest first."""
+    return [dict(r) for r in conn.execute(
+        "SELECT case_id, direction, height_m FROM case_fields WHERE n_valid IS NULL"
+        " ORDER BY reported_at, case_id, direction LIMIT ?", (int(limit),)).fetchall()]
+
+
+@_locked
+def _field_blob(conn, case_id: str, direction: str, height_m: float):
+    row = conn.execute(
+        "SELECT sha256, blob FROM case_fields WHERE case_id=? AND direction=? AND ABS(height_m - ?) < 1e-6",
+        (case_id, direction, float(height_m))).fetchone()
+    return None if row is None else (row["sha256"], bytes(row["blob"]))
+
+
+@_locked
+def _set_field_summary(conn, case_id: str, direction: str, height_m: float, sha: str,
+                       summary: dict[str, Any]) -> bool:
+    # Only if the field is still the one summarised: a direction stored again in
+    # between has its own summary already, written with it.
+    cur = conn.execute(
+        "UPDATE case_fields SET " + ", ".join("%s=?" % c for c in _FIELD_SUMMARY_COLUMNS)
+        + " WHERE case_id=? AND direction=? AND ABS(height_m - ?) < 1e-6 AND sha256=?",
+        tuple(summary[c] for c in _FIELD_SUMMARY_COLUMNS) + (case_id, direction, float(height_m), sha))
+    return (cur.rowcount or 0) > 0
+
+
+def summarise_stored_fields(conn, limit: int = 200) -> dict[str, int]:
+    """Compute data_offset and the statistics of up to ``limit`` fields stored before
+    the broker did so on arrival. One field per locked read and per locked write, the
+    arithmetic between them unlocked. ``remaining`` counts what is still without."""
+    done = failed = 0
+    for row in fields_without_stats(conn, limit):
+        got = _field_blob(conn, row["case_id"], row["direction"], row["height_m"])
+        if got is None:
+            continue
+        sha, blob = got
+        try:
+            summary = field_summary(blob)
+        except (ValueError, KeyError) as exc:
+            print("[fields] %s/%s @ %s m: cannot summarise: %s" % (row["case_id"], row["direction"],
+                                                                     row["height_m"], exc), file=sys.stderr)
+            failed += 1
+            continue
+        done += _set_field_summary(conn, row["case_id"], row["direction"], row["height_m"], sha, summary)
+    left = _count_fields_without_stats(conn)
+    return {"summarised": done, "failed": failed, "remaining": left}
+
+
+@_locked
+def _count_fields_without_stats(conn) -> int:
+    return int(conn.execute("SELECT COUNT(*) AS n FROM case_fields WHERE n_valid IS NULL").fetchone()["n"])
+
+
+#: What GET /v1/fields filters and sorts on. ``vr_<stat>`` is ``umag_<stat>`` / u_ref.
+FIELD_QUERY_NUMBERS = ("deg", "height_m", "coverage", "u_ref", "n_valid", "umag_p999") + tuple(
+    c for c in _FIELD_STATS_COLUMNS if c != "n_valid")
+_FIELD_VR = tuple("vr_" + c[len("umag_"):] for c in FIELD_QUERY_NUMBERS if c.startswith("umag_"))
+_WHERE_RE = re.compile(r"^\s*([a-z0-9_]+)\s*(<=|>=|!=|<|>|=)\s*([-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)\s*$")
+
+
+def _field_expr(key: str) -> str:
+    """The SQL for one queryable number, or ValueError naming what is."""
+    if key in FIELD_QUERY_NUMBERS:
+        return "f." + key
+    if key in _FIELD_VR:
+        # Guarded rather than divided: Postgres raises on a division by zero where
+        # SQLite answers NULL, and a field without u_ref has no ratio on either.
+        return "(CASE WHEN f.u_ref > 0 THEN f.umag_%s / f.u_ref END)" % key[len("vr_"):]
+    raise ValueError("%r is not a field number; use one of %s" % (key, ", ".join(FIELD_QUERY_NUMBERS + _FIELD_VR)))
+
+
+def parse_field_where(clause: str) -> tuple[str, str, float]:
+    """``"vr_p95>=1.2"`` -> ("vr_p95", ">=", 1.2); ValueError for anything else."""
+    m = _WHERE_RE.match(clause or "")
+    if not m:
+        raise ValueError("%r is not <number><op><value>, e.g. vr_p95>=1.2 (ops < <= = != >= >)" % clause)
+    key, op, value = m.group(1), m.group(2), float(m.group(3))
+    _field_expr(key)
+    return key, op, value
+
+
+@_locked
+def query_fields(conn, *, recipe: str | None = None, lcz: str | None = None, split: str | None = None,
+                 city_cluster: str | None = None, state: str | None = None,
+                 case_ids: list[str] | None = None, directions: list[str] | None = None,
+                 label: str | None = None, height_m: float | None = None,
+                 where: Iterable[str] = (), sort: str | None = None,
+                 limit: int = 100, offset: int = 0) -> dict[str, Any]:
+    """Fields across cases, by what the case is and by what the field holds: one
+    record per (case, direction) at the published height (or exactly ``height_m``),
+    with the case's recipe, LCZ, split, city, state and spec. ``where`` clauses are
+    ``<number><op><value>`` over FIELD_QUERY_NUMBERS and their ``vr_`` ratios, ANDed;
+    ``sort`` is one of those, ``-`` first for descending, missing values last.
+    ValueError for a clause or sort key that is not one."""
+    limit = max(1, min(int(limit), 1000))
+    offset = max(0, int(offset))
+    sql_where: list[str] = []
+    params: list[Any] = []
+    for column, value in (("c.recipe", recipe), ("c.lcz", lcz), ("c.split", split),
+                          ("c.city_cluster", city_cluster), ("c.state", state)):
+        if value:
+            sql_where.append(column + " = ?")
+            params.append(value)
+    for column, values in (("f.case_id", case_ids), ("f.direction", directions)):
+        if values:
+            sql_where.append(column + " IN (" + ",".join("?" * len(values)) + ")")
+            params.extend(values)
+    if label:
+        key, _, value = label.partition(":")
+        if value:
+            sql_where.append("f.case_id IN (SELECT case_id FROM case_labels WHERE key = ? AND value = ?)")
+            params.extend([key.strip(), value.strip()])
+        else:
+            sql_where.append("f.case_id IN (SELECT case_id FROM case_labels WHERE key = ?)")
+            params.append(key.strip())
+    if height_m is None:
+        sql_where.append("f.height_m BETWEEN ? AND ?")
+        params.extend(_FIELD_HEIGHT_BAND)
+    else:
+        sql_where.append("ABS(f.height_m - ?) < 1e-6")
+        params.append(float(height_m))
+    for clause in where:
+        key, op, value = parse_field_where(clause)
+        sql_where.append("%s %s ?" % (_field_expr(key), "<>" if op == "!=" else op))
+        params.append(value)
+    order = "f.case_id ASC, f.deg ASC, f.direction ASC"
+    if sort:
+        key = sort.lstrip("-+")
+        expr = _field_expr(key)
+        order = "(%s IS NULL) ASC, %s %s, %s" % (expr, expr, "DESC" if sort.startswith("-") else "ASC", order)
+    base = " FROM case_fields f JOIN cases c ON c.case_id = f.case_id WHERE " + " AND ".join(sql_where)
+    total = int(conn.execute("SELECT COUNT(*) AS n" + base, params).fetchone()["n"])
+    cols = ", ".join("f." + c.strip() for c in _FIELD_RECORD.split(",") if c.strip() not in ("worker_id",))
+    rows = conn.execute(
+        "SELECT f.case_id, " + cols + ", c.recipe, c.lcz, c.split, c.city_cluster, c.state, c.spec"
+        + base + " ORDER BY " + order + " LIMIT ? OFFSET ?", params + [limit, offset]).fetchall()
+    return {"fields": [dict(r) for r in rows], "total": total, "limit": limit, "offset": offset}
+
+
+@_locked
+def field_band(conn, case_id: str, direction: str, height_m: float, j0: int, j1: int):
+    """Rows j0..j1 of one field's values: ``(band, None)``, the band read in place and
+    ``4 * nx * (j1 - j0 + 1)`` bytes long -- or, for a row stored gzip-wrapped, which
+    cannot be, ``(None, container)``, the whole container inflated for the caller to
+    slice. None for no such field."""
+    row = conn.execute(
+        "SELECT nx, data_offset FROM case_fields WHERE case_id=? AND direction=? AND ABS(height_m - ?) < 1e-6",
+        (case_id, direction, float(height_m))).fetchone()
+    if row is None:
+        return None
+    nx, off = int(row["nx"]), row["data_offset"]
+    if off is None:
+        blob = conn.execute(
+            "SELECT blob FROM case_fields WHERE case_id=? AND direction=? AND ABS(height_m - ?) < 1e-6",
+            (case_id, direction, float(height_m))).fetchone()["blob"]
+        return None, umag_container(bytes(blob))
+    band = conn.execute(
+        "SELECT substr(blob, CAST(data_offset + ? AS INTEGER), ?) AS b FROM case_fields"
+        " WHERE case_id=? AND direction=? AND ABS(height_m - ?) < 1e-6",
+        (4 * j0 * nx + 1, 4 * nx * (j1 - j0 + 1), case_id, direction, float(height_m))).fetchone()["b"]
+    return bytes(band), None
 
 
 @_locked
