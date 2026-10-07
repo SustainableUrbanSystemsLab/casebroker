@@ -2232,13 +2232,15 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         keeps (CASEBROKER_PARTS_KEEP). A node asks this when it sweeps its done folder -- at
         start, after each case, after an outage -- and uploads what it has of them, so parts
         that reached nobody (shipped before the broker kept parts, or while it was down) go up
-        in bulk the next time it can. Without a part store: ``enabled`` false and nothing wanted."""
-        if store is None:
-            return {"enabled": False, "cases": {}}
+        in bulk the next time it can. Each case also lists the directions whose field the
+        broker holds (``fields``), for the node to backfill the rest. Without a part store:
+        ``enabled`` false and no part wanted, the fields still listed."""
         found = db.parts_wanted(conn, body.case_ids)
         for row in found.values():
-            row["wanted"] = [w for w in row["wanted"] if _kind(w["part"]) in keep]
-        return {"enabled": True, "cases": found}
+            # Without a store no part is wanted -- but the fields it holds still are listed:
+            # a node backfills those into the database, store or not.
+            row["wanted"] = [w for w in row["wanted"] if store is not None and _kind(w["part"]) in keep]
+        return {"enabled": store is not None, "cases": found}
 
     @app.get("/v1/cases/{case_id}/blobs", dependencies=[ReadAuth])
     def get_case_blobs(case_id: str) -> dict[str, Any]:
@@ -2323,6 +2325,39 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         if outcome == "gone":
             raise HTTPException(409, "lease expired or superseded, or not this case's, or not "
                                      "this credential's; stop sending fields for this case")
+        raise HTTPException(422, outcome)
+
+    @app.put("/v1/cases/{case_id}/fields/{direction}/backfill", dependencies=[WriteAuth])
+    async def backfill_field(case_id: str, direction: str, request: Request) -> dict[str, Any]:
+        """The field of a DONE case that has none for this direction, read by a node from the
+        archive it still holds: a case finished by a build from before fields went to the
+        broker, or whose field did not get through. The same umag/1 body as the field a node
+        sends while it solves, and no lease -- the case is finished. A machine may send it for
+        a case it completed or a direction it reported (POST /v1/parts): the machines whose
+        disk holds the archive. 409 when the case has this field (a solve's own is never
+        replaced) or is not done, 403 for another machine's case, 404 for no such case."""
+        blob = await request.body()
+        if len(blob) > db.FIELD_MAX_BYTES:
+            raise HTTPException(413, f"the field is {len(blob)} bytes; the limit is {db.FIELD_MAX_BYTES}")
+        if not blob:
+            raise HTTPException(422, "the body is empty; send the umag/1 blob as application/octet-stream")
+        machine = _machine_principal(request)
+        may = None
+        if machine:
+            name = machine["name"]
+            may = lambda worker: bool(worker) and _may_lease_as(name, worker)  # noqa: E731
+        outcome = db.backfill_field(conn, case_id, direction, blob, may_act_as=may)
+        if outcome == "ok":
+            return {"ok": True, "bytes": len(blob)}
+        if outcome == "exists":
+            raise HTTPException(409, "the case has this field already")
+        if outcome == "not_done":
+            raise HTTPException(409, "the case is not done; its node sends its fields while it solves")
+        if outcome == "forbidden":
+            raise HTTPException(403, "neither the worker that completed this case nor the one that "
+                                     "reported this direction is this credential's")
+        if outcome == "no_case":
+            raise HTTPException(404, "no such case")
         raise HTTPException(422, outcome)
 
     @app.get("/v1/cases/{case_id}/fields", dependencies=[ReadAuth])

@@ -263,6 +263,15 @@ pass, ten at a time); until then it matches no `where` on them. A field stored
 gzip-wrapped (before 0.28.0) cannot be read in place and is read whole instead, with
 the same answers.
 
+**Backfill.** `PUT /v1/cases/{id}/fields/{direction}/backfill` (write) takes the same umag/1
+body for a DONE case that has no field for that direction -- one finished by a build from
+before fields went to the broker, or whose field did not get through -- read by a node from
+the archive it still holds. No lease: the case is finished. A machine may send it for a case
+it completed or a direction it reported (`POST /v1/parts`); 403 otherwise, 409 when the case
+is not done or already has the field (a solve's own is never replaced), 404 for no such case.
+`POST /v1/parts/wanted` lists, per case, the directions whose field the broker holds
+(`fields`), so a sweeping node backfills the rest.
+
 ### Parts the broker holds
 
 With `CASEBROKER_PARTS_DIR` set, a node uploads each part of a case to the broker as
@@ -276,7 +285,7 @@ of parts. The database holds which case, which part, the hash, the size and when
 | `POST /v1/cases/{id}/parts/{part}/upload` | write | `{sha256, bytes}` of the file the node holds. `part` is `mesh`, `case_<dir>` (both reported first, `POST /v1/parts`) or `archive` (the case's own archive: the case must be done, and the hash is the completion's). Answers `state`: `stored` (nothing to send), `verifying` (all sent; ask again), `declined` (this broker does not keep that kind -- the node keeps it on its own disk), `absent` / `partial` with the `offset` to send from and the `chunk_bytes` to use. 409 for a hash or size that is not what was reported, 404 for an unreported part, 507 when the store would pass its limit or cut into its reserve of free space |
 | `PUT /v1/cases/{id}/parts/{part}/upload?offset=&bytes=` | write | One chunk (at most 64 MiB, under Cloudflare's 100 MB a request), written at `offset`; `bytes` is the whole part's size. 409 with the broker's `offset` when that is not where the upload stands, so the node resumes from there. A chunk is all or nothing. The last one starts the verification in the background (`verifying`): a 6.5 GB archive takes a minute to hash on the server, longer than the reverse proxy waits |
 | `GET /v1/cases/{id}/parts/{part}/blob` | read | The part's file. Byte ranges are answered, so a fetch resumes; the ETag is the sha256 |
-| `POST /v1/parts/wanted` | write | `{case_ids: [...]}` (at most 500): for each case the broker has, the parts it would take -- reported (or a done case's archive, by its completion's hash), not held yet, of a kind it keeps -- as `{state, wanted: [{part, sha256, bytes, archive}]}`, the mesh first. What a node asks when it sweeps its done folder (at start, after each case, after an outage), so parts that reached nobody go up in bulk. `{enabled: false, cases: {}}` without a store |
+| `POST /v1/parts/wanted` | write | `{case_ids: [...]}` (at most 500): for each case the broker has, the parts it would take -- reported (or a done case's archive, by its completion's hash), not held yet, of a kind it keeps -- as `{state, wanted: [{part, sha256, bytes, archive}]}`, the mesh first. What a node asks when it sweeps its done folder (at start, after each case, after an outage), so parts that reached nobody go up in bulk. Each case also lists `fields`, the directions whose field the broker holds, for a node to backfill the rest. Without a store `enabled` is false and no part is wanted; the fields are still listed |
 | `GET /v1/cases/{id}/blobs` | read | What of the case the broker holds, and `complete`: its archive and every part it reported |
 | `DELETE /v1/cases/{id}/parts/{part}/blob` | admin | Stop holding one part; its file goes when nothing else refers to the content |
 | `POST /v1/parts/sweep?dry_run=` | admin | Files no case refers to (a replaced mesh's parts) and stale uploads. Reports by default |
