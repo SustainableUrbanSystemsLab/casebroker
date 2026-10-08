@@ -8,6 +8,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.35.1] - 2026-10-08
+
+### Added
+- **`scripts/ice_workers.sh` queues E3D nodes on PACE ICE.** `chain N` submits N 8-hour shifts that
+  each start when the last has ended (one worker at a time; the next picks up the case the last
+  released, from the broker's mesh and finished directions), `parallel N` submits N at once, `lanes L N`
+  both. The job is `slurm/ice_e3d_node.sbatch`, which runs the E3D binary alone (no repo, no Python)
+  through `slurm/podman-pace.sh`; `slurm/submit_workers.sh` is the cluster side. A job whose
+  predecessor ended in under 15 minutes starts no worker, so a broken setup cannot run a whole
+  chain of jobs that lease cases to fail them. Setup and the traps (mpirun as root, node-local
+  scratch): `docs/pace-hpc.md` section 8.
+
 ## [0.35.0] - 2026-10-07
 
 ### Added

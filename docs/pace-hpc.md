@@ -4,12 +4,15 @@ For joining a machine -- PACE or not -- to the campaign as a worker (profiles,
 progress, resume, archives, getting results to the master) see
 [`fleet.md`](fleet.md). This page is the cluster-specific traps.
 
-Two different jobs, don't confuse them:
+Three different jobs, don't confuse them:
 
+- **The E3D node on ICE** (`slurm/ice_e3d_node.sbatch`, submitted with
+  `scripts/ice_workers.sh`) -- the same worker with nothing on the cluster but
+  the `E3D` binary: no repo, no Python. Section 8. This is how ICE is queued now.
 - **The broker worker fleet** (`slurm/ice_worker.sbatch`, `slurm/phoenix_worker.sbatch`) —
   a pool of long-lived workers that lease cases from the casebroker queue,
-  run them through `runner/run_case.sh`, and report back. This is how the
-  production campaign runs. If you're draining the queue, submit these.
+  run them through `runner/run_case.sh`, and report back. The Python path the
+  E3D node replaces; ICE's copy needs the campaign repo checked out there.
 - **Standalone single-case offload** (`slurm/standalone_solve_template.sbatch`) —
   running ONE already-built case directly, outside the broker, e.g. to get a
   mesh-study probe onto a dedicated node instead of fighting local cores for
@@ -209,3 +212,50 @@ building this:
 If none of these are it: `srun --jobid=<id> --overlap bash -c '...'` peeks
 at a *running* job's node-local state without disturbing it — useful since
 `$TMPDIR` content isn't synced back until the job ends.
+
+## 8. The E3D node on ICE
+
+Set up once, from your own machine (ICE has no `gh` login, and `E3D` is the only file it needs):
+
+1. **The binary.** On your machine: `gh release download e3d-node-latest -R Eddy3D-Dev/Eddy3D -p E3D-linux-x64`,
+   check its sha256 against `release.json` in the same release, `scp` it to `~/windcomfort/bin/E3D`
+   (nothing on ICE needs a GitHub login). Updating is the same three steps.
+2. **Pairing.** On ICE: `~/windcomfort/bin/E3D setup-sim-node https://casebroker.eddy3d.com --name ice
+   --no-browser`, then approve the printed code on the dashboard as an admin. Send its output to a
+   file (`> pair.log &`) and read the code from there: through a pipe it appears only when the
+   command exits. The credential lands in `~/.local/share/Eddy3D/node/`; `ice-<job>` ids all fall
+   under the name `ice`.
+
+Then queue shifts with `scripts/ice_workers.sh` (it copies `slurm/` to ICE and runs
+`slurm/submit_workers.sh` there; needs the VPN and your login):
+
+```
+scripts/ice_workers.sh chain 20       # 20 shifts back to back: one worker at a time
+scripts/ice_workers.sh parallel 4     # 4 workers at once (4 x 24 cores)
+scripts/ice_workers.sh lanes 4 10     # 4 parallel lanes of 10 chained shifts
+```
+
+**Why a chain.** 24 ranks is the most a PACE job gets and a direction takes about 22 min on them
+(the first, from a cold start, about an hour), so a 32-direction case is ~12 h and outlives the 8 h
+shift. That costs almost nothing: each finished direction goes to the broker as it finishes (a
+`case_NNN` part, ~230 MB), at the shift's end SIGTERM releases the case with its attempt refunded,
+and the next worker is handed it with its parts, fetches the mesh from the broker and solves only
+the directions that are missing. Lost per shift: the direction in flight, ~11 min on average.
+Check a hand-over in the job log (`~/windcomfort/logs/e3d_node_<job>.out`) for
+`continuing: fetching the mesh ice-<job>-0 made`, and `GET /v1/cases/<id>/parts` for what the
+broker holds.
+
+**Guard.** A job whose predecessor ended in under 15 minutes (`CHAIN_MIN_SECONDS`) starts no worker,
+so the rest of the chain falls through instead of leasing cases to fail them. The same stops it on
+demand: `scancel` one pending job of a lane. `scancel -u $USER -n e3d-node-ice` stops everything; a
+running job releases its case on the way out.
+
+Traps met setting this up (2026-10-07):
+
+- **mpirun refuses to run as root**, which the container is (`--user 0:0`, section 3):
+  `OMPI_ALLOW_RUN_AS_ROOT=1` and `OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1`. Meshing and `decomposePar`
+  passed without them and every solve failed, a case at a time, each costing an attempt.
+  `slurm/podman-pace.sh` (E3D's `EDDY3D_CONTAINER_CLI`) carries them with the storage options.
+- **`--work` is node-local and wiped at job end**, so a case in flight is never resumed on its own
+  scratch; it is continued from the broker. `--done` is on `/storage/ice1`, so a part that had not
+  finished uploading when the wall hit is still sent by the next job's sweep.
