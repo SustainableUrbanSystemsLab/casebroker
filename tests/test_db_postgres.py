@@ -150,6 +150,7 @@ def cleanup_after_module(preflight):
     conn.execute("DELETE FROM case_artifacts WHERE case_id LIKE ?", (like,))
     conn.execute("DELETE FROM case_parts WHERE case_id LIKE ?", (like,))
     conn.execute("DELETE FROM case_fields WHERE case_id LIKE ?", (like,))
+    conn.execute("DELETE FROM case_residuals WHERE case_id LIKE ?", (like,))
     conn.execute("DELETE FROM cases WHERE case_id LIKE ?", (like,))
     conn.execute("DELETE FROM workers WHERE worker_id LIKE ?", (like,))
     conn.execute("DELETE FROM worker_tokens WHERE name LIKE ?", (like,))
@@ -668,6 +669,50 @@ def test_a_fresh_claim_forgets_the_last_attempt_s_telemetry_over_a_real_connecti
     second = db.lease(fresh_conn(), prefix("w-b"), recipes=[recipe])[0]
     assert (second.case_id, second.attempt) == (cid, 2)
     assert db.get_case(fresh_conn(), cid)["telemetry"] is None
+
+
+@scratch_only
+def test_residual_series_are_upserted_assembled_and_pruned_over_a_real_connection():
+    """Kind `residuals` is an INSERT ... ON CONFLICT of its own table, a `solve`
+    report folds a point into it with a read-modify-write of a JSON TEXT column,
+    and a fresh claim prunes it with a subquery on case_parts -- none of which
+    the SQLite suite can show to be valid Postgres. Scratch-only: it leases."""
+    recipe = prefix("r-resid")
+    (cid,) = seed(1, "resid", recipe=recipe)
+    lease = db.lease(fresh_conn(), prefix("w-resid-a"), recipes=[recipe])[0]
+    series = {"direction": "case_000", "iterations": [1, 50, 100],
+              "fields": {"p": [1, 0.1, 0.01], "Ux": [1, 0.2, None]}, "end_time": 2000}
+    assert db.post_telemetry(fresh_conn(), lease.lease_id, cid, "residuals", series) == "ok"
+    series["iterations"], series["fields"] = [1, 50, 100, 150], {"p": [1, 0.1, 0.01, 0.005]}
+    assert db.post_telemetry(fresh_conn(), lease.lease_id, cid, "residuals", series) == "ok"
+    for it, p in ((10, 0.9), (20, 0.8)):
+        solve = {"current": "case_011", "iteration": it, "end_time": 2000, "residuals": {"p": p}}
+        assert db.post_telemetry(fresh_conn(), lease.lease_id, cid, "solve", solve) == "ok"
+    # An absurd iteration is not stored -- the column is a 32-bit REAL here, where 1e300 is an
+    # error inside the transaction that holds the report -- and costs the report nothing.
+    huge = {"current": "case_099", "iteration": 1e300, "end_time": 1e300, "residuals": {"p": 0.1}}
+    assert db.post_telemetry(fresh_conn(), lease.lease_id, cid, "solve", huge) == "ok"
+    # A lease that is not this case's writes nothing.
+    assert db.post_telemetry(fresh_conn(), "no-such-lease", cid, "residuals", series) == "gone"
+
+    got = db.case_residuals(fresh_conn(), cid, "case_000")
+    assert [(d["direction"], d["source"], d["n"], d["iteration"]) for d in got["directions"]] == [
+        ("case_000", "trace", 4, 150), ("case_011", "reports", 2, 20)]
+    assert got["series"]["iterations"] == [1, 50, 100, 150]
+    assert got["series"]["fields"] == {"p": [1, 0.1, 0.01, 0.005]}
+    assert db.case_residuals(fresh_conn(), cid, "case_011")["series"]["fields"] == {"p": [0.9, 0.8]}
+    assert db.case_residuals(fresh_conn(), prefix("no-such-case")) is None
+    # Not telemetry: the case's own record does not carry it.
+    assert "residuals" not in json.loads(db.get_case(fresh_conn(), cid)["telemetry"])
+
+    # A fresh claim starts over, except for a direction the case still holds.
+    mesh = "a1" * 32
+    assert db.report_part(fresh_conn(), lease.lease_id, cid, "mesh", f"{cid}.mesh.tar.gz", mesh) == "ok"
+    assert db.report_part(fresh_conn(), lease.lease_id, cid, "case_000", f"{cid}.case_000.tar.gz",
+                          "c0" * 32, 10, mesh) == "ok"
+    assert db.fail(fresh_conn(), lease.lease_id, "preempted", retryable=True)
+    assert db.lease(fresh_conn(), prefix("w-resid-b"), recipes=[recipe])[0].case_id == cid
+    assert [d["direction"] for d in db.case_residuals(fresh_conn(), cid)["directions"]] == ["case_000"]
 
 
 @scratch_only

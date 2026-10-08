@@ -50,6 +50,15 @@
     --info: #0969da;
     --info-light: #ddf4ff;
 
+    /* Residual-curve series (the Solve card's chart): blue, teal and purple for
+       Ux Uy Uz, vermillion for p, green for k, amber for epsilon, then pink and
+       grey for anything else. An Okabe-Ito set, which stays apart under the
+       common colour-vision deficiencies; each is >= 3:1 on --surface, as a
+       1.5px line needs. Not the state scale: a "done" green line would read as
+       a verdict. */
+    --rs-1: #0072b2; --rs-2: #0e8f9e; --rs-3: #7b4fc9; --rs-4: #d55e00;
+    --rs-5: #00875f; --rs-6: #a86f00; --rs-7: #b5487f; --rs-8: #6b7280;
+
     /* BRAND -- identity and interaction, never state. RhinoPackages' accent is
        the pink of its logo ramp; these are its `brand-*` scale verbatim.
        Deliberately NOT wired to --accent/--primary/--warn/--bad above: those
@@ -119,6 +128,9 @@
     --bad-light: rgba(229, 83, 75, 0.1);
     --info: #539bf5;
     --info-light: rgba(65, 132, 228, 0.15);
+    /* The same eight series, lightened for the dark ground (>= 4.5:1). */
+    --rs-1: #5aa9e6; --rs-2: #3dc6d6; --rs-3: #a58df0; --rs-4: #ff8a3d;
+    --rs-5: #3ecf9a; --rs-6: #e6b422; --rs-7: #f08fc0; --rs-8: #a1a1aa;
 
     /* Brand lightens in the dark, exactly as the source does: its components
        pair `text-brand-600` with `dark:text-brand-400`, because brand-600 on a
@@ -1092,6 +1104,33 @@
   .ms-finished .it { color: var(--text-muted); text-align: right; font-variant-numeric: tabular-nums; }
   .ms-sublabel { font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em;
                  color: var(--text-muted); margin-top: 10px; }
+
+  /* -- Residual curves (the Solve card) ------------------------------------------
+     One log-scale line chart per wind direction, drawn by residualSvg(). The
+     controls are re-skinned because the page's bare `button` and `select` are
+     sized for forms, not for a legend. */
+  .rs-head { display: flex; align-items: center; gap: 6px 10px; flex-wrap: wrap; margin-top: 4px; }
+  .rs-head .mono { font-size: 11px; color: var(--text-primary); }
+  .rs-at { margin-left: auto; font-size: 10.5px; color: var(--text-muted); white-space: nowrap;
+           font-variant-numeric: tabular-nums; }
+  select.rs-dir { width: auto; max-width: 100%; padding: 2px 6px; font-size: 11px; border-radius: 6px;
+                  font-family: var(--font-mono); }
+  .rs-svg { display: block; width: 100%; height: auto; margin-top: 4px; overflow: visible; touch-action: pan-y; }
+  .rs-svg text { font: 9.5px var(--font-mono); fill: var(--text-muted); }
+  .rs-svg .rs-grid { stroke: var(--border-subtle); stroke-width: 1; }
+  .rs-svg .rs-frame { stroke: var(--border); stroke-width: 1; fill: none; }
+  .rs-svg .rs-line { fill: none; stroke-width: 1.5; stroke-linejoin: round; stroke-linecap: round;
+                     vector-effect: non-scaling-stroke; }
+  .rs-svg .rs-cross { stroke: var(--text-secondary); stroke-width: 1; stroke-dasharray: 2 2; pointer-events: none; }
+  .rs-svg .rs-hit { fill: transparent; }
+  .rs-keys { display: flex; flex-wrap: wrap; gap: 3px 5px; margin-top: 6px; }
+  button.rs-key { padding: 1px 6px; gap: 4px; border-radius: 6px; font-size: 10.5px; font-weight: 500;
+                  font-family: var(--font-mono); line-height: 1.6; background: transparent; }
+  button.rs-key i { width: 9px; height: 9px; border-radius: 2px; flex: none; }
+  button.rs-key .v { color: var(--text-muted); font-variant-numeric: tabular-nums; }
+  /* Not by opacity alone: a switched-off series is struck through as well. */
+  button.rs-key[aria-pressed="false"] { opacity: 0.5; text-decoration: line-through; }
+  .rs-note { margin-top: 4px; font-size: 11px; }
 
   /* -- Histograms (the dataset drawer and "Where this case sits") -------------
      One renderer, histSvg(). Bars are the reference distribution; an outline is
@@ -5445,6 +5484,360 @@
       : ["last report", "the last report of an attempt that ended"];
   }
 
+  // -- Residual curves --------------------------------------------------------------
+  // The Solve card's chart: the initial residual of every solved field against the
+  // iteration, on a log axis, for one wind direction at a time (docs/protocol.md,
+  // "Telemetry", kind `residuals`). The table of latest residuals above it cannot
+  // tell a direction that fell three decades from one that has sat at 1e-3 for an
+  // hour; the curve can. Drawn here as inline SVG, like the histograms: this page
+  // has no build step and no chart library, and a line chart is forty lines.
+  //
+  // The series come from GET /v1/cases/{id}/residuals: `trace` (the node's own
+  // series, decimated) or `reports` (a coarse one the broker assembles from the
+  // solve reports of a node that sends none, drawn with a dot per report so it is
+  // not mistaken for a trace).
+  // The viewBox and the plot's margins in it. The card is ~340 px wide on a desktop
+  // and ~220 on a phone, and the svg scales to the card, so the narrow set is drawn
+  // on a smaller canvas: the same 9.5-unit labels then stay about 8 px on a phone
+  // instead of shrinking to 6.
+  const RS_GEOM = { wide: { W: 360, H: 190, L: 40, R: 10, T: 8, B: 22 },
+                    narrow: { W: 250, H: 165, L: 36, R: 8, T: 6, B: 20 } };
+  function residualGeom() { return window.innerWidth < 760 ? RS_GEOM.narrow : RS_GEOM.wide; }
+  // A colour slot (css --rs-N) per field every OpenFOAM wind case solves, so Ux is
+  // the same blue in every case. A Map, not an object: a field NAMED "constructor"
+  // is a legal OpenFOAM field name and a truthy property of every object.
+  const RS_SLOT = new Map([["Ux", 1], ["Uy", 2], ["Uz", 3], ["p", 4], ["k", 5], ["epsilon", 6]]);
+  const RS_LIVE_MS = 30000;                  // a curve a node is still extending is re-read this often
+  const RS_IDLE_MS = 300000;                 // one no node is working on, this often
+  const residualCache = new Map();           // case_id -> { at: ms, data: the response }
+  const residualPick = new Map();            // case_id -> the direction its viewer chose
+  const residualOff = new Map();             // case_id -> Set of the fields its viewer switched off
+  const residualBusy = new Set();            // case_ids with a request in flight
+  const residualFailed = new Map();          // case_id -> ms when its first request failed
+  let residualHot = null;                    // the svg showing a hover crosshair
+
+  /// The colour slot (1-8) of a field; the ones with no fixed colour take the
+  /// pink and the grey in turn.
+  function residualSlot(names, name) {
+    if (RS_SLOT.has(name)) return RS_SLOT.get(name);
+    const rest = names.filter((f) => !RS_SLOT.has(f)).sort();
+    return 7 + (Math.max(0, rest.indexOf(name)) % 2);
+  }
+
+  /// The decades a series spans, as [lo, hi] exponents at least two apart (one
+  /// decade is a line, not a chart). null when nothing in it is a positive
+  /// number: every field diverged to nan, or none was solved.
+  function residualDecades(series) {
+    let lo = Infinity, hi = -Infinity;
+    for (const f of Object.keys(series.fields)) {
+      for (const v of series.fields[f]) {
+        if (typeof v !== "number" || !(v > 0)) continue;
+        const e = Math.log10(v);
+        if (e < lo) lo = e;
+        if (e > hi) hi = e;
+      }
+    }
+    if (!Number.isFinite(lo)) return null;
+    lo = Math.floor(lo);
+    hi = Math.ceil(hi);
+    if (hi - lo < 2) hi = lo + 2;
+    return [lo, hi];
+  }
+
+  /// [lo, hi] of the x axis. `toEnd` (the iteration cap) widens it for a direction
+  /// still being solved, so the line fills the chart as the solve progresses
+  /// instead of the chart rescaling under it. It starts at 0 when the series does
+  /// (iteration 1 of 2,000), else where the series starts.
+  function residualDomain(series, toEnd) {
+    const xs = series.iterations;
+    const first = xs[0], last = xs[xs.length - 1];
+    let hi = toEnd > last ? toEnd : last;
+    if (!(hi > first)) hi = first + 1;
+    return [first <= 0.02 * hi ? Math.min(0, first) : first, hi];
+  }
+
+  /// Round tick values for [lo, hi]: about `want` of them, on 1, 2, 2.5 or 5 times a power of ten.
+  function residualTicks(lo, hi, want) {
+    const span = hi - lo;
+    if (!(span > 0)) return [lo];
+    const raw = span / (want || 5);
+    const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+    const step = [1, 2, 2.5, 5, 10].map((m) => m * mag).find((s) => s >= raw) || raw;
+    const out = [];
+    for (let t = Math.ceil(lo / step - 1e-9) * step; t <= hi + step * 1e-9; t += step) out.push(Math.round(t * 1e6) / 1e6 + 0);   // + 0: -0 prints as "-0"
+    return out;
+  }
+
+  /// SVG path data for one field. A missing value (a field not solved in that
+  /// iteration, or not finite) and a non-positive one (no logarithm) end a run;
+  /// a point with no neighbour is drawn as a dot, since a lone "M" draws nothing.
+  function residualPath(xs, ys, px, py) {
+    const ok = (i) => i >= 0 && i < xs.length && typeof ys[i] === "number" && ys[i] > 0;
+    let d = "";
+    for (let i = 0; i < xs.length; i++) {
+      if (!ok(i)) continue;
+      const here = px(xs[i]).toFixed(1) + " " + py(ys[i]).toFixed(1);
+      if (ok(i - 1)) d += "L" + here;
+      else d += "M" + here + (ok(i + 1) ? "" : "L" + here);
+    }
+    return d;
+  }
+
+  /// Index of the point of the ascending `xs` nearest to `x`.
+  function residualNearest(xs, x) {
+    let lo = 0, hi = xs.length - 1;
+    while (hi - lo > 1) {
+      const mid = (lo + hi) >> 1;
+      if (xs[mid] <= x) lo = mid; else hi = mid;
+    }
+    return Math.abs(xs[lo] - x) <= Math.abs(xs[hi] - x) ? lo : hi;
+  }
+
+  /// The last number in a field's column, or null.
+  function residualLast(col) {
+    for (let i = col.length - 1; i >= 0; i--) if (typeof col[i] === "number") return col[i];
+    return null;
+  }
+
+  function residualValue(v) {
+    return typeof v === "number" ? v.toExponential(2) : "—";
+  }
+
+  /// The chart itself, as an <svg> string; "" when there is nothing to put on a log axis.
+  /// o.off: the Set of fields switched off. o.toEnd: the cap a running direction is
+  /// drawn towards. o.dots: a dot on every point (a sparse series). o.id: the case,
+  /// for the hover handler.
+  function residualSvg(series, o) {
+    const dec = residualDecades(series);
+    if (!dec) return "";
+    const off = o.off || new Set();
+    const names = Object.keys(series.fields);
+    const dom = residualDomain(series, o.toEnd);
+    const x0 = dom[0], x1 = dom[1];
+    const g = residualGeom(), W = g.W, H = g.H, L = g.L, R = g.R, T = g.T, B = g.B;
+    const pw = W - L - R, ph = H - T - B;
+    const px = (x) => L + (x - x0) / (x1 - x0) * pw;
+    const py = (v) => T + (dec[1] - Math.log10(v)) / (dec[1] - dec[0]) * ph;
+    let grid = "";
+    for (let e = dec[0]; e <= dec[1]; e++) {
+      const y = (T + (dec[1] - e) / (dec[1] - dec[0]) * ph).toFixed(1);
+      grid += '<line class="rs-grid" x1="' + L + '" x2="' + (W - R) + '" y1="' + y + '" y2="' + y + '"></line>'
+        + '<text x="' + (L - 5) + '" y="' + y + '" dy="3" text-anchor="end">' + (e === 0 ? "1" : "1e" + e) + '</text>';
+    }
+    for (const t of residualTicks(x0, x1, W < 300 ? 4 : 5)) {
+      const x = px(t).toFixed(1);
+      grid += '<line class="rs-grid" x1="' + x + '" x2="' + x + '" y1="' + T + '" y2="' + (T + ph) + '"></line>'
+        + '<text x="' + x + '" y="' + (H - 8) + '" text-anchor="middle">' + (Math.round(t).toLocaleString()) + '</text>';
+    }
+    let lines = "";
+    for (const f of names) {
+      if (off.has(f)) continue;
+      const col = series.fields[f], c = "var(--rs-" + residualSlot(names, f) + ")";
+      const d = residualPath(series.iterations, col, px, py);
+      if (!d) continue;
+      lines += '<path class="rs-line" style="stroke:' + c + '" d="' + d + '"></path>';
+      if (o.dots) {
+        for (let i = 0; i < col.length; i++) {
+          if (typeof col[i] !== "number" || !(col[i] > 0)) continue;
+          lines += '<circle cx="' + px(series.iterations[i]).toFixed(1) + '" cy="' + py(col[i]).toFixed(1)
+            + '" r="2" style="fill:' + c + '"></circle>';
+        }
+      }
+    }
+    // The geometry rides on the element, for the pointer handler to map a pixel back to an iteration.
+    return '<svg class="rs-svg" viewBox="0 0 ' + W + ' ' + H + '" role="img" data-case="' + esc(o.id)
+      + '" data-x0="' + x0 + '" data-x1="' + x1 + '" data-w="' + W + '" data-l="' + L + '" data-pw="' + pw
+      + '" aria-label="Residuals against iteration, log scale">'
+      + grid + '<rect class="rs-frame" x="' + L + '" y="' + T + '" width="' + pw + '" height="' + ph + '"></rect>'
+      + lines
+      + '<line class="rs-cross" y1="' + T + '" y2="' + (T + ph) + '" style="display:none"></line>'
+      + '<rect class="rs-hit" x="' + L + '" y="' + T + '" width="' + pw + '" height="' + ph + '"></rect></svg>';
+  }
+
+  /// One toggle per field: its colour, its name and its value at the end of the
+  /// series (at the pointer, while one hovers the chart).
+  function residualKeysHtml(series, off) {
+    const names = Object.keys(series.fields);
+    const buttons = names.map((f) =>
+      '<button type="button" class="rs-key" data-field="' + esc(f) + '" aria-pressed="' + (off.has(f) ? "false" : "true")
+      + '" title="Show or hide ' + esc(f) + '"><i style="background:var(--rs-' + residualSlot(names, f) + ')"></i>'
+      + esc(f) + ' <span class="v" data-field="' + esc(f) + '">' + residualValue(residualLast(series.fields[f]))
+      + '</span></button>').join("");
+    return '<div class="rs-keys">' + buttons + '</div>';
+  }
+
+  /// Everything inside the chart's wrapper: the direction, the chart and its toggles. `data` is the response.
+  function residualInner(c, solve, data) {
+    const live = c.state === "leased";
+    const head = '<div class="ms-sublabel">Residuals</div>';
+    const dirs = data.directions.slice().sort((a, b) => natural(a.direction, b.direction));
+    if (!dirs.length) {
+      return head + '<div class="ms-note">' + (live
+        ? "No residual history yet. The node sends the curve with its solve reports."
+        : "No residual history: the node that solved this case sent none.") + '</div>';
+    }
+    const fin = solve && isObj(solve.finished) ? solve.finished : {};
+    const running = (d) => live && solve && solve.current === d;
+    // What a direction is, beside its name: running, or the status its finish was reported with.
+    const tag = (name) => running(name) ? " · running"
+      : isObj(fin[name]) && fin[name].status ? " · " + String(fin[name].status) : "";
+    const options = dirs.map((d) =>
+      '<option value="' + esc(d.direction) + '"' + (d.direction === data.direction ? " selected" : "") + '>'
+      + esc(d.direction + tag(d.direction)) + '</option>').join("");
+    const picker = dirs.length > 1
+      ? '<select class="rs-dir" data-case="' + esc(c.case_id) + '" aria-label="Wind direction">' + options + '</select>'
+      : '<span class="mono">' + esc(dirs[0].direction) + '</span>';
+    const s = data.series;
+    const meta = dirs.find((d) => d.direction === data.direction);
+    if (!s || !meta) {
+      return head + '<div class="rs-head">' + picker + '</div><div class="ms-note rs-note">No residual history for this direction.</div>';
+    }
+    const off = residualOff.get(c.case_id) || new Set();
+    const cap = finite(meta.end_time) ? Number(meta.end_time) : 0;
+    const going = running(data.direction) && s.complete !== true;
+    const last = s.iterations[s.iterations.length - 1];
+    const at = "iteration " + Number(last).toLocaleString() + (going && cap ? " / " + Number(cap).toLocaleString() : "");
+    const svg = residualSvg(s, { id: c.case_id, off: off, toEnd: going ? cap : 0, dots: meta.source === "reports" || s.iterations.length <= 40 });
+    const basis = meta.source === "reports"
+      ? "assembled from " + Number(meta.n).toLocaleString() + " solve reports; a node on a newer E3D build sends the solver's full curve"
+      : finite(s.total) && Number(s.total) > s.iterations.length
+        ? Number(s.iterations.length).toLocaleString() + " of " + Number(s.total).toLocaleString() + " iterations, thinned to keep the worst of each stretch"
+        : Number(s.iterations.length).toLocaleString() + " iterations";
+    const plot = svg || '<div class="ms-note rs-note">Every residual in this series is missing or not finite: the solver diverged, or solved none of these fields.</div>';
+    return head + '<div class="rs-head">' + picker + '<span class="rs-at" data-rest="' + esc(at) + '">' + esc(at) + '</span></div>'
+      + '<div class="rs-plot">' + plot + '</div>' + residualKeysHtml(s, off)
+      + '<div class="ms-note rs-note rs-basis">Initial residual per field, log scale; ' + esc(basis) + '.</div>';
+  }
+
+  /// The Solve card's residual block: the chart once its series has landed, a
+  /// placeholder of its own shape until then.
+  function residualBlockHtml(c, solve) {
+    const st = residualCache.get(c.case_id);
+    if (st) return '<div class="rs-wrap" data-case="' + esc(c.case_id) + '">' + residualInner(c, solve, st.data) + '</div>';
+    if (residualFailed.has(c.case_id)) {
+      return '<div class="ms-sublabel">Residuals</div><div class="ms-note">Could not load the residual curves. Close and reopen the row to try again.</div>';
+    }
+    return '<div class="rs-wrap" aria-busy="true" data-case="' + esc(c.case_id) + '"><div class="ms-sublabel">Residuals</div>'
+      + skelBar("100%", "150px", "skel-block", "margin-top:6px;") + '</div>';
+  }
+
+  /// Redraw one case's chart in place, without rebuilding the whole panel: a
+  /// pointer over the chart, a toggle and a direction change all come through here.
+  function redrawResiduals(id) {
+    const st = residualCache.get(id);
+    const wrap = document.querySelector('.rs-wrap[data-case="' + CSS.escape(id) + '"]');
+    if (!st || !wrap) { redrawOpenCase(id); return; }
+    const c = Object.assign({}, caseDetails.get(id) || {}, casesOnScreen.find((r) => r.case_id === id) || {});
+    const tel = isObj(c.telemetry) ? c.telemetry : {};
+    const next = document.createElement("div");
+    next.innerHTML = residualInner(c, isObj(tel.solve) ? tel.solve : null, st.data);
+    // The picker is left alone while it has focus: a refresh that replaced it
+    // closed the list of directions under the hand choosing from it, every 30 s.
+    // What it picks is drawn by the parts around it.
+    const picker = wrap.querySelector("select.rs-dir");
+    if (picker && picker === document.activeElement && next.querySelector("select.rs-dir")) {
+      for (const part of [".rs-at", ".rs-plot", ".rs-keys", ".rs-basis"]) {
+        const was = wrap.querySelector(part), now = next.querySelector(part);
+        if (was && now) was.replaceWith(now);
+      }
+    } else {
+      wrap.innerHTML = next.innerHTML;
+    }
+    wrap.removeAttribute("aria-busy");
+    residualHot = null;
+  }
+
+  /// Fetch a case's residual series when it has none yet, when it is stale (30 s
+  /// while a node is extending it, 5 min otherwise), or when `force`. The page's
+  /// 60 s refresh comes through here with the open row, so a live curve grows.
+  function ensureResiduals(id, row, force) {
+    if (!id || residualBusy.has(id) || (row && isThermal(row))) return;
+    const have = residualCache.get(id);
+    if (have && !force && Date.now() - have.at < (row && row.state === "leased" ? RS_LIVE_MS : RS_IDLE_MS)) return;
+    if (!have && Date.now() - (residualFailed.get(id) || 0) < CASE_DETAIL_RETRY_MS) return;
+    const pick = residualPick.get(id) || "";
+    let answered = false;
+    residualBusy.add(id);
+    api("/v1/cases/" + encodeURIComponent(id) + "/residuals" + (pick ? "?direction=" + encodeURIComponent(pick) : "")).then((data) => {
+      answered = true;
+      residualFailed.delete(id);
+      // A direction picked earlier that the case no longer has (a fresh attempt
+      // started over): follow the broker's choice instead.
+      const gone = pick && data.series === null && data.directions.length > 0;
+      if (gone) residualPick.delete(id);
+      residualCache.set(id, { at: gone ? 0 : Date.now(), data: data });
+    }).catch(() => {
+      // Keep the curve on screen if there is one, and wait out the interval
+      // before asking a failing endpoint again.
+      if (have) have.at = Date.now(); else residualFailed.set(id, Date.now());
+    }).finally(() => {
+      residualBusy.delete(id);
+      // The viewer chose another direction while this one was on the wire (the
+      // request in flight made that choice's own request wait): ask for it now,
+      // rather than draw the one it no longer wants. Only after an ANSWER, so a
+      // failing endpoint is not asked again in a loop.
+      const now = residualCache.get(id), want = residualPick.get(id);
+      if (answered && want && now && now.data.direction !== want) {
+        ensureResiduals(id, casesOnScreen.find((r) => r.case_id === id), true);
+        return;
+      }
+      redrawResiduals(id);
+    });
+  }
+
+  /// The pointer over a chart: a crosshair at the nearest iteration, and each
+  /// toggle showing that iteration's value. `ev` null puts the end of the series back.
+  function residualHover(svg, ev) {
+    const st = residualCache.get(svg.dataset.case);
+    const wrap = svg.closest(".rs-wrap");
+    const s = st && st.data.series;
+    const cross = svg.querySelector(".rs-cross");
+    if (!s || !wrap || !cross) return;
+    let i = -1;
+    const box = svg.getBoundingClientRect();
+    if (ev && box.width > 0) {
+      const x0 = Number(svg.dataset.x0), x1 = Number(svg.dataset.x1);
+      const W = Number(svg.dataset.w), L = Number(svg.dataset.l), pw = Number(svg.dataset.pw);
+      const vx = (ev.clientX - box.left) / box.width * W;
+      i = residualNearest(s.iterations, x0 + (vx - L) / pw * (x1 - x0));
+      const cx = L + (s.iterations[i] - x0) / (x1 - x0) * pw;
+      cross.setAttribute("x1", cx.toFixed(1));
+      cross.setAttribute("x2", cx.toFixed(1));
+    }
+    cross.style.display = i < 0 ? "none" : "";
+    wrap.querySelectorAll(".rs-key .v").forEach((el) => {
+      const col = s.fields[el.dataset.field];
+      el.textContent = residualValue(col ? (i < 0 ? residualLast(col) : col[i]) : null);
+    });
+    const at = wrap.querySelector(".rs-at");
+    if (at) at.textContent = i < 0 ? at.dataset.rest : "iteration " + Number(s.iterations[i]).toLocaleString();
+    residualHot = i < 0 ? null : svg;
+  }
+
+  document.addEventListener("pointermove", (e) => {
+    const svg = e.target.closest && e.target.closest("svg.rs-svg");
+    if (svg) residualHover(svg, e);
+    else if (residualHot) { const was = residualHot; residualHot = null; residualHover(was, null); }
+  });
+  document.addEventListener("change", (e) => {
+    const sel = e.target.closest && e.target.closest("select.rs-dir");
+    if (!sel) return;
+    residualPick.set(sel.dataset.case, sel.value);
+    ensureResiduals(sel.dataset.case, casesOnScreen.find((r) => r.case_id === sel.dataset.case), true);
+  });
+  document.addEventListener("click", (e) => {
+    const key = e.target.closest && e.target.closest("button.rs-key");
+    const wrap = key && key.closest(".rs-wrap");
+    if (!wrap) return;
+    const off = residualOff.get(wrap.dataset.case) || new Set();
+    if (off.has(key.dataset.field)) off.delete(key.dataset.field); else off.add(key.dataset.field);
+    residualOff.set(wrap.dataset.case, off);
+    const field = key.dataset.field;
+    redrawResiduals(wrap.dataset.case);
+    // The redraw replaced the button that has the keyboard's place; give it back.
+    for (const b of document.querySelectorAll("button.rs-key")) if (b.dataset.field === field) { b.focus(); break; }
+  });
+
   function solveSectionHtml(c, solve, metrics, meshShown) {
     const solveSecs = finite(metrics.solve_seconds) ? formatDuration(Math.round(Number(metrics.solve_seconds))) : "";
     const live = c.state === "leased";
@@ -5503,11 +5896,13 @@
       finished = `<div class="ms-sublabel">Finished directions (${Number(keys.length).toLocaleString()})</div>`
         + `<div class="ms-finished">${rows}</div>`;
     }
+    // The curve above the numbers it explains: the table is the end of it.
+    const curve = residualBlockHtml(c, solve);
     return `<div class="ms-sec"><div class="ms-head"><span class="ms-title">Solve</span>`
       + (live ? "" : `<span class="vbadge muted" title="${esc(endedReportText(c.state)[1])}">${esc(endedReportText(c.state)[0])}</span>`)
       + `${reportedHtml(solve)}</div>`
       + (kv.length ? `<dl class="kv-list">${kv.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${v}</dd>`).join("")}</dl>` : "")
-      + residuals + finished + `</div>`;
+      + curve + residuals + finished + `</div>`;
   }
 
   /// The fourth card. `c` is the merged record; its telemetry exists only once
@@ -6206,6 +6601,7 @@
     // so nothing redraws under this render.
     ensureCaseDetail(openDetailId);
     refreshCaseDetail(openDetailId, cases.find((c) => c.case_id === openDetailId));
+    ensureResiduals(openDetailId, cases.find((c) => c.case_id === openDetailId));
     renderCasesHead();
     $("casesEmpty").style.display = cases.length ? "none" : "block";
     $("casesEmpty").textContent = "No cases match this filter.";

@@ -390,6 +390,30 @@ CREATE TABLE IF NOT EXISTS case_fields (
     PRIMARY KEY (case_id, direction, height_m)
 );
 
+-- The residual history of each wind direction a node solved: the curves a CFD
+-- engineer reads convergence off. Telemetry keeps only the LATEST report of a
+-- kind, which is a number; this is the series behind it, one row per (case,
+-- direction) and 32 to a case. `series` is JSON, {iterations: [...], fields:
+-- {Ux: [...], ...}, total, complete}, a node's decimated copy of the solver's
+-- own trace; `source` says where it came from -- 'trace' (the node sent the
+-- series) or 'reports' (the broker assembled it from the latest-residual
+-- numbers of successive `solve` reports, so a node that predates traces still
+-- gets a coarse curve). n, iteration and end_time repeat what is inside
+-- `series` so a case's list of directions needs no JSON parsing. See
+-- post_telemetry (kind 'residuals') and protocol.md, "Telemetry".
+CREATE TABLE IF NOT EXISTS case_residuals (
+    case_id     TEXT NOT NULL,
+    direction   TEXT NOT NULL,
+    source      TEXT NOT NULL,
+    n           INTEGER NOT NULL,
+    iteration   REAL,
+    end_time    REAL,
+    series      TEXT NOT NULL,
+    worker_id   TEXT,
+    reported_at INTEGER NOT NULL,
+    PRIMARY KEY (case_id, direction)
+);
+
 -- What has ARRIVED where results are kept (DOMAIN.md, "Custody"). `state` says what
 -- became of the computation; a receipt says where its result is, proven by whoever
 -- holds it -- the broker's own part store, or an operator's scan of a copy. One row per
@@ -759,6 +783,21 @@ CREATE TABLE IF NOT EXISTS case_fields (
     worker_id   TEXT,
     reported_at INTEGER NOT NULL,
     PRIMARY KEY (case_id, direction, height_m)
+);
+
+-- The residual history of each wind direction a node solved (see the SQLite
+-- copy of this schema for what the columns mean).
+CREATE TABLE IF NOT EXISTS case_residuals (
+    case_id     TEXT NOT NULL,
+    direction   TEXT NOT NULL,
+    source      TEXT NOT NULL,
+    n           INTEGER NOT NULL,
+    iteration   REAL,
+    end_time    REAL,
+    series      TEXT NOT NULL,
+    worker_id   TEXT,
+    reported_at INTEGER NOT NULL,
+    PRIMARY KEY (case_id, direction)
 );
 
 -- What has ARRIVED where results are kept (DOMAIN.md, "Custody"). `state` says what
@@ -1706,6 +1745,16 @@ def lease(conn, worker_id: str, count: int = 1,
                 " lease_expires=?, leased_at=?, attempts=?, updated_at=?" + forget +
                 " WHERE case_id=?",
                 (lease_id, worker_id, expires, now, attempt, now, row["case_id"]))
+            if not resumed:
+                # The residual curves of the attempt before are its solves'. A
+                # direction the case still HOLDS (case_parts) was solved once
+                # and is not solved again -- the node takes the case over from
+                # the broker's copy and does the rest -- so its curve is still
+                # the one that describes the result, and is kept.
+                conn.execute(
+                    "DELETE FROM case_residuals WHERE case_id=? AND direction NOT IN"
+                    " (SELECT part FROM case_parts WHERE case_id=?)",
+                    (row["case_id"], row["case_id"]))
             _event(conn, row["case_id"], worker_id, "resumed" if resumed else "leased",
                    "attempt %d" % attempt, now)
             out.append(Lease(case_id=row["case_id"], lease_id=lease_id,
@@ -2725,8 +2774,10 @@ def report_part(conn, lease_id: str, case_id: str, part: str, archive: str,
                                     (case_id,)).fetchone()["n"]
                 conn.execute("DELETE FROM case_parts WHERE case_id=?", (case_id,))
                 # What the broker holds of the old mesh is no longer this case's;
-                # its files go at the next sweep (unreferenced_blobs).
+                # its files go at the next sweep (unreferenced_blobs). Nor are the
+                # residual curves of the directions solved on it.
                 conn.execute("DELETE FROM case_blobs WHERE case_id=? AND part != 'archive'", (case_id,))
+                conn.execute("DELETE FROM case_residuals WHERE case_id=?", (case_id,))
                 _event(conn, case_id, row["lease_worker"], "parts_reset",
                        "a new mesh; %d part(s) of the old one dropped" % gone, now)
             mesh_sha256 = sha256
@@ -2759,6 +2810,7 @@ def reset_parts(conn, case_id: str, by: str | None = None, now: int | None = Non
                          (case_id,)).fetchone()["n"]
         conn.execute("DELETE FROM case_parts WHERE case_id=?", (case_id,))
         conn.execute("DELETE FROM case_blobs WHERE case_id=? AND part != 'archive'", (case_id,))
+        conn.execute("DELETE FROM case_residuals WHERE case_id=?", (case_id,))
         if n:
             _event(conn, case_id, by, "parts_reset", "%d part(s) dropped by an admin" % n, now)
         conn.execute("COMMIT")
@@ -3779,7 +3831,10 @@ def prepare_telemetry(kind: Any, data: Any) -> tuple[str, dict[str, Any] | None]
 
     Returns ``("ok", cleaned)``, or an outcome and None: ``"invalid"`` (a kind
     outside TELEMETRY_KIND, or `data` that is not an object), ``"too_deep"``
-    (past TELEMETRY_MAX_DEPTH) or ``"too_large"`` (past TELEMETRY_MAX_BYTES).
+    (past TELEMETRY_MAX_DEPTH), ``"too_large"`` (past TELEMETRY_MAX_BYTES) or,
+    for kind ``residuals`` only, ``"bad_series"`` (not a residual series: see
+    normalize_residuals). For that kind `cleaned` is the series as it will be
+    stored, not just cleaned.
     """
     if not isinstance(kind, str) or not TELEMETRY_KIND.fullmatch(kind) \
             or not isinstance(data, dict):
@@ -3789,6 +3844,9 @@ def prepare_telemetry(kind: Any, data: Any) -> tuple[str, dict[str, Any] | None]
     cleaned = _clean(data)
     if len(_telemetry_json(cleaned)) > TELEMETRY_MAX_BYTES:
         return "too_large", None
+    if kind == RESIDUAL_KIND:
+        series = normalize_residuals(cleaned)
+        return ("ok", series) if series is not None else ("bad_series", None)
     return "ok", cleaned
 
 
@@ -3814,10 +3872,17 @@ def post_telemetry(conn, lease_id: str, case_id: str, kind: str,
 
     Returns ``"ok"``, ``"gone"`` (not this case's current lease, or not the
     caller's: the node stops sending for the case), ``"too_many_kinds"`` (a
-    new kind past TELEMETRY_MAX_KINDS), or an outcome of prepare_telemetry.
+    new kind past TELEMETRY_MAX_KINDS), ``"too_many_directions"`` (a residual
+    series for a 65th direction), or an outcome of prepare_telemetry.
     Nothing here touches ``updated_at`` or the events trail: telemetry is not a
     state change, and a solve reporting every five minutes must not become the
     case browser's idea of "what just happened".
+
+    Kind ``residuals`` is the one exception to "the latest report of a kind
+    replaces the one before": it is a series per wind direction, kept apart in
+    case_residuals (see there), and does not count toward TELEMETRY_MAX_KINDS.
+    A ``solve`` report also feeds that table, for a node that sends no series
+    of its own (_note_solve_report).
     """
     outcome, cleaned = prepare_telemetry(kind, data)
     if outcome != "ok":
@@ -3830,6 +3895,10 @@ def post_telemetry(conn, lease_id: str, case_id: str, kind: str,
                 or (worker_ok is not None and not worker_ok(row["lease_worker"])):
             conn.execute("ROLLBACK")
             return "gone"
+        if kind == RESIDUAL_KIND:
+            outcome = _put_residuals(conn, case_id, cleaned, "trace", row["lease_worker"], now)
+            conn.execute("COMMIT" if outcome == "ok" else "ROLLBACK")
+            return outcome
         try:
             current = json.loads(row["telemetry"] or "{}")
         except (TypeError, ValueError):
@@ -3842,11 +3911,253 @@ def post_telemetry(conn, lease_id: str, case_id: str, kind: str,
         current[kind] = {**cleaned, "at": now, "worker": row["lease_worker"]}
         conn.execute("UPDATE cases SET telemetry=? WHERE case_id=? AND lease_id=?",
                      (_telemetry_json(current), case_id, lease_id))
+        if kind == "solve":
+            _note_solve_report(conn, case_id, cleaned, row["lease_worker"], now)
         conn.execute("COMMIT")
     except Exception:
         conn.execute("ROLLBACK")
         raise
     return "ok"
+
+
+# -- residual histories ----------------------------------------------------------
+#
+# Telemetry is a summary: the latest report of a kind, replacing the one before.
+# That is the right shape for "where is the solve" and the wrong one for "is it
+# converging", which is a curve -- a residual that fell three decades and one
+# that has sat at 1e-3 for an hour print the same latest number. A case has a
+# curve per wind direction (32), which neither the 16 kinds nor the 32 KiB a
+# kind may hold can carry, so the series live in their own table, written by
+# post_telemetry (kind `residuals`) and read by case_residuals.
+
+RESIDUAL_KIND = "residuals"
+#: Points in one stored series. A node sends at most ~160 (it decimates a
+#: 2,000-iteration solve for the 32 KiB a telemetry post may carry); this only
+#: bounds what the broker will keep of a node that sends more.
+RESIDUAL_MAX_POINTS = 1000
+#: Fields (Ux, Uy, Uz, p, k, epsilon, ... ) in one series.
+RESIDUAL_MAX_FIELDS = 16
+#: Directions with a series, per case. A case has 32; the bound is what keeps a
+#: node that invents direction names from growing the table without limit.
+RESIDUAL_MAX_DIRECTIONS = 64
+#: Points kept of a series assembled from `solve` reports (one per ~5 minutes,
+#: so 50 hours): the oldest go first.
+RESIDUAL_SAMPLE_MAX = 600
+#: An OpenFOAM field name as it appears in "Solving for <field>".
+_RESIDUAL_FIELD = re.compile(r"[A-Za-z][A-Za-z0-9_.:-]{0,31}")
+
+
+def _real(v: Any) -> float | None:
+    """`v` as a finite float, or None for anything that is not one (a bool is
+    not a number here: JSON `true` is not an iteration)."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return None
+    return float(v) if math.isfinite(v) else None
+
+
+#: The largest iteration or iteration cap taken at its word. They are stored in
+#: REAL columns, which are 32-bit floats on Postgres: 1e300 in one is "real out
+#: of range", an error inside the transaction that also holds the node's solve
+#: report -- so a node that sent nonsense would lose the report, not just the
+#: curve. No solve runs a quadrillion iterations.
+_ITERATION_MAX = 1e15
+
+
+def _iteration(v: Any) -> float | None:
+    """`v` as an iteration number the broker will store, else None."""
+    x = _real(v)
+    return x if x is not None and abs(x) <= _ITERATION_MAX else None
+
+
+def _sig4(v: float) -> float | int:
+    """`v` to four significant digits. A residual is read on a log axis to a
+    decade or a third of one; the 17 digits a double prints are 60% of a stored
+    series."""
+    if v == 0:
+        return 0
+    return float("%.4g" % v)
+
+
+def _whole(v: float) -> float | int:
+    return int(v) if v == int(v) else v
+
+
+def normalize_residuals(data: dict[str, Any]) -> dict[str, Any] | None:
+    """One direction's residual series as it is stored, or None when `data` is
+    not one: ``{"direction", "iterations", "fields", "end_time", "total",
+    "complete"}`` (protocol.md, "Telemetry").
+
+    Strict about the shape, because a chart is drawn from it -- `iterations` a
+    list of numbers, every field a list of numbers-or-null as long as it, a
+    direction named like a case directory -- and forgiving about what a solver
+    legitimately produces: a non-finite residual is null (OpenFOAM prints `nan`
+    for a diverging field; `data` was cleaned of them already), and a series
+    whose iterations go BACKWARDS is cut to its last run. That second is not
+    defensive: the numerics ladder restarts a direction from 0 on a safer rung
+    and its solver tees into the same log, so a naive read of the log is the
+    failed run followed by the one that is current, and a line chart of that
+    doubles back on itself.
+    """
+    direction, xs_in, fields_in = data.get("direction"), data.get("iterations"), data.get("fields")
+    if not isinstance(direction, str) or direction == "mesh" or not PART_NAME.fullmatch(direction):
+        return None
+    if not isinstance(xs_in, list) or not 1 <= len(xs_in) <= RESIDUAL_MAX_POINTS:
+        return None
+    if not isinstance(fields_in, dict) or not 1 <= len(fields_in) <= RESIDUAL_MAX_FIELDS:
+        return None
+    xs = [_iteration(x) for x in xs_in]
+    if any(x is None for x in xs):
+        return None
+    cols: dict[str, list[float | int | None]] = {}
+    for name, values in fields_in.items():
+        if not _RESIDUAL_FIELD.fullmatch(str(name)) or not isinstance(values, list) \
+                or len(values) != len(xs):
+            return None
+        col: list[float | int | None] = []
+        for v in values:
+            if v is None:
+                col.append(None)
+                continue
+            y = _real(v)
+            if y is None:                       # a string, a bool, a nested value
+                return None
+            col.append(_sig4(y))
+        cols[str(name)] = col
+    start = 0
+    for i in range(1, len(xs)):
+        if xs[i] < xs[i - 1]:
+            start = i
+    total = data.get("total")
+    return {
+        "direction": direction,
+        "iterations": [_whole(x) for x in xs[start:]],
+        "fields": {k: v[start:] for k, v in cols.items()},
+        "end_time": _iteration(data.get("end_time")),
+        "total": int(total) if isinstance(total, int) and not isinstance(total, bool)
+                 and total >= len(xs) - start else None,
+        "complete": data.get("complete") is True,
+    }
+
+
+def _put_residuals(conn, case_id: str, record: dict[str, Any], source: str,
+                   worker: str | None, now: int) -> str:
+    """Store one direction's series, replacing that direction's; inside the
+    caller's transaction. ``"ok"``, or ``"too_many_directions"``."""
+    direction = record["direction"]
+    known = conn.execute("SELECT 1 FROM case_residuals WHERE case_id=? AND direction=?",
+                         (case_id, direction)).fetchone()
+    if known is None and conn.execute(
+            "SELECT COUNT(*) AS n FROM case_residuals WHERE case_id=?",
+            (case_id,)).fetchone()["n"] >= RESIDUAL_MAX_DIRECTIONS:
+        return "too_many_directions"
+    xs = record["iterations"]
+    body = _telemetry_json({"iterations": xs, "fields": record["fields"],
+                            "total": record["total"], "complete": record["complete"]})
+    conn.execute(
+        "INSERT INTO case_residuals(case_id, direction, source, n, iteration, end_time, series,"
+        " worker_id, reported_at) VALUES (?,?,?,?,?,?,?,?,?)"
+        " ON CONFLICT(case_id, direction) DO UPDATE SET source=excluded.source, n=excluded.n,"
+        " iteration=excluded.iteration, end_time=excluded.end_time, series=excluded.series,"
+        " worker_id=excluded.worker_id, reported_at=excluded.reported_at",
+        (case_id, direction, source, len(xs), xs[-1], record["end_time"], body, worker, now))
+    return "ok"
+
+
+def _note_solve_report(conn, case_id: str, solve: dict[str, Any], worker: str | None,
+                       now: int) -> None:
+    """Add the latest residuals of a `solve` report to the current direction's
+    series, for a node that sends no series of its own.
+
+    A node from before kind `residuals` reports only the newest number per
+    field, every five minutes at most: a coarse curve (a dozen points an hour)
+    but the same shape, which is better than a table of one row, and it is
+    there the moment this broker is, without waiting for a fleet to update. A
+    series the node itself sent (``source = 'trace'``) is never touched: it is
+    the solver's own and finer, and a report's point would only be noise in it.
+
+    Never raises on what a node sent -- a progress report must not fail its
+    own post -- it just records nothing. An iteration at or before the last
+    point is not new (a repeated report), except that going BACKWARDS is a
+    rung of the numerics ladder restarting the direction, which starts the
+    series over.
+    """
+    direction, it, res = solve.get("current"), _iteration(solve.get("iteration")), solve.get("residuals")
+    if not isinstance(direction, str) or direction == "mesh" or not PART_NAME.fullmatch(direction) \
+            or it is None or not isinstance(res, dict):
+        return
+    point: dict[str, float | int | None] = {}
+    for name, v in res.items():
+        if not _RESIDUAL_FIELD.fullmatch(str(name)) or len(point) >= RESIDUAL_MAX_FIELDS:
+            continue
+        y = _real(v)
+        point[str(name)] = _sig4(y) if y is not None else None
+    if not any(v is not None for v in point.values()):
+        return
+    row = conn.execute("SELECT source, series FROM case_residuals WHERE case_id=? AND direction=?",
+                       (case_id, direction)).fetchone()
+    xs: list[float | int] = []
+    cols: dict[str, list[float | int | None]] = {}
+    if row is not None:
+        if row["source"] != "reports":
+            return
+        try:
+            old = json.loads(row["series"])
+            xs, cols = list(old["iterations"]), {k: list(v) for k, v in old["fields"].items()}
+        except (TypeError, ValueError, KeyError, AttributeError):
+            xs, cols = [], {}
+    if xs and it == xs[-1]:
+        return
+    if xs and it < xs[-1]:
+        xs, cols = [], {}
+    for name in point:
+        cols.setdefault(name, [None] * len(xs))
+    for name, col in cols.items():
+        col.append(point.get(name))
+    xs.append(_whole(it))
+    if len(xs) > RESIDUAL_SAMPLE_MAX:
+        cut = len(xs) - RESIDUAL_SAMPLE_MAX
+        xs, cols = xs[cut:], {k: v[cut:] for k, v in cols.items()}
+    end = _iteration(solve.get("end_time"))
+    _put_residuals(conn, case_id, {
+        "direction": direction, "iterations": xs, "fields": cols, "end_time": end,
+        "total": None, "complete": False}, "reports", worker, now)
+
+
+@_locked
+def case_residuals(conn, case_id: str, direction: str | None = None) -> dict[str, Any] | None:
+    """A case's residual series: the list of directions that have one, and the
+    series of one of them. None for a case that does not exist.
+
+    ``directions`` is one record per direction (``direction``, ``source``,
+    ``n`` points, the last ``iteration``, ``end_time``, ``reported_at``,
+    ``worker``), sorted by name as text -- the order a node solved them in is
+    not recorded, and the dashboard sorts the names as numbers. ``series`` is
+    that of the direction asked for, else the one reported most recently (the
+    one a viewer watching a live solve wants), or None when there is none. The
+    index never carries the points, so the list stays small however many
+    directions there are; the series is one request away.
+    """
+    if conn.execute("SELECT 1 FROM cases WHERE case_id=?", (case_id,)).fetchone() is None:
+        return None
+    rows = conn.execute(
+        "SELECT direction, source, n, iteration, end_time, reported_at, worker_id"
+        " FROM case_residuals WHERE case_id=? ORDER BY direction", (case_id,)).fetchall()
+    index = [{"direction": r["direction"], "source": r["source"], "n": r["n"],
+              "iteration": r["iteration"], "end_time": r["end_time"],
+              "reported_at": r["reported_at"], "worker": r["worker_id"]} for r in rows]
+    chosen = direction
+    if chosen is None and index:
+        chosen = max(index, key=lambda r: (r["reported_at"], r["direction"]))["direction"]
+    series = None
+    if chosen is not None:
+        got = conn.execute("SELECT series FROM case_residuals WHERE case_id=? AND direction=?",
+                           (case_id, chosen)).fetchone()
+        if got is not None:
+            try:
+                series = json.loads(got["series"])
+            except (TypeError, ValueError):
+                series = None
+    return {"case_id": case_id, "directions": index, "direction": chosen, "series": series}
 
 
 # How many cases one dataset_rows() page holds: ~8 MB of JSON TEXT at the
@@ -4501,7 +4812,7 @@ def get_case(conn, case_id: str) -> dict[str, Any] | None:
 @_locked
 def purge_cases(conn, recipe: str | None = None, state: str | None = None,
                 expect: int | None = None, dry_run: bool = False) -> dict[str, Any]:
-    """Delete cases (and their events and footprints) from the campaign.
+    """Delete cases (and their events, footprints, labels and residual series) from the campaign.
 
     This is the one destructive operation in the API, and it exists because the
     alternative people reach for is a psql session against production. Three
@@ -4550,6 +4861,7 @@ def purge_cases(conn, recipe: str | None = None, state: str | None = None,
         conn.execute(f"DELETE FROM events WHERE case_id IN ({sub})", params)
         conn.execute(f"DELETE FROM footprints WHERE case_id IN ({sub})", params)
         conn.execute(f"DELETE FROM case_labels WHERE case_id IN ({sub})", params)
+        conn.execute(f"DELETE FROM case_residuals WHERE case_id IN ({sub})", params)
         cur = conn.execute("DELETE FROM cases" + clause, params)
         out["deleted"] = int(cur.rowcount or 0)
         conn.execute("COMMIT")

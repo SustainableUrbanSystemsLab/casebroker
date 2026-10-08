@@ -8,6 +8,36 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.36.0] - 2026-10-08
+
+### Added
+- **The case page draws the residual curves of a CFD solve.** The Solve card showed the newest
+  residual of each field and nothing else, which cannot tell a direction that fell three decades
+  from one that has sat at 1e-3 for an hour. It now draws a log-scale chart per wind direction
+  (a line per field; a picker for the direction, running or finished, with its verdict; a toggle
+  per field; a crosshair that reads every field at an iteration), above the table of latest
+  numbers, and only on a CFD case -- a Radiance surface-temperature case has no solve to plot.
+  The chart redraws in place while a node is still extending it, every 30 s like the rest of the
+  record, and stays readable on a phone.
+  - **`GET /v1/cases/{id}/residuals`** answers which directions have a curve and the series of
+    one (`?direction=`, else the one reported most recently).
+  - **Telemetry kind `residuals`** carries it from the node: one direction's initial residual
+    per field at up to 1,000 iterations (a node decimates a 2,000-iteration solve to ~160, keeping
+    the worst of each stretch). Unlike every other kind it is kept PER DIRECTION in its own table
+    (`case_residuals`) rather than as the latest of its kind: a case has 32 of them, which the 16
+    kinds and the 32 KiB per kind could not hold, and `GET /v1/cases/{id}` stays small. It is
+    cleaned on the way in (four significant digits; `nan` is `null`; iterations that go backwards
+    -- a numerics-ladder rung restarting the direction -- are cut to the last run) and a malformed
+    record is `422`.
+  - **A node that sends no series still gets a coarse curve.** The broker adds the newest
+    residuals of every `solve` report to the current direction's series (`source: "reports"`: at
+    most a dozen points an hour, drawn with a dot each and labelled as assembled from reports),
+    so the chart works on the running fleet the moment this broker does, before any node updates.
+    A series a node sent is never added to by a report, and replaces one made of reports.
+  - **Lifecycle.** A fresh claim deletes the curves of the attempt before, except for a direction
+    the case still holds a part for (the next node takes its result over, so keeps the curve that
+    made it); a new mesh, `casebroker parts reset` and a purge delete them all.
+
 ## [0.35.1] - 2026-10-08
 
 ### Added

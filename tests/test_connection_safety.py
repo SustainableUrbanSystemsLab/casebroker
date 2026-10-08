@@ -57,6 +57,8 @@ _ALLOWED_UNLOCKED = {
     "_parts_of",           # inside lease() and case_parts
     "_blob_receipt",       # inside record_blob, in its transaction
     "_insert_field",       # inside _store_field and _backfill_field, in their transactions
+    "_put_residuals",      # inside post_telemetry and _note_solve_report, in its transaction
+    "_note_solve_report",  # inside post_telemetry, in its transaction
     # Orchestrators that touch the connection only through locked helpers, so the
     # arithmetic between them runs unlocked: a lease never waits behind numpy.
     "put_field",           # validates and summarises the field, then _store_field

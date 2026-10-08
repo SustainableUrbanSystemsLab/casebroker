@@ -2011,6 +2011,15 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         if outcome == "too_many_kinds":
             raise HTTPException(413, f"a case holds at most {db.TELEMETRY_MAX_KINDS} "
                                      "telemetry kinds")
+        if outcome == "too_many_directions":
+            raise HTTPException(413, f"a case holds residual series for at most "
+                                     f"{db.RESIDUAL_MAX_DIRECTIONS} directions")
+        if outcome == "bad_series":
+            raise HTTPException(422, "a residuals record needs `direction` (a case directory name, "
+                                     "case_...), `iterations` (1 to "
+                                     f"{db.RESIDUAL_MAX_POINTS} numbers) and `fields` (1 to "
+                                     f"{db.RESIDUAL_MAX_FIELDS} field names, each a list of numbers or "
+                                     "null as long as `iterations`)")
         if outcome == "too_large":
             raise HTTPException(413, f"telemetry data is limited to "
                                      f"{db.TELEMETRY_MAX_BYTES} bytes of JSON per post "
@@ -2019,6 +2028,28 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
             raise HTTPException(422, f"telemetry data may nest objects and arrays at most "
                                      f"{db.TELEMETRY_MAX_DEPTH} levels deep")
         raise HTTPException(422, "kind must match ^[a-z][a-z0-9_]{0,31}$ and data must be an object")
+
+
+    @app.get("/v1/cases/{case_id}/residuals", dependencies=[ReadAuth])
+    def get_residuals(case_id: str,
+                      direction: str | None = Query(None, max_length=64)) -> dict[str, Any]:
+        """The residual curves of a CFD case: which wind directions have one
+        (`directions`: `direction`, `source`, `n` points, the last `iteration`,
+        `end_time`, `reported_at`, `worker`) and the series of one of them.
+
+        `series` is `{iterations, fields: {Ux: [...], ...}, total, complete}`:
+        the initial residual of every solved field at every point, null where a
+        field was not solved or was not finite. It belongs to `direction`, the
+        one asked for, else the one reported most recently (the one to watch on
+        a live solve); null when the case has none. `source` is `trace` for the
+        solver's own series (decimated by the node) and `reports` for a coarse
+        one the broker built from a node's `solve` reports. A case that is not
+        CFD, or whose node has reported no solve yet, has none: 200 with an
+        empty list, not 404 -- 404 is for a case that does not exist."""
+        out = db.case_residuals(conn, case_id, direction)
+        if out is None:
+            raise HTTPException(404, "no such case")
+        return out
 
 
     @app.post("/v1/parts", dependencies=[WriteAuth])

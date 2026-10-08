@@ -141,7 +141,8 @@ than silent. Creating the first account closes it.
 | `POST /v1/complete` | Report a result pointer + metrics. Send `case_id` alongside `lease_id`: it scopes the retry-safety check to this case, so a runner whose `result_uri` is not unique per case cannot have one case's retry confirmed by another's row. Optional, so older workers keep working |
 | `POST /v1/fail` | Report a failure; `retryable=false` quarantines immediately. A retryable failure goes back to `pending`. For `CASEBROKER_FAIL_COOLDOWN` (12 h), no worker on the failing host is handed it again, fresh or as a resume, so the next attempt runs on another machine |
 | `POST /v1/release` | Graceful preemption — requeues and **refunds the attempt** |
-| `POST /v1/telemetry` | `{lease_id, case_id, kind, data}`: the node's latest structured report of one `kind` for the case it holds, replacing that kind only. `200` stored; **`409` means stop sending telemetry for this case** (the lease is not current, or not this case's, or -- for a per-machine credential -- not held under that credential's name, the rule `/v1/lease` applies) and is never retried; `413` for `data` over 32 KiB or a 17th kind on one case, the size measured as stored: compact JSON with non-ASCII escaped as `\uXXXX`; `422` for a `kind` outside `^[a-z][a-z0-9_]{0,31}$`, or `data` nesting objects/arrays more than 16 levels deep (`data` itself is level 1). A NaN or infinity is stored as `null`, a lone UTF-16 surrogate as U+FFFD. A broker from before this route answers `404`, and the node then stops sending telemetry for the rest of its process -- so this route never answers 404. **Write auth** |
+| `POST /v1/telemetry` | `{lease_id, case_id, kind, data}`: the node's latest structured report of one `kind` for the case it holds, replacing that kind only. `200` stored; **`409` means stop sending telemetry for this case** (the lease is not current, or not this case's, or -- for a per-machine credential -- not held under that credential's name, the rule `/v1/lease` applies) and is never retried; `413` for `data` over 32 KiB or a 17th kind on one case, the size measured as stored: compact JSON with non-ASCII escaped as `\uXXXX`; `422` for a `kind` outside `^[a-z][a-z0-9_]{0,31}$`, or `data` nesting objects/arrays more than 16 levels deep (`data` itself is level 1). One kind is kept differently: `residuals` is a series per wind direction, held in its own table and not counted among the 16 ("The residual curves", below); `422` for it also means `data` is not a residual series, `413` a 65th direction. A NaN or infinity is stored as `null`, a lone UTF-16 surrogate as U+FFFD. A broker from before this route answers `404`, and the node then stops sending telemetry for the rest of its process -- so this route never answers 404. **Write auth** |
+| `GET /v1/cases/{case_id}/residuals` | The residual curves of a CFD case: `directions` (which wind directions have one, each with `source`, `n` points, the last `iteration`, `end_time`, `reported_at`, `worker`) and `series` of one of them -- `?direction=` names it, else the one reported most recently. `200` with an empty list for a case that has none, `404` only for a case that does not exist. **Read auth** |
 | `DELETE /v1/cases` | Purge a superseded campaign, with its events and footprints. **Admin session** (a write bearer token also passes, as it always has; an `operator` session does not). `dry_run` defaults to **true**, so a half-remembered curl reports what it would have deleted instead of deleting it; `expect` is the real interlock — state the row count you believe you are removing, and a mismatch refuses |
 | `GET /v1/status` | Counts by state and split, expired leases, 24 h throughput, ETA |
 | `GET /healthz` | Liveness, plus the running `version`, auth posture (`token` / `accounts` / `OPEN`), per-scope token counts and redacted DB target. **Unauthenticated** — see Deploying |
@@ -185,7 +186,56 @@ kinds the node sends:
 | --- | --- | --- |
 | `site` | once the site geometry is built (a resumed case: from the site report on disk) | `urban_form` (the flat indices of the completion metrics: `bcr`, `bht_m`, `bdr_m`, `vr_ring`, `vr_exposed`, `ar`, `open_space_width_m`, `bht_sigma_m`, `rar`, `svf`, `svf_dome`, `lambda_f_min`, `lambda_f_max` -- whichever exist -- and one table, `lambda_f_by_direction`, below), `n_buildings`, `terrain_relief_m`, `canopy_fraction`, `dem` |
 | `mesh` | once the mesh verdict is in, fresh and resumed | `meshes` (per mesh: `ok`, `failed_checks`, `negative_volume_cells`, `max_skewness`, `max_non_orthogonality`, `cells`), `total_cells`, `all_ok`, `mesh_seconds` (null on resume), `ranks`, `cells_per_rank`, `engine`, `build`, `recipe`, `directions` |
-| `solve` | from the solve watcher, only on change and at most every 300 s, plus once per finished direction | `directions_total`, `directions_done`, `current`, `iteration`, `end_time`, `residuals`, `finished` (per direction: `iterations`, `status`) |
+| `solve` | from the solve watcher, only on change and at most every 300 s, plus once per finished direction | `directions_total`, `directions_done`, `current`, `iteration`, `end_time`, `residuals` (the newest initial residual of each field), `finished` (per direction: `iterations`, `status`) |
+| `residuals` | with each `solve` report, for the direction being solved, and once more, `complete`, when a direction finishes | one direction's residual history: `direction`, `iterations`, `fields`, `end_time`, `total`, `complete` -- see below. **Kept per direction, not as the latest of its kind** |
+
+### The residual curves
+
+A `solve` report says where the solve is and what its newest residuals are, which
+cannot tell a direction that fell three decades from one that has sat at 1e-3 for an
+hour. The curve can, so the dashboard draws one (log residual against iteration, a
+line per field, a picker for the wind direction) from `GET /v1/cases/{id}/residuals`.
+It comes from the node as telemetry kind `residuals`:
+
+```json
+{"direction": "case_112",
+ "iterations": [1, 14, 27, "..."],
+ "fields": {"Ux": [0.99, 0.5, "..."], "p": [1.0, 0.7, null], "k": ["..."]},
+ "end_time": 2000, "total": 853, "complete": false}
+```
+
+`iterations` are the solver's own (OpenFOAM's `Time`), non-decreasing, 1 to 1,000 of
+them; every field is as long as `iterations` and holds that field's INITIAL residual
+at each point, `null` where it was not solved in that iteration or was not finite (a
+diverging solve prints `nan`). A node decimates a 2,000-iteration solve to about 160
+points to fit the 32 KiB a post may carry, keeping from each stretch the point where the
+worst residual is, so a spike survives; `total` says how many iterations it was cut
+down from. `end_time` is the cap the direction runs to, which lets a chart of a running
+direction fill as the solve progresses instead of rescaling under it.
+
+How the broker keeps it, because it differs from the other kinds:
+
+* **One series per (case, direction)** in `case_residuals`, replacing that direction's
+  series wholesale on each post and leaving the others alone. A case has 32, which
+  neither the 16 kinds nor the 32 KiB per kind could hold, and `GET /v1/cases/{id}`
+  stays small. At most 64 directions per case (`413` beyond).
+* **Cleaned and bounded on the way in.** Values are kept to four significant digits.
+  A series whose iterations go BACKWARDS is cut to its last run: the numerics ladder
+  restarts a direction from 0 on a safer rung and its solver tees into the same log, so
+  a log read whole is the failed run followed by the current one. A record whose fields
+  are not as long as `iterations`, whose direction is not a case directory name
+  (`case_...`), or with a non-numeric value is `422` and writes nothing.
+* **A node that sends none still gets a coarse curve.** The broker adds the newest
+  residuals of each `solve` report as a point of the current direction's series
+  (`source: "reports"`, a dozen points an hour at most, the oldest dropped past 600).
+  A series a node sent (`source: "trace"`) is never added to by a report, and replaces
+  one made of reports. The dashboard draws a `reports` series with a dot per point and
+  says what it is made of.
+* **It lives with the attempt, except for what the case holds.** A fresh claim starts
+  the case over and deletes the series of every direction that has no part
+  (`POST /v1/parts`) -- a direction whose result the next node takes over from the
+  broker's copy keeps the curve that produced it. A new mesh, `casebroker parts reset`
+  and a purge delete them all.
 
 `GET /v1/dataset` turns every case into distributions. Each metric has a
 `label`, `unit`, `group` and one set of 25 `bins` edges (24 bins) from the

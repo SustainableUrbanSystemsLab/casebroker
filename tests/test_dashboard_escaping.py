@@ -63,10 +63,15 @@ def test_no_server_supplied_field_reaches_the_dom_unescaped():
 # sweep above sees none of them. Inside these functions, then, EVERY
 # interpolation goes through a safe call, unless it is one of the locals below
 # -- markup this file builds from checked parts, or a choice between literals.
-TELEMETRY_RENDERERS = ("reportedHtml", "meshSectionHtml", "solveSectionHtml", "pctCardInner")
+TELEMETRY_RENDERERS = ("reportedHtml", "meshSectionHtml", "solveSectionHtml", "pctCardInner",
+                       # The residual chart: field names, direction names, a direction's
+                       # status and the worker all come from the node.
+                       "residualSvg", "residualKeysHtml", "residualInner", "residualBlockHtml")
 # solveStatusClass answers one of five class names this file chose.
 TELEMETRY_SAFE = SAFE_CALLS + ("formatCells(", "formatMetric(", "formatDuration(",
-                               "verdictBadge(", "reportedHtml(", "histSvg(", "solveStatusClass(")
+                               "verdictBadge(", "reportedHtml(", "histSvg(", "solveStatusClass(",
+                               # a colour slot number; a number in exponent form, or a dash
+                               "residualSlot(", "residualValue(")
 BUILT_LOCALS = {"by", "rows", "v", "solveSecs", "fig", "tiles", "useOwn", "!useOwn",
                 'notes.join(" · ")', 'foot.join(" · ")', 'it ? " · " + it + end : ""'}
 _LITERAL = r"""(?:"[^"]*"|'[^']*')"""
