@@ -3308,17 +3308,21 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
                    offset: int = 0, sort: str | None = None,
                    direction: str = "desc", include_spec: bool = True,
                    label: str | None = None,
-                   recipe: str | None = Query(None, max_length=128)) -> dict[str, Any]:
+                   recipe: str | None = Query(None, max_length=128),
+                   after: str | None = Query(None, max_length=128)) -> dict[str, Any]:
         """A page of cases for the dashboard's case browser -- most recently
         touched first, optionally filtered by state/split/city/label/recipe.
         Distinct from ``GET /v1/cases/{case_id}`` (one case by id, used for a
         direct lookup).
 
         ``include_spec=false`` leaves out the largest column, which more than
-        halves the page; a caller that wants one case's spec asks for that case."""
+        halves the page; a caller that wants one case's spec asks for that case.
+        ``after=<case_id>`` pages by key, in case_id order, and a case_id-ordered
+        answer carries ``next_after`` (see db.list_cases)."""
         return db.list_cases(conn, state=state, split=split, city_cluster=city_cluster,
                              limit=limit, offset=offset, sort=sort, direction=direction,
-                             include_spec=include_spec, label=label, recipe=recipe or None)
+                             include_spec=include_spec, label=label, recipe=recipe or None,
+                             after=after)
 
     return app
 

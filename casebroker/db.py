@@ -4959,7 +4959,8 @@ def list_cases(conn, state: str | None = None, split: str | None = None,
                city_cluster: str | None = None, limit: int = 50,
                offset: int = 0, sort: str | None = None,
                direction: str = "desc", include_spec: bool = True,
-               label: str | None = None, recipe: str | None = None) -> dict[str, Any]:
+               label: str | None = None, recipe: str | None = None,
+               after: str | None = None) -> dict[str, Any]:
     """A page of cases for the dashboard's case browser, most-recently-touched
     first -- that ordering is what makes "what just happened" the default view
     rather than an arbitrary slice of a 40,000-row table.
@@ -4981,6 +4982,14 @@ def list_cases(conn, state: str | None = None, split: str | None = None,
     out of a page must not silently stop getting them; the dashboard, which reads
     a spec only for the one row it expands (and fetches that row in full), asks
     for it to be dropped.
+
+    ``after`` pages by KEY instead of by offset: the cases whose id sorts after it,
+    in case_id order (``sort`` and ``offset`` are then ignored). An offset counts
+    rows, and a live campaign moves rows: a case that leaves ``done`` between two
+    pages of an export shifts every later row up by one, and one case is never
+    read. The answer to a case_id-ordered page carries ``next_after`` -- the id to
+    ask after for the next page, None on the last -- so a client knows the broker
+    understood (one that ignored ``after`` would hand back page one forever).
     """
     limit = max(1, min(int(limit), 200))
     offset = max(0, int(offset))
@@ -5004,15 +5013,22 @@ def list_cases(conn, state: str | None = None, split: str | None = None,
             params.append(key.strip())
     clause = (" WHERE " + " AND ".join(where)) if where else ""
     total = conn.execute("SELECT COUNT(*) n FROM cases" + clause, params).fetchone()["n"]
-    column = CASE_SORTS.get(sort or "", "cases.updated_at")
-    descending = str(direction).lower() != "asc"
-    order = f"{column} {'DESC' if descending else 'ASC'}, cases.case_id ASC"
+    keyset = after is not None or (sort == "case_id" and str(direction).lower() == "asc")
+    if after is not None:
+        clause += (" AND " if clause else " WHERE ") + "cases.case_id > ?"
+        params = params + [after]
+        order, offset = "cases.case_id ASC", 0
+    else:
+        column = CASE_SORTS.get(sort or "", "cases.updated_at")
+        descending = str(direction).lower() != "asc"
+        order = f"{column} {'DESC' if descending else 'ASC'}, cases.case_id ASC"
     columns = _CASE_LIST_COLS if include_spec else _CASE_COLS_NO_SPEC
     rows = conn.execute(
         "SELECT " + columns + " FROM cases" + clause +
         " ORDER BY " + order + " LIMIT ? OFFSET ?",
         params + [limit, offset]).fetchall()
-    return {"cases": _attach_labels(conn, [dict(r) for r in rows]), "total": total,
+    extra = {"next_after": rows[-1]["case_id"] if len(rows) == limit else None} if keyset else {}
+    return {**extra, "cases": _attach_labels(conn, [dict(r) for r in rows]), "total": total,
             "limit": limit, "offset": offset}
 
 

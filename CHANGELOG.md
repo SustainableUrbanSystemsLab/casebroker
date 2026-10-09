@@ -8,6 +8,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.40.1] - 2026-10-09
+
+### Fixed
+- **`casebroker export` cannot skip a case that changes state mid-read.** It paged `GET /v1/cases`
+  by offset, and a case leaving the selection between two pages shifted every later row up by one:
+  the row that slid across the boundary was never read. `GET /v1/cases?after=<case_id>` pages by
+  key, a case_id-ordered page says where the next starts (`next_after`), and the export uses it
+  whenever the broker answers that way (it keeps the offset for an older broker).
+
 ## [0.40.0] - 2026-10-09
 
 ### Security

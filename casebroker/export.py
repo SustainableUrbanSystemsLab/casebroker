@@ -187,9 +187,15 @@ def select(http, opts: Options) -> list[dict[str, Any]]:
     for recipe in opts.recipes or [None]:
         for split in opts.splits or [None]:
             offset = kept = 0
+            after: str | None = None
             while True:
                 params: dict[str, Any] = {"limit": PAGE, "offset": offset, "sort": "case_id",
                                           "direction": "asc", "include_spec": "false"}
+                if after is not None:
+                    # By key, once the broker has shown it pages that way: an
+                    # offset skips a case that changed state between two pages.
+                    params["after"] = after
+                    params.pop("offset")
                 for k, v in (("state", opts.state), ("recipe", recipe), ("split", split), ("label", first)):
                     if v:
                         params[k] = v
@@ -205,7 +211,15 @@ def select(http, opts: Options) -> list[dict[str, Any]]:
                 offset += len(rows)
                 # Each combination is read in case_id order, so its first `limit`
                 # matches hold every one of its cases the merged first `limit` can.
-                if not rows or offset >= int(page.get("total") or 0) or (opts.limit and kept >= opts.limit):
+                if not rows or (opts.limit and kept >= opts.limit):
+                    break
+                if "next_after" in page:
+                    # A broker that pages by key (0.40.1 on) says where the next
+                    # page starts, and None on the last one.
+                    if page["next_after"] is None:
+                        break
+                    after = page["next_after"]
+                elif offset >= int(page.get("total") or 0):
                     break
     out = [found[k] for k in sorted(found)]
     return out[:opts.limit] if opts.limit else out
