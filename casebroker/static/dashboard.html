@@ -1122,7 +1122,7 @@
                  font-size: 11px; margin-top: 6px; align-items: center; }
   .ms-finished .mono { font-family: var(--font-mono); color: var(--text-primary); overflow: hidden;
                        text-overflow: ellipsis; white-space: nowrap; }
-  .ms-finished .it { color: var(--text-muted); text-align: right; font-variant-numeric: tabular-nums; }
+  .ms-finished .it { color: var(--text-muted); text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
   .ms-sublabel { font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em;
                  color: var(--text-muted); margin-top: 10px; }
 
@@ -1152,6 +1152,10 @@
   /* Not by opacity alone: a switched-off series is struck through as well. */
   button.rs-key[aria-pressed="false"] { opacity: 0.5; text-decoration: line-through; }
   .rs-note { margin-top: 4px; font-size: 11px; }
+  /* How the direction on show ended, under its name: the badge, then why. */
+  .rs-verdict { margin-top: 6px; font-size: 11px; line-height: 1.5; color: var(--text-secondary); }
+  .rs-verdict .vbadge { margin-right: 4px; }
+  .rs-tally { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
 
   /* -- Histograms (the dataset drawer and "Where this case sits") -------------
      One renderer, histSvg(). Bars are the reference distribution; an outline is
@@ -5796,11 +5800,173 @@
 
   function solveStatusClass(s) {
     const v = String(s || "").toLowerCase();
-    if (v === "converged") return "ok";
-    if (v === "plateaued") return "warn";
+    // `stationary` and `capped` are not words a node sends: they are what
+    // convergenceOf makes of one that said "converged" (see there).
+    if (v === "converged" || v === "stationary") return "ok";
+    if (v === "plateaued" || v === "capped") return "warn";
     if (v === "running") return "info";
     if (v === "diverging" || v === "stopped" || v === "failed" || v.startsWith("exit")) return "bad";
     return "muted";
+  }
+
+  // -- How a direction converged ---------------------------------------------------
+  // "converged" is one word for three different ends of the node's gate
+  // (MetaFOAM.Lib ConvergenceCheck), and the solve report carries only the word:
+  //
+  //   * the solver met its residual tolerance;
+  //   * it did not, but the wall shear on every patch stopped moving, which the
+  //     pipeline accepts as converged (FieldStationarity);
+  //   * neither, and the direction merely ran to its iteration cap with residuals
+  //     finite and not rising. The gate still says "converged"; the manifest entry
+  //     says "ended-without-meeting-tolerances".
+  //
+  // Someone looking at p = 1.2e-4 and epsilon = 7e-3 under a green "converged"
+  // cannot tell which it was, and had no way to. The node's own verdict entry for
+  // each direction says (POST /v1/parts, `verdict`: converged, met_residual_control,
+  // converged_by, last_residuals, last_iteration, end_time, ...). The broker has
+  // always kept it (GET /v1/cases/{id}/parts) and this page never read it.
+  //
+  // The functions between the markers are pure, and tests/convergence_check.js runs
+  // them as shipped, on the entries a node writes.
+  // convergence:pure begin
+  /// The fields whose residual can stop a solve: all but epsilon. Under wall
+  /// functions its initial residual floors near 1e-2 while p, U and k go on to
+  /// machine zero (measured on a street canyon at 17k and 102k cells with three
+  /// k-epsilon models, Eddy3D #911), so residualControl leaves it out; a k-omega
+  /// model keeps omega.
+  function stopFields(names) { return names.filter((f) => f !== "epsilon"); }
+
+  /// "p 1.15e-4": the highest last residual among the fields that can stop a
+  /// solve -- the one to hold against the tolerance -- or "".
+  function highestStopResidual(last) {
+    if (!isObj(last)) return "";
+    let name = "", worst = -1;
+    for (const f of stopFields(Object.keys(last))) {
+      if (!finite(last[f])) continue;
+      const v = Number(last[f]);
+      if (v > worst) { worst = v; name = f; }
+    }
+    return name ? name + " " + worst.toExponential(2) : "";
+  }
+
+  const CONV_LABEL = { converged: "converged", stationary: "converged · shear", capped: "hit the cap" };
+
+  /// What a direction's finish says, from the word its solve report carried
+  /// (`status`), the node's verdict entry for it (`v`, which may be missing) and,
+  /// for want of that entry, what the solve report saw (`seen`: iterations, cap).
+  /// -> { kind, label, why, record }: `kind` picks the colour (solveStatusClass),
+  /// `label` is the badge, `why` is a sentence for a note or a tooltip (empty when
+  /// there is nothing to add) and `record` says whether there was an entry to read.
+  function convergenceOf(status, v, seen) {
+    const word = String(status || "").toLowerCase();
+    if (!isObj(v)) {
+      let why = "";
+      const it = seen && finite(seen.iterations) ? Number(seen.iterations) : null;
+      const cap = seen && finite(seen.cap) && Number(seen.cap) > 0 ? Number(seen.cap) : null;
+      if (word === "converged" && it !== null && cap !== null) {
+        why = it < cap
+          ? "Stopped at iteration " + it.toLocaleString() + " of " + cap.toLocaleString() + ", so a stop criterion fired"
+            + " (the solver's tolerance, or a steady wall shear); this node did not report which."
+          : "Ran to its cap, " + cap.toLocaleString() + " iterations. This node did not report whether it met a tolerance,"
+            + " and the gate also says converged for a direction that reached the cap quietly.";
+      }
+      return { kind: word, label: word || "finished", why, record: false };
+    }
+    const said = String(v.verdict || "").toLowerCase();
+    const by = typeof v.converged_by === "string" ? v.converged_by : "";
+    const byResidual = by === "residualControl" || v.met_residual_control === true;
+    let kind;
+    // met = residualControl || the wall shear, so a converged direction that did not
+    // meet residualControl is the wall shear's, whether or not the entry names it.
+    if (v.converged === true) kind = byResidual ? "converged" : "stationary";
+    else if (said === "ended-without-meeting-tolerances") kind = "capped";
+    else kind = said || word;
+    const it = finite(v.last_iteration) ? Number(v.last_iteration).toLocaleString() : "";
+    const cap = finite(v.end_time) ? Number(v.end_time).toLocaleString() : "";
+    const at = it ? "iteration " + it + (cap ? " of " + cap : "") : "";
+    const hi = highestStopResidual(v.last_residuals);
+    const worst = hi ? " (highest on a stop field: " + hi + ")" : "";
+    let why = "";
+    if (kind === "converged" && byResidual) {
+      why = "The solver met its residual tolerance on p, U and k (and omega in a k-omega model; epsilon never counts)"
+        + (at ? " at " + at : "") + ".";
+    } else if (kind === "stationary") {
+      why = (at ? "Stopped at " + at + ". " : "")
+        + "The solver's residual tolerance was not met" + worst + ", but the wall shear on every patch stopped moving: "
+        + "within 0.1 % of its mean over the last 100 iterations, or a steady oscillation under 0.5 %. "
+        + "The pipeline accepts that as converged.";
+    } else if (kind === "capped") {
+      why = "Ran to " + (at || "its iteration cap") + ". Neither test was met: not the solver's residual tolerance" + worst
+        + ", and not a steady wall shear. Its residuals were finite and not rising, which is why the gate still reports it"
+        + " as converged; its own record says ended-without-meeting-tolerances.";
+    } else if (kind === "plateaued") {
+      why = "Residuals stopped falling"
+        + (typeof v.plateau_field === "string" && v.plateau_field && finite(v.plateau_log_drop)
+           ? ": " + v.plateau_field + " dropped only " + Number(v.plateau_log_drop).toFixed(2) + " decades over the last window" : "")
+        + worst + (at ? ". Ended at " + at : "") + ".";
+    } else if (kind === "diverging") {
+      why = v.max_u_at_cap === true
+        ? "The velocity cap" + (finite(v.u_cap) ? " (" + Number(v.u_cap) + " m/s)" : "")
+          + " was still clipping when it ended: the field was held up, not solved."
+        : "Residuals rose: the solve diverged" + worst + ".";
+    } else if (kind === "stopped") {
+      why = "The solver ended without converging.";
+    } else if (kind === "running") {
+      why = "No final verdict: the node was still solving, or stopped before it judged this direction.";
+    } else if (kind === "unknown") {
+      why = "No residual history to judge it by.";
+    }
+    return { kind, label: CONV_LABEL[kind] || kind || "finished", why, record: true };
+  }
+
+  /// How many directions ended each way, the ones to look at first:
+  /// [{ kind, label, n }] from a list of convergenceOf answers.
+  function convergenceTally(list) {
+    const rank = ["diverging", "stopped", "plateaued", "capped", "stationary", "converged"];
+    const by = new Map();
+    for (const c of list) {
+      const t = by.get(c.kind) || { kind: c.kind, label: c.label, n: 0 };
+      t.n += 1;
+      by.set(c.kind, t);
+    }
+    // A word nobody expected sorts after the known ones, by name.
+    const at = (k) => { const i = rank.indexOf(k); return i < 0 ? rank.length : i; };
+    return Array.from(by.values()).sort((a, b) => at(a.kind) - at(b.kind) || String(a.kind).localeCompare(String(b.kind)));
+  }
+  // convergence:pure end
+
+  // Each direction's verdict entry, per open case: direction -> entry (null: that
+  // direction has none). Asked for like the residual curves -- the open case only,
+  // never a thermal one, as often as the case record while a node is on it and
+  // rarely otherwise -- and a failing endpoint costs the page nothing it had.
+  const partsCache = new Map();               // case_id -> { at: ms, verdicts: Map }
+  const partsBusy = new Set();
+  const partsFailed = new Map();
+
+  function verdictsOf(id) {
+    const st = partsCache.get(id);
+    return st ? st.verdicts : null;
+  }
+
+  function ensureVerdicts(id, row, force) {
+    if (!id || partsBusy.has(id) || (row && isThermal(row))) return;
+    const have = partsCache.get(id);
+    if (have && !force && Date.now() - have.at < (row && row.state === "leased" ? RS_LIVE_MS : RS_IDLE_MS)) return;
+    if (!have && Date.now() - (partsFailed.get(id) || 0) < CASE_DETAIL_RETRY_MS) return;
+    partsBusy.add(id);
+    api("/v1/cases/" + encodeURIComponent(id) + "/parts").then((data) => {
+      partsFailed.delete(id);
+      const verdicts = new Map();
+      for (const part of (data && data.parts) || []) {
+        if (isObj(part) && part.part !== "mesh") verdicts.set(String(part.part), isObj(part.verdict) ? part.verdict : null);
+      }
+      // Redrawn only when what a reader sees can have changed.
+      const changed = !have || JSON.stringify(Array.from(have.verdicts)) !== JSON.stringify(Array.from(verdicts));
+      partsCache.set(id, { at: Date.now(), verdicts });
+      if (changed) redrawOpenCase(id);
+    }).catch(() => {
+      if (have) have.at = Date.now(); else partsFailed.set(id, Date.now());
+    }).finally(() => partsBusy.delete(id));
   }
 
   /// failed_checks is the list of checkMesh tests a mesh failed; a count or an
@@ -6108,9 +6274,10 @@
     }
     const fin = solve && isObj(solve.finished) ? solve.finished : {};
     const running = (d) => live && solve && solve.current === d;
-    // What a direction is, beside its name: running, or the status its finish was reported with.
+    // What a direction is, beside its name: running, or how its finish was judged.
+    const vmap = verdictsOf(c.case_id);
     const tag = (name) => running(name) ? " · running"
-      : isObj(fin[name]) && fin[name].status ? " · " + String(fin[name].status) : "";
+      : isObj(fin[name]) && fin[name].status ? " · " + convergenceOf(fin[name].status, vmap && vmap.get(name)).label : "";
     const options = dirs.map((d) =>
       '<option value="' + esc(d.direction) + '"' + (d.direction === data.direction ? " selected" : "") + '>'
       + esc(d.direction + tag(d.direction)) + '</option>').join("");
@@ -6134,8 +6301,24 @@
         ? Number(s.iterations.length).toLocaleString() + " of " + Number(s.total).toLocaleString() + " iterations, thinned to keep the worst of each stretch"
         : Number(s.iterations.length).toLocaleString() + " iterations";
     const plot = svg || '<div class="ms-note rs-note">Every residual in this series is missing or not finite: the solver diverged, or solved none of these fields.</div>';
+    // How this direction ended, and the evidence for it: a green "converged" over
+    // numbers that do not look converged says nothing about why (see convergenceOf).
+    let ended = "";
+    const done = isObj(fin[data.direction]) ? fin[data.direction] : null;
+    const entry = vmap ? vmap.get(data.direction) || null : null;
+    if (!running(data.direction) && (done || entry)) {
+      const conv = convergenceOf(done && done.status, entry, { iterations: done && done.iterations, cap: meta.end_time });
+      // Only once the verdicts have been asked for: "none" while they are on the way is not true yet.
+      const why = conv.why || (!conv.record && vmap ? "No verdict record for this direction: the node did not say how it was judged." : "");
+      ended = '<div class="rs-verdict"><span class="vbadge ' + solveStatusClass(conv.kind) + '">' + esc(conv.label) + '</span>'
+        + (why ? esc(why) : "") + '</div>';
+    }
+    // The number that looks worst on a converged direction is epsilon's; say what it is.
+    const epsilon = Object.keys(s.fields).includes("epsilon")
+      ? '<div class="ms-note rs-note rs-eps">epsilon is drawn but never stops a solve: with wall functions its residual typically floors near 1e-2 even when p, U and k reach machine zero.</div>'
+      : "";
     return head + '<div class="rs-head">' + picker + '<span class="rs-at" data-rest="' + esc(at) + '">' + esc(at) + '</span></div>'
-      + '<div class="rs-plot">' + plot + '</div>' + residualKeysHtml(s, off)
+      + ended + '<div class="rs-plot">' + plot + '</div>' + residualKeysHtml(s, off) + epsilon
       + '<div class="ms-note rs-note rs-basis">Initial residual per field, log scale; ' + esc(basis) + '.</div>';
   }
 
@@ -6166,7 +6349,7 @@
     // What it picks is drawn by the parts around it.
     const picker = wrap.querySelector("select.rs-dir");
     if (picker && picker === document.activeElement && next.querySelector("select.rs-dir")) {
-      for (const part of [".rs-at", ".rs-plot", ".rs-keys", ".rs-basis"]) {
+      for (const part of [".rs-at", ".rs-verdict", ".rs-plot", ".rs-keys", ".rs-eps", ".rs-basis"]) {
         const was = wrap.querySelector(part), now = next.querySelector(part);
         if (was && now) was.replaceWith(now);
       }
@@ -6271,6 +6454,7 @@
   function solveSectionHtml(c, solve, metrics, meshShown) {
     const solveSecs = finite(metrics.solve_seconds) ? formatDuration(Math.round(Number(metrics.solve_seconds))) : "";
     const live = c.state === "leased";
+    const vmap = verdictsOf(c.case_id);
     if (!solve) {
       if (solveSecs) {
         return `<div class="ms-sec"><div class="ms-head"><span class="ms-title">Solve</span>`
@@ -6295,6 +6479,21 @@
         + (total && live ? `<span class="ms-dirbar" style="display:block"><span style="width:${Number(pct).toFixed(1)}%"></span></span>` : "")
         + `</span>`]);
     }
+    // How the finished directions ended, in one line, the ones to look at first:
+    // "converged" over thirty directions says nothing about the one that hit its cap.
+    // A row of its own under the facts, not one of them: three badges are wider than
+    // the value column of a phone.
+    let convergence = "";
+    if (isObj(solve.finished) && Object.keys(solve.finished).length) {
+      const ended = Object.keys(solve.finished).map((dir) => {
+        const f = isObj(solve.finished[dir]) ? solve.finished[dir] : {};
+        return convergenceOf(f.status, vmap && vmap.get(dir));
+      });
+      convergence = `<div class="ms-sublabel">Convergence</div><div class="rs-tally">`
+        + convergenceTally(ended).map((t) =>
+          `<span class="vbadge ${solveStatusClass(t.kind)}">${Number(t.n).toLocaleString()} ${esc(t.label)}</span>`).join("")
+        + `</div>`;
+    }
     if (solve.current != null && solve.current !== "") {
       const it = finite(solve.iteration) ? `iteration ${Number(solve.iteration).toLocaleString()}` : "";
       const end = finite(solve.end_time) ? ` / ${Number(solve.end_time).toLocaleString()}` : "";
@@ -6318,9 +6517,9 @@
       const keys = Object.keys(solve.finished).sort(natural);
       const rows = keys.map((dir) => {
         const f = isObj(solve.finished[dir]) ? solve.finished[dir] : {};
-        const st = f.status != null ? String(f.status) : "finished";
+        const conv = convergenceOf(f.status != null ? String(f.status) : "finished", vmap && vmap.get(dir));
         return `<span class="mono" title="${esc(dir)}">${esc(dir)}</span>`
-          + `<span><span class="vbadge ${solveStatusClass(st)}">${esc(st)}</span></span>`
+          + `<span><span class="vbadge ${solveStatusClass(conv.kind)}" title="${esc(conv.why)}">${esc(conv.label)}</span></span>`
           + `<span class="it">${finite(f.iterations) ? Number(f.iterations).toLocaleString() + " it" : ""}</span>`;
       }).join("");
       finished = `<div class="ms-sublabel">Finished directions (${Number(keys.length).toLocaleString()})</div>`
@@ -6332,7 +6531,7 @@
       + (live ? "" : `<span class="vbadge muted" title="${esc(endedReportText(c.state)[1])}">${esc(endedReportText(c.state)[0])}</span>`)
       + `${reportedHtml(solve)}</div>`
       + (kv.length ? `<dl class="kv-list">${kv.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${v}</dd>`).join("")}</dl>` : "")
-      + curve + residuals + finished + `</div>`;
+      + convergence + curve + residuals + finished + `</div>`;
   }
 
   /// The fourth card. `c` is the merged record; its telemetry exists only once
@@ -7038,6 +7237,7 @@
     ensureCaseDetail(openDetailId);
     refreshCaseDetail(openDetailId, cases.find((c) => c.case_id === openDetailId));
     ensureResiduals(openDetailId, cases.find((c) => c.case_id === openDetailId));
+    ensureVerdicts(openDetailId, cases.find((c) => c.case_id === openDetailId));
     renderCasesHead();
     $("casesEmpty").style.display = cases.length ? "none" : "block";
     $("casesEmpty").textContent = "No cases match this filter.";

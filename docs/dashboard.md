@@ -12,6 +12,8 @@ anything outside the broker's own API:
   completion), **where its result is finally stored** (`result_uri`, bytes,
   sha256), wall time, and the last error if it has one — plus a jump-to-id box
   for a direct lookup
+- **How each direction converged**: not the node's one word "converged" but its basis -- the
+  residual tolerance, a steady wall shear, or the iteration cap -- with the numbers
 - **Machines**: one credential per box, issued and revoked here
 - **Deep links**: the address bar says where you are, so any view -- a case, a filtered
   list, a drawer -- is a link you can bookmark or send
@@ -103,6 +105,44 @@ cluster (`phoenix`) and it covers every worker id under that name —
 `phoenix-<job>-<task>`. (A cluster's E3D nodes pair once per cluster account as
 `ice` or `phoenix`: `slurm/ice_e3d_node.sbatch`, `slurm/phoenix_e3d_node.sbatch`.) Revoking it stops that cluster's workers on their next lease and
 nothing else.
+
+## How a direction converged
+
+A CFD case solves up to 32 wind directions, and the **Mesh & Solve** card says how each one
+ended. The node's gate reports one word, `converged`, for three different ends:
+
+| Shown as | What happened | Evidence in the verdict entry |
+| --- | --- | --- |
+| `converged` | the solver met its residual tolerance (`residualControl`) on p, U and k, plus omega in a k-omega model | `converged_by: residualControl`, `met_residual_control: true` |
+| `converged · shear` | the residual tolerance was **not** met, but the wall shear on every patch stopped moving: within 0.1 % of its mean over the last 100 iterations, or a steady oscillation under 0.5 %. The pipeline accepts that as converged | `converged_by: fieldStationarity` |
+| `hit the cap` | neither. It ran to its iteration cap with residuals finite and not rising, which the gate also lets through as `converged`. Its own record says `ended-without-meeting-tolerances` | `converged: false`, no `converged_by` |
+
+`plateaued`, `diverging` and `stopped` keep their words, with the evidence beside them: the field
+that stopped falling and by how much, or that the velocity cap was still clipping when it ended.
+
+The solve report a node sends carries only the word (`solve.finished[dir].status`). The rest is
+each direction's **verdict entry**, which the node ships with the direction's part
+(`POST /v1/parts`, `verdict`) and the broker keeps (`GET /v1/cases/{id}/parts`); the open case
+reads it. A direction with no entry (a node from before parts, or one that shipped none) shows the
+node's word as it always did, and says what the report does show: that it stopped short of its cap,
+so a stop criterion fired, but not which.
+
+Where it shows:
+
+- **Convergence**, under the Solve header: how many directions ended each way, the ones to look
+  at first (`1 hit the cap · 2 converged · shear · 29 converged`).
+- The **direction picker** names the basis (`case_349 · converged · shear`), and a note under it
+  says why, with the highest residual among the fields that can stop a solve (`p 1.15e-4`).
+- **Finished directions**: the same badge per direction, with the sentence as its tooltip.
+
+**epsilon never stops a solve.** Eddy3D leaves it out of `residualControl` (#911): under wall
+functions its initial residual floors near 1e-2 -- 7e-3 to 1.5e-2 measured on a street canyon --
+while p, U and k go on to machine zero. So a converged direction's epsilon line sitting at 7e-3 is
+normal, and is not the field to hold against the tolerance; the note says so beside the chart, and
+"highest on a stop field" skips it.
+
+The tolerance itself is not sent, so the chart does not draw it: a node that reported
+`residualControl`'s value with its verdict would let it.
 
 ## Deep links
 

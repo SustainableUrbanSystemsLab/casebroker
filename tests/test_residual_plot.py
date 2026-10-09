@@ -65,6 +65,6 @@ def test_the_chart_is_redrawn_in_place_not_by_rebuilding_the_panel():
     # The list of directions is not taken out from under a hand that is choosing from
     # it: while the picker has focus, only the parts around it are replaced.
     assert "picker === document.activeElement" in redraw
-    for part in (".rs-at", ".rs-plot", ".rs-keys", ".rs-basis"):
+    for part in (".rs-at", ".rs-verdict", ".rs-plot", ".rs-keys", ".rs-eps", ".rs-basis"):
         assert part in redraw
     assert "residualOff" in src and "residualPick" in src

@@ -30,6 +30,13 @@ eval(grab('esc'));
 eval(line(/const RS_GEOM = \{[\s\S]*?\};/));
 eval(line(/const RS_SLOT = .*;/));
 var residualOff = new Map();
+// How a direction ended is read from the node's verdict entries, which the page keeps per case.
+var partsCache = new Map();
+eval(grab('solveStatusClass'));
+// The reading itself is one block between markers (its own check: tests/convergence_check.js).
+eval(src.slice(src.indexOf('// convergence:pure begin'), src.indexOf('// convergence:pure end'))
+  .replace(/^  const /gm, '  var '));
+eval(grab('verdictsOf'));
 for (const f of ['residualGeom', 'residualSlot', 'residualDecades', 'residualDomain', 'residualTicks',
                  'residualPath', 'residualNearest', 'residualLast', 'residualValue', 'residualSvg',
                  'residualKeysHtml', 'residualInner']) eval(grab(f));
@@ -127,6 +134,50 @@ check(!/ \/ 2,000/.test(residualInner({ case_id: 'x', state: 'done' }, { current
   direction: 'case_000', directions: [{ direction: 'case_000', source: 'trace', n: 3, end_time: 2000 }],
   series: { iterations: [10, 20, 30], fields: { p: [0.9, 0.5, 0.3] }, total: 900, complete: true },
 }).replace(/data-rest="[^"]*"/, '')), 'a finished direction does not show a cap it did not run to');
+
+// -- how the direction on show ended ------------------------------------------------
+const finishedCase = { case_id: 'v2-abc', state: 'done' };
+const finishedData = (fields) => ({
+  // Two directions, so there is a picker and the picker has the status in it.
+  direction: 'case_349', directions: [{ direction: 'case_349', source: 'reports', n: 10, end_time: 2000 },
+                                      { direction: 'case_350', source: 'reports', n: 4, end_time: 2000 }],
+  series: { iterations: [100, 500, 942], fields, complete: true },
+});
+const k = { p: [1e-2, 1e-3, 1.15e-4], epsilon: [5e-2, 1e-2, 7.3e-3] };
+const solveDone = { current: null, finished: { case_349: { status: 'converged', iterations: 942 } } };
+// Before the verdicts are known: the word the node sent, and no claim that there is no record.
+let cs = residualInner(finishedCase, solveDone, finishedData(k));
+check(/case_349 · converged</.test(cs) && /class="rs-verdict"/.test(cs), 'the picker and the note say what the solve report said');
+check(/Stopped at iteration 942 of 2,000, so a stop criterion fired/.test(cs), 'stopped short of the cap says so, from the report alone');
+check(!/No verdict record/.test(cs), 'a verdict still on its way is not "none"');
+// With the verdict: the basis, in words, beside the curve it explains.
+partsCache.set('v2-abc', { at: 0, verdicts: new Map([['case_349', {
+  exit: 0, converged: true, met_residual_control: false, converged_by: 'fieldStationarity', verdict: 'converged',
+  last_residuals: { p: 1.15e-4, epsilon: 7.3e-3 }, last_iteration: 942, end_time: 2000 }]]) });
+cs = residualInner(finishedCase, solveDone, finishedData(k));
+check(/case_349 · converged · shear</.test(cs), 'the picker names the basis');
+check(/<span class="vbadge ok">converged · shear<\/span>/.test(cs), 'the badge');
+check(/wall shear on every patch stopped moving/.test(cs) && /highest on a stop field: p 1\.15e-4/.test(cs),
+  'the note says how it converged, and holds p, not epsilon, against the tolerance');
+check(/epsilon is drawn but never stops a solve/.test(cs), 'epsilon is explained where it is drawn');
+check(!/epsilon is drawn/.test(residualInner(finishedCase, solveDone, finishedData({ p: [1e-2, 1e-4] }))), 'and only where it is');
+// A direction that merely reached the cap is not green.
+partsCache.set('v2-abc', { at: 0, verdicts: new Map([['case_349', {
+  exit: 0, converged: false, verdict: 'ended-without-meeting-tolerances', last_residuals: { p: 3.2e-3 }, last_iteration: 2000, end_time: 2000 }]]) });
+cs = residualInner(finishedCase, solveDone, finishedData(k));
+check(/<span class="vbadge warn">hit the cap<\/span>/.test(cs) && /case_349 · hit the cap</.test(cs), 'the cap is a warning, in the picker too');
+// Loaded, and this direction has none.
+partsCache.set('v2-abc', { at: 0, verdicts: new Map([['case_000', null]]) });
+check(/No verdict record for this direction/.test(residualInner(finishedCase,
+  { current: null, finished: { case_349: { status: 'plateaued', iterations: 942 } } }, finishedData(k))), 'loaded and absent says so');
+check(/this node did not report which/.test(residualInner(finishedCase, solveDone, finishedData(k))),
+  'and for a "converged" it says what the report does show');
+// Running: nothing to say yet.
+check(!/rs-verdict/.test(residualInner({ case_id: 'v2-abc', state: 'leased' }, { current: 'case_349' }, finishedData(k))), 'a running direction has no verdict yet');
+// Whatever a node sends is text.
+partsCache.set('v2-abc', { at: 0, verdicts: new Map([['case_349', { converged: false, verdict: evil, plateau_field: evil, last_residuals: { [evil]: 1 } }]]) });
+check(!/<img/.test(residualInner(finishedCase, { current: null, finished: { case_349: { status: evil } } }, finishedData(k))), 'a verdict a node made up is escaped');
+partsCache.clear();
 
 console.log(bad === 0 ? `all ${checks} residual chart cases hold` : `${bad} of ${checks} mismatches`);
 process.exit(bad === 0 ? 0 : 1);

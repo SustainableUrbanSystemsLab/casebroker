@@ -8,6 +8,25 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.41.1] - 2026-10-09
+
+### Fixed
+- **The case page no longer prints a bare "converged".** A direction showed a green `converged` over
+  p = 1.15e-4 and epsilon = 7.3e-3 with nothing to say why, and "its not clear that this is converged"
+  was the right reaction. The node's gate says `converged` for three different ends -- the solver met
+  its residual tolerance; it did not, but the wall shear on every patch stopped moving (accepted by
+  the pipeline); or it merely ran to its iteration cap with residuals finite and not rising (its
+  manifest entry says `ended-without-meeting-tolerances`) -- and the solve report carries only the
+  word. The page now reads each direction's verdict entry (`GET /v1/cases/{id}/parts`, which the
+  broker has always kept) and says which: `converged`, `converged · shear` or `hit the cap` (a
+  warning), in the direction picker, in the list of finished directions, in a **Convergence** line of
+  counts under the Solve header (the ones to look at first), and in a note under the picker that
+  gives the reason and the highest residual among the fields that can stop a solve. epsilon, which
+  floors near 1e-2 under wall functions and is deliberately not a stop criterion (Eddy3D #911), is
+  explained beside the chart and is never the field the note points at. A direction with no entry
+  keeps the node's word and says what the report does show (stopped short of its cap, so a stop
+  criterion fired). Nothing on the broker changed.
+
 ## [0.41.0] - 2026-10-09
 
 ### Added
