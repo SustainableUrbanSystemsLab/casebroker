@@ -13,6 +13,23 @@ name: e3d contract
 # depends on another repo's release, and the live fleet must not wait on that.
 # A red run here means the two sides disagree -- look before the next node build
 # reaches the fleet.
+#
+# THE TOKEN. Eddy3D-Dev/Eddy3D is a private repository and this one is public,
+# so the GITHUB_TOKEN every run gets -- scoped to THIS repository -- cannot see
+# that release at all. A private repository does not answer 403 to a caller it
+# will not show itself to, it answers 404, and `gh release download` prints that
+# as "release not found": word for word what a release that does not exist
+# would say. Every run of this workflow ended there, before it had read a byte
+# of the node. The download uses E3D_RELEASE_READ_TOKEN instead -- a
+# fine-grained personal access token with resource owner Eddy3D-Dev, repository
+# Eddy3D only and permission Contents: read-only, so it can read that
+# repository's code and releases and change nothing. It expires; the step below
+# says so when it does. Set, or rotate, with
+#
+#   gh secret set E3D_RELEASE_READ_TOKEN -R SustainableUrbanSystemsLab/casebroker
+#
+# The other direction needs nothing: Eddy3D's e3d-node-build checks this
+# repository out without a token, because it is public.
 
 on:
   push:
@@ -25,6 +42,11 @@ on:
 jobs:
   contract:
     name: broker <-> E3D node
+    # GitHub withholds secrets from a pull request opened from a fork, and without
+    # the token there is nothing to download with: skipped, rather than red for a
+    # reason that is nobody's bug. Every other run (push, schedule, dispatch, a
+    # branch of this repository) has the secret, and a missing one is an error.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -32,15 +54,38 @@ jobs:
       - uses: astral-sh/setup-uv@v3
       - name: The newest published node, checked against its release.json
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.E3D_RELEASE_READ_TOKEN }}
         run: |
+          set -euo pipefail
+          repo=Eddy3D-Dev/Eddy3D
+          setup="gh secret set E3D_RELEASE_READ_TOKEN -R SustainableUrbanSystemsLab/casebroker (a fine-grained token: resource owner Eddy3D-Dev, repository Eddy3D only, Contents: read)"
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error title=E3D_RELEASE_READ_TOKEN is not set::$repo is private, so this repository's own token cannot read its releases (the API answers 404, printed as 'release not found'). Run: $setup"
+            exit 1
+          fi
           mkdir -p e3d
-          gh release download e3d-node-latest -R Eddy3D-Dev/Eddy3D \
-            -p E3D-linux-x64 -p release.json -D e3d
-          want=$(python3 -c "import json; print(next(r['sha256'] for r in json.load(open('e3d/release.json')) if r['platform'] == 'linux-x64'))")
+          if ! gh release download e3d-node-latest -R "$repo" -p E3D-linux-x64 -p release.json -D e3d; then
+            # A 404 here is two different things: no such release, or a token the
+            # repository will not show itself to. Ask which, instead of guessing.
+            if seen=$(gh api "repos/$repo" --jq .full_name 2>&1); then
+              echo "::error title=No usable e3d-node-latest release::The token can see $repo, so the download failed for the reason printed above. e3d-node-build publishes the release from dev; check that it ran and attached E3D-linux-x64 and release.json."
+            else
+              echo "::error title=E3D_RELEASE_READ_TOKEN cannot read $repo::${seen//$'\n'/ } -- the token has expired, been revoked, or was not given Contents: read on that repository. Make a new one and run: $setup"
+            fi
+            exit 1
+          fi
+          want=$(python3 -c "import json; print(next((r['sha256'] for r in json.load(open('e3d/release.json')) if r['platform'] == 'linux-x64'), ''))")
+          [ -n "$want" ] || { echo "::error::release.json has no linux-x64 row"; exit 1; }
           got=$(sha256sum e3d/E3D-linux-x64 | cut -d' ' -f1)
           [ "$want" = "$got" ] || { echo "::error::E3D-linux-x64 hashes to $got, release.json says $want"; exit 1; }
           chmod +x e3d/E3D-linux-x64
           e3d/E3D-linux-x64 version --json
       - name: Run the contract
-        run: uv run python tests/contract/e3d_node_contract.py --e3d e3d/E3D-linux-x64
+        # The executable ALONE in a directory, under the name nodes use: how it
+        # arrives on a node, and how Eddy3D's own CI runs the same driver (the
+        # release.json beside it in e3d/ is not part of a node).
+        run: |
+          set -euo pipefail
+          alone="$(mktemp -d)"
+          cp e3d/E3D-linux-x64 "$alone/E3D"
+          uv run python tests/contract/e3d_node_contract.py --e3d "$alone/E3D"

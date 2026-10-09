@@ -8,6 +8,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.41.2] - 2026-10-09
+
+### Fixed
+- **The e3d contract workflow can read the node it tests.** Every run (push, pull request, the daily
+  schedule) ended at `release not found`: `Eddy3D-Dev/Eddy3D` is private and this repository is public,
+  so the token a run is given can see nothing of it -- and a private repository answers 404 where it
+  would otherwise say 403, the same words as a release that does not exist. The download now uses
+  `E3D_RELEASE_READ_TOKEN` (a fine-grained token, `Contents: read` on that one repository; how to set
+  and rotate it is in the workflow's header) and says which of three things is wrong -- no secret, a
+  token that cannot read the repository, or no such release -- instead of the one sentence all three
+  produced. A pull request from a fork, which GitHub gives no secrets, is skipped rather than failed.
+  The node is run alone under the name nodes use, as Eddy3D's own CI runs the same driver.
+
 ## [0.41.1] - 2026-10-09
 
 ### Fixed
