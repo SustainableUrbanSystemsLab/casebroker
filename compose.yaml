@@ -14,7 +14,7 @@ services:
     build: .
     restart: unless-stopped
     environment:
-      # Unlike the Render deployment, ./data is a real bind mount, so SQLite here
+      # Unlike the old Render deployment, ./data is a real bind mount, so SQLite here
       # genuinely persists -- this is the self-hosted-VM path. For a managed
       # database instead, replace this with the Supabase DSN and drop the volume.
       CASEBROKER_DB: ${CASEBROKER_DB:-/data/campaign.sqlite}

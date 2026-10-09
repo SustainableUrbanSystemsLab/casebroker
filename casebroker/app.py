@@ -1097,8 +1097,8 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         machine = _machine_principal(request)
         if machine:
             # Previously absent, and the reason the documented worker
-            # onboarding aborted: setup_windows.ps1 runs `token check --expect
-            # write` against this endpoint, and a dashboard-issued per-machine
+            # onboarding aborted: setup_windows.ps1 (since retired with the Python
+            # worker) ran `token check --expect write` against this endpoint, and a dashboard-issued per-machine
             # token -- the credential the docs tell you to use -- came back
             # `scope: none`.
             return {"scope": "write", "auth": "machine", "machine": machine["name"]}
@@ -1696,8 +1696,8 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         Quarantine means "this site is broken everywhere". It also collects cases
         that merely met three machines that could not run anything: a stopped
         container daemon charged an attempt per lease, and three of those
-        quarantine a site with nothing wrong with it. `runner/run_case.sh` has
-        carried the warning since the first ICE run -- a wrongly fatal error
+        quarantine a site with nothing wrong with it. `runner/run_case.sh` (the
+        retired Python runner) carried the warning from the first ICE run -- a wrongly fatal error
         "silently removes a site from the campaign with no way back short of
         editing the database" -- and this is that way back.
 

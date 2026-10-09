@@ -49,7 +49,7 @@ if [ -z "$ENGINE" ]; then
   exit $fail
 fi
 
-step "build the image Render deploys ($ENGINE)"
+step "build the image the server runs ($ENGINE)"
 if $ENGINE build -q -t casebroker:preflight . >/dev/null 2>&1; then
   good "image builds"
 else
@@ -71,7 +71,7 @@ print('  canopy :', c.get('source'), c.get('frac_canopy'), c.get('detail', ''))
 assert t['source'] == 'gedtm30', t
 assert c['source'] == 'meta-wri-chm-v1', c
 assert c['frac_canopy'] > 0.05, c
-import casebroker.app, casebroker.worker, casebroker.cli
+import casebroker.app, casebroker.cli
 assert F.on_land(33.749, -84.388) and not F.on_land(7.5, -37.5)
 "; then
   good "rasterio reads remote COGs; land mask and every module present"

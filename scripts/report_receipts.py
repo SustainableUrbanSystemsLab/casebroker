@@ -2,7 +2,7 @@
 """Tell the broker which finished cases' archives have arrived in a folder (DOMAIN.md, "Custody").
 
 Run on the machine holding a copy of the archives: a node's done folder, or one pulled from a
-cluster (scripts/pull_done.sh). The broker's own part store writes its receipts itself. For every case the broker lists
+cluster (copied there by hand; scripts/pull_done.sh went with the Python worker). The broker's own part store writes its receipts itself. For every case the broker lists
 as done but without an archive receipt (GET /v1/custody), it looks in the folder: a case whose
 archive and every part its manifest names are here, and whose parts hash to what the manifest
 says (casebroker.archives.status, verify), is hashed and reported (POST /v1/cases/{id}/receipts).
@@ -15,7 +15,7 @@ or no case archive yet) is skipped and named.
 
 A dry run by default; --post reports. The token is CASEBROKER_TOKEN (write scope) or --token.
 
-    python scripts/report_receipts.py --broker https://casebroker.onrender.com --done D:/campaign/done [--post]
+    python scripts/report_receipts.py --broker https://casebroker.eddy3d.com --done D:/campaign/done [--post]
 """
 from __future__ import annotations
 

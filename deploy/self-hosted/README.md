@@ -106,8 +106,8 @@ Workers hold leases, so do this in a quiet window.
    otherwise abort on.
 3. Start the broker; `curl https://<broker-host>/healthz` must say
    `"ok": true`, and `casebroker doctor` should pass against it.
-4. Point every worker's `CASEBROKER_URL` (machine.env, SLURM scripts) at the
-   new URL. Accounts and per-machine tokens moved with the data; the shared
+4. Point every node at the new URL (a node pairs with one broker: run
+   `E3D setup-sim-node <new-url>` again, or keep the hostname). Accounts and per-machine tokens moved with the data; the shared
    `CASEBROKER_WRITE_TOKENS` moved via `.env`.
 5. Keep Supabase for a week as the fallback, then retire it. (Done for
    Render on 2026-10-06: the service and its `deploy-smoke-test` CI job are

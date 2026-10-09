@@ -3501,10 +3501,10 @@
       if (s.status === "loading") msg = `Loading <span class="mono">${esc(s.src)}</span>…`;
       else if (s.status === "absent")
         msg = `The broker holds no field for this case${s.src ? `, and there is none at <span class="mono">${esc(s.src)}</span>` : ""}.
-               A node built before fields went to the broker sent none; cases finished before the pedestrian
-               sampler was fixed have none until they are backfilled from their archive
-               (<span class="mono">scripts/backfill_pedestrian.py</span>), whose <span class="mono">.wfld</span> a
-               wind-field source (Settings → Preferences) or this box can open.`
+               A node built before fields went to the broker sent none; the node that still holds the case's
+               archive sends it when it next sweeps its done folder (the broker lists what it lacks). A
+               <span class="mono">.wfld</span> from a wind-field source (Settings → Preferences) or this box
+               can still be opened.`
           + (s.brokerErr ? ` <span style="color:var(--warn)">The broker could not be asked: ${esc(s.brokerErr)}.</span>` : "");
       else if (s.status === "error")
         msg = `Could not read the field${s.src ? ` from <span class="mono">${esc(s.src)}</span>` : ""}: ${esc(s.err)}.`
@@ -6403,7 +6403,7 @@
         // Punctuation around the pair is stripped so the two shapes older workers
         // still send are understood as well: "step 3/5: 03_snappyHexMesh" from a
         // node built before the grammar existed, and "case_270 [3/8 dirs] iter 412"
-        // from runner/run_case.sh, which is what every cluster worker sends.
+        // from runner/run_case.sh, which every cluster worker sent before it was retired.
         const token = raw.replace(/^[\[(]+/, "").replace(/[\])::;.]+$/, "");
         const m = /^(-?[\d.]+)\/(-?[\d.]+)$/.exec(token);
         if (!m) continue;
@@ -7320,7 +7320,7 @@
   function buildCell(w) {
     const now = Math.floor(Date.now() / 1000);
     const conflict = w.id_conflict && w.id_conflict_at && now - w.id_conflict_at < 86400
-      ? ` <span class="badge quarantined" title="its build flipped between ${esc(w.id_conflict)} within minutes (${esc(relTime(w.id_conflict_at))}): two clients share this worker id -- an E3D node and a Python worker started from the same machine.env? Stop one of them.">shared id?</span>`
+      ? ` <span class="badge quarantined" title="its build flipped between ${esc(w.id_conflict)} within minutes (${esc(relTime(w.id_conflict_at))}): two clients share this worker id -- two nodes started under one name? Stop one of them.">shared id?</span>`
       : "";
     if (!w.build) return `<span style="color:var(--text-muted)" title="its client sent no build with the lease: an E3D.exe from before build identity, or a Python worker started without EDDY3D_CLI. The broker cannot move it; update it by hand once, and it declares itself from then on">undeclared</span>` + conflict;
     const r = lastReleases;
@@ -7834,8 +7834,10 @@
         'Copy this now -- only its hash is stored, so it cannot be shown again.</div>' +
         '<code style="display:block; padding:10px; word-break:break-all; ' +
         'border:1px solid var(--border, #ccc); border-radius:6px;">' + esc(data.token) + '</code>' +
-        '<div class="panel-subtitle" style="margin-top:8px;">Then on that machine:<br>' +
-        '<code>.\\bootstrap_worker.ps1 -Token &lt;above&gt; -WorkerId ' + esc(name) + '</code></div>';
+        '<div class="panel-subtitle" style="margin-top:8px;">Present it as <code>Authorization: Bearer</code> ' +
+        'from a script or a CI step acting as <code>' + esc(name) + '</code>. A simulation node does not need ' +
+        'one issued here: it pairs itself (<code>E3D setup-sim-node &lt;broker-url&gt; --name ' + esc(name) +
+        '</code>) and you approve it on this page.</div>';
       $("newMachine").value = "";
       loadMachines();
     } catch (err) {
@@ -8473,8 +8475,8 @@
                 + "credential called <code>phoenix</code> covers every "
                 + "<code>phoenix-&lt;job&gt;-&lt;task&gt;</code> id its SLURM tasks run as.",
         action: isAdmin ? { label: "Open Machines", tab: "machines" } : null,
-        hint: "On the box itself, <code>casebroker worker setup</code> does the same "
-            + "thing without a browser, and leaves no session behind.",
+        hint: "A simulation node pairs itself: <code>E3D setup-sim-node &lt;broker-url&gt;</code> "
+            + "on the box, then approve it on Machines. The raw token never leaves that machine.",
       },
       {
         title: "A worker has leased a case",

@@ -529,51 +529,6 @@ def test_a_cluster_credential_covers_every_worker_id_under_its_name(admin):
     assert lease_as("lab-phoenix") == 403       # under, not merely containing
 
 
-def test_a_worker_whose_credential_is_refused_exits_instead_of_spinning(admin, monkeypatch):
-    """A 401 or 403 on lease was caught by the same handler as a network blip
-    and retried every idle_backoff seconds for the whole SLURM walltime -- an
-    array job holding twenty allocations with "[warn] lease failed: 403"
-    scrolling past. Waiting does not fix a credential."""
-    from casebroker import worker as wmod
-
-    issued = admin.post("/v1/workers/tokens", json={"name": "lab-ws-02"}).json()["token"]
-    admin.post("/v1/auth/logout")
-    headers = {"Authorization": f"Bearer {issued}"}
-
-    # Under the old behaviour this loop never ends, so bound it: a sleep is the
-    # retry, and more than a couple of them is the bug reproduced.
-    sleeps = []
-
-    def counted_sleep(seconds):
-        sleeps.append(seconds)
-        if len(sleeps) > 3:
-            raise AssertionError("still retrying a refused credential after 3 backoffs")
-    monkeypatch.setattr(wmod.time, "sleep", counted_sleep)
-
-    w = wmod.Worker("http://testserver", None, worker_id="someone-elses-box",
-                    heartbeat_seconds=3600)
-    w._post = lambda path, payload, retries=4: admin.post(path, json=payload, headers=headers)
-
-    def runner(lease, worker):
-        raise AssertionError("no lease should ever have been handed out")
-
-    with pytest.raises(wmod.CredentialRefused) as refused:
-        w.run_forever(runner, idle_backoff=0, max_idle_polls=5)
-    assert "403" in str(refused.value) and "lab-ws-02" in str(refused.value)
-    assert sleeps == [], "a refused credential must not be retried at all"
-
-
-def test_worker_main_exits_2_on_a_refused_credential(monkeypatch):
-    """The exit code is the deliverable: it is what makes an sbatch log end
-    with `exit=2` and the sentence that explains it, instead of the job
-    holding its nodes to the wall clock."""
-    from casebroker import worker as wmod
-
-    def refuse(self, *args, **kwargs):
-        raise wmod.CredentialRefused("broker refused this credential (403): nope")
-    monkeypatch.setattr(wmod.Worker, "run_forever", refuse)
-
-    assert wmod.main(["--broker", "http://broker.invalid", "--worker-id", "w"]) == 2
 
 
 def test_a_revoked_machine_name_can_be_issued_again(admin):

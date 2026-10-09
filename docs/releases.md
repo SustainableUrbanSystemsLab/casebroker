@@ -36,7 +36,7 @@ against the hash it was given.
 3. **Register.** From a terminal or a CI step:
 
    ```bash
-   casebroker release register release.json --broker https://casebroker.onrender.com --username ada
+   casebroker release register release.json --broker https://casebroker.eddy3d.com --username ada
    ```
 
    (`--password-stdin` for a CI secret; `--notes` for a line shown beside the
@@ -67,7 +67,7 @@ against the hash it was given.
 | `update failed` | it tried the target, could not start it, and went back; the tooltip has the reason |
 | `blocked` | its build is refused new cases |
 | `undeclared` | its client sent no build: update it by hand once (`gh release download e3d-node-latest -R Eddy3D-Dev/Eddy3D -p E3D.exe --clobber`, then `E3D node`), and it declares itself from then on |
-| `shared id?` | its build flipped back and forth within minutes: two clients share this worker id — an E3D node and a Python worker started from the same `machine.env`. Stop one |
+| `shared id?` | its build flipped back and forth within minutes: two clients share this worker id — two E3D nodes started under one name (or, before it was retired, an E3D node and a Python worker sharing a `machine.env`). Stop one |
 
 ## The guards
 
@@ -120,12 +120,11 @@ broker:`, and it stays drained until someone undrains it.
 
 The terminal has the same: `casebroker release list|register|target|promote|rollback`.
 
-## The Python worker
+## Nodes that cannot update themselves
 
-`casebroker.worker` declares its build from `E3D version --json` and shows on
-the fleet table like any node, but it never asks `/v1/node/release`, so it
-never updates itself; the table says *cannot update itself*. Update it by
-hand — copy the new `E3D.exe` over the old, start the worker again — and it
-declares the new build with its next lease. A campaign that blocks its build,
-or insists on a declared one it lacks, stops it with exit code 3 and the
-broker's reason.
+A node started as `E3D run-sim-node` (not under the `E3D node` supervisor) asks
+`/v1/node/release` but never switches; the fleet table says *cannot update
+itself*. Update it by hand -- copy the new `E3D.exe` over the old and start it
+again -- and it declares the new build with its next lease. (The Python worker,
+`casebroker.worker`, which never asked at all, is retired: it could not build any
+campaign recipe.)

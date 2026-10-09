@@ -52,8 +52,8 @@ _RECON_TABLE = "pgtest_recon_%s" % RUN
 
 # The reconciler tests CREATE, ALTER and DROP tables, which is a different
 # contract from the per-run-UUID row cleanup the rest of this file relies on to
-# be safe against the SHARED production database (the main-only CI job points
-# CASEBROKER_TEST_PG_DSN at the real DBSTRING). Table DDL there is not worth the
+# be safe against a SHARED database (CI used to point CASEBROKER_TEST_PG_DSN at
+# production; the suite still allows it, by hand). Table DDL there is not worth the
 # coverage: a run interrupted between CREATE and DROP would leave a stray table
 # in the campaign's own database. So these run only where a throwaway Postgres
 # says so -- the service-container job in .github/workflows/test.yml.
@@ -550,8 +550,8 @@ def test_many_real_connections_racing_never_double_lease():
             with lock:
                 claimed.extend((g.case_id, k) for g in got)
                 # db.lease claims any pending row, and CASEBROKER_TEST_PG_DSN is
-                # allowed to point at the REAL database -- the CI job points it
-                # at production deliberately. So a racer can pick up campaign
+                # allowed to point at the REAL database (CI did, until the
+                # production database moved behind WireGuard). So a racer can pick up campaign
                 # cases, and leaving them leased would strand real work until the
                 # TTL lapsed. Hand back anything that is not ours immediately.
                 for g in got:

@@ -7,11 +7,12 @@ wrong with. ``runner/run_case.sh`` has carried the warning since the first ICE
 run -- a wrongly fatal error "silently removes a site from the campaign with no
 way back short of editing the database" -- and it had no way back.
 
-Three things are pinned here, one per layer: the runner says "this node is
-unfit" with its own exit code, the worker turns that into a RELEASE rather than a
-failure, and the broker can put back what was quarantined before any of this
-existed. Each has its control: the ordinary failure path must still charge the
-case, or a genuinely broken site would cycle the fleet for ever.
+What is pinned here is the broker's half: it can put back what a broken node
+quarantined, and only that. (The node's half -- a machine that cannot run gives
+the case back as a RELEASE and stops -- is Eddy3D's NodeWorker, tested there;
+the Python runner that first carried it is retired.) Each has its control: the
+ordinary failure path must still charge the case, or a genuinely broken site
+would cycle the fleet for ever.
 """
 
 from __future__ import annotations
@@ -24,7 +25,7 @@ import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
-from casebroker import db, ids, worker  # noqa: E402
+from casebroker import db, ids  # noqa: E402
 
 
 def make_db(tmp_path, n=3):
@@ -62,99 +63,6 @@ def quarantine_one(conn, worker_id="ws-01", error="Docker daemon is not running"
 
 
 # -- the runner's half ---------------------------------------------------------
-
-def test_the_runner_reserves_a_distinct_exit_code_for_an_unfit_node():
-    """69 is sysexits' EX_UNAVAILABLE, and it is the mirror of 64.
-
-    64 blames the case for ever; 69 blames the machine and costs the case
-    nothing. Two codes because the runner is the only thing that can tell them
-    apart -- by the time the worker sees a non-zero exit, both look the same.
-    """
-    text = (pathlib.Path(__file__).resolve().parents[1] / "runner" / "run_case.sh").read_text()
-    assert "node_unfit()" in text and "exit 69" in text
-    # The case it was written for: no runtime at all must be unfit, not retryable.
-    assert "node_unfit \"no OpenFOAM runtime found" in text
-    # A binary that exists is not a daemon that answers -- podman gets the same
-    # `info` probe docker always had.
-    assert "podman info" in text
-
-
-# -- the worker's half ---------------------------------------------------------
-
-def _runner_script(tmp_path, name, code, stderr=None):
-    """A runner that exits `code`, in the form the worker runs on THIS system. POSIX
-    runs it with bash; Windows executes it directly -- a `.cmd` launcher in production
-    (runner/run_case.cmd) -- and a `.sh` there fails with WinError 193 before it can
-    exit with anything, which is how these tests were red on every Windows box."""
-    if os.name == "nt":
-        script = tmp_path / f"{name}.cmd"
-        say = f"echo {stderr} 1>&2\r\n" if stderr else ""
-        script.write_text(f"@echo off\r\n{say}exit /b {code}\r\n")
-    else:
-        script = tmp_path / f"{name}.sh"
-        say = f"echo '{stderr}' >&2\n" if stderr else ""
-        script.write_text(f"#!/bin/sh\n{say}exit {code}\n")
-        script.chmod(0o755)
-    return script
-
-
-def test_a_runner_that_exits_69_raises_NodeUnfit_not_an_ordinary_failure(tmp_path):
-    """Through the real script_runner, not by inspecting an exception class."""
-    script = _runner_script(tmp_path, "unfit", 69, stderr="no OpenFOAM runtime found")
-
-    run = worker.script_runner(str(script))
-    with pytest.raises(worker.NodeUnfitError):
-        run({"case_id": "c1", "lease_id": "L-1", "spec": {}, "attempt": 1}, None)
-
-
-def test_the_other_exit_codes_keep_their_meaning(tmp_path):
-    """The controls. 64 still quarantines the case and an ordinary non-zero exit
-    is still an ordinary retryable failure -- or a genuinely broken site would
-    cycle the fleet for ever instead of being parked on its third attempt."""
-    def runner_for(code):
-        return worker.script_runner(str(_runner_script(tmp_path, f"exit{code}", code)))
-
-    lease = {"case_id": "c1", "lease_id": "L-1", "spec": {}, "attempt": 1}
-    with pytest.raises(worker.FatalCaseError):
-        runner_for(64)(lease, None)
-    with pytest.raises(RuntimeError) as ordinary:
-        runner_for(1)(lease, None)
-    assert not isinstance(ordinary.value, (worker.FatalCaseError, worker.NodeUnfitError))
-
-
-def test_an_unfit_node_releases_the_case_and_stops_leasing(monkeypatch):
-    """The loop itself: one lease, one release, no fail, and no second lease.
-
-    The node that caused this took a case every time round and failed each one.
-    """
-    w = worker.Worker("http://broker.invalid", None, worker_id="ws-01")
-    calls: list[tuple] = []
-    leases = [[{"case_id": "c1", "lease_id": "L-1", "spec": {}, "attempt": 1}],
-              [{"case_id": "c2", "lease_id": "L-2", "spec": {}, "attempt": 1}]]
-
-    monkeypatch.setattr(w, "install_signal_handlers", lambda: None)
-    monkeypatch.setattr(w, "_heartbeat_loop", lambda: None)
-    # Returns [] once exhausted rather than raising: the loop retries a FAILING
-    # lease for ever, so a raising double would hang instead of failing when the
-    # fix is removed -- and a control that hangs proves nothing.
-    def fake_lease(**kw):
-        calls.append(("lease",))
-        return leases.pop(0) if leases else []
-    monkeypatch.setattr(w, "lease", fake_lease)
-    monkeypatch.setattr(w, "fail", lambda error, retryable=True: calls.append(("fail", retryable)))
-    monkeypatch.setattr(w, "release", lambda reason="released": calls.append(("release", reason)))
-
-    def unfit_runner(lease, worker_self):
-        raise worker.NodeUnfitError("runner exited 69: no OpenFOAM runtime found")
-
-    w.run_forever(unfit_runner, max_idle_polls=1, idle_backoff=0)
-
-    assert ("release", "node cannot run cases") in calls
-    assert not [c for c in calls if c[0] == "fail"], "the case must not be charged"
-    assert len([c for c in calls if c[0] == "lease"]) == 1, "it must stop, not take the next case"
-
-
-# -- the broker's half ---------------------------------------------------------
 
 def test_a_case_quarantined_by_a_broken_node_can_be_put_back(tmp_path):
     conn = make_db(tmp_path)

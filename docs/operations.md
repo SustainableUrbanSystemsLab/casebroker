@@ -57,44 +57,29 @@ works when the service is down.
 > Set `CASEBROKER_SETUP_TOKEN` before a broker with no tokens at all becomes
 > reachable, or the first stranger to find the form becomes its permanent admin.
 
-**3. Enrol each machine.** The one command to run **on** the new box:
+**3. Pair each machine.** A simulation node is `E3D.exe` and nothing else, and it
+joins with nothing secret typed on it:
 
 ```bash
-uv run casebroker worker setup --broker https://broker.example.org
-```
-
-It asks for your broker login, mints a credential for **this** machine, writes
-it into `machine.env`, and drops the admin session again — nothing long-lived is
-left on a shared lab machine. Your admin *password* is still typed on the box,
-though; pairing, below, is what removes that. The worker id defaults to the hostname; pass
-`--worker-id` to override, and `--rotate` if the box has lost its credential and
-needs a fresh one. Existing settings in `machine.env` (`WIND_NP`, the runtime
-paths) are preserved.
-
-Or from the dashboard, if you would rather not log in at the box: **Machines** ▸
-*Issue token*, named after the worker id that box will run under. The token is
-shown **once** — only its hash is stored — with the exact `bootstrap_worker.ps1`
-line to paste there.
-
-Or **pair it from the browser**, with nothing secret typed on the node at all —
-**Eddy3D `dev` only, in no release yet**, so build `eddy3d-cli` from `dev`:
-
-```bash
-eddy3d-cli setup-sim-node https://broker.example.org
+E3D setup-sim-node https://broker.example.org
 ```
 
 It shows a short code and opens the broker. Signed in as an admin, check the
 code matches under **Settings ▸ Machines** (the printed `/?pair=CODE` link opens
 straight to it) and approve. The node generates its own credential and only its
 SHA-256 ever reaches the broker ([protocol](protocol.md)). `--no-browser` on a
-login node; `--name <cluster>` for a cluster, as with *Issue token*.
+login node; `--name <cluster>` for a cluster (`ice`, `phoenix`), whose jobs then
+lease as `<cluster>-<job>`. Then `E3D node` runs it, under the supervisor that
+lets it update itself ([releases](releases.md)).
 
 The credential lands in `%LOCALAPPDATA%\Eddy3D\node\credential.json` on
 Windows and `~/.local/share/Eddy3D/node/` on Linux (`EDDY3D_NODE_DIR` overrides
-it, for clusters whose systems share one home) — **not** in `machine.env`. So
-pairing serves `eddy3d-cli run-sim-node`, the native runner, and not
-`start_worker.sh`/`.ps1`, which still read `CASEBROKER_TOKEN` from
-`machine.env`. Use one of the two routes above for those.
+it, for clusters whose systems share one home).
+
+**Machines** ▸ *Issue token* is for everything that is not a node: a script or a
+CI step acting under a name. The token is shown **once** — only its hash is
+stored. (`casebroker worker setup`, which wrote such a token into a Python
+worker's `machine.env`, went with that worker.)
 
 Either way, revoking one machine is a button, takes effect on its next request,
 and leaves every other machine running. **A machine's credential may only lease
@@ -231,7 +216,7 @@ whether an account existed. A broker secured entirely by accounts therefore
 reported that it had no auth at all, `whoami` returned `scope: write` for any
 string whatsoever, and both documented deploy gates said the opposite of the
 truth — which also aborted the per-machine worker bootstrap, since
-`setup_windows.ps1` runs `token check --expect write`.
+`setup_windows.ps1` (retired with the Python worker) ran `token check --expect write`.
 
 `GET /v1/whoami` is what those calls use, and it is deliberately unauthenticated
 and always `200`: it answers *about* a credential rather than gating on one, and
@@ -245,7 +230,7 @@ work. Setting a variable *and* its deprecated twin to **different** values is
 refused at startup rather than resolved by precedence: the quiet failure there is
 a token you believe you revoked continuing to work.
 
-## Storage: Supabase in production, SQLite for tests
+## Storage: Postgres in production, SQLite for tests
 
 `CASEBROKER_DB` decides the engine purely by its shape — a file path opens
 SQLite, a `postgres://` or `postgresql://` DSN opens Postgres — and nothing
@@ -253,10 +238,13 @@ above `db.py` needs to know which one it got:
 
 ```bash
 CASEBROKER_DB=campaign.sqlite                       # local dev and the test suite
-CASEBROKER_DB=postgresql://postgres.<ref>:<pw>@aws-0-<region>.pooler.supabase.com:6543/postgres
+CASEBROKER_DB=postgresql://admin:<pw>@postgres:5432/casebroker?sslmode=disable   # deploy/self-hosted
 ```
 
-**The live campaign runs on Supabase Postgres.** SQLite is not a smaller
+**The live campaign runs on Postgres**, self-hosted beside the broker since
+2026-10-06 ([deploy/self-hosted](../deploy/self-hosted/README.md); Supabase
+before that). On Postgres the broker holds `CASEBROKER_PG_POOL` connections
+(default 4), so that many database calls run at once. SQLite is not a smaller
 production option, it is the *test* engine: it needs no network and no
 credentials, which is why the tests that exercise lease semantics run in
 milliseconds with zero external dependencies. A managed database survives a
@@ -264,8 +252,9 @@ service restart or redeploy where a container's filesystem does not, and with
 state external the service itself is **stateless and disk-free** — the cheapest
 compute tier is enough.
 
-**Supabase gives you two ports, and the difference matters here.** `6543` is the
-*transaction* pooler and is what this deploys against; `5432` is a direct
+**On Supabase (the campaign's database until 2026-10-06) there are two ports, and
+the difference matters.** `6543` is the *transaction* pooler and is what it was
+deployed against; `5432` is a direct
 connection. Transaction pooling is exactly the mode that breaks server-side
 prepared statements — see the pooler note below, which is already handled.
 
@@ -304,8 +293,8 @@ count only the five campaign tables, which meant it reported "schema present"
 against a database with no auth layer at all.
 
 The image ships **no default `CASEBROKER_DB`** on purpose. It used to default to
-`/data/campaign.sqlite` with a `VOLUME`, which is right on a VM and wrong on
-Render, where there is no persistent disk: the campaign was written to a
+`/data/campaign.sqlite` with a `VOLUME`, which is right on a VM and was wrong on
+Render (the host until 2026-10-06), where there is no persistent disk: the campaign was written to a
 filesystem discarded on every deploy, and nothing said so — the service came
 back up healthy and simply empty. `app.py` now prints a startup warning whenever
 `CASEBROKER_DB` resolves to SQLite.
@@ -371,7 +360,7 @@ python3 scripts/bump_version.py --level minor    # or --major
 
 `SKIP_VERSION_BUMP=1 git commit` leaves the number where it is; CI still
 refuses that on `main`. `/healthz` and the header badge carry the deployed
-commit beside the version (`RENDER_GIT_COMMIT` on Render), so a number can
+commit beside the version (`CASEBROKER_COMMIT`, which CI bakes into the image), so a number can
 always be matched to the code that is live. Unsure which level a change is?
 `--suggest` reads the conventional-commit subjects and tells you what they
 argue for:
@@ -435,13 +424,17 @@ curl -s https://casebroker.example.org/healthz | python3 -c "import json,sys; pr
 
 ## Deploying
 
-`Dockerfile` and `compose.yaml` are here for a cloud VM; either works equally
-for a platform that builds from a Dockerfile directly (Render, Fly, Railway).
-Three things are **not** done and must be before this faces the internet:
+Production is [deploy/self-hosted](../deploy/self-hosted/README.md): the broker
+and Postgres in one compose project, the image pulled from GHCR, Watchtower
+recreating the container when CI publishes a new one (AGENTS.md, "Deploying").
+The root `Dockerfile` and `compose.yaml` serve any VM or a platform that builds
+from a Dockerfile. Three things are **not** done for you and must be before
+this faces the internet:
 
 1. **Put it behind TLS.** The token is a bearer credential in a header; over
    plain HTTP it is readable by anything on the path. Terminate TLS at Caddy or
-   nginx, or use a platform that terminates it for you (Render, Fly).
+   nginx, or put it behind a proxy that terminates it (the live broker sits
+   behind Cloudflare).
 2. **Turn auth on**, by creating the admin account — step 2 of
    [First run](#first-run-from-nothing-to-a-working-broker). With no account
    *and* no env tokens, auth is off entirely: `GET /healthz` reports
@@ -452,9 +445,8 @@ Three things are **not** done and must be before this faces the internet:
    still supported and still turns auth on, but a new deployment does not need
    it — and a new *machine* should get its own credential from **Machines**
    rather than a copy of a shared one.
-3. **Point `CASEBROKER_DB` at the Supabase DSN** (port `6543`, the transaction
-   pooler). A container's local filesystem does not survive a redeploy; a
-   managed database does. With state external, the service needs no disk at all
+3. **Point `CASEBROKER_DB` at Postgres.** A container's local filesystem does
+   not survive a redeploy; a database does. With state external, the service needs no disk at all
    — the cheapest compute tier a platform offers is enough. If this is left
    unset, or set to a file path, the service starts anyway and logs a warning:
    it will look healthy right up until a redeploy silently empties it.
@@ -523,38 +515,34 @@ describes?"
 
 ### Rotating the database password
 
-The DSN lives in **four** places, and a rotation that misses one strands
-something. In this order:
+On the self-hosted deployment the password is `POSTGRES_PASSWORD` in
+`deploy/self-hosted/.env`, and the broker's DSN is built from it in the compose
+file. In this order:
 
-1. **Supabase** ▸ Project Settings ▸ Database ▸ Reset database password.
-   Copy the new DSN for the **transaction pooler** (port `6543`), not the
-   direct connection.
-2. **Render** ▸ the service ▸ Environment ▸ `CASEBROKER_DB`. Saving triggers a
-   redeploy, which is the restart the new credential needs.
-3. **GitHub** ▸ repo ▸ Settings ▸ Secrets ▸ Actions ▸ `DBSTRING`. The
-   `postgres` job in `.github/workflows/test.yml` runs against the real
-   database on every push to `main`. A stale secret no longer turns that job
-   red on a commit that is perfectly fine — it **skips** the job with a
-   `Postgres coverage skipped` warning annotation naming the cause, because a
-   third party's credential says nothing about the commit. That warning is the
-   signal to come back here; until you do, the production-database coverage is
-   not running. `CASEBROKER_TEST_PG_REQUIRED=1` makes it a hard failure
-   instead.
-4. **Your workstation** — whichever file you keep it in. `casebroker doctor`
+1. Change the role's password inside the database:
+   `docker compose exec postgres psql -U admin -d casebroker -c "ALTER ROLE admin PASSWORD '<new>'"`.
+2. Put the new value in `.env` (`POSTGRES_PASSWORD`, and
+   `POSTGRES_PASSWORD_URLENCODED` if it has characters a URL must escape), then
+   `docker compose up -d casebroker`: the restart is what the new credential needs.
+3. **Your workstation** — whichever file you keep a DSN in. `casebroker doctor`
    finds every copy on the box and tells you which ones still authenticate, so
    run it rather than trying to remember.
+
+No CI secret holds it any more: the tier that ran the Postgres suite against the
+production database retired with Supabase (CI runs it against a throwaway
+container instead).
 
 Then confirm, in this order:
 
 ```bash
 casebroker doctor                       # every local copy, and whether it works
-curl -s https://casebroker.onrender.com/healthz   # db_ok must be true
-casebroker health --broker https://casebroker.onrender.com
+curl -s https://casebroker.eddy3d.com/healthz   # db_ok must be true
+casebroker health --broker https://casebroker.eddy3d.com
 ```
 
 Workers do **not** hold the database credential — they talk to the broker over
 HTTP with a worker token — so the fleet needs no attention beyond surviving the
-Render restart, which it does. A heartbeat that cannot reach the broker logs a
+broker's restart, which it does. A heartbeat that cannot reach the broker logs a
 warning and tries again on the next tick, and the 15-minute lease TTL is far
 longer than a redeploy. The one call that used to be at risk was `/v1/complete`
 — the case solved, the archive written, and only the broker not yet told — so

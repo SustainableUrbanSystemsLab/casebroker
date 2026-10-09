@@ -79,9 +79,12 @@ database, which is what recovers a deployment nobody can log into.
 Signed in as an admin, **Machines** ▸ *Issue token* mints a credential for one
 machine, named after the worker id that box will run under.
 
-The token is displayed **once**, with the exact `bootstrap_worker.ps1` line to
-paste on that machine. Only its hash is stored, so this is the only moment it
-exists in readable form — a credential the server could show you again is one an
+The token is displayed **once**: a bearer credential for a script or a CI step
+acting as that name. A simulation node does not need one issued here -- it pairs
+itself (`E3D setup-sim-node <broker-url>`, a device code you approve on this page)
+and generates its own token, of which the broker keeps only the hash. Only an
+issued token's hash is stored too, so this is the only moment it exists in
+readable form — a credential the server could show you again is one an
 attacker could read out of the database.
 
 The list shows **last seen** per machine, which is the question a shared secret
@@ -92,8 +95,8 @@ machine running.
 
 A cluster is one machine here, not one per node. Name the credential after the
 cluster (`phoenix`) and it covers every worker id under that name —
-`phoenix-<job>-<task>`, which is what `slurm/phoenix_worker.sbatch` runs each
-task as. Revoking it stops that cluster's workers on their next lease and
+`phoenix-<job>-<task>`. (A cluster's E3D nodes pair once per cluster account as
+`ice` or `phoenix`: `slurm/ice_e3d_node.sbatch`, `slurm/phoenix_e3d_node.sbatch`.) Revoking it stops that cluster's workers on their next lease and
 nothing else.
 
 ## Sharing a read-only view

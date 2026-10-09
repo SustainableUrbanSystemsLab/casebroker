@@ -148,8 +148,13 @@ def test_required_turns_an_unusable_credential_back_into_a_failure():
     assert "refused the pre-flight connection" in out
 
 
-def test_ci_passes_rs_so_the_skip_reason_is_not_swallowed():
-    """The behaviour above is only visible in CI if the workflow asks for it."""
+def test_the_server_image_waits_for_the_postgres_suite():
+    """Production is Postgres. Before publish-image waited for the throwaway
+    Postgres job, a change that broke only the Postgres branch of db.py was
+    pushed to GHCR, and Watchtower put it live, while that job was red."""
     wf = (ROOT / ".github" / "workflows" / "test.yml").read_text(encoding="utf-8")
-    real_pg = wf.split("real postgres (main only)", 1)[1].split("deploy-smoke-test", 1)[0]
-    assert "-rs" in real_pg, "without -rs a skipped production-DB job states no reason"
+    publish = wf.split("publish-image:", 1)[1]
+    needs = publish.split("needs:", 1)[1].split("\n", 1)[0]
+    for job in ("sqlite", "postgres-throwaway", "docker", "version"):
+        assert job in needs, f"publish-image must wait for {job}"
+    assert "secrets.DBSTRING" not in wf, "no CI job points the suite at the production database"

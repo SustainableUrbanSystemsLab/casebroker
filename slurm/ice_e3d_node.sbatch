@@ -52,5 +52,8 @@ DONE=${E3D_DONE:-/storage/ice1/0/3/pkastner3/windcomfort/done}; mkdir -p "$DONE"
 WORK=${TMPDIR:-/tmp}/e3d-work; mkdir -p "$WORK"
 
 echo "node ice-${SLURM_JOB_ID} on $(hostname), $(nproc) cores, work=$WORK, chain prev=${CHAIN_PREV:-none}"
+# CHUNK_HOURS=7 (optional) hands the case on at a direction boundary before the wall instead of
+# losing the direction in flight to SIGTERM; it needs an E3D build with --chunk-hours.
 exec "$B/E3D" run-sim-node --engine docker --cpus "${SLURM_NTASKS:-24}" --cluster ICE \
-    --work "$WORK" --done "$DONE" ${MAX_CASES:+--max-cases "$MAX_CASES"} --drain --max-idle-polls 10
+    --work "$WORK" --done "$DONE" ${MAX_CASES:+--max-cases "$MAX_CASES"} \
+    ${CHUNK_HOURS:+--chunk-hours "$CHUNK_HOURS"} --drain --max-idle-polls 10

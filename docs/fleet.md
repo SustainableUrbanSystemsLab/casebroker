@@ -1,125 +1,98 @@
 # Hooking a machine into the campaign
 
-How any Linux or Windows machine becomes a worker that pulls cases from the
-broker, solves them, reports progress, survives being stopped, and gets its
-finished cases to where they are kept. For the cluster-specific traps (SSH,
-quotas, Podman, billing) see [`pace-hpc.md`](pace-hpc.md).
+How any Linux or Windows machine becomes a simulation node that pulls cases from
+the broker, solves them, reports progress, survives being stopped, and gets its
+finished cases to where they are kept. A node is `E3D.exe` -- the Eddy3D CLI, one
+self-contained file -- and nothing else; its side of the contract is Eddy3D's
+`docs/SIMULATION_NODE.md`, the broker's is [protocol.md](protocol.md). For the
+cluster-specific traps (SSH, quotas, Podman, billing) see
+[`pace-hpc.md`](pace-hpc.md).
+
+(Until 2026-10 a second kind of worker existed: `casebroker.worker` driving
+`runner/run_case.sh`, with `machine.env`, `start_worker.sh`/`.ps1` and
+`scripts/pull_done.sh`. Its runner could not build any campaign recipe -- it
+handed every case back -- and it is retired. Git history has it.)
 
 ## The shape
 
 ```
-                lease / heartbeat(progress) / complete
-   worker  <------------------------------------------>  broker (Supabase/Render)
-     |
-     |  runner/run_case.sh          WIND_RUNTIME = podman | docker | native
+            pair once; then lease / heartbeat (progress, stage) / telemetry /
+            parts as they finish / complete
+   E3D node <-------------------------------------------------------->  broker
+     |                                                            (self-hosted,
+     |  --engine docker (Docker Desktop, WSL; podman on PACE)      part store)
+     |           bluecfd (native Windows, OpenFOAM-12 + MS-MPI)
      v
-   geometry -> e3d build-case -> mesh -> solve (per direction) -> reconstruct
-     |                                          |
-     |  SIGTERM: checkpoint to $WIND_CASES      |  done: <case_id>.tar.gz -> $WIND_DONE
-     v                                          v
-   resume.json (asked for on next lease)     E3D node: every part to the broker's
-                                               part store, as it is shipped /
-                                             runner script: scripts/pull_done.sh
-                                               over SSH (PACE) -> a done/ folder
+   site geometry -> build-case -> mesh -> solve (per direction) -> gate -> archive
+                                   |              |                        |
+                          mesh part -> broker   each direction's part     <case>.tar.gz
+                                                and its 1.75 m field      -> --done and
+                                                -> broker                 the broker
+   SIGTERM / Ctrl-C: the case is released (attempt refunded); its scratch (--work)
+   stays, and the next lease either gives it back to this node or another node
+   continues it from the broker's mesh and finished directions.
 ```
-
-One runner, three OpenFOAM runtimes. The solve is the same inner script in
-all three; only how it is launched and how MPI is spelled differ:
-
-| `WIND_RUNTIME` | where | how |
-| --- | --- | --- |
-| `podman` | PACE ICE / Phoenix | rootless, no subuid range -- the runner sets `--root`/`--runroot`, fuse-overlayfs and `--user 0:0` itself |
-| `docker` | lab workstations (Docker Desktop, WSL) | `docker run --entrypoint bash`, host path converted with `cygpath` on Windows |
-| `native` | Windows with blueCFD-Core 2024 | OpenFOAM-12 `foamRun.exe` under MS-MPI `mpiexec`, no container. blueCFD's environment is rebuilt from its `setvars_OF12.bat` (sourcing OpenFOAM's `bashrc` in its MSYS2 does not work) |
-
-`auto` (the default) takes the first found, in that order.
 
 ## Setting up a machine
 
-1. **Prerequisites**: `uv`; one runtime from the table; the `e3d` CLI for the
-   OS (Linux: the `linux-x64` single-file build, currently at `$WC/bin/e3d` on
-   both clusters); a `git clone --recurse-submodules` of
-   [windcomfort-real-cities](https://github.com/SustainableUrbanSystemsLab/windcomfort-real-cities)
-   — the campaign repo, which carries this one as `benchmark/casebroker` and
-   `real_cities` beside it. **Not** JP-Wind-ML-Comparison: that is the paper,
-   and its casebroker pin is stale by design now that the campaign has moved;
-   Git for Windows on a Windows box (`run_case.cmd` finds its bash).
-2. **Profile**: copy `machine.env.example` to `machine.env` (gitignored) and
-   fill it in. The three that matter most:
-   - `CASEBROKER_WORKER_ID` -- stable **per machine**. It is what lets a
-     restarted worker get its own half-finished case back. Never reuse one
-     across machines.
-   - `CASEBROKER_TOKEN` -- this machine's own credential. Get it from the
-     dashboard: sign in, **Machines** > *Issue token*, naming it after the
-     `CASEBROKER_WORKER_ID` above. It is shown once, works immediately, and can
-     be revoked for this one box without touching the rest of the fleet. A
-     shared `CASEBROKER_WRITE_TOKENS` value still works too -- it is simply the
-     older model. A cluster gets **one credential per cluster**, named after
-     it: every SLURM task runs as `phoenix-<job>-<task>`, and a credential
-     covers every worker id under its own name.
-     `uv run casebroker worker setup --broker <url>`, run on the box itself,
-     does the same without the dashboard and writes the token into
-     `machine.env` for you (it asks for your admin login once and keeps no
-     session). Browser pairing (`eddy3d-cli setup-sim-node`) is a
-     different path: its credential serves the native `run-sim-node`
-     runner and never lands in `machine.env` -- see
-     [operations.md](operations.md#first-run-from-nothing-to-a-working-broker).
-   - `WIND_NP` -- ranks per case, **measured per machine** (below). Until
-     measured, `min(24, cores/2)`.
-3. **Start it**: `./start_worker.sh` (Linux, WSL, git-bash) or
-   `.\start_worker.ps1` (Windows). Foreground; Ctrl-C stops it cleanly. On
-   PACE the sbatch scripts under `slurm/` do the same inside a job.
+1. **The binary**: `gh release download e3d-node-latest -R Eddy3D-Dev/Eddy3D -p E3D.exe`
+   (`E3D-linux-x64` on Linux), checked against `release.json` in the same
+   release. One OpenFOAM runtime: Docker (Desktop or WSL), blueCFD-Core 2024 on
+   Windows, Podman on PACE.
+2. **Pair it**: `E3D setup-sim-node <broker-url>` shows a code; approve it on the
+   dashboard (**Settings ▸ Machines**). The node generates its own credential;
+   the broker keeps only its hash. Its name is its worker id, stable **per
+   machine** -- it is how a restarted node gets its own case back; never reuse
+   one across machines. A cluster pairs once as itself (`--name ice`) and its
+   jobs lease as `ice-<job>`.
+3. **Run it**: `E3D node --done <folder> --cpus <N> [--engine bluecfd --bluecfd-dir ...]`.
+   `node` is the supervisor: it updates the node when the broker names a new
+   build ([releases.md](releases.md)); `run-sim-node` runs the same loop without
+   it. On PACE the sbatch scripts under `slurm/` do this inside a job.
+4. **Optional, sharing a big case out** (protocol 2): `--max-directions N` hands
+   the case on after N directions, `--chunk-hours H` at the first direction
+   boundary after H hours -- a small box contributes directions without holding
+   an 800-core-hour case for a week ([protocol.md](protocol.md#protocol-2-capabilities-machines-stages-handoffs)).
 
 That is the whole procedure. Everything below is what the pieces do.
 
 ## Progress on the dashboard
 
-The runner parses the solver log every 60 s -- **one residual per outer
-iteration**, the first `Solving for` after each `Time =`; `p` is solved ~6x per
-step and reading every line makes a clean descent look like an oscillation --
-and writes one line such as
+Every heartbeat (the first at once, then every 5 min) carries the node's
+current line -- `mesh 3/5 · 03_snappyHexMesh`, `solve 3/32 dirs · iter 412/2000`
+-- and, from a protocol-2 node, the stage it belongs to. The broker keeps each
+change of line, so a case page shows how long each stage took and where it is
+now. Alongside, the node posts structured telemetry (`site`, `mesh`, `solve`, and
+each direction's `residuals` curve: protocol.md, "Telemetry and the dataset"),
+and the machine it runs on (`cpus`, `mem_gb`) with every lease.
 
-    case_270 [3/8 dirs] iter 412 p=3.2e-05 Ux=8.1e-07 (2.3 h)
-
-to the file the worker names in `CASEBROKER_PROGRESS_FILE`. The heartbeat ships
-it as `detail` instead of `"alive"`; the broker keeps the latest per case as
-`last_progress` / `last_progress_at` on the case row, and the dashboard's
-case detail shows it. No new endpoint: it rides the heartbeat that already had
-to happen.
-
-## Stopping and resuming (same machine only)
+## Stopping and resuming
 
 `SIGTERM`/`SIGINT` -- SLURM walltime, `embers` preemption, Ctrl-C -- is the
-normal way a solve stops, not an error. The runner:
+normal way a solve stops, not an error. The node stops the solver and releases
+the case; the attempt is refunded. Its scratch (`--work`) keeps the mesh and
+every direction it reached.
 
-1. stops the solver,
-2. copies the study (mesh, every direction's last written time step,
-   dictionaries, logs) to `$WIND_CASES/<case_id>/`,
-3. writes `resume.json` there naming the case and this `CASEBROKER_WORKER_ID`,
-4. exits; the worker releases the lease (attempt refunded).
+On its next lease the node lists the cases it holds scratch for as
+`resume_case_ids`. The broker claims those **first**, and a case still leased to
+the same worker id comes back **without spending an attempt** -- continuing, not
+retrying -- and the node skips what it already finished.
 
-On its next lease the worker lists the `resume.json` markers that carry its
-own id and sends them as `resume_case_ids`. The broker claims those **first**,
-and a case still leased to the same worker id comes back **without spending an
-attempt** -- continuing, not retrying. The runner restores the checkpoint,
-keeps meshes already built, skips directions that already converged, and
-continues each unfinished direction from its last time step with
-`startFrom latestTime`.
+If another node is handed the case first, it continues from the broker's copy:
+the mesh and each finished direction were uploaded as they finished, so it
+fetches the mesh and solves only the directions that are missing. Rules that
+follow:
 
-Rules that follow from this:
-
-- **A case never moves between machines mid-solve.** The checkpoint is on that
-  machine's local disk; another worker's `resume_case_ids` for it is ignored.
-- **Same `WIND_NP` on resume.** The decomposition on disk *is* the checkpoint;
-  a different rank count restarts that direction from 0 (the runner says
-  `RESTART` in `run.log` when it does).
-- **`WIND_WRITE_INTERVAL` is the resume granularity**, default 200 iterations
-  (~1-2 h). The old default was the whole iteration budget -- one write at the
-  very end -- and an 8 h chunk cut at iteration 749 had nothing to resume from.
+- **A direction in flight never moves.** A case moves between machines only at
+  a direction boundary, through the broker's part store; what a stopped node
+  loses is the direction it was solving.
+- **A failed case goes to another machine first.** For
+  `CASEBROKER_FAIL_COOLDOWN` (12 h) no worker on the failing host is handed it
+  again (DOMAIN.md, "Three chances means three machines").
 
 ## What a finished case is
 
-One `tar.gz` per case in `$WIND_DONE`, written under `.tmp/` and renamed into
+One `tar.gz` per case in the node's `--done` folder, written under `.tmp/` and renamed into
 place so nothing ever picks up a half-written archive:
 
 ```
@@ -134,11 +107,11 @@ place so nothing ever picks up a half-written archive:
   run.log build.json cfg.json spec.json preview_*.png manifest.json
 ```
 
-(The Windows node's archives differ in layout -- `<id>/<id>/case_*`, `geometry/`.
-Since Eddy3D #935 the node takes the same pedestrian sample -- same dictionary, same
-cropped sheet -- and ships the raw surfaces (`postProcessing/pedestrianSurface/`),
-`pedestrian/grid.json` and `geometry/<id>_terrain.stl`; `ped_field.py` on the master
-turns them into `U.npz` and the `.wfld`. Archives from before it carry no field: see below.)
+(That listing is the retired runner's layout; a node's archive is laid out as
+`<id>/<id>/case_*` with `geometry/`, and ships the raw pedestrian surfaces
+(`postProcessing/pedestrianSurface/`), `pedestrian/grid.json` and
+`geometry/<id>_terrain.stl`. The field itself goes to the broker as each direction
+finishes: see "The pedestrian field".)
 
 Full field data, last time step only, reconstructed on the client -- rank
 counts differ per machine, so a decomposed result would be unusable anywhere
@@ -154,7 +127,7 @@ An Eddy3D node no longer holds a case until its last direction is solved. On
 v2-00e76e426bea6d52 solved, and all of them were lost with it. The node now
 ships each piece of a case the moment it is done (Eddy3D `CaseParts`):
 
-| when | file in `$WIND_DONE` |
+| when | file in `--done` |
 | --- | --- |
 | meshing passed | `<case>.mesh.tar.gz`: mesh, `cfg.json`, `spec.json`, site JSON, terrain sheet |
 | a direction is finished | `<case>.case_NNN.tar.gz`: its latest time, `system/`, `postProcessing/`, logs |
@@ -176,11 +149,10 @@ uv run casebroker archives E:/wind/done --verify      # also hash every part aga
   arrive in write order);
 - **partial**: parts and no case archive -- the node stopped, or is still solving.
   The mesh and the finished directions are here and unpack
-  (`casebroker.archives.extract_case`); `scripts/backfill_pedestrian.py` takes
-  any of a case's archives and unpacks them all.
+  (`casebroker.archives.extract_case`).
 
-Runner-script archives and nodes from before parts write only `<case>.tar.gz`,
-which reads as complete, as before.
+Archives from the retired runner and from nodes before parts are only
+`<case>.tar.gz`, which reads as complete, as before.
 
 ### A case outlives its machine
 
@@ -216,9 +188,10 @@ case has on record.
 each direction's surface the moment the direction is solved (`MetaFOAM.Deploy.PedestrianField`,
 a port of `ped_field.py`) and `PUT`s |U| at 1.75 m as a `umag/1` blob to
 `/v1/cases/<id>/fields/<direction>` under its lease; the dashboard reads it back from
-there, exact, with no field source and no master in the way. Everything below -- `U.npz`
-in the archive, the `.wfld`, the backfill -- still holds, and is the path for a case whose
-node predates this. `GET /v1/cases/<id>/fields` lists what the broker holds;
+there, exact, with no field source and no master in the way. A case finished by a node
+from before this has no field at the broker until the node that holds its archive
+backfills it (`PUT /v1/cases/<id>/fields/<dir>/backfill`; the node does it when it sweeps
+its done folder, asking `POST /v1/parts/wanted` which fields the broker lacks). `GET /v1/cases/<id>/fields` lists what the broker holds;
 `metrics.pedestrian.fields` on the completion says what the node managed to send.
 **Since 0.28.0 the broker stores it uncompressed**, whichever way the node sent it: gzip
 saved 13% of a float32 field and Postgres's own compression nothing, while the plain
@@ -236,10 +209,10 @@ each height, how much of the core is air, and how far each value's height above
 grade is from its label.
 
 **How it is made.** OpenFOAM cuts one `distanceSurface` per height over the
-builder's terrain sheet cropped to the core (`runner/lib/ped_grid.py`), under
-MPI on the still-decomposed case, and writes U on its vertices (cellPoint).
-`runner/lib/ped_field.py` reads each surface onto the grid by linear
-interpolation inside the surface's own triangles, so a building stays a hole
+builder's terrain sheet cropped to the core, under MPI on the still-decomposed
+case, and writes U on its vertices (cellPoint). The node reads each surface onto
+the grid by linear interpolation inside the surface's own triangles
+(`MetaFOAM.Deploy.PedestrianField`, a port of the retired runner's `ped_field.py`), so a building stays a hole
 rather than being bridged over. Measured on v2-1410516cea4c5d7b (4.8M cells):
 the cut takes 32 s on 8 ranks for both heights; the read is ~2 s a surface; every
 value lands 1.75 m above the terrain to 1 mm median, 5.6 cm p99.
@@ -258,13 +231,6 @@ value lands 1.75 m above the terrain to 1 mm median, 5.6 cm p99.
   layers, the two differ by 6.8% median (18% max, 25 points). The surface is
   what ParaView draws for the same slice; a cellPoint-exact grid would need the
   interpolation done outside OpenFOAM from the archived mesh and fields.
-
-**Cases finished before it**: `scripts/backfill_pedestrian.py <archive> --out
-<dir> --e3d <eddy3d-cli>` rebuilds the field from the archive alone -- mesh and
-last time step, no re-solve. An archive without `terrain.stl` gets its sheet
-regenerated with `eddy3d-cli site-geometry`, and the script refuses unless that
-matches the archived geometry report on DEM source, extent, stride and z range.
-~2 min a direction on 8 ranks, dominated by decomposePar.
 
 **Seeing it**: the dashboard reads `<source>/<case_id>.wfld`. On the master,
 `uv run python scripts/serve_fields.py <folder of .wfld>` serves them on
@@ -291,24 +257,14 @@ leases are removed; a node from before still leases (the field is ignored, and t
 404 reads as "no master"). A Syncthing that an earlier node build started keeps
 running until it is stopped; what it already delivered stays where it is.
 
-**A runner-script worker** (runner/run_case.sh) writes `<case>.tar.gz` into
-`$WIND_DONE` and leaves it there; collect it with `scripts/pull_done.sh` or by hand,
-and `scripts/report_receipts.py` tells the broker it arrived.
-
-**PACE: pull what the broker did not take.** An E3D node in a job uploads its
-parts itself and waits up to 20 min for them when it drains. For a runner-script
-worker, or a broker without room: compute nodes cannot be reached from outside,
-and a long-running daemon does not fit shared login nodes or job-lifetime compute
-nodes. The master already has SSH to the login nodes, so
-`scripts/pull_done.sh <master done dir> ice:<WIND_DONE> phoenix:<WIND_DONE>`
-on a timer collects finished archives; `PULL_REMOVE=1` deletes on the cluster
-after a size-verified copy, which is what keeps ICE's 300 GB scratch from
-filling with results.
+**PACE.** An E3D node in a job uploads its parts itself and waits up to 20 min
+for them when it drains; its `--done` is on persistent scratch, so a part that
+had not gone up when the job ended is sent by the next job's sweep.
 
 ## What the geometry step adds beyond buildings and terrain
 
-`real_cities/site_geometry.py` writes, next to the two STLs, a site report the
-runner reads into `build-case`:
+The node's site build (its native port of `real_cities/site_geometry.py`)
+writes, next to the two STLs, a site report that goes into `build-case`:
 
 - `z0_by_direction` -- the inlet roughness per wind direction
   (`upstream_z0.py`: ESA WorldCover, log-mean z0 of a 3 km upwind sector
@@ -320,8 +276,8 @@ runner reads into `build-case`:
   default from Eddy3D's vegetation library; recorded as such). Goes to
   `geometry.canopyStl` + `vegetation`; `build-case` writes a `topoSetDict`
   (mesh case) and a `porosityForce` on the `canopy` cellZone with
-  `f = 2·Cd·LAD` (direction cases); the runner runs `topoSet` after
-  reconstructing the mesh and prints `CANOPY ... now: N cells` in `run.log`.
+  `f = 2·Cd·LAD` (direction cases), and `topoSet` selects the zone's cells after
+  the mesh is reconstructed.
   A treeless site has no STL and no zone.
 
 ## Ranks per machine
@@ -330,20 +286,10 @@ Different machines have different knees. `C:\rc2\scaling_test.sh` (local) and
 the `scaling-sweep` job (PACE) run the same 3.9M-cell case for a short bounded
 number of iterations at several rank counts and record iterations/hour and
 per-rank efficiency; the knee -- where adding ranks stops paying -- is the
-machine's `WIND_NP`. Results so far live in `scaling_results.csv` on each
+machine's `--cpus`. Results so far live in `scaling_results.csv` on each
 machine. Known ceilings that no sweep will move: **24 ranks per job on PACE**
 (a scheduler policy, not hardware -- `-N 1 -n 28` is refused outright), and on
 Windows the count MS-MPI's `mpiexec -n` will launch on one box.
-
-## Smoke-testing a machine without a real solve
-
-`WIND_ALLOW_UNCONVERGED=1` makes the runner accept a direction that ran out
-of iterations without meeting `residualControl`, so a deliberately crude case
-(one direction, a 48 m background, a few hundred iterations) exercises every
-stage -- geometry, `build-case`, mesh, solve, checkpoint writes, reconstruct,
-archive, result line -- in minutes. The archive's `manifest.json` and the
-reported metrics carry `converged: false`. It is a dev switch: never set it
-on a production worker, where an unconverged case is quarantined on purpose.
 
 ## Reproducing one case on another machine
 
@@ -364,7 +310,7 @@ CASEBROKER_DB=E:/wind/repro/broker.sqlite CASEBROKER_WRITE_TOKENS=repro-local-to
 
 # 2. the production case's own spec, with max_attempts 1 (one failure is the answer)
 curl -s -H "Authorization: Bearer $PROD_TOKEN" \
-  https://casebroker.onrender.com/v1/cases/<case_id> > case.json
+  https://casebroker.eddy3d.com/v1/cases/<case_id> > case.json
 python - <<'EOF'
 import json
 d = json.load(open("case.json"))
@@ -418,11 +364,8 @@ and no numerics setting reaches it.
 - `Cannot find file "points" in directory "polyMesh"` from `decomposePar`:
   the mesh link is wrong. It is resolved relative to `case_*/constant/`, so it
   is two levels up (`../../mesh/...`). On the native runtime it is a copy.
-- Everything resumed from time 0: the checkpoint had no written time step.
-  Check `WIND_WRITE_INTERVAL` and that the solve ran longer than one interval.
-- `RESTART` in `run.log` on a resume: rank count changed; see above.
-- ICE/Phoenix `$HOME` is 20-30 GB and usually nearly full -- checkpoints and
-  archives must go to scratch (`WIND_CASES`/`WIND_DONE` in the sbatch files),
+- ICE/Phoenix `$HOME` is 20-30 GB and usually nearly full -- scratch and
+  archives must go to scratch (`--work` and `--done` in the sbatch files),
   and a 100%-full scratch silently loses rank data during the copy-back.
 - A worker shown as **Drained**, with a reason that starts `drained by the
   broker:`, failed five different cases within ten minutes. That points at the

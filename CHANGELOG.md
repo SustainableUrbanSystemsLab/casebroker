@@ -8,6 +8,40 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.39.0] - 2026-10-09
+
+### Added
+- **E3D nodes on Phoenix's free `embers` QOS** (`slurm/phoenix_e3d_node.sbatch`, `--requeue`).
+  A preemption is a SIGTERM: the node releases the case refunded, every finished direction is
+  already at the broker, and the requeued job or any other node continues it. `scripts/pace_workers.sh
+  <ice|phoenix> <mode> ...` queues either cluster from a workstation (`scripts/ice_workers.sh` is now
+  its `ice` shorthand), and `submit_workers.sh` names the pairing a cluster needs from its job name.
+  Both sbatch files pass `CHUNK_HOURS` to a node as `--chunk-hours` when set.
+
+### Removed
+- **The Python worker path.** `casebroker.worker`, `runner/` (`run_case.sh`, `run_case.cmd`, the
+  pedestrian and progress helpers), `slurm/ice_worker.sbatch` and `phoenix_worker.sbatch`,
+  `start_worker.sh`/`.ps1`, `bootstrap_worker.ps1`, `setup_windows.ps1`, `machine.env.example`,
+  `scripts/pull_done.sh`, `scripts/backfill_pedestrian.py`, `casebroker worker setup`, and
+  `docs/windows-worker.md` and `docs/MORNING.md`. Its runner could not build any campaign recipe --
+  it handed every case back with exit 69 -- so the Phoenix pool it ran had nothing it could solve,
+  while the E3D node does all of it: pairing, native geometry, parts, fields, backfill, updates.
+  The broker still leases a client that declares nothing exactly as before.
+
+### Changed
+- **The docs describe the system that runs.** README, AGENTS, fleet, operations, pace-hpc,
+  releases and the E3D contract (now version 3, node only) no longer describe production as
+  Supabase behind Render, a cluster run from a submodule checkout, or the invariant that "a case
+  never moves between machines mid-solve" -- it does, at a direction boundary, through the part
+  store. The README badge, `casebroker repro`'s default `--broker` and the scripts' examples point
+  at https://casebroker.eddy3d.com instead of the dead Render host. The dashboard's Machines hints
+  show pairing (`E3D setup-sim-node`) instead of `bootstrap_worker.ps1`.
+- **CI: the server image waits for the Postgres suite, and nothing points at production.**
+  `publish-image` now needs the throwaway-Postgres job: production is Postgres, and a change that
+  broke only that branch of `db.py` could ship while it was red. The "real postgres" job, which
+  ran the suite against the production database through the `DBSTRING` secret, is gone: the
+  self-hosted database is reachable only over WireGuard, so it could only ever skip.
+
 ## [0.38.0] - 2026-10-09
 
 ### Added

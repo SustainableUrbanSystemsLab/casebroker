@@ -6,18 +6,21 @@ how to change things without breaking the campaign.
 ## The shape of it
 
 A lease-based work queue: one Postgres database of CFD cases, many machines
-pulling from it. `casebroker/` is the service, `runner/run_case.sh` is the seam
-to the CFD, `slurm/` submits workers. The sampler and geometry pipeline live in
-the **parent repo** (`benchmark/real_cities/`), which vendors this one as a
-submodule.
+pulling from it. `casebroker/` is the service; the CFD is the E3D node --
+`E3D.exe`, the Eddy3D CLI, a separate repo -- which pairs, leases, builds the
+site, solves and reports over HTTP (docs/protocol.md; Eddy3D's
+`docs/SIMULATION_NODE.md`); `slurm/` queues E3D nodes on PACE. The sampler that
+draws the sites lives in the campaign repo (see "Where the campaign lives").
 
-Production is Supabase Postgres behind Render. **SQLite is the test engine, not a
-smaller production option** — it needs no network and no credentials, which is
-why the suite runs in seconds with zero external dependencies.
+Production is self-hosted: the broker container and Postgres on one server
+behind Cloudflare (`deploy/self-hosted`, https://casebroker.eddy3d.com).
+**SQLite is the test engine, not a smaller production option** — it needs no
+network and no credentials, which is why the suite runs in seconds with zero
+external dependencies.
 
 ## Before you change anything
 
-- **`uv run --with pytest --with httpx python -m pytest tests/ --ignore=tests/test_db_postgres.py -q`**
+- **`uv run --extra export --with pytest --with httpx python -m pytest tests/ --ignore=tests/test_db_postgres.py -q`**
   is the fast suite. It must stay green and needs nothing external.
 - `tests/test_db_postgres.py` runs against a real Postgres when
   `CASEBROKER_TEST_PG_DSN` is set; skipped otherwise.
@@ -48,18 +51,12 @@ heartbeating before touching a `leased` row.
 so `~/.local/bin` is not on `PATH` and `uv` is not found. Both sbatch scripts
 export it explicitly and check.
 
-**`$PY` in `run_case.sh` is a bare interpreter** for parsing the spec. Anything
-needing numpy/rasterio/trimesh must go through
-`uv run --project "$REAL_CITIES"`, or it dies with `ModuleNotFoundError` on
-every case identically.
-
-**Check which branch and which commit a cluster is on.** A Phoenix job queued
-hours earlier started running old code and quarantined ~900 cases. Every
-worker now runs from `windcomfort-real-cities` on `main`, with this repo as its
-`benchmark/casebroker` submodule -- the clusters through `slurm/*.sbatch`, which
-refuse to start when that pin is behind this repo's `main`, and Windows
-workstations through `bootstrap_worker.ps1`. Nothing clones
-`JP-Wind-ML-Comparison` any more (see "Where the campaign lives" below).
+**Check which build a machine is running.** A Phoenix job queued hours earlier
+started running old code and quarantined ~900 cases (the Python worker, retired
+since). Every node now declares its `build` with each lease, the fleet table
+shows it beside the campaign's target, and a build can be refused at the next
+lease (docs/releases.md: `require_build`, `blocked_builds`, the kill switch).
+Nothing clones `JP-Wind-ML-Comparison` (see "Where the campaign lives" below).
 
 **The dashboard's data path is `/v1/status`, not `/healthz`.** A browser that
 could reach one but not the other connected fine and then couldn't name what it
@@ -114,14 +111,14 @@ production's before reasoning from the difference: the first reproduction's
 snappyHexMesh that died mid-snap, which the step then reported as finished.
 Eddy3D now fails that step unless snappy says `Finished meshing`.
 
-**Hooking any machine into the campaign as a worker -- Windows or Linux,
-Docker, Podman or native blueCFD -- is [`docs/fleet.md`](docs/fleet.md):**
-`machine.env` + `start_worker.sh`/`.ps1`, progress in the heartbeat,
-same-machine checkpoint/resume, one archive per finished case, collected by
-`scripts/pull_done.sh` (an E3D node sends its parts to the broker itself). Two invariants people will
-be tempted to "simplify": a case never moves between machines mid-solve
-(the checkpoint is local disk), and `CASEBROKER_WORKER_ID` is stable per
-machine (it is how a restarted worker gets its own case back).
+**Hooking any machine into the campaign -- Windows or Linux, Docker, Podman or
+native blueCFD -- is [`docs/fleet.md`](docs/fleet.md):** download `E3D.exe`,
+`E3D setup-sim-node <broker>`, approve it, `E3D node`. Two invariants people will
+be tempted to "simplify": a case moves between machines only at a DIRECTION
+boundary, through the broker's part store -- the mesh and every finished
+direction are uploaded as they finish, a direction in flight never moves -- and a
+node's worker id is stable per machine (it is how a restarted node gets its own
+case back).
 
 **Running a case on PACE ICE/Phoenix: see [`docs/pace-hpc.md`](docs/pace-hpc.md)
 before improvising.** Covers Podman (not Docker — check for it before
@@ -150,15 +147,15 @@ cost.
 
 ## Deploying
 
-Push to `main` → CI runs → the deploy job triggers a Render deploy of **that
-commit** and polls **that deploy id**. It never trusts "the latest deploy is
-live" as a proxy for "my commit is live" — that mistake let three pushes go
-undeployed while reporting green.
-
-The Postgres CI job gates deploys. If Supabase trips its circuit breaker
-(`ECIRCUITBREAKER — too many authentication failures`, usually from too many
-connections in a short window), that job fails and nothing deploys even though
-the code is fine.
+Push to `main` → CI runs the version check, the SQLite suite, the Postgres suite
+against a throwaway container, and the image smoke test → only then is that
+commit's image pushed to GHCR (`:latest` and `:sha-<sha>`) → Watchtower on the
+server notices the new digest within about ten minutes and recreates the broker
+container. Confirm a deploy by its commit, not its timing: `curl
+https://casebroker.eddy3d.com/healthz` carries `version` and `commit`. (The Render
+deploy job, and the CI tier that ran the Postgres suite against the production
+database, retired with Render and Supabase on 2026-10-06.) A roll back is pinning
+the compose file to an older `:sha-` tag.
 
 Releases: every commit on `main` is a version (the hook bumps PATCH and moves
 `CHANGELOG.md`'s `Unreleased` entries under it), and `release.yml` tags and
@@ -171,10 +168,10 @@ so a broker that stops speaking the old protocol strands them.
 The runner pipeline — `site_sampler.py`, `site_geometry.py`, `canopy_zones.py`,
 `gba.py` and the rest of `real_cities/` — is in
 [windcomfort-real-cities](https://github.com/SustainableUrbanSystemsLab/windcomfort-real-cities),
-which carries this repo as the `benchmark/casebroker` submodule. Workers on PACE
-run **from that submodule**, so its pin is what a worker actually executes; the
-sbatch files refuse to start when it is behind this repo's `main`, which means
-every merge here wants a submodule bump there.
+which carries this repo as the `benchmark/casebroker` submodule. Nothing runs
+cases from that checkout any more -- the Python worker that did is retired, and a
+node is the `E3D` binary alone -- so the pin matters to the sampler's scripts, not
+to what a machine executes.
 
 `JP-Wind-ML-Comparison` is the paper the pipeline was split out of. It is being
 submitted and is not touched for campaign work; its own casebroker pin is stale
@@ -182,8 +179,8 @@ and stays that way.
 
 ## Before pushing to main
 
-Run `scripts/preflight.sh`. It runs the test suite, builds the image Render
-deploys, and — the part that matters — imports rasterio and performs a real
+Run `scripts/preflight.sh`. It runs the test suite, builds the image the server
+runs, and — the part that matters — imports rasterio and performs a real
 remote COG read *inside* that image.
 
 That last check exists because the suite structurally cannot do it. rasterio

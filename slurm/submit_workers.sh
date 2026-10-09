@@ -1,6 +1,7 @@
 #!/bin/bash
-# Submit E3D simulation-node jobs (ice_e3d_node.sbatch) as a chain, in parallel, or both.
-# Run on the cluster login node; scripts/ice_workers.sh does that from your own machine.
+# Submit E3D simulation-node jobs (ice_e3d_node.sbatch, phoenix_e3d_node.sbatch) as a chain, in
+# parallel, or both. Run on the cluster login node; scripts/pace_workers.sh does that from your own
+# machine.
 #
 #   submit_workers.sh chain N       N jobs, each starting when the one before has ENDED (wall clock,
 #                                   failure, scancel -- any way). One worker at a time: a case that
@@ -11,13 +12,15 @@
 #                                   (chain N is lanes 1 N, parallel N is lanes N 1).
 #
 #   --after JOBID   the first job of every lane waits for JOBID to end: extends a chain
-#   --script FILE   the sbatch script (default: ice_e3d_node.sbatch beside this file)
+#   --script FILE   the sbatch script (default: ice_e3d_node.sbatch beside this file;
+#                   phoenix_e3d_node.sbatch on Phoenix, where `parallel N` is the usual shape:
+#                   embers jobs are preempted and requeue themselves)
 #   --dry-run       print the sbatch commands and submit nothing
 #
 # Prints every job id and each lane's last one; pass that as --after to add more to the lane.
 # A job whose predecessor ended in under CHAIN_MIN_SECONDS (default 900) does not start a worker,
 # and neither does anything after it (see ice_e3d_node.sbatch): scancel one pending job to stop
-# the rest of a lane. To stop everything: scancel -u $USER -n e3d-node-ice
+# the rest of a lane. To stop everything: scancel -u $USER -n e3d-node-ice (or e3d-node-phoenix)
 # (a running job gets SIGTERM and releases its case).
 
 set -euo pipefail
@@ -28,7 +31,7 @@ after=""
 dry=0
 max_total=200
 
-usage() { sed -n '2,22p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,25p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
 is_count() { [[ "${1:-}" =~ ^[1-9][0-9]*$ ]]; }
 
 [ $# -ge 1 ] || usage
@@ -56,6 +59,7 @@ is_count "$lanes" && is_count "$n" || usage
 [ -z "$after" ] || [[ "$after" =~ ^[0-9]+$ ]] || { echo "--after wants a job id, got '$after'" >&2; exit 1; }
 
 name=$(awk '/^#SBATCH[[:space:]]+-J[[:space:]]/{print $3; exit}' "$script")
+pairing=${name#e3d-node-}          # the name this cluster's node pairs as: ice, phoenix
 
 if [ "$dry" = 0 ]; then
     # What the job needs on this cluster, checked here so a missing piece is one sentence now and
@@ -63,7 +67,7 @@ if [ "$dry" = 0 ]; then
     [ -x "$HOME/windcomfort/bin/E3D" ] || { echo "no $HOME/windcomfort/bin/E3D (docs/pace-hpc.md section 8)" >&2; exit 1; }
     [ -x "$HOME/windcomfort/bin/podman-pace.sh" ] || { echo "no $HOME/windcomfort/bin/podman-pace.sh (copy slurm/podman-pace.sh there)" >&2; exit 1; }
     [ -s "${EDDY3D_NODE_DIR:-$HOME/.local/share/Eddy3D/node}/credential.json" ] \
-        || { echo "this account is not paired: $HOME/windcomfort/bin/E3D setup-sim-node <broker-url> --name ice --no-browser" >&2; exit 1; }
+        || { echo "this account is not paired: $HOME/windcomfort/bin/E3D setup-sim-node <broker-url> --name $pairing --no-browser" >&2; exit 1; }
     # The sbatch script writes its log to logs/ under the directory it is submitted from.
     cd "$HOME/windcomfort"
     mkdir -p logs

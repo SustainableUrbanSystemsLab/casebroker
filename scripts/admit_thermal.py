@@ -24,7 +24,7 @@ case back with exit 69 and stops, which ends a PACE allocation. It also refuses
 while a case of a WITHDRAWN version of the recipe is still pending or leased:
 two versions are two training sets, and are never produced side by side.
 
-    python scripts/admit_thermal.py --broker https://casebroker.onrender.com \\
+    python scripts/admit_thermal.py --broker https://casebroker.eddy3d.com \\
         --e3d C:/E3D/E3D.exe --count 50 [--post]
 
 The token is CASEBROKER_TOKEN (write scope to post) or --token.

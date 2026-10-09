@@ -7,7 +7,7 @@ the archives already land -- and this is the server for it: read-only, *.wfld
 only, from one folder.
 
 Two headers are the whole reason this is not `python -m http.server`: the
-dashboard is served from the broker's origin (https on Render), so the browser
+dashboard is served from the broker's origin (https), so the browser
 refuses a cross-origin read without Access-Control-Allow-Origin, and Chrome
 additionally refuses a public page reading a private address (localhost, a LAN
 IP) unless the preflight answers Access-Control-Allow-Private-Network.

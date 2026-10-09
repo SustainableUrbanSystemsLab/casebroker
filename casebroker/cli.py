@@ -573,19 +573,12 @@ def _stamp(epoch) -> str:
 
 
 
-# -- enrolling this machine --------------------------------------------------
+# -- talking to a broker as an admin -----------------------------------------
 #
-# The one command to run ON a new worker box. Before it existed, every machine
-# cost an admin a browser round-trip -- sign in, Machines, Issue token, copy it
-# out, carry it over -- which does not scale past a handful of boxes and is the
-# step people skip, falling back to pasting the shared token everywhere and
-# losing the per-machine attribution entirely.
-#
-# It authenticates as a HUMAN and throws the session away immediately. The
-# alternative -- a long-lived enrollment secret the machine carries -- means one
-# more credential to distribute, rotate and eventually leak; a password typed
-# once at install time leaves nothing behind on the box but the machine's own
-# token, which is exactly the credential that is already revocable on its own.
+# The release and parts commands authenticate as a HUMAN and throw the session
+# away immediately: a password typed once leaves nothing behind but what the
+# command did. (`casebroker worker setup`, which used the same helpers to enrol a
+# Python worker, went with that worker; an E3D node pairs itself, E3D setup-sim-node.)
 
 
 def _cookie_opener():
@@ -612,131 +605,6 @@ def _call(opener, broker: str, method: str, path: str, payload=None,
             return e.code, json.loads(e.read().decode() or "{}")
         except Exception:                                    # noqa: BLE001
             return e.code, {}
-
-
-def _default_worker_id() -> str:
-    """This machine's hostname, in the shape the campaign uses for worker ids.
-
-    A stable per-machine default matters more than a pretty one: the worker id
-    is what lets a restarted worker reclaim its own half-finished case, so it
-    must survive a reboot, and a hostname does.
-    """
-    import re
-    import socket
-    name = socket.gethostname().split(".")[0].lower()
-    return re.sub(r"[^a-z0-9._-]+", "-", name).strip("-") or "worker"
-
-
-def _write_env(path: pathlib.Path, values: dict) -> None:
-    """Set these keys in a dotenv-style file, preserving everything else.
-
-    An overwrite would be wrong: machine.env also carries WIND_NP, the runtime
-    paths and whatever else that box needed, and enrolling is not a reason to
-    lose them.
-    """
-    lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
-    remaining = dict(values)
-    out = []
-    for line in lines:
-        key = line.split("=", 1)[0].strip() if "=" in line else ""
-        if key in remaining:
-            out.append("%s=%s" % (key, remaining.pop(key)))
-        else:
-            out.append(line)
-    if remaining and out and out[-1].strip():
-        out.append("")
-    out.extend("%s=%s" % (k, v) for k, v in remaining.items())
-    body = "\n".join(out).rstrip("\n") + "\n"
-    # Restricted BEFORE the credential is written, not after. Writing first and
-    # chmodding second lands the token at whatever the umask allows -- 0644 on a
-    # default login shell -- and leaves it world-readable for the gap between the
-    # two calls. On a shared cluster filesystem, where home directories are
-    # routinely group-readable, that gap is the whole exposure.
-    try:
-        if path.exists():
-            path.chmod(0o600)
-            path.write_text(body)
-        else:
-            # O_CREAT with a mode means the file never exists at a wider one.
-            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            with os.fdopen(fd, "w") as fh:
-                fh.write(body)
-    except OSError:
-        # Windows has no POSIX mode bits worth setting -- the parent directory's
-        # ACL governs there -- so fall back rather than failing the enrolment.
-        path.write_text(body)
-    try:
-        path.chmod(0o600)
-    except OSError:
-        pass
-
-
-def cmd_worker_setup(args) -> int:
-    from . import auth  # noqa: F401  -- kept for symmetry with the other commands
-
-    worker_id = args.worker_id or _default_worker_id()
-    env_path = pathlib.Path(args.env_file)
-
-    print("enrolling this machine as %r with %s\n" % (worker_id, args.broker))
-
-    opener = _cookie_opener()
-    status, body = _call(opener, args.broker, "GET", "/v1/auth/state")
-    if status != 200:
-        print("cannot reach %s (%s)" % (args.broker, status), file=sys.stderr)
-        return 2
-    if body.get("needs_setup"):
-        print("this broker has no account yet -- open it in a browser and create\n"
-              "the admin account first, or run `casebroker account create`.",
-              file=sys.stderr)
-        return 2
-
-    import getpass
-    username = args.username or input("broker username: ").strip()
-    password = getpass.getpass("password for %s: " % username)
-    status, body = _call(opener, args.broker, "POST", "/v1/auth/login",
-                         {"username": username, "password": password})
-    if status != 200:
-        print("\nlogin failed: %s" % body.get("detail", status), file=sys.stderr)
-        return 1
-    if body.get("role") != "admin":
-        print("\n%r is a %s; issuing machine credentials needs an admin."
-              % (username, body.get("role")), file=sys.stderr)
-        return 1
-
-    try:
-        status, body = _call(opener, args.broker, "POST", "/v1/workers/tokens",
-                             {"name": worker_id})
-        if status == 409 and args.rotate:
-            # Revoke-then-reissue, and only when asked: doing it implicitly would
-            # strand whichever credential this box is actually running on.
-            _call(opener, args.broker, "DELETE", "/v1/workers/tokens/" + worker_id)
-            status, body = _call(opener, args.broker, "POST", "/v1/workers/tokens",
-                                 {"name": worker_id})
-        if status == 409:
-            print("\n%r already has a credential. If this machine has lost it, "
-                  "re-run with --rotate\nto revoke that one and issue a fresh "
-                  "one; every other machine keeps running." % worker_id,
-                  file=sys.stderr)
-            return 1
-        if status != 200:
-            print("\ncould not issue a token: %s" % body.get("detail", status),
-                  file=sys.stderr)
-            return 1
-
-        _write_env(env_path, {"CASEBROKER_URL": args.broker,
-                              "CASEBROKER_WORKER_ID": worker_id,
-                              "CASEBROKER_TOKEN": body["token"]})
-    finally:
-        # Whatever happened, do not leave a fortnight-long admin session alive on
-        # a shared lab machine.
-        _call(opener, args.broker, "POST", "/v1/auth/logout")
-
-    print("\n  wrote %s" % env_path)
-    print("  worker id : %s" % worker_id)
-    print("  token     : stored in that file, and nowhere else -- the broker "
-          "keeps only its hash")
-    print("\n  start the worker with:  ./start_worker.sh    (or .\\start_worker.ps1)")
-    return 0
 
 
 # -- releases: the catalog from a terminal or a CI step ------------------------
@@ -1156,20 +1024,6 @@ def main(argv: list[str] | None = None) -> int:
     acd = _account_common(ac.add_parser("delete", help="remove an account and its sessions"))
     acd.set_defaults(func=cmd_account_delete)
 
-    wk = sub.add_parser("worker", help="set this machine up as a worker").add_subparsers(
-        dest="subcmd", required=True)
-    ws = wk.add_parser("setup", help="enrol THIS machine: log in, mint its own "
-                                     "credential, write machine.env")
-    ws.add_argument("--broker", required=True)
-    ws.add_argument("--worker-id", default=None,
-                    help="stable id for this machine (default: its hostname)")
-    ws.add_argument("--username", default=None, help="broker admin (default: prompt)")
-    ws.add_argument("--env-file", default="machine.env",
-                    help="dotenv file to update (default: machine.env)")
-    ws.add_argument("--rotate", action="store_true",
-                    help="revoke this machine's existing credential and issue a new one")
-    ws.set_defaults(func=cmd_worker_setup)
-
     rl = sub.add_parser("release", help="the builds the fleet runs: register, target, "
                                         "promote a canary, roll back").add_subparsers(
         dest="subcmd", required=True)
@@ -1225,7 +1079,7 @@ def main(argv: list[str] | None = None) -> int:
                                        "node pipeline, against a throwaway local broker")
     rp_.add_argument("case_id")
     rp_.add_argument("--e3d", required=True, help="the node executable (E3D.exe / E3D) to run it with")
-    rp_.add_argument("--broker", default=os.environ.get("CASEBROKER_URL", "https://casebroker.onrender.com"),
+    rp_.add_argument("--broker", default=os.environ.get("CASEBROKER_URL", "https://casebroker.eddy3d.com"),
                      help="where the case lives (default: $CASEBROKER_URL, else production)")
     rp_.add_argument("--token", default=os.environ.get("CASEBROKER_TOKEN"),
                      help="token for --broker ('-' reads stdin; default $CASEBROKER_TOKEN)")

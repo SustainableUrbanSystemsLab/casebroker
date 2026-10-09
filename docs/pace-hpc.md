@@ -1,18 +1,16 @@
 # Running a case on PACE ICE / Phoenix
 
-For joining a machine -- PACE or not -- to the campaign as a worker (profiles,
-progress, resume, archives, getting results to the master) see
-[`fleet.md`](fleet.md). This page is the cluster-specific traps.
+For joining a machine -- PACE or not -- to the campaign see [`fleet.md`](fleet.md).
+This page is the cluster-specific traps.
 
 Three different jobs, don't confuse them:
 
-- **The E3D node on ICE** (`slurm/ice_e3d_node.sbatch`, submitted with
-  `scripts/ice_workers.sh`) -- the same worker with nothing on the cluster but
-  the `E3D` binary: no repo, no Python. Section 8. This is how ICE is queued now.
-- **The broker worker fleet** (`slurm/ice_worker.sbatch`, `slurm/phoenix_worker.sbatch`) —
-  a pool of long-lived workers that lease cases from the casebroker queue,
-  run them through `runner/run_case.sh`, and report back. The Python path the
-  E3D node replaces; ICE's copy needs the campaign repo checked out there.
+- **The E3D node on ICE and Phoenix** (`slurm/ice_e3d_node.sbatch`,
+  `slurm/phoenix_e3d_node.sbatch`, submitted with `scripts/pace_workers.sh`) --
+  nothing on the cluster but the `E3D` binary: no repo, no Python. Section 8.
+  (The Python worker pools, `ice_worker.sbatch` and `phoenix_worker.sbatch`
+  driving `runner/run_case.sh`, are retired: the runner could not build any
+  campaign recipe and handed every case back.)
 - **Standalone single-case offload** (`slurm/standalone_solve_template.sbatch`) —
   running ONE already-built case directly, outside the broker, e.g. to get a
   mesh-study probe onto a dedicated node instead of fighting local cores for
@@ -55,8 +53,8 @@ near full from unrelated work:
 
 Neither fits a multi-GB CFD case. Use **Phoenix's `/storage/scratch1`**
 instead — a 6+ PB Lustre filesystem with essentially no relevant quota.
-Convention already used by the broker (`WIND_ROOT` in
-`phoenix_worker.sbatch`): `/storage/scratch1/3/pkastner3/...`. ICE has no
+Convention already used by the broker (`--done` in
+`phoenix_e3d_node.sbatch`): `/storage/scratch1/3/pkastner3/...`. ICE has no
 equivalent scratch mount for this account — this is the concrete reason the
 standalone-offload path targets Phoenix, not ICE.
 
@@ -213,27 +211,42 @@ If none of these are it: `srun --jobid=<id> --overlap bash -c '...'` peeks
 at a *running* job's node-local state without disturbing it — useful since
 `$TMPDIR` content isn't synced back until the job ends.
 
-## 8. The E3D node on ICE
+## 8. The E3D node on ICE and Phoenix
 
-Set up once, from your own machine (ICE has no `gh` login, and `E3D` is the only file it needs):
+Set up once per cluster -- ICE and Phoenix have separate home directories, so each gets its own
+binary and its own pairing -- from your own machine (neither has a `gh` login, and `E3D` is the
+only file it needs):
 
 1. **The binary.** On your machine: `gh release download e3d-node-latest -R Eddy3D-Dev/Eddy3D -p E3D-linux-x64`,
    check its sha256 against `release.json` in the same release, `scp` it to `~/windcomfort/bin/E3D`
    (nothing on ICE needs a GitHub login). Updating is the same three steps.
 2. **Pairing.** On ICE: `~/windcomfort/bin/E3D setup-sim-node https://casebroker.eddy3d.com --name ice
-   --no-browser`, then approve the printed code on the dashboard as an admin. Send its output to a
+   --no-browser` (on Phoenix, `--name phoenix`), then approve the printed code on the dashboard as an admin. Send its output to a
    file (`> pair.log &`) and read the code from there: through a pipe it appears only when the
    command exits. The credential lands in `~/.local/share/Eddy3D/node/`; `ice-<job>` ids all fall
    under the name `ice`.
 
-Then queue shifts with `scripts/ice_workers.sh` (it copies `slurm/` to ICE and runs
-`slurm/submit_workers.sh` there; needs the VPN and your login):
+Then queue jobs with `scripts/pace_workers.sh` (it copies `slurm/` to the cluster and runs
+`slurm/submit_workers.sh` there; needs the VPN and your login; `scripts/ice_workers.sh ...` is
+`pace_workers.sh ice ...`):
 
 ```
-scripts/ice_workers.sh chain 20       # 20 shifts back to back: one worker at a time
-scripts/ice_workers.sh parallel 4     # 4 workers at once (4 x 24 cores)
-scripts/ice_workers.sh lanes 4 10     # 4 parallel lanes of 10 chained shifts
+scripts/pace_workers.sh ice chain 20         # 20 ICE shifts back to back: one worker at a time
+scripts/pace_workers.sh ice parallel 4       # 4 ICE workers at once (4 x 24 cores)
+scripts/pace_workers.sh ice lanes 4 10       # 4 parallel lanes of 10 chained shifts
+scripts/pace_workers.sh phoenix parallel 10  # 10 nodes on Phoenix's free embers QOS
 ```
+
+**Phoenix's `embers`** is free and preempted after an hour whenever a paying job wants the node;
+`phoenix_e3d_node.sbatch` asks for `--requeue`. A preemption is a SIGTERM: the case is released
+with its attempt refunded, every finished direction is already at the broker, and the requeued job
+(or any other node) continues it. Lost per preemption: the direction in flight and an image pull.
+`parallel N` is the shape there; a chain buys nothing when the scheduler restarts jobs itself.
+
+**`CHUNK_HOURS=7`** in the environment of `submit_workers.sh` (it passes `--export=ALL`) makes each
+node hand its case on at the first direction boundary after seven hours (`--chunk-hours`, protocol
+2 "sequential chunks"), so an 8 h shift ends between directions instead of losing one to the wall.
+It needs an E3D build that has the option.
 
 **Why a chain.** 24 ranks is the most a PACE job gets and a direction takes about 22 min on them
 (the first, from a cold start, about an hour), so a 32-direction case is ~12 h and outlives the 8 h
@@ -248,7 +261,7 @@ broker holds.
 **Guard.** A job whose predecessor ended in under 15 minutes (`CHAIN_MIN_SECONDS`) starts no worker,
 so the rest of the chain falls through instead of leasing cases to fail them. The same stops it on
 demand: `scancel` one pending job of a lane. `scancel -u $USER -n e3d-node-ice` stops everything; a
-running job releases its case on the way out.
+running job releases its case on the way out (`-n e3d-node-phoenix` on Phoenix).
 
 Traps met setting this up (2026-10-07):
 

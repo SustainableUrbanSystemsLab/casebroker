@@ -31,17 +31,17 @@ background thread while the CFD runs.
 
 ```mermaid
 sequenceDiagram
-    participant W as worker.py
+    participant W as E3D node
     participant B as broker
-    participant R as run_case.sh
+    participant R as the case (geometry, mesh, solve)
     W->>B: POST /v1/lease
-    B-->>W: lease_id + case spec (state → leased, 30 min TTL)
-    W->>R: spec as JSON on stdin
+    B-->>W: lease_id + case spec (state → leased, 15 min TTL)
+    W->>R: build and run it, in-process
     loop every 5 min, while the solve runs
-        W->>B: POST /v1/heartbeat
+        W->>B: POST /v1/heartbeat (+ telemetry, parts as they finish)
         B-->>W: 200, lease extended
     end
-    R-->>W: result_uri on the last stdout line
+    R-->>W: the archive, and its sha256
     W->>B: POST /v1/complete
     B-->>W: 200, state → done
 ```
@@ -57,13 +57,14 @@ Step by step:
    SLURM allocation is freed.
 2. **Receive.** The broker atomically claims a row and returns a `lease_id` with
    the full spec. Concurrency is settled here, inside one SQL statement.
-3. **Run.** The spec goes to `run_case.sh` as JSON on stdin. The broker knows
-   nothing about OpenFOAM; this is the only seam.
+3. **Run.** The node builds the case from the spec (`E3D`'s own site geometry,
+   mesh and solve). The broker knows nothing about OpenFOAM; the spec is the only
+   seam.
 4. **Heartbeat.** A background thread renews every 5 min. A **409** means the
    case was taken away — the worker abandons it rather than finishing work it no
    longer owns.
-5. **Report.** The runner's last stdout line carries `result_uri`; the worker
-   posts it with metrics, wall time and which machine produced it. Among the
+5. **Report.** The node posts the archive's `result_uri` and sha256 with
+   metrics, wall time and which machine produced it. Among the
    metrics, `height_source` names the building source the mesh was built from
    (`gba-lod1`, or `overture`), read from the geometry report beside the STLs —
    the case inspector draws a finished case from it.

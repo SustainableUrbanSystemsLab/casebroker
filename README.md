@@ -1,6 +1,6 @@
 # casebroker — one queue for the v2 campaign: CFD wind and Radiance surface temperatures
 
-[![broker](https://img.shields.io/website?url=https%3A%2F%2Fcasebroker.onrender.com%2Fhealthz&label=broker&up_message=live&down_message=down&style=flat-square)](https://casebroker.onrender.com/healthz)
+[![broker](https://img.shields.io/website?url=https%3A%2F%2Fcasebroker.eddy3d.com%2Fhealthz&label=broker&up_message=live&down_message=down&style=flat-square)](https://casebroker.eddy3d.com/healthz)
 [![tests](https://img.shields.io/github/actions/workflow/status/SustainableUrbanSystemsLab/casebroker/test.yml?branch=main&label=tests&style=flat-square)](https://github.com/SustainableUrbanSystemsLab/casebroker/actions/workflows/test.yml)
 [![version](https://img.shields.io/github/v/tag/SustainableUrbanSystemsLab/casebroker?label=version&style=flat-square)](https://github.com/SustainableUrbanSystemsLab/casebroker/releases)
 [![license](https://img.shields.io/github/license/SustainableUrbanSystemsLab/casebroker?style=flat-square)](LICENSE)
@@ -19,11 +19,10 @@ PACE ICE, PACE Phoenix, the lab workstation, anyone else's box — can each ask
 | [`docs/operations.md`](docs/operations.md) | First run, accounts, tokens, storage, releases, deploying |
 | [`docs/dashboard.md`](docs/dashboard.md) | The ops UI and read-only sharing |
 | [`docs/releases.md`](docs/releases.md) | Moving the fleet between builds while a campaign runs: catalog, canary, promote, roll back, the badges |
-| [`docs/e3d-contract.md`](docs/e3d-contract.md) | The seam to the CFD: what `E3D.exe` must do on the Python path, and why it never holds a broker credential there |
+| [`docs/e3d-contract.md`](docs/e3d-contract.md) | The seam to the CFD: what a node (`E3D.exe`) is to the broker, where its contract lives, and the identity it declares |
 | [`docs/dataset.md`](docs/dataset.md) | `casebroker export`: the campaign as a training snapshot (Parquet tables, a Zarr store of every field, a card), and how to read it |
-| `casebroker/` | The service: `app.py` (API), `db.py` (both engines, and the schema), `auth.py` (passwords, sessions, machine tokens), `worker.py` (the client), `cli.py` (`casebroker`), `ids.py` (case identity and splits) |
-| `runner/run_case.sh` | The seam to the CFD: geometry → mesh → solve → sample |
-| `slurm/` | Worker pools for Phoenix and ICE |
+| `casebroker/` | The service: `app.py` (API), `db.py` (both engines, and the schema), `auth.py` (passwords, sessions, machine tokens), `cli.py` (`casebroker`), `export.py` (`casebroker export`), `ids.py` (case identity and splits) |
+| `slurm/` | E3D node jobs for PACE ICE and Phoenix, and the script that queues them |
 | `tests/` | The suite: SQLite-only by default, with a Postgres set that runs when `CASEBROKER_TEST_PG_DSN` is set |
 
 ## Run it
@@ -38,15 +37,13 @@ CASEBROKER_DB=campaign.sqlite \
 Then open <http://localhost:8000> and **create the admin account** the page asks
 for. That is what turns auth on: until an account exists (and with no env tokens
 set) every caller has full access, and `/healthz` says so with `"auth": "OPEN"`.
-Signed in, **Machines** ▸ *Issue token* mints one credential per box and shows it
-once.
 
-```bash
-# a worker, anywhere that can reach it
-uv run python -m casebroker.worker \
-  --broker https://broker.example.org --token <that machine's token> \
-  --runner runner/run_case.sh --max-cases 4
-```
+A simulation node is `E3D.exe` (the Eddy3D CLI) and nothing else. On the
+machine, `E3D setup-sim-node https://broker.example.org` pairs it -- it prints a
+code you approve under **Machines**; the node generates its own token and the
+broker keeps only its hash -- and `E3D node` runs it, leasing, solving and
+updating itself when the broker names a new build. Its side of the contract is
+Eddy3D's `docs/SIMULATION_NODE.md`; this side is [docs/protocol.md](docs/protocol.md).
 
 No browser? The same first two steps, headless:
 
@@ -60,23 +57,14 @@ cannot require a login, so otherwise whoever reaches it first becomes your
 permanent admin. Full sequence in
 [docs/operations.md](docs/operations.md#first-run-from-nothing-to-a-working-broker).
 
-Without `--runner` the worker uses a built-in echo runner — useful to smoke a new
-deployment without spending CFD time, though never against a real campaign, since
-it reports fabricated results.
-
 <details>
-<summary><b>The runner contract</b> — what <code>--runner</code> must do</summary>
+<summary><b>Retryable or fatal</b> -- the distinction a node's failure report carries</summary>
 
-The case spec arrives as JSON on stdin and in `$CASE_SPEC`. The last line of
-stdout must be a JSON object carrying at least `result_uri`.
-
-Exit codes are a contract with the broker:
-
-| Code | Meaning |
-| --- | --- |
-| `0` | Success |
-| `64` | **This site is broken and must never be retried** — degenerate geometry that will fail identically everywhere, forever |
-| anything else | Retryable: a node died, an image pull failed, a host was down |
+A node reports a failure as retryable or not (`POST /v1/fail`, `retryable`).
+Fatal means **this site is broken and must never be retried** -- degenerate
+geometry that will fail identically everywhere, forever; anything else (a node
+died, an image pull failed, a host was down) is retryable, and goes to another
+machine first.
 
 Getting that distinction wrong is expensive in one direction only. A wrongly
 retryable error costs at most three attempts; a wrongly fatal one removes a site
@@ -109,7 +97,6 @@ the dashboard answers that.
 <summary><b>Quick reference</b> — the calls you will actually type</summary>
 
 ```bash
-uv run casebroker worker setup --broker URL                   # enrol THIS machine as a worker
 uv run casebroker account create --username ada --role admin  # the first admin, headless
 uv run casebroker account passwd --username ada               # forgot it -- no old password needed
 uv run casebroker account list                                # who exists, and last login
@@ -197,8 +184,9 @@ machine, by hand.
 
 ## Status
 
-The v2 campaign runs on Supabase Postgres behind Render, with workers on PACE
-Phoenix and ICE. Two things are worth knowing before trusting a result:
+The v2 campaign runs on a self-hosted broker and Postgres (https://casebroker.eddy3d.com,
+[deploy/self-hosted](deploy/self-hosted/README.md)), with E3D nodes on lab
+workstations and PACE ICE and Phoenix. Two things are worth knowing before trusting a result:
 
 - **Every building height is a prediction.** GlobalBuildingAtlas covers >97% of
   buildings, which retired Overture's coverage problem, but it did so by
