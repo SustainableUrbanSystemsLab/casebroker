@@ -36,7 +36,7 @@ import time
 import pathlib
 import sys
 import weakref
-from typing import Any
+from typing import Annotated, Any
 from urllib.parse import urlsplit, urlunsplit
 
 import numpy as np
@@ -47,6 +47,20 @@ from pydantic import BaseModel, Field
 from . import __version__, auth, dataset, db, footprints, ids, partstore, places, umag
 
 MAX_LEASE_SECONDS = 24 * 3600
+
+# What a node may count on this broker for, said on /healthz rather than learned
+# from a 404. A node used to decide "this broker predates telemetry" from a single
+# 404 and stop sending for the rest of its process -- and a reverse proxy answers
+# 404 too, for a moment during a deploy. With the list a node knows; without it
+# (an older broker) it falls back to exactly the old heuristics. PROTOCOL moves
+# when a set of worker-facing additions lands together; it is not the MAJOR
+# version, which only a break moves. `part_store` is added per deployment.
+PROTOCOL = 2
+FEATURES = ("field_backfill", "fields", "handoff", "hardware", "heartbeat_stage",
+            "machine_scoped_leases", "node_release", "parts", "parts_wanted",
+            "residuals", "telemetry")
+
+_FEATURE_NAME = r"^[a-z][a-z0-9_]{0,31}$"
 
 # The dashboard shell (static/dashboard.html) carries no secrets -- it prompts the
 # viewer for a bearer token client-side and calls the JSON API with it, exactly like
@@ -239,6 +253,13 @@ class LeaseIn(BaseModel):
     # Whether the node can fetch a mesh from the BROKER (GET .../parts/mesh/blob): it is
     # then handed a case another node started, while the broker holds its mesh.
     can_continue_from_broker: bool | None = None
+    # Protocol 2: what the node can do (continue_from_broker, handoff,
+    # heartbeat_stage, ...), the cores it gives a case and the memory it has. All
+    # kept on the worker row; cpus and mem_gb also steer what it is handed
+    # (db._hardware_sql).
+    features: list[Annotated[str, Field(pattern=_FEATURE_NAME)]] | None = Field(default=None, max_length=32)
+    cpus: int | None = Field(default=None, ge=1, le=4096)
+    mem_gb: float | None = Field(default=None, ge=0.25, le=65536)
 
 
 class ReleaseIn_(BaseModel):
@@ -270,6 +291,9 @@ class PolicyIn(BaseModel):
     # "owner/name" on GitHub, for the commit links the panel draws from build
     # names; "" clears it.
     release_repo: str | None = Field(default=None, max_length=120)
+    # Below this many declared cpus a node is handed only cases already meshed at
+    # the broker (db._hardware_sql); 0 turns it off.
+    small_node_cpus: int | None = Field(default=None, ge=0, le=4096)
 
 
 class PromoteIn(BaseModel):
@@ -324,6 +348,10 @@ class HeartbeatIn(BaseModel):
     lease_id: str
     lease_seconds: int = Field(default=3600, ge=60, le=MAX_LEASE_SECONDS)
     detail: str | None = None
+    # Protocol 2: the stage `detail` belongs to, in the node's own words
+    # (stages.STAGES); stored with the progress line. A name this broker does not
+    # know is kept and ignored, so a node can grow a stage before the broker does.
+    stage: str | None = Field(default=None, pattern=r"^[a-z][a-z-]{0,23}$")
 
 
 class CompleteIn(BaseModel):
@@ -349,6 +377,10 @@ class FailIn(BaseModel):
 class ReleaseIn(BaseModel):
     lease_id: str
     reason: str = "released"
+    # Protocol 2, sequential chunks: the node solved its share on purpose and
+    # passes the rest on. Refunded like any release, and kept from this host for
+    # db.HANDOFF_COOLDOWN_SECONDS so another machine continues it.
+    handoff: bool = False
 
 
 class TelemetryIn(BaseModel):
@@ -985,6 +1017,10 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
                 "scopes": {"write": len(tokens), "read": len(readonly_tokens)},
                 # Whether a node may upload parts here (POST .../parts/{part}/upload).
                 "parts_store": store is not None,
+                # What a node may count on (see FEATURES): read once at its start
+                # and again after an outage, in place of probing routes for a 404.
+                "protocol": PROTOCOL,
+                "features": sorted(FEATURES + (("part_store",) if store is not None else ())),
                 # kept for older dashboards that read this field by name
                 "readonly_auth": bool(readonly_tokens),
                 # Whether the broker can actually REACH its database, as opposed
@@ -1787,7 +1823,8 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
                        build=body.build, version=body.version,
                        platform=body.platform, recipes=body.recipes,
                        can_continue=body.can_continue,
-                       can_continue_from_broker=body.can_continue_from_broker)
+                       can_continue_from_broker=body.can_continue_from_broker,
+                       features=body.features, cpus=body.cpus, mem_gb=body.mem_gb)
         return [LeaseOut(case_id=g.case_id, lease_id=g.lease_id, expires_at=g.expires_at,
                          attempt=g.attempt, spec=g.spec, parts=list(g.parts)) for g in got]
 
@@ -1890,6 +1927,9 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
                     raise HTTPException(422, "undeclared_recipes are recipe names, 1-128 characters each")
             db.set_setting(conn, "undeclared_recipes", None if wanted is None else json.dumps(wanted),
                            by=user["username"])
+        if body.small_node_cpus is not None:
+            db.set_setting(conn, "small_node_cpus", str(body.small_node_cpus) if body.small_node_cpus else None,
+                           by=user["username"])
         if body.release_repo is not None:
             repo = body.release_repo.strip()
             if repo and not re.fullmatch(r"[\w.-]+/[\w.-]+", repo):
@@ -1962,7 +2002,7 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
     @app.post("/v1/heartbeat", dependencies=[WriteAuth])
     def heartbeat(body: HeartbeatIn, request: Request) -> dict[str, bool]:
         ok = db.heartbeat(conn, body.lease_id, body.lease_seconds, body.detail,
-                          worker_ok=_lease_holder_test(request))
+                          worker_ok=_lease_holder_test(request), stage=body.stage)
         # 409, not 404: the lease existed, it is just no longer the worker's. The
         # worker must abandon the case rather than retry the call.
         if not ok:
@@ -1991,7 +2031,7 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
     def release(body: ReleaseIn, request: Request) -> dict[str, bool]:
         """Graceful preemption. Refunds the attempt, unlike fail()."""
         if not db.release(conn, body.lease_id, body.reason,
-                          worker_ok=_lease_holder_test(request)):
+                          worker_ok=_lease_holder_test(request), handoff=body.handoff):
             raise HTTPException(409, "lease expired or superseded")
         return {"ok": True}
 

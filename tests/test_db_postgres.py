@@ -672,6 +672,35 @@ def test_a_fresh_claim_forgets_the_last_attempt_s_telemetry_over_a_real_connecti
 
 
 @scratch_only
+def test_protocol_2_lease_sql_over_a_real_connection():
+    """Protocol 2 put an EXISTS inside ORDER BY next to FOR UPDATE SKIP LOCKED, a
+    memory gate on a new BIGINT column, a handoff cooldown subquery and three
+    worker columns into the lease -- new SQL on the production engine."""
+    recipe = prefix("r-proto2")
+    big, started, fresh = seed(3, "proto2", recipe=recipe)   # big sorts first by id
+    sha = "b" * 64
+    c = fresh_conn()
+    c.execute("INSERT INTO case_parts(case_id, part, archive, sha256, reported_at)"
+              " VALUES (?, 'mesh', 'm.tar.gz', ?, 1)", (started, sha))
+    c.execute("INSERT INTO case_blobs(case_id, part, sha256, bytes, stored_at) VALUES (?, 'mesh', ?, 1, 1)",
+              (started, sha))
+    c.execute("UPDATE cases SET mesh_cells = 50000000 WHERE case_id = ?", (big,))
+    w = prefix("w-proto2")
+    got = db.lease(fresh_conn(), w, recipes=[recipe], features=["continue_from_broker", "handoff"],
+                   cpus=24, mem_gb=16.0, host=prefix("box"))
+    assert [g.case_id for g in got] == [started], "started work first"
+    row = fresh_conn().execute("SELECT features, cpus, mem_gb FROM workers WHERE worker_id = ?", (w,)).fetchone()
+    assert (json.loads(row["features"]), row["cpus"], row["mem_gb"]) == (["continue_from_broker", "handoff"], 24, 16.0)
+    assert db.heartbeat(fresh_conn(), got[0].lease_id, 900, "x", stage="solve")
+    assert fresh_conn().execute("SELECT stage FROM events WHERE case_id = ? AND event = 'progress'",
+                                (started,)).fetchone()["stage"] == "solve"
+    assert db.release(fresh_conn(), got[0].lease_id, "handoff", handoff=True)
+    nxt = db.lease(fresh_conn(), w, recipes=[recipe], features=["continue_from_broker"], cpus=24, mem_gb=16.0,
+                   host=prefix("box"), resume_case_ids=[started])
+    assert [g.case_id for g in nxt] == [fresh], "not its own handoff, and not the 100 GB mesh"
+
+
+@scratch_only
 def test_residual_series_are_upserted_assembled_and_pruned_over_a_real_connection():
     """Kind `residuals` is an INSERT ... ON CONFLICT of its own table, a `solve`
     report folds a point into it with a read-modify-write of a JSON TEXT column,

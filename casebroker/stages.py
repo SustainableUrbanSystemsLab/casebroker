@@ -77,7 +77,7 @@ def from_events(events: list[dict[str, Any]], now: int) -> dict[str, Any]:
     Each segment: ``stage``, ``started_at``, ``ended_at`` (None while open),
     ``seconds``, the last ``detail`` seen in it, and the ``attempt`` it belongs
     to -- a lease or a resume starts one; done, failed, quarantined, released,
-    cancelled and stale-released end it. A stale release (db._release_stale_leases) ends the
+    handed-off, cancelled and stale-released end it. A stale release (db._release_stale_leases) ends the
     segment at the last thing its worker said, not at the sweep 48 h later: the
     run stopped when the machine went silent. ``failed_in`` is the stage that was open when the
     most recent failure landed, ``current`` the open one of a running case.
@@ -103,7 +103,11 @@ def from_events(events: list[dict[str, Any]], now: int) -> dict[str, Any]:
             close(ts)
             attempt += 1
         elif kind == "progress":
-            stage = stage_of(detail)
+            # The node's own word when it gave one (heartbeat `stage`, protocol 2),
+            # else read off the line: older nodes, run_case.sh, and a stage name
+            # this broker does not know yet.
+            said = e.get("stage")
+            stage = said if said in STAGES else stage_of(detail)
             if stage is None:
                 if open_seg is not None:
                     open_seg["detail"] = detail
@@ -118,7 +122,7 @@ def from_events(events: list[dict[str, Any]], now: int) -> dict[str, Any]:
         elif kind in ("failed", "quarantined"):
             failed_in = open_seg["stage"] if open_seg is not None else None
             close(ts)
-        elif kind in ("done", "released", "cancelled"):
+        elif kind in ("done", "released", "handed-off", "cancelled"):
             close(ts)
         elif kind == "stale-released":
             close(said_last if said_last is not None else ts)

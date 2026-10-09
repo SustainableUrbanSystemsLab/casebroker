@@ -89,7 +89,12 @@ CREATE TABLE IF NOT EXISTS cases (
     -- reported, including every case from before it existed.
     telemetry      TEXT,
     created_at     INTEGER NOT NULL,
-    updated_at     INTEGER NOT NULL
+    updated_at     INTEGER NOT NULL,
+    -- How many cells this site's mesh had, from the node's `mesh` telemetry
+    -- (total_cells). Unlike `telemetry` it is NOT cleared when a new attempt
+    -- starts over: it describes the site, and is what lets lease() keep a case
+    -- from a node too small to hold its mesh (the memory gate).
+    mesh_cells     INTEGER
 );
 
 -- The claim query filters on state and orders by (priority, case_id); this index
@@ -165,7 +170,13 @@ CREATE TABLE IF NOT EXISTS workers (
     build_changed_at INTEGER,
     build_flips      INTEGER,
     id_conflict      TEXT,
-    id_conflict_at   INTEGER
+    id_conflict_at   INTEGER,
+    -- What the node says it can do (JSON list: continue_from_broker, handoff,
+    -- heartbeat_stage, ...) and the machine it runs on: the cores it gives a case
+    -- and the memory it has. Declared with every lease; NULL = never said.
+    features         TEXT,
+    cpus             INTEGER,
+    mem_gb           REAL
 );
 -- What a SCHEDULER holds that has not reached the broker yet. A worker queued in
 -- SLURM has never contacted this service -- it does not exist here until its
@@ -202,7 +213,11 @@ CREATE TABLE IF NOT EXISTS events (
     case_id   TEXT,
     worker_id TEXT,
     event     TEXT NOT NULL,
-    detail    TEXT
+    detail    TEXT,
+    -- The stage a progress line belongs to, as the node that wrote it said
+    -- (heartbeat `stage`); NULL when it did not, and stages.stage_of(detail)
+    -- reads it off the text instead.
+    stage     TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_events_case ON events(case_id, id);
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events(event, ts);
@@ -488,7 +503,12 @@ CREATE TABLE IF NOT EXISTS cases (
     -- reported, including every case from before it existed.
     telemetry      TEXT,
     created_at     INTEGER NOT NULL,
-    updated_at     INTEGER NOT NULL
+    updated_at     INTEGER NOT NULL,
+    -- How many cells this site's mesh had, from the node's `mesh` telemetry
+    -- (total_cells). Unlike `telemetry` it is NOT cleared when a new attempt
+    -- starts over: it describes the site, and is what lets lease() keep a case
+    -- from a node too small to hold its mesh (the memory gate).
+    mesh_cells     BIGINT
 );
 
 CREATE INDEX IF NOT EXISTS idx_cases_claim ON cases(state, priority, case_id);
@@ -562,7 +582,13 @@ CREATE TABLE IF NOT EXISTS workers (
     build_changed_at INTEGER,
     build_flips      INTEGER,
     id_conflict      TEXT,
-    id_conflict_at   INTEGER
+    id_conflict_at   INTEGER,
+    -- What the node says it can do (JSON list: continue_from_broker, handoff,
+    -- heartbeat_stage, ...) and the machine it runs on: the cores it gives a case
+    -- and the memory it has. Declared with every lease; NULL = never said.
+    features         TEXT,
+    cpus             INTEGER,
+    mem_gb           REAL
 );
 -- What a SCHEDULER holds that has not reached the broker yet. A worker queued in
 -- SLURM has never contacted this service -- it does not exist here until its
@@ -597,7 +623,11 @@ CREATE TABLE IF NOT EXISTS events (
     case_id   TEXT,
     worker_id TEXT,
     event     TEXT NOT NULL,
-    detail    TEXT
+    detail    TEXT,
+    -- The stage a progress line belongs to, as the node that wrote it said
+    -- (heartbeat `stage`); NULL when it did not, and stages.stage_of(detail)
+    -- reads it off the text instead.
+    stage     TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_events_case ON events(case_id, id);
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events(event, ts);
@@ -1483,10 +1513,16 @@ def _now() -> int:
     return int(time.time())
 
 
-def _event(conn, case_id, worker_id, event, detail=None, now=None) -> None:
+def _event(conn, case_id, worker_id, event, detail=None, now=None, stage=None) -> None:
+    if stage is None:
+        conn.execute(
+            "INSERT INTO events(ts, case_id, worker_id, event, detail) VALUES (?,?,?,?,?)",
+            (now or _now(), case_id, worker_id, event, detail),
+        )
+        return
     conn.execute(
-        "INSERT INTO events(ts, case_id, worker_id, event, detail) VALUES (?,?,?,?,?)",
-        (now or _now(), case_id, worker_id, event, detail),
+        "INSERT INTO events(ts, case_id, worker_id, event, detail, stage) VALUES (?,?,?,?,?,?)",
+        (now or _now(), case_id, worker_id, event, detail, stage),
     )
 
 
@@ -1619,6 +1655,33 @@ _RECENTLY_FAILED_HERE_SQL = (
     " AND (f.worker_id = ? OR f.worker_id IN"
     "      (SELECT w.worker_id FROM workers w WHERE w.host = ?)))")
 
+# A case a machine HANDED OFF (release with handoff=true: it solved its
+# --max-directions or --chunk-hours share) is for another machine first, by the
+# same host rule as a failure and for a much shorter time: nothing is wrong with
+# the case or the machine, the point is only that the node letting go does not
+# take it straight back on its next poll. Past the cooldown, a fleet with nobody
+# else free lets the same node continue -- from its own scratch, as a resume.
+HANDOFF_COOLDOWN_SECONDS = int(os.environ.get("CASEBROKER_HANDOFF_COOLDOWN", "900"))
+_RECENTLY_HANDED_OFF_HERE_SQL = (
+    " AND NOT EXISTS (SELECT 1 FROM events h WHERE h.case_id = cases.case_id"
+    " AND h.event = 'handed-off' AND h.ts > ?"
+    " AND (h.worker_id = ? OR h.worker_id IN"
+    "      (SELECT w.worker_id FROM workers w WHERE w.host = ?)))")
+
+# Memory a node needs per million cells of a case's mesh, for the lease's memory
+# gate. 2 GB is the conservative end for snappyHexMesh + a steady RANS solve on
+# OpenFOAM 12 (the solve alone is ~1 GB/Mcell); a node that is turned away for a
+# case it could have held costs a little queue order, one that takes a case it
+# cannot hold costs an attempt and an OOM-killed machine.
+GB_PER_MCELL = float(os.environ.get("CASEBROKER_GB_PER_MCELL", "2.0"))
+
+# Which of a pending case's meshes the BROKER holds: the case another node
+# started, which a node that fetches from the part store can continue.
+_MESHED_AT_BROKER_SQL = (
+    "EXISTS (SELECT 1 FROM case_parts p JOIN case_blobs b"
+    " ON b.case_id = p.case_id AND b.part = 'mesh' AND b.sha256 = p.sha256"
+    " WHERE p.case_id = cases.case_id AND p.part = 'mesh')")
+
 
 @_locked
 def lease(conn, worker_id: str, count: int = 1,
@@ -1630,8 +1693,21 @@ def lease(conn, worker_id: str, count: int = 1,
           platform: str | None = None,
           recipes: list[str] | None = None,
           can_continue: bool | None = None,
-          can_continue_from_broker: bool | None = None) -> list[Lease]:
+          can_continue_from_broker: bool | None = None,
+          features: list[str] | None = None,
+          cpus: int | None = None,
+          mem_gb: float | None = None) -> list[Lease]:
     """Atomically claim up to ``count`` cases.
+
+    ``features``, ``cpus`` and ``mem_gb`` (protocol 2) are what the node can do and
+    the machine it runs on; all are kept on the worker row. ``continue_from_broker``
+    in ``features`` means ``can_continue_from_broker``. The machine decides three
+    things here (see `_hardware_sql`): a node that continues from the broker takes
+    a case another node started before a fresh one at the same priority -- started
+    work first, so a handed-off case does not wait behind the whole queue; a node
+    is not handed a case whose known mesh needs more memory than it declared; and,
+    when the campaign sets `small_node_cpus`, a node with fewer cores than that is
+    handed only cases already meshed at the broker.
 
     ``recipes`` are the exact recipes this worker can produce. When it declares
     any, it is handed only those: a recipe is the contract a training set is
@@ -1688,15 +1764,18 @@ def lease(conn, worker_id: str, count: int = 1,
     # means it can. A node that says neither is from before parts: handed anything, as
     # before (it meshes afresh). Its own case a node may always resume -- the mesh is on
     # its disk, and resume_case_ids is claimed above this filter.
+    if can_continue_from_broker is None and features and "continue_from_broker" in features:
+        can_continue_from_broker = True
     continue_sql = ""
     if can_continue is not None or can_continue_from_broker is not None:
         continue_sql = (" AND (NOT EXISTS (SELECT 1 FROM case_parts p WHERE p.case_id = cases.case_id"
                         " AND p.part = 'mesh')")
         if can_continue_from_broker:
-            continue_sql += (" OR EXISTS (SELECT 1 FROM case_parts p JOIN case_blobs b"
-                             " ON b.case_id = p.case_id AND b.part = 'mesh' AND b.sha256 = p.sha256"
-                             " WHERE p.case_id = cases.case_id AND p.part = 'mesh')")
+            continue_sql += " OR " + _MESHED_AT_BROKER_SQL
         continue_sql += ")"
+    # Not a case this host handed off within HANDOFF_COOLDOWN_SECONDS.
+    handoff_params = [now - HANDOFF_COOLDOWN_SECONDS, worker_id, host]
+    hw_sql, hw_params, order_sql = _hardware_sql(conn, can_continue_from_broker, cpus, mem_gb)
 
     def claim(rows, resumed: bool) -> None:
         for row in rows:
@@ -1786,8 +1865,9 @@ def lease(conn, worker_id: str, count: int = 1,
                 "SELECT case_id, spec, attempts, max_attempts, state, lease_worker"
                 " FROM cases WHERE case_id IN (" + placeholders + ")"
                 " AND " + own_only + recipe_sql + _RECENTLY_FAILED_HERE_SQL +
+                _RECENTLY_HANDED_OFF_HERE_SQL +
                 " ORDER BY case_id ASC" + lock_clause,
-                [*ids, *own_params, *recipe_params, *cooldown_params],
+                [*ids, *own_params, *recipe_params, *cooldown_params, *handoff_params],
             ).fetchall()
             claim(rows, resumed=True)
 
@@ -1801,6 +1881,8 @@ def lease(conn, worker_id: str, count: int = 1,
                 params.extend(splits)
             params.extend(recipe_params)
             params.extend(cooldown_params)
+            params.extend(handoff_params)
+            params.extend(hw_params)
             params.append(remaining)
             rows = conn.execute(
                 "SELECT case_id, spec, attempts, max_attempts, state, lease_worker FROM cases"
@@ -1814,11 +1896,12 @@ def lease(conn, worker_id: str, count: int = 1,
                 "            OR (leased_at IS NOT NULL AND leased_at < ?"
                 "                AND " + _LAST_PROGRESS_SQL + " < ?))))"
                 + split_sql + recipe_sql + continue_sql + _RECENTLY_FAILED_HERE_SQL +
+                _RECENTLY_HANDED_OFF_HERE_SQL + hw_sql +
                 # Every worker targets the same "lowest" rows. That is contention by
                 # design, not by accident: under SKIP LOCKED a locked row is simply
                 # skipped, and case_id is a hash so the tiebreak is effectively random
                 # -- deterministic ordering with no hot spot.
-                " ORDER BY priority ASC, case_id ASC LIMIT ?" + lock_clause,
+                " ORDER BY priority ASC, " + order_sql + "case_id ASC LIMIT ?" + lock_clause,
                 params,
             ).fetchall()
             claim(rows, resumed=False)
@@ -1831,14 +1914,16 @@ def lease(conn, worker_id: str, count: int = 1,
         # is updated, which is the whole point of recording it.
         conn.execute(
             "INSERT INTO workers(worker_id, host, cluster, first_seen, last_seen,"
-            " build, version, platform, recipes)"
-            " VALUES (?,?,?,?,?,?,?,?,?)"
+            " build, version, platform, recipes, features, cpus, mem_gb)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)"
             " ON CONFLICT(worker_id) DO UPDATE SET"
             " last_seen=excluded.last_seen, host=excluded.host, cluster=excluded.cluster,"
             " build=excluded.build, version=excluded.version,"
-            " platform=excluded.platform, recipes=excluded.recipes",
+            " platform=excluded.platform, recipes=excluded.recipes,"
+            " features=excluded.features, cpus=excluded.cpus, mem_gb=excluded.mem_gb",
             (worker_id, host, cluster, now, now, build, version, platform,
-             json.dumps(list(recipes)) if recipes else None))
+             json.dumps(list(recipes)) if recipes else None,
+             json.dumps(sorted(set(features))) if features else None, cpus, mem_gb))
         if known is not None and (known["build"] or None) != (build or None):
             _note_build_change(conn, worker_id, known, build, now)
         conn.execute("COMMIT")
@@ -1846,6 +1931,46 @@ def lease(conn, worker_id: str, count: int = 1,
         conn.execute("ROLLBACK")
         raise
     return out
+
+
+def _small_node_cpus(conn) -> int:
+    """The campaign's `small_node_cpus` (0 = off): below it a node does not mesh."""
+    try:
+        return max(0, int(_setting(conn, "small_node_cpus") or 0))
+    except ValueError:
+        return 0
+
+
+def _hardware_sql(conn, can_continue_from_broker: bool | None, cpus: int | None,
+                  mem_gb: float | None) -> tuple[str, list[Any], str]:
+    """The machine's part of lease()'s fresh-case query: extra WHERE clauses, their
+    parameters, and an ORDER BY term to put before the case_id tiebreak.
+
+    Started work first. A case a node handed off (or a node that died mid-case left)
+    holds a mesh and some finished directions at the broker. Ordered only by
+    priority and case_id it waits behind every fresh case of its priority -- 5,000
+    of them on this campaign -- with ~8 GB of parts sitting in the store and a site
+    half answered. So a node that can continue from the broker takes such a case
+    first.
+
+    The memory gate needs a cell count, which a site has only once some node meshed
+    it (cases.mesh_cells, from `mesh` telemetry): a fresh site passes, and the gate
+    catches the retry that would OOM the same way on the next small machine.
+
+    `small_node_cpus` is the operator's: meshing is the heaviest single step and a
+    4-core box spends most of a day on snappyHexMesh, so below that many cores a
+    node is handed only cases already meshed at the broker. Off unless set.
+    """
+    where, params = "", []
+    if mem_gb and mem_gb > 0 and GB_PER_MCELL > 0:
+        where += " AND (cases.mesh_cells IS NULL OR cases.mesh_cells <= ?)"
+        params.append(int(mem_gb / GB_PER_MCELL * 1e6))
+    small = _small_node_cpus(conn)
+    if small and cpus is not None and cpus < small:
+        where += " AND " + _MESHED_AT_BROKER_SQL
+    order = ("CASE WHEN " + _MESHED_AT_BROKER_SQL + " THEN 0 ELSE 1 END ASC, "
+             if can_continue_from_broker else "")
+    return where, params, order
 
 
 def _count_for_build(conn, build: str | None, worker_id: str | None, now: int,
@@ -2119,6 +2244,7 @@ def list_releases(conn, now: int | None = None) -> dict[str, Any]:
         "require_build": value("require_build") == "1",
         "blocked_builds": json.loads(value("blocked_builds") or "[]"),
         "undeclared_recipes": _undeclared_recipes(conn),
+        "small_node_cpus": _small_node_cpus(conn),
         "release_repo": value("release_repo"),
         "stuck_after": STUCK_AFTER,
         "queue_recipes": queue,
@@ -2391,9 +2517,15 @@ def _not_theirs(row, worker_ok: Callable[[str | None], bool] | None) -> bool:
 @_locked
 def heartbeat(conn, lease_id: str, lease_seconds: int = 3600,
               detail: str | None = None, now: int | None = None,
-              worker_ok: Callable[[str | None], bool] | None = None) -> bool:
+              worker_ok: Callable[[str | None], bool] | None = None,
+              stage: str | None = None) -> bool:
     """Extend a lease. Returns False when the lease is gone -- the worker must
-    then STOP working that case, because someone else may already own it."""
+    then STOP working that case, because someone else may already own it.
+
+    ``stage`` is the stage the node says ``detail`` belongs to (protocol 2): kept
+    with the progress event, and preferred by stages.from_events over reading it
+    off the text -- the node writes the line, so it knows; the broker can only
+    guess from a grammar three codebases had to keep in step."""
     now = now or _now()
     row = _by_lease(conn, lease_id)
     if row is None or _not_theirs(row, worker_ok):
@@ -2455,7 +2587,8 @@ def heartbeat(conn, lease_id: str, lease_seconds: int = 3600,
             "                    AND event IN ('leased', 'resumed')), 0)"
             " ORDER BY id DESC LIMIT 1", (row["case_id"], row["case_id"])).fetchone()
         if previous is None or previous["detail"] != detail:
-            _event(conn, row["case_id"], row["lease_worker"], "progress", detail, now)
+            _event(conn, row["case_id"], row["lease_worker"], "progress", detail, now,
+                   stage=stage)
     return True
 
 
@@ -2681,12 +2814,20 @@ def _drain_on_burst(conn, worker_id: str | None, error: str, now: int) -> bool:
 @_locked
 def release(conn, lease_id: str, reason: str = "released",
             now: int | None = None,
-            worker_ok: Callable[[str | None], bool] | None = None) -> bool:
+            worker_ok: Callable[[str | None], bool] | None = None,
+            handoff: bool = False) -> bool:
     """Hand a case back untouched, without burning a retry.
 
     This is the preemption path: a SIGTERM'd worker calls it and the case becomes
     available immediately instead of sitting unavailable until its TTL runs out.
     The attempt is refunded because nothing about the case was wrong.
+
+    ``handoff`` is a node that solved its share of the case on purpose -- its
+    `--max-directions` or `--chunk-hours` -- and passes the rest on (protocol 2,
+    "sequential chunks"). Recorded as `handed-off`, not `released`, because
+    lease() then keeps the case from every worker on that host for
+    HANDOFF_COOLDOWN_SECONDS: otherwise the node that just let go asks again at
+    once and is handed its own case straight back, which is no handoff at all.
     """
     now = now or _now()
     conn.execute("BEGIN IMMEDIATE")
@@ -2704,7 +2845,8 @@ def release(conn, lease_id: str, reason: str = "released",
             " lease_expires=NULL, leased_at=NULL,"
             " attempts=CASE WHEN attempts > 0 THEN attempts - 1 ELSE 0 END, updated_at=?"
             " WHERE case_id=?", (now, row["case_id"]))
-        _event(conn, row["case_id"], row["lease_worker"], "released", reason, now)
+        _event(conn, row["case_id"], row["lease_worker"],
+               "handed-off" if handoff else "released", reason, now)
         conn.execute("COMMIT")
     except Exception:
         conn.execute("ROLLBACK")
@@ -3937,6 +4079,9 @@ def post_telemetry(conn, lease_id: str, case_id: str, kind: str,
                      (_telemetry_json(current), case_id, lease_id))
         if kind == "solve":
             _note_solve_report(conn, case_id, cleaned, row["lease_worker"], now)
+        cells = cleaned.get("total_cells") if kind == "mesh" else None
+        if isinstance(cells, int) and not isinstance(cells, bool) and 0 < cells < 1 << 40:
+            conn.execute("UPDATE cases SET mesh_cells=? WHERE case_id=?", (cells, case_id))
         conn.execute("COMMIT")
     except Exception:
         conn.execute("ROLLBACK")
@@ -4566,6 +4711,10 @@ def status(conn, now: int | None = None, recipe: str | None = None) -> dict[str,
     for w in workers:
         w["current_eta"] = _solve_eta(conn, w["current_case"], w["current_leased_at"]) \
             if w.get("current_case") else None
+        try:
+            w["features"] = json.loads(w["features"]) if w.get("features") else None
+        except (TypeError, ValueError):
+            w["features"] = None
     return {
         "fleet": fleet(conn, now),
         "recipe": recipe,
@@ -4704,7 +4853,7 @@ _CASE_COLS_WITHOUT_SPEC = (
     " cases.priority, cases.state, cases.attempts, cases.max_attempts,"
     " cases.lease_worker, cases.leased_at, cases.lease_expires,"
     " cases.result_uri, cases.result_sha256, cases.result_bytes, cases.metrics,"
-    " cases.last_error, cases.created_at, cases.updated_at"
+    " cases.last_error, cases.created_at, cases.updated_at, cases.mesh_cells"
 )
 
 _CASE_COLS = (
@@ -4825,7 +4974,7 @@ def get_case(conn, case_id: str) -> dict[str, Any] | None:
     # of cases carries the last line only.
     from . import stages as _stages
     trail = [dict(e) for e in conn.execute(
-        "SELECT ts, event, detail FROM events WHERE case_id = ? ORDER BY id", (case_id,)).fetchall()]
+        "SELECT ts, event, detail, stage FROM events WHERE case_id = ? ORDER BY id", (case_id,)).fetchall()]
     out.update(_stages.from_events(trail, _now()))
     # Which case this one was moved to another recipe as, or from (respec_cases):
     # a parked case says where its site went, and the new one where it came from.

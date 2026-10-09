@@ -8,6 +8,27 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.37.0] - 2026-10-09
+
+### Added
+- **Protocol 2: a node and the broker say what they can do, and the machine counts.**
+  Additive; a node that sends none of it is leased as before (docs/protocol.md, "Protocol 2").
+  - **Capabilities.** `/healthz` carries `protocol: 2` and `features`. A node used to decide
+    "this broker predates telemetry" from one 404 and stop for the rest of its process -- and a
+    proxy answers 404 too, for a moment during a deploy. With the list it knows. The lease takes
+    the node's own `features`, shown on the fleet table.
+  - **Hardware-aware leasing.** The lease takes `cpus` and `mem_gb`. A node that can continue
+    from the broker takes a case another node started before a fresh one (started work first);
+    a case whose site was meshed (`cases.mesh_cells`, kept across attempts) is not handed to a
+    node too small to hold it (`CASEBROKER_GB_PER_MCELL`, default 2.0); and the release policy
+    `small_node_cpus` keeps fresh meshing off machines with fewer cores than that.
+  - **The stage, from the node.** A heartbeat may say which stage its line belongs to; the case's
+    stages are built from that rather than from a grammar three codebases had to keep in step.
+  - **Sequential chunks.** `POST /v1/release {handoff: true}`: a node that solved its share
+    (`--max-directions`, `--chunk-hours`) passes the case on. Refunded, recorded as `handed-off`,
+    and kept from that host for `CASEBROKER_HANDOFF_COOLDOWN` (900 s) so another machine
+    continues it from the broker's mesh.
+
 ## [0.36.3] - 2026-10-09
 
 ### Security

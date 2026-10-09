@@ -135,17 +135,17 @@ than silent. Creating the first account closes it.
 | `GET /v1/storage` | How much space the database uses: the total, per table (rows, size, index share) largest first, bytes per case, and the plan's limit when known -- `CASEBROKER_DB_QUOTA_MB`, or for a Supabase DSN an assumed 500 MB free plan, labelled as the assumption it is. What the dashboard's header **storage** button shows |
 | `GET /v1/dataset` | The campaign as a dataset: `counts` by state, split, LCZ, recipe and country (the 40 largest listed by name, ties broken alphabetically, then `unknown` for sites no country claims and `other` for the rest), and per metric its distribution over every case and per LCZ -- see [Telemetry and the dataset](#telemetry-and-the-dataset). Computed from every case, read a page at a time, and cached 60 s; while one request recomputes it, others are served the previous answer rather than waiting. `503` with `Retry-After` when the computation failed and there is no earlier answer to serve (a failure is remembered for the 60 s too). **Read scope** |
 | `GET /v1/errors` | Every case that carries an error, in one answer: `last_error` in full, the site's coordinates, and each failed attempt with the worker, host and cluster it failed on. Quarantined first, then most recent; `limit` (default 2000, max 5000) and `truncated` says when it bit. What the dashboard's **Copy all errors** button turns into text for a bug report |
-| `POST /v1/lease` | Claim up to N cases. Empty list = drained, not an error. Workers report their `host`/`cluster` here (optional) so "what machine produced this" stays answerable later. A node says `can_continue_from_broker` when it can fetch a mesh from the broker's part store; only such a node is handed a case another node started, and only while the broker holds its mesh. `syncthing_id` and `can_continue: true` from nodes before 2026-10-06 are ignored |
+| `POST /v1/lease` | Claim up to N cases. Empty list = drained, not an error. Workers report their `host`/`cluster` here (optional) so "what machine produced this" stays answerable later. A node says `can_continue_from_broker` when it can fetch a mesh from the broker's part store; only such a node is handed a case another node started, and only while the broker holds its mesh. `syncthing_id` and `can_continue: true` from nodes before 2026-10-06 are ignored. Protocol 2 adds `features`, `cpus` and `mem_gb` -- see [Protocol 2](#protocol-2-capabilities-machines-stages-handoffs) |
 | `GET /v1/node/release` | What this node should be running: the fleet's (or its canary) target, the file and sha256 for its platform, when to switch, whether it is draining. Asked before every lease and at every heartbeat; carries `build`, `platform`, `state` (what it is doing about the target) and `failed_build` (it tried and rolled back). See [releases.md](releases.md) |
 | `POST /v1/heartbeat` | Extend the lease. **409 means stop working on that case** -- also for a per-machine credential naming a lease another machine holds (as for complete, fail, release, telemetry, parts and fields). Refused once the lease is older than `CASEBROKER_MAX_LEASE_AGE` (7 days), which releases the case: a heartbeat proves the worker is alive, not that it is progressing |
 | `POST /v1/complete` | Report a result pointer + metrics. Send `case_id` alongside `lease_id`: it scopes the retry-safety check to this case, so a runner whose `result_uri` is not unique per case cannot have one case's retry confirmed by another's row. Optional, so older workers keep working |
 | `POST /v1/fail` | Report a failure; `retryable=false` quarantines immediately. A retryable failure goes back to `pending`. For `CASEBROKER_FAIL_COOLDOWN` (12 h), no worker on the failing host is handed it again, fresh or as a resume, so the next attempt runs on another machine |
-| `POST /v1/release` | Graceful preemption — requeues and **refunds the attempt** |
+| `POST /v1/release` | Graceful preemption — requeues and **refunds the attempt**. `handoff: true` is a node passing a case on after its share (protocol 2): the same, plus the case goes to another machine first |
 | `POST /v1/telemetry` | `{lease_id, case_id, kind, data}`: the node's latest structured report of one `kind` for the case it holds, replacing that kind only. `200` stored; **`409` means stop sending telemetry for this case** (the lease is not current, or not this case's, or -- for a per-machine credential -- not held under that credential's name, the rule `/v1/lease` applies) and is never retried; `413` for `data` over 32 KiB or a 17th kind on one case, the size measured as stored: compact JSON with non-ASCII escaped as `\uXXXX`; `422` for a `kind` outside `^[a-z][a-z0-9_]{0,31}$`, or `data` nesting objects/arrays more than 16 levels deep (`data` itself is level 1). One kind is kept differently: `residuals` is a series per wind direction, held in its own table and not counted among the 16 ("The residual curves", below); `422` for it also means `data` is not a residual series, `413` a 65th direction. A NaN or infinity is stored as `null`, a lone UTF-16 surrogate as U+FFFD. A broker from before this route answers `404`, and the node then stops sending telemetry for the rest of its process -- so this route never answers 404. **Write auth** |
 | `GET /v1/cases/{case_id}/residuals` | The residual curves of a CFD case: `directions` (which wind directions have one, each with `source`, `n` points, the last `iteration`, `end_time`, `reported_at`, `worker`) and `series` of one of them -- `?direction=` names it, else the one reported most recently. `200` with an empty list for a case that has none, `404` only for a case that does not exist. **Read auth** |
 | `DELETE /v1/cases` | Purge a superseded campaign, with its events and footprints. **Admin session** (a write bearer token also passes, as it always has; an `operator` session does not). `dry_run` defaults to **true**, so a half-remembered curl reports what it would have deleted instead of deleting it; `expect` is the real interlock — state the row count you believe you are removing, and a mismatch refuses |
 | `GET /v1/status` | Counts by state and split, expired leases, 24 h throughput, ETA |
-| `GET /healthz` | Liveness, plus the running `version`, auth posture (`token` / `accounts` / `OPEN`), per-scope token counts and redacted DB target. **Unauthenticated** — see Deploying |
+| `GET /healthz` | Liveness, plus `protocol` and `features` (what a node may count on; see Protocol 2), the running `version`, auth posture (`token` / `accounts` / `OPEN`), per-scope token counts and redacted DB target. **Unauthenticated** — see Deploying |
 | `GET /v1/whoami` | What the presented credential can do (`write` / `read` / `none`) **and which kind it is** — a session, a per-machine token, or a shared env token. **Unauthenticated** — it answers *about* a credential rather than gating on one |
 | `GET /v1/share-token` | The read-only token, so the dashboard can mint a shareable link. **Write auth** — not an escalation, since a write token already passes every read gate |
 | `POST /v1/pair/start` | A machine asks to join: `{name, token_hash, host?, platform?}` → `{user_code, verification_url, expires_in, interval}`. **Unauthenticated** (it has nothing to authenticate with yet), so throttled per address and the queue is bounded. The node generates its own token and sends only the SHA-256 — the raw credential never reaches the broker |
@@ -352,6 +352,52 @@ parts on a lease) carry `at_broker`, so a node continuing a case knows it can fe
 mesh from the broker. When the broker holds the archive and every reported part, it writes
 the case's archive receipt at location `broker` -- the same `stored` the master's scan
 gives, so `/v1/custody` counts either.
+
+## Protocol 2: capabilities, machines, stages, handoffs
+
+Additive, like everything worker-facing short of a MAJOR: a node that sends none of
+it is leased exactly as before, and a node reading an older broker finds none of it.
+
+**Capabilities.** `GET /healthz` carries `protocol: 2` and `features`, sorted:
+`field_backfill`, `fields`, `handoff`, `hardware`, `heartbeat_stage`,
+`machine_scoped_leases`, `node_release`, `parts`, `parts_wanted`, `residuals`,
+`telemetry`, and `part_store` where a store is configured. A node reads it at start
+and after every outage. A feature listed is one whose 404 is a hiccup (a proxy during
+a deploy), not "a broker from before"; a feature missing is one not to send. Without
+the list (an older broker) the node keeps its 404 heuristics. A node says what IT can
+do with every lease, `features` (`continue_from_broker`, `handoff`, `heartbeat_stage`,
+`residuals`, `telemetry`, `parts_upload`, `field_backfill`), kept on the worker row;
+`continue_from_broker` there counts as `can_continue_from_broker: true`.
+
+**The machine.** The lease's `cpus` (the cores the node gives a case) and `mem_gb`
+(the memory it has) are kept on the worker row -- the fleet table shows them under
+the host -- and steer what it is handed:
+
+- *Started work first.* For a node that can continue from the broker, a pending case
+  whose mesh the broker holds sorts ahead of fresh ones of its priority, so a
+  handed-off case does not wait behind the whole queue.
+- *Memory gate.* A case whose site has been meshed has `mesh_cells` (from `mesh`
+  telemetry `total_cells`, kept across attempts). It is not handed to a node whose
+  `mem_gb` is below `mesh_cells / 1e6 * CASEBROKER_GB_PER_MCELL` (default 2.0).
+- *Small nodes do not mesh,* when the campaign says so: release policy
+  `small_node_cpus` (`PUT /v1/releases/policy`, 0 = off). Below it, a node is handed
+  only cases already meshed at the broker, and its own resumes.
+
+**The stage.** A heartbeat may carry `stage` (`geometry`, `build-case`, `resume`,
+`mesh`, `solve`, `gate`, `scene`, `trace`, `surface`, `archive`): the stage its
+`detail` belongs to, in the node's words. It is kept with the progress line and the
+case's stages are built from it; without one (or with a name this broker does not
+know) the line is read as before.
+
+**Handing a case on (sequential chunks).** A node started with `--max-directions N`
+or `--chunk-hours H` solves its share of a case, ships every direction as it goes,
+and gives the case back with `POST /v1/release {handoff: true}`: refunded like any
+release, recorded as `handed-off`, and not handed to any worker on that host for
+`CASEBROKER_HANDOFF_COOLDOWN` (900 s), fresh or as a resume, so another machine
+continues it from the broker's mesh. Past the cooldown, with nobody else free, the
+same node continues from its own scratch. A small machine contributes directions
+without holding an 800-core-hour case for a week; an ICE job with `--chunk-hours 7`
+hands its case on cleanly instead of losing the direction in flight to the wall.
 
 ## Three design decisions worth knowing
 

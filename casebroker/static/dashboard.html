@@ -4635,6 +4635,18 @@
     });
   }
 
+  /// The machine a node runs on, as it declared with its lease (protocol 2): the
+  /// cores it gives a case and its memory, and on hover what it says it can do.
+  /// Nothing for a worker that declared neither -- an older node.
+  function machineLine(w) {
+    const bits = [];
+    if (w.cpus) bits.push(`${w.cpus} cpu`);
+    if (w.mem_gb) bits.push(`${Math.round(w.mem_gb)} GB`);
+    if (!bits.length) return "";
+    const can = (w.features || []).length ? `can: ${w.features.join(", ")}` : "declared no features";
+    return `<div class="mono" style="font-size:10.5px;color:var(--text-muted);margin-top:2px;white-space:nowrap" title="${esc(can)}">${esc(bits.join(" · "))}</div>`;
+  }
+
   function renderWorkersHead() {
     $("workersHead").innerHTML = "<tr>" + WORKER_COLUMNS
       .map(([label, key]) => sortableTh(label, key, workerSort.key, workerSort.dir, "workers", ""))
@@ -4667,7 +4679,7 @@
                 </button>
               </div>
             </td>
-            <td>${w.host ? `<span class="chip mono">${esc(w.host)}</span>` : "—"}</td>
+            <td>${w.host ? `<span class="chip mono">${esc(w.host)}</span>` : "—"}${machineLine(w)}</td>
             <td>${w.cluster ? `<span class="chip">${esc(w.cluster)}</span>` : "—"}</td>
             <td>${buildCell(w)}</td>
             <td>
