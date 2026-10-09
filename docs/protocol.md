@@ -67,7 +67,10 @@ Step by step:
    metrics, wall time and which machine produced it. Among the
    metrics, `height_source` names the building source the mesh was built from
    (`gba-lod1`, or `overture`), read from the geometry report beside the STLs —
-   the case inspector draws a finished case from it.
+   the case inspector draws a finished case from it. E3D nodes sent it from
+   Eddy3D dev 2026-10-09 on; for a case finished before that, `builder`
+   (`eddy3d-native`, `eddy3d-thermal`) answers instead, since the node's site
+   builder meshes GBA LoD1 only.
 6. **Repeat.**
 
 Defaults are the client's: `lease_seconds=900`, `heartbeat_seconds=300`.
@@ -161,7 +164,7 @@ than silent. Creating the first account closes it.
 | `POST /v1/cases/land-audit` | Find cases already in the campaign whose coordinates are not on land and quarantine them. `dry_run=true` by default — it reports and changes nothing. **Write auth** |
 | `POST /v1/cases/respec` | **Move cases to another recipe**: `recipe`, plus `case_id` (repeatable) and/or `error_contains` (the case's last failure, as for reopen), `reason`. Each site is admitted again under `recipe` as a new case, the one `POST /v1/cases` would make, and the old case is parked in quarantine with a pointer to it. Only nodes declaring `recipe` are handed the new case, and its new id means no node can resume the old recipe's mesh as it. A leased case is skipped (cancel it first), and so is a done one; each skip says why in `skipped`. A recipe no worker has declared and no case carries is `422`, since it's a typo. `known_to_builds` names the builds that declare it. `dry_run=true` and `limit=50` by default; the limit bounds how many are moved. **Write auth** |
 | `POST /v1/fleet` | Report what a scheduler holds (`cluster`, `queued`, `running`). The broker cannot see SLURM; `casebroker fleet` pushes this from a login node |
-| `GET /v1/cases/{case_id}/footprints` | Everything a case is meshed from, cached: building footprints with predicted heights (GeoJSON), plus `terrain` (GEDTM30 relief grid) and `canopy` (Meta/WRI tree heights) over the mesh domain. Same sources and bbox the runner meshes, so the picture is the geometry. The buildings come from the source the case's mesh was built from — its reported `height_source`, Overture if it finished before the switch to GBA, GBA otherwise — carried back as `mesh_source`, with `mesh_source_basis` saying how that is known. `source` is what actually answered, with `fallback_from` when the mesh's source could not be drawn; a cached row from a different source is queried again, and concurrent requests for one case share one query |
+| `GET /v1/cases/{case_id}/footprints` | Everything a case is meshed from, cached: building footprints with predicted heights (GeoJSON), plus `terrain` (GEDTM30 relief grid) and `canopy` (Meta/WRI tree heights) over the mesh domain. Same sources and bbox the runner meshes, so the picture is the geometry. The buildings come from the source the case's mesh was built from — its reported `height_source`, GBA for a case an E3D node built (`builder: eddy3d-native` or `eddy3d-thermal`, whose site builder meshes GBA LoD1 only), Overture if it finished before the switch to GBA, GBA otherwise — carried back as `mesh_source`, with `mesh_source_basis` saying how that is known (`reported`, `native_builder`, `before_gba`, `unreported`, `not_done`, `unrecognized`). `source` is what actually answered, with `fallback_from` when the mesh's source could not be drawn; a cached row from a different source is queried again, and concurrent requests for one case share one query |
 
 State machine:
 

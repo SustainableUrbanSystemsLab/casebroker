@@ -149,6 +149,10 @@ assert digest == card["files"]["fields.zarr"]["sha256"]
 Heights are GlobalBuildingAtlas predictions, and GBA is **CC BY-NC 4.0**
 ([AGENTS.md](../AGENTS.md), "Open problems"). Sites meshed before the switch to
 GBA were built from Overture. `height_source` says which source a case was
-built from, and a null means the case finished before the runner reported it.
+built from: what its run reported, or `gba-lod1` for a case an E3D node built
+(`builder: eddy3d-native` or `eddy3d-thermal` in its metrics; the node's site
+builder meshes GBA LoD1 and nothing else, though its runs only began to say so
+on 2026-10-09). A null
+means a run that said neither.
 [DOMAIN.md](../DOMAIN.md), "Which buildings, for this case", explains why the
 date alone does not settle that.

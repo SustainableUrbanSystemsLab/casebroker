@@ -8,6 +8,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.42.4] - 2026-10-09
+
+### Fixed
+- **A case an E3D node built says where its buildings came from.** Site Geometry read "(GlobalBuildingAtlas,
+  assumed: this case's run did not say)" on every such case, and the dataset export's `height_source` was
+  null for all of them: the protocol has the node name its building source in its completion metrics
+  (`height_source`), and E3D nodes never did. Their site builder (`builder: eddy3d-native`, or `eddy3d-thermal` for a
+  surface-temperature case, in the same metrics; since 2026-09-17) meshes GlobalBuildingAtlas LoD1 and nothing else, so the broker now takes the
+  builder as the answer (`mesh_source_basis: native_builder`): the heading says "the source this case was
+  meshed from", and the export writes `gba-lod1`. A run that reports `height_source` still outranks it, and
+  Eddy3D nodes report it themselves from dev 2026-10-09 on.
+
 ## [0.42.3] - 2026-10-09
 
 ### Fixed

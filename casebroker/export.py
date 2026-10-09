@@ -45,7 +45,7 @@ from typing import Any, Callable
 
 import httpx
 
-from . import USER_AGENT, dataset, db, umag
+from . import USER_AGENT, dataset, db, footprints, umag
 
 #: Bumped when a column, an attribute or the card changes meaning or goes away.
 #: Adding a column is not a bump: a reader that names its columns keeps working.
@@ -273,9 +273,10 @@ def _case_row(detail: dict[str, Any]) -> dict[str, Any]:
         row[m.key] = _float(values.get(m.key))
     mesh = telemetry.get("mesh") if isinstance(telemetry.get("mesh"), dict) else {}
     # Which building source the mesh was built from (DOMAIN.md, "Which buildings,
-    # for this case"): None for a case finished before the runner reported it,
-    # which is a different answer from "gba-lod1" and must stay one.
-    row["height_source"] = _str(metrics.get("height_source"))
+    # for this case"): what the run reported, or gba-lod1 for a case an E3D node
+    # built, whose builder meshes nothing else (footprints.building_source). None
+    # for a run that said neither, which is a different answer and must stay one.
+    row["height_source"] = _str(footprints.building_source(metrics))
     row["build"] = _str(metrics.get("build")) or _str(mesh.get("build"))
     # The Python worker writes its id into the metrics; an E3D node does not, and the
     # broker's own trail (the worker of the case's last event: for a done case, the

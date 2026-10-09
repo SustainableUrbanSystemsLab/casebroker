@@ -229,6 +229,39 @@ def test_a_source_the_broker_cannot_draw_is_not_mistaken_for_one_it_can():
         ("globalbuildingatlas", "unrecognized")
 
 
+def test_a_case_an_e3d_node_built_is_known_to_be_gba_without_a_report():
+    """E3D nodes did not put height_source in their completion metrics before Eddy3D dev
+    2026-10-09, so every case they finished read "assumed: this case's run did not say".
+    Their geometry builder (builder: eddy3d-native) meshes GBA LoD1 and nothing else, so
+    the builder is the answer -- known, not assumed."""
+    from casebroker import footprints
+    after = footprints.GBA_BUILDER_SINCE + 86400
+    assert footprints.mesh_source("done", {"builder": "eddy3d-native"}, after) == \
+        ("globalbuildingatlas", "native_builder")
+    # A run's own report still outranks it, and a run that says nothing at all is still only assumed.
+    assert footprints.mesh_source("done", {"builder": "eddy3d-native", "height_source": "gba-lod1"}, after) == \
+        ("globalbuildingatlas", "reported")
+    assert footprints.mesh_source("done", {"builder": "eddy3d-thermal"}, after) == \
+        ("globalbuildingatlas", "native_builder"), "the surface-temperature runner builds its site the same way"
+    assert footprints.mesh_source("done", {"builder": "python"}, after) == ("globalbuildingatlas", "unreported")
+    assert footprints.mesh_source("done", {}, after) == ("globalbuildingatlas", "unreported")
+    # What the dataset export writes in its height_source column.
+    assert footprints.building_source({"builder": "eddy3d-native"}) == "gba-lod1"
+    assert footprints.building_source({"builder": "eddy3d-native", "height_source": "overture"}) == "overture"
+    assert footprints.building_source({"builder": "python"}) is None
+    assert footprints.building_source({}) is None and footprints.building_source(None) is None
+
+
+def test_the_page_says_a_natively_built_case_was_meshed_from_gba_not_that_it_assumes_so():
+    import pathlib
+    page = (pathlib.Path(__file__).resolve().parents[1] / "casebroker" / "static" / "dashboard.html").read_text(encoding="utf-8")
+    start = page.index("const GEO_BASIS = {")
+    basis = page[start:page.index("};", start)]
+    entry = basis[basis.index("native_builder:"):]
+    assert entry.split("\n")[0].endswith('["the source this case was meshed from",'), "certain, like a report"
+    assert "assumed" not in entry.split("],")[0]
+
+
 def test_a_cached_picture_from_the_wrong_source_is_queried_again(broker, monkeypatch):
     """A row cached before the switch carries no `source`, and is Overture. It was
     served for good -- including for cases still pending, which GBA will mesh."""

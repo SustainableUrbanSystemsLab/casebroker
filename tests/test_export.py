@@ -116,8 +116,10 @@ def _seed(c: TestClient) -> None:
     # No build in the completion: the mesh report's is the one there is.
     _finish(c, B, {"mesh": {"total_cells": 1_500_000, "build": "1.14.0.800+def"}},
             {"case_seconds": 3600})
-    # Finished before telemetry: its urban form is in the completion metrics only.
-    _finish(c, C, {}, {"urban_form": {"bcr": 0.5}, "mesh_cells": 900_000, "case_seconds": 1800})
+    # Finished before telemetry: its urban form is in the completion metrics only. Built by an
+    # E3D node that did not say where its buildings came from: its builder meshes GBA only.
+    _finish(c, C, {}, {"urban_form": {"bcr": 0.5}, "mesh_cells": 900_000, "case_seconds": 1800,
+                       "builder": "eddy3d-native"})
     r = c.post("/v1/cases", json=[D], headers=W)        # never leased: pending
     assert r.status_code == 200, r.text
 
@@ -201,6 +203,7 @@ def test_an_export_writes_the_cases_the_fields_the_store_and_the_card(broker, tm
     assert b["build"] == "1.14.0.800+def", "the mesh report's build when the completion names none"
     assert b["height_source"] is None and b["bcr"] is None, "unreported stays unreported, not 0"
     assert (c["bcr"], c["total_cells"]) == (0.5, 900_000), "the completion metrics when telemetry has none"
+    assert c["height_source"] == "gba-lod1", "an E3D node's case: its builder meshes GBA LoD1 and nothing else"
     assert (a["n_fields"], b["n_fields"], c["n_fields"]) == (2, 1, 2), "C's 10 m field is not at 1.75 m"
 
     fields = by(table(out / "fields.parquet"), "case_id", "direction")

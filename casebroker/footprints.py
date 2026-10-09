@@ -266,6 +266,32 @@ OVERTURE = "overture"
 # run's own report outranks the date.
 GBA_BUILDER_SINCE = 1788895202
 
+# An E3D node's own geometry builder (MetaFOAM.Site, since 2026-09-17) meshes
+# GlobalBuildingAtlas LoD1 and nothing else: its site report always says height_source
+# "gba-lod1". Both of the node's runners build with it -- the wind one names itself
+# `builder: "eddy3d-native"` in its completion metrics, the surface-temperature one
+# "eddy3d-thermal" -- and neither put height_source in those metrics until Eddy3D dev
+# 2026-10-09, so for the cases they finished the builder is the answer: a fact about
+# the code that built them, not a guess by date.
+NATIVE_BUILDERS = ("eddy3d-native", "eddy3d-thermal")
+NATIVE_HEIGHT_SOURCE = "gba-lod1"
+
+
+def _built_natively(metrics: dict[str, Any] | None) -> bool:
+    builder = (metrics or {}).get("builder")
+    return isinstance(builder, str) and builder.strip().lower() in NATIVE_BUILDERS
+
+
+def building_source(metrics: dict[str, Any] | None) -> str | None:
+    """The building source a finished case's geometry came from, as its completion
+    metrics establish it: the run's own ``height_source``, else ``gba-lod1`` for a case
+    an E3D node built (its builder meshes nothing else), else None -- a run that did
+    not say, which is a different answer from either and stays one."""
+    reported = (metrics or {}).get("height_source")
+    if isinstance(reported, str) and reported.strip():
+        return reported.strip()
+    return NATIVE_HEIGHT_SOURCE if _built_natively(metrics) else None
+
 
 def mesh_source(state: str, metrics: dict[str, Any] | None,
                 updated_at: int | None) -> tuple[str, str]:
@@ -277,6 +303,9 @@ def mesh_source(state: str, metrics: dict[str, Any] | None,
 
     - ``reported``: the run said so -- ``height_source`` in its completion
       metrics, from the geometry report beside the STLs it actually meshed.
+    - ``native_builder``: an E3D node built it (``builder: eddy3d-native`` or
+      ``eddy3d-thermal``), whose geometry builder meshes GBA LoD1 only. GBA, as
+      certainly as a report.
     - ``unrecognized``: the run named a source this broker cannot draw. GBA.
     - ``before_gba``: finished before the builder could mesh GBA at all. Overture.
     - ``unreported``: finished after the switch without saying. GBA, as the
@@ -296,6 +325,8 @@ def mesh_source(state: str, metrics: dict[str, Any] | None,
         if spelled.startswith("overture"):
             return OVERTURE, "reported"
         return GBA, "unrecognized"
+    if _built_natively(metrics):
+        return GBA, "native_builder"
     if state != "done":
         return GBA, "not_done"
     if updated_at is not None and int(updated_at) < GBA_BUILDER_SINCE:
