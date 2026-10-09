@@ -1042,12 +1042,18 @@
        empty boxes beside it. */
     align-items: start;
   }
-  /* Four across: the Mesh & Solve card spans two rows, so the first row is
-     only as tall as the tallest of the other three, and those three stretch
-     to that one height instead of ending ragged beside the tall fourth. */
+  /* Wide screen: Parameters, Compute and Storage share the first row at one
+     height, and Mesh & Solve -- by far the tallest -- runs full width under
+     them, its reports in two balanced columns. Beside the other three
+     it left a tall empty gap under them however they were stretched. */
   @media (min-width: 1340px) {
-    .detail-grid { align-items: stretch; }
-    .detail-grid > .detail-card:nth-child(4) { grid-row: span 2; }
+    .detail-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); align-items: stretch; }
+    .detail-grid > .detail-card:nth-child(4) { grid-column: 1 / -1; }
+    /* Its reports flow down two balanced columns, newspaper style, so the
+       long Solve report does not leave the Mesh half empty. */
+    .ms-card { column-count: 2; column-gap: 32px; column-rule: 1px solid var(--border-subtle); }
+    .ms-card > h3 { column-span: all; }
+    .ms-card .kv-list, .ms-card table, .ms-card .rs-wrap, .ms-card .ms-head { break-inside: avoid; }
   }
   @media (max-width: 1339px) { .detail-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
   @media (max-width: 759px) {
@@ -5933,7 +5939,7 @@
     const solve = isObj(tel.solve) ? tel.solve : null;
     const metrics = parseMaybeJson(c.metrics) || {};
     const meshHtml = meshSectionHtml(c, mesh, metrics);
-    return `<div class="detail-card"><h3>${MS_TITLE}</h3>${meshHtml}`
+    return `<div class="detail-card ms-card"><h3>${MS_TITLE}</h3>${meshHtml}`
       + solveSectionHtml(c, solve, metrics, !!mesh) + `</div>`;
   }
 
