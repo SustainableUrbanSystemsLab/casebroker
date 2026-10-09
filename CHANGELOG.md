@@ -8,6 +8,39 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.37.0] - 2026-10-09
+
+### Added
+- **Deep links: the address bar says where you are.** A reload lost the case you were reading and a
+  case could not be sent to anyone; the dashboard now keeps its state in the URL's fragment, so
+  `/#case=<id>`, `/#state=quarantined&split=test&sort=attempts`, `/#settings=users`, `/#storage` and
+  `/#dataset` each open that place -- cold, or in a tab that already has the page (a change of fragment
+  does not reload it, so the page listens for it). Back and Forward step through the cases you opened;
+  every other change (a filter, a page, a drawer) rewrites its own history entry. A fragment is not sent
+  to the broker, written to the proxy's log or passed on in a `Referer`. Each part of one is checked
+  against what the page offers -- a state it lists, a column it sorts by, a tab it has -- and the rest is
+  dropped. An open case has a **link** button beside its ID. `?pair=` no longer wipes the fragment.
+- **Share links: send a read-only view from the page.** The ways to show someone the dashboard were a
+  `viewer` account (a password to invent and hand over) and `CASEBROKER_READ_TOKENS` (one shared secret in
+  the host's environment, in the query string, with no name, no expiry and a redeploy to take it back).
+  An admin now makes a link in **Settings ▸ Sharing** (or the share button in the header, or in an open
+  case, which makes the link open on that case): for a named person, for a day to a year or until revoked,
+  then **Copy link**, **Email it** or **Share…**. The holder needs no account and sees what a `viewer`
+  sees; every mutating endpoint answers `403` "this is a read-only link", and the identity endpoints refuse
+  it. The token rides in the URL's **fragment** and is traded for an HttpOnly cookie at once, then taken out
+  of the address bar and the history entry; only its hash is stored, so it is shown once; and it is checked
+  against the database on every request, so **Revoke** ends it on its holder's next click. The list says
+  when each link was last used and how often it was opened; the label is the admin's note and is never
+  shown to the holder. At most 50 are live; ended ones stay a month.
+  - **`POST /v1/shares`**, **`GET /v1/shares`**, **`DELETE /v1/shares/{id}`** (admin) and
+    **`POST /v1/auth/share`** (public, throttled to 25 unknown tokens per address in 5 minutes; `410` for a
+    link that expired or was withdrawn, saying which). A link's token also reads as a bearer, so a script
+    can be given one. Someone already signed in who opens a link keeps their login.
+  - **`/v1/auth/state`** carries `share` (when the link ends) and `role: viewer` for such a visitor, and
+    **`/v1/whoami`** says `auth: share`; **`/v1/auth/logout`** clears the link's cookie as well.
+  - New table **`share_links`** (schema 8). The old **Copy read-only link** button now appears only on a
+    broker that has `CASEBROKER_READ_TOKENS`.
+
 ## [0.36.2] - 2026-10-08
 
 ## [0.36.1] - 2026-10-08

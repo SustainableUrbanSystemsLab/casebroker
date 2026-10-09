@@ -202,7 +202,11 @@ than for what they are:
 | Variable | Grants | Carried by |
 | --- | --- | --- |
 | `CASEBROKER_WRITE_TOKENS` | read **and** write — lease, heartbeat, complete, fail, release, add cases | workers, and `site_sampler.py publish` |
-| `CASEBROKER_READ_TOKENS` | read only — 401 from every mutating endpoint | a dashboard link you hand out |
+| `CASEBROKER_READ_TOKENS` | read only — 401 from every mutating endpoint | a shared secret you hand out — see below for the better way |
+
+To show someone the dashboard, an admin makes a **share link** in the browser (Settings ▸ Sharing, or the share
+button in the header) instead: it names the person, expires, and is revoked with a click, none of which a
+token in this environment can do without a redeploy. See [dashboard.md](dashboard.md#sharing-a-read-only-view).
 
 A write token also reads, so you never need both to operate. Each is a
 comma-separated list, which is how you **rotate without stranding a worker

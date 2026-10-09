@@ -93,7 +93,7 @@ else now, and continuing burns core-hours on a result the broker will refuse.
 
 ### Who may call what
 
-Three kinds of principal, and every endpoint below is gated on one of them.
+Every endpoint below is gated on one of these principals.
 
 | Principal | How it authenticates | Gets |
 | --- | --- | --- |
@@ -102,6 +102,7 @@ Three kinds of principal, and every endpoint below is gated on one of them.
 | A logged-in **viewer** | the same | reads only; `403` from every mutating endpoint |
 | A **machine** | `Authorization: Bearer <per-machine token>` | read and write, but never the identity endpoints — a worker credential that could mint more worker credentials would defeat the point of issuing them per machine. It may only lease as **its own** worker id or one under it — `phoenix` covers `phoenix-<job>-<task>`, which is how a cluster gets one revocable credential — and gets `403` otherwise, so the Machines list is a fact rather than a claim |
 | A **shared env token** | `Authorization: Bearer <value>` | read and write (`CASEBROKER_WRITE_TOKENS`) or read only (`CASEBROKER_READ_TOKENS`). The older model; still honoured |
+| A **share link** | the `wsb_share` cookie that `POST /v1/auth/share` sets, or `Authorization: Bearer <link token>` | reads only, as a `viewer` does; `403` ("this is a read-only link") from every mutating endpoint and `401`/`403` from the identity endpoints. Made by an admin, named, expiring, revocable, and checked against the database on every request, so a revocation ends it on its holder's next click |
 
 With **no env tokens and no accounts**, auth is off entirely and every caller
 gets write. `GET /healthz` reports `"auth": "OPEN"` so that is visible rather
@@ -114,7 +115,11 @@ than silent. Creating the first account closes it.
 | `GET /v1/auth/state` | What the login UI needs before anything is typed: `needs_setup`, `setup_token_required`, the `roles` this broker accepts (so a picker cannot drift from the server), and who you already are. **Unauthenticated** — it leaks nothing beyond "has this broker been set up", which is obvious from whether logging in is possible |
 | `POST /v1/auth/setup` | Create the FIRST account, which is an admin. **Open only while there are none**, and `409` forever after. Requires `CASEBROKER_SETUP_TOKEN` if set, else one of `CASEBROKER_WRITE_TOKENS` if any are set, else nothing — see [First run](operations.md#first-run-from-nothing-to-a-working-broker). A read token is never enough |
 | `POST /v1/auth/login` | Username and password for a session cookie. Throttled: 10 failures per account per source address in 5 minutes, then `429` |
-| `POST /v1/auth/logout` | Delete the session server-side |
+| `POST /v1/auth/logout` | Delete the session server-side, and clear the share-link cookie too |
+| `POST /v1/auth/share` | `{token}` → trade a share link's token for the read-only `wsb_share` cookie (HttpOnly, SameSite=Lax, `Secure` over TLS). **Unauthenticated**, throttled to 25 unknown tokens per source address in 5 minutes (`429`). `401` for a token the broker does not know; `410` for one that expired or was withdrawn, saying which. Someone already logged in keeps their login: they get `{"already_signed_in": true}` and no cookie |
+| `GET /v1/shares` | Every share link still on record, `state` `live` / `expired` / `revoked`, with who made it, when it was last used and how often it was opened. Never the token. **Admin** |
+| `POST /v1/shares` | `{label, ttl_seconds?}` → make a read-only link and return its token **once** (only the hash is stored), with the `url` to send: the token rides in the **fragment** (`/#share=…`), which a browser sends to nobody. `ttl_seconds` defaults to a week; `null` is until revoked; 300 s to a year. `label` is the admin's own note, never shown to the holder. `409` at 50 live links. **Admin** |
+| `DELETE /v1/shares/{id}` | Revoke a link, effective on its holder's next request. **Admin** |
 | `GET /v1/users` | Every account, its role, and when it last logged in. **Admin** |
 | `POST /v1/users` | Add an account. Defaults to `viewer` unless `role` says otherwise, so a privilege is asked for rather than inherited by omission. **Admin** |
 | `POST /v1/users/{username}/role` | Promote or demote. Refuses to demote the last admin. **Admin** |
@@ -147,7 +152,7 @@ than silent. Creating the first account closes it.
 | `GET /v1/status` | Counts by state and split, expired leases, 24 h throughput, ETA |
 | `GET /healthz` | Liveness, plus the running `version`, auth posture (`token` / `accounts` / `OPEN`), per-scope token counts and redacted DB target. **Unauthenticated** — see Deploying |
 | `GET /v1/whoami` | What the presented credential can do (`write` / `read` / `none`) **and which kind it is** — a session, a per-machine token, or a shared env token. **Unauthenticated** — it answers *about* a credential rather than gating on one |
-| `GET /v1/share-token` | The read-only token, so the dashboard can mint a shareable link. **Write auth** — not an escalation, since a write token already passes every read gate |
+| `GET /v1/share-token` | The read-only env token, for brokers that set `CASEBROKER_READ_TOKENS`. **Write auth** — not an escalation, since a write token already passes every read gate. The dashboard no longer needs it: **Settings ▸ Sharing** makes a named, expiring, revocable link with `POST /v1/shares` |
 | `POST /v1/pair/start` | A machine asks to join: `{name, token_hash, host?, platform?}` → `{user_code, verification_url, expires_in, interval}`. **Unauthenticated** (it has nothing to authenticate with yet), so throttled per address and the queue is bounded. The node generates its own token and sends only the SHA-256 — the raw credential never reaches the broker |
 | `POST /v1/pair/poll` | `{user_code}` with the token as bearer → `pending` / `approved` / `denied` / `expired` / `superseded`. An unknown code and a wrong token get the same 404 |
 | `GET /v1/pair/pending`, `POST /v1/pair/{code}/approve`, `…/deny` | The dashboard's side. **Admin session only** — a credential that could approve machines could mint credentials |
