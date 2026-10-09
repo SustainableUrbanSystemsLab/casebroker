@@ -432,12 +432,20 @@ def _tokens_from_env(canonical: str, legacy: str) -> list[str]:
 # FastAPI runs every sync endpoint in anyio's threadpool, which defaults to 40.
 # That number is sized for a machine, not for a 512 MB instance whose resident
 # floor is already ~280 MB once DuckDB and GDAL load -- and it buys nothing here,
-# because db._LOCK serialises the database work those handlers exist to do. What
-# it does buy is 40 simultaneous request bodies, 40 stack frames deep in scrypt
-# or a GeoJSON parse, and a queue that grows until the platform kills the
-# process. Lower is not slower for this workload; it is the same throughput with
-# a bound on the worst case.
+# because the database work those handlers exist to do runs at most
+# PG_POOL_SIZE at a time (one, under db._LOCK, on SQLite). What it does buy is 40
+# simultaneous request bodies, 40 stack frames deep in scrypt or a GeoJSON parse,
+# and a queue that grows until the platform kills the process. Lower is not
+# slower for this workload; it is the same throughput with a bound on the worst
+# case.
 REQUEST_CONCURRENCY = int(os.environ.get("CASEBROKER_REQUEST_CONCURRENCY", "12"))
+
+# How many Postgres connections the broker holds (db.PgPool), i.e. how many
+# database calls run at once. One shared connection serialised everything -- a
+# heartbeat waited behind a dataset page or a field insert. Four lets a scan, a
+# write and two heartbeats proceed together on the self-hosted server; 1 is the
+# old single connection under the lock. SQLite ignores it.
+PG_POOL_SIZE = int(os.environ.get("CASEBROKER_PG_POOL", "4"))
 
 
 def _apply_thread_limit() -> None:
@@ -686,7 +694,8 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
     # Content-Encoding (the dashboard, precompressed) passes through untouched.
     app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=6,
                        exclude_content_types=(*DEFAULT_EXCLUDED_CONTENT_TYPES, "application/octet-stream"))
-    conn = db.connect(db_path)
+    conn = (db.connect(db_path, pool=PG_POOL_SIZE) if _is_postgres_dsn(db_path)
+            else db.connect(db_path))
     app.state.db_path = db_path
     # Per app, not per module, for the reason this is a factory at all: a
     # module-level cache would serve one test's campaign to the next test.

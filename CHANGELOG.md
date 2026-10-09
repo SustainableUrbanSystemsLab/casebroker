@@ -8,6 +8,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.37.1] - 2026-10-09
+
+### Changed
+- **On Postgres the broker holds a small pool of connections, not one under a lock.** One shared
+  connection behind a process-wide lock made every database call wait for every other: a
+  heartbeat queued behind a dataset page, a `/v1/fields` scan or a 1 MB field insert. The lock was
+  only ever needed for SQLite; on Postgres the database already keeps concurrent callers apart
+  (`FOR UPDATE SKIP LOCKED` in the lease, `FOR UPDATE` on a lease's row), as it must across
+  machines. Each call now takes one of `CASEBROKER_PG_POOL` connections (default 4) for its whole
+  duration -- nested calls share it, so a transaction stays on one connection -- and a transaction
+  Postgres aborts to settle a race (deadlock, serialization failure) is run again, whole. A session
+  that comes back with a transaction still open is rolled back before anyone else gets it.
+  `CASEBROKER_PG_POOL=1` is the old behaviour; SQLite is unchanged.
+
 ## [0.37.0] - 2026-10-09
 
 ### Added

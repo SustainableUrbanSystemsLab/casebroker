@@ -25,6 +25,7 @@ import os
 import pathlib
 import sys
 import threading
+import time
 import uuid
 
 import pytest
@@ -582,6 +583,70 @@ def test_many_real_connections_racing_never_double_lease():
     assert not dupes, f"double-leased over real connections: {sorted(dupes)}"
     assert set(claimed_ids) == set(case_ids), (
         f"expected all {n_cases} claimed exactly once, got {len(set(claimed_ids))}")
+
+
+def test_a_pool_lets_real_lease_calls_overlap_and_never_double_leases():
+    """The race above with the lock out of the way: one PgPool, the object the
+    broker runs on, shared by every thread, so lease() calls really do overlap
+    in the database and only FOR UPDATE SKIP LOCKED keeps them apart."""
+    recipe = prefix("r-pool-race")
+    case_ids = seed(40, "pool-race", recipe=recipe)
+    pool = db.connect(DSN, pool=6)
+    assert isinstance(pool, db.PgPool)
+    claimed, errors = [], []
+    lock = threading.Lock()
+    barrier = threading.Barrier(10, timeout=30)
+
+    def worker(k):
+        try:
+            barrier.wait()
+            while True:
+                got = db.lease(pool, prefix(f"pool-racer-{k}"), count=2, recipes=[recipe])
+                if not got:
+                    return
+                with lock:
+                    claimed.extend(g.case_id for g in got)
+        except Exception as e:                # pragma: no cover - surfaced below
+            errors.append(e)
+
+    threads = [threading.Thread(target=worker, args=(k,)) for k in range(10)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=60)
+    assert not errors, errors
+    assert sorted(claimed) == sorted(case_ids), "every case exactly once"
+
+
+def test_a_pool_does_not_make_a_quick_call_wait_behind_a_slow_one():
+    """What the pool is for: a heartbeat does not queue behind a long scan."""
+    pool = db.connect(DSN, pool=2)
+    started = threading.Event()
+
+    def slow():
+        with pool.session() as s:
+            started.set()
+            s.execute("SELECT pg_sleep(1.5)")
+
+    t = threading.Thread(target=slow)
+    t.start()
+    assert started.wait(10)
+    t0 = time.monotonic()
+    db.get_settings(pool)
+    quick = time.monotonic() - t0
+    t.join()
+    assert quick < 1.0, f"a one-row read waited {quick:.2f}s behind another session"
+
+
+def test_a_pool_never_hands_on_an_open_transaction():
+    pool = db.connect(DSN, pool=2)
+    key = prefix("leaked-tx")
+    with pool.session() as s:
+        s.execute("BEGIN")
+        s.execute("INSERT INTO events(ts, case_id, event) VALUES (1, ?, 'pgtest')", (key,))
+        # ...and the block ends without COMMIT, as a buggy caller would.
+    assert pool.execute("SELECT id FROM events WHERE case_id = ?", (key,)).fetchone() is None
+    assert not pool._in_tx
 
 
 def test_a_superseded_lease_cannot_write_across_real_connections():

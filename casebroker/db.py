@@ -42,6 +42,7 @@ pool on its own. Nothing has to notice the death.
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import json
 import math
@@ -1422,6 +1423,112 @@ class PgConnection:
             cur.execute(sql)
 
 
+class PgPool(PgConnection):
+    """Several Postgres connections behind the one object every route closes over.
+
+    One shared connection under one process-wide lock serialised the whole broker:
+    a heartbeat waited behind a /v1/fields scan, a custody query, a dataset page
+    or a 1 MB field insert, and the code had grown comments apologising for it
+    ("list_cases holds _LOCK while it runs, so the sort stalls every worker's
+    lease"). That lock was only ever needed for SQLite; on Postgres, correctness
+    across concurrent callers already comes from the database -- FOR UPDATE SKIP
+    LOCKED in lease(), FOR UPDATE in _by_lease() -- exactly as it must across
+    machines. The single connection was a Supabase-era economy (a transaction
+    pooler with a connection cap); the self-hosted Postgres has neither.
+
+    So each locked entry point (`_locked`) takes a SESSION -- one of up to `size`
+    PgConnections, each with its own reconnect logic and its own transaction
+    state -- binds it to the calling thread for the whole call, and returns it
+    after. Nested locked calls on one thread reuse the bound session, so a
+    function that calls another stays inside one transaction. A statement issued
+    outside any locked call (a test, a script) takes a session for that one
+    statement. Callers that wait for a free session simply queue, as they queued
+    on the lock before -- only now `size` of them run at once.
+
+    A subclass so every `isinstance(conn, PgConnection)` dialect check holds.
+    """
+
+    def __init__(self, dsn: str, size: int, connect: Callable[[], Any]):
+        # Not super().__init__: this object owns no connection of its own.
+        self._dsn = dsn
+        self._size = max(1, int(size))
+        self._connect_raw = connect
+        self._idle: list[PgConnection] = []
+        self._idle_lock = threading.Lock()
+        self._slots = threading.BoundedSemaphore(self._size)
+        self._local = threading.local()
+
+    # PgConnection's own state, answered for whichever session this thread holds,
+    # so code (and tests) written against one connection keep working.
+    @property
+    def _raw(self):
+        return self._held_or_any()._raw
+
+    @property
+    def _in_tx(self) -> bool:
+        held = getattr(self._local, "conn", None)
+        return bool(held and held._in_tx)
+
+    def _held_or_any(self) -> PgConnection:
+        held = getattr(self._local, "conn", None)
+        if held is not None:
+            return held
+        with self._idle_lock:
+            if self._idle:
+                return self._idle[-1]
+        with self.session() as c:
+            return c
+
+    @contextlib.contextmanager
+    def session(self):
+        """Bind one connection to this thread for the duration of the block."""
+        held = getattr(self._local, "conn", None)
+        if held is not None:
+            yield held
+            return
+        self._slots.acquire()
+        try:
+            with self._idle_lock:
+                c = self._idle.pop() if self._idle else None
+            if c is None:
+                c = PgConnection(self._connect_raw(), self._dsn)
+            self._local.conn = c
+            try:
+                yield c
+            finally:
+                self._local.conn = None
+                if c._in_tx:
+                    # A call that returned with a transaction still open is a bug
+                    # somewhere above, and the next caller must not inherit it:
+                    # its COMMIT would commit someone else's half-done work.
+                    try:
+                        c.execute("ROLLBACK")
+                    except Exception:                        # noqa: BLE001
+                        c._in_tx = False
+                        c._needs_reconnect = True
+                with self._idle_lock:
+                    self._idle.append(c)
+        finally:
+            self._slots.release()
+
+    def execute(self, sql: str, params: Iterable[Any] = ()) -> "_PgCursor":
+        held = getattr(self._local, "conn", None)
+        if held is not None:
+            return held.execute(sql, params)
+        # psycopg's client-side cursor holds its whole result, so the session can
+        # go back to the pool before the caller fetches from it.
+        with self.session() as c:
+            return c.execute(sql, params)
+
+    def executescript(self, sql: str) -> None:
+        with self.session() as c:
+            c.executescript(sql)
+
+    def _reconnect(self) -> bool:
+        held = getattr(self._local, "conn", None)
+        return held._reconnect() if held is not None else False
+
+
 class _PgCursor:
     """Wraps a psycopg cursor (dict-row factory) with the bit of sqlite3.Cursor's
     surface this module actually uses: fetchone/fetchall/rowcount/iteration."""
@@ -1443,8 +1550,13 @@ class _PgCursor:
         return self._cur.rowcount
 
 
-def connect(path_or_dsn: str):
+def connect(path_or_dsn: str, pool: int = 1):
     """SQLite for a file path, Postgres for a ``postgres(ql)://`` DSN.
+
+    ``pool`` > 1 on Postgres gives a `PgPool` of that many connections, so that
+    many database calls run at once; 1 (the default, and every script and test
+    that does not ask) is one connection under the process-wide lock, as before.
+    SQLite ignores it: one file has one writer whatever the process does.
 
     The caller (``CASEBROKER_DB`` in practice) decides the engine purely by what
     string it passes; nothing else in this module, or above it, branches on
@@ -1452,7 +1564,7 @@ def connect(path_or_dsn: str):
     genuinely differ between the two.
     """
     if path_or_dsn.startswith(("postgres://", "postgresql://")):
-        return _connect_postgres(path_or_dsn)
+        return _connect_postgres(path_or_dsn, pool)
 
     # check_same_thread=False because the connection is shared across the
     # threadpool; _LOCK is what makes that safe.
@@ -1464,7 +1576,7 @@ def connect(path_or_dsn: str):
     return conn
 
 
-def _connect_postgres(dsn: str) -> PgConnection:
+def _connect_postgres(dsn: str, pool: int = 1) -> PgConnection:
     import psycopg
     from psycopg.rows import dict_row
 
@@ -1506,7 +1618,13 @@ def _connect_postgres(dsn: str) -> PgConnection:
     wrapped = PgConnection(raw, dsn)
     with _LOCK:
         apply_schema(wrapped, PG_SCHEMA, is_pg=True)
-    return wrapped
+    if pool <= 1:
+        return wrapped
+    # The schema is in place; the connection that brought it forward becomes the
+    # pool's first session rather than being thrown away.
+    pooled = PgPool(dsn, pool, lambda: psycopg.connect(dsn, **kwargs))
+    pooled._idle.append(wrapped)
+    return pooled
 
 
 def _now() -> int:
@@ -1528,10 +1646,38 @@ def _event(conn, case_id, worker_id, event, detail=None, now=None, stage=None) -
 
 # -- ingest -------------------------------------------------------------------
 
+# Postgres errors that mean "your transaction lost a race and was rolled back;
+# run it again". With several sessions (PgPool) two transactions can now meet in
+# the database instead of in Python, and the database settles it by aborting one.
+_PG_RETRY_SQLSTATES = {"40P01", "40001"}          # deadlock_detected, serialization_failure
+_PG_RETRIES = 2
+
+
+def _pg_retryable(exc: BaseException) -> bool:
+    return getattr(exc, "sqlstate", None) in _PG_RETRY_SQLSTATES
+
+
 def _locked(fn):
-    """Serialise a public entry point against the shared connection."""
+    """Serialise a public entry point against the shared connection -- or, on a
+    `PgPool`, give it a session of its own for the whole call (see PgPool)."""
     @functools.wraps(fn)
     def wrapper(*a, **kw):
+        conn = a[0] if a else kw.get("conn")
+        if isinstance(conn, PgPool):
+            for attempt in range(_PG_RETRIES + 1):
+                with conn.session() as session:
+                    nested = session._in_tx
+                    try:
+                        return fn(*a, **kw)
+                    except Exception as exc:                 # noqa: BLE001
+                        # Only a whole call is re-run, never one nested inside a
+                        # transaction its caller opened: that caller's work went
+                        # with the rollback, and it must see the error.
+                        if nested or attempt == _PG_RETRIES or not _pg_retryable(exc):
+                            raise
+                        print(f"[db] {fn.__name__}: {exc.__class__.__name__}; "
+                              f"running it again ({attempt + 1}/{_PG_RETRIES})", file=sys.stderr)
+                time.sleep(0.05 * (attempt + 1))
         with _LOCK:
             return fn(*a, **kw)
     return wrapper
