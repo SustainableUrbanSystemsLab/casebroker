@@ -2,7 +2,8 @@
 buttons that survive the minute's refresh.
 
 Checked by hand in a browser against a real case's cached geometry (2026-09-22):
-three 300 x 300 views, + three times is 1.6^3 = 4.1x about the middle, − and
+three square views (300 x 300 in their own units; drawn as wide as the panel lets them
+since 2026-10-09), + three times is 1.6^3 = 4.1x about the middle, − and
 reset greyed at the whole drawing, and a forced refresh -- which rebuilds the
 panel -- puts the zoomed view back where it was.
 """
@@ -75,3 +76,19 @@ def test_a_zoom_survives_the_rebuild_the_refresh_does():
     body = _draw_geometry()
     assert body.index("wrap.innerHTML =") < body.index('wrap.querySelectorAll("svg.geo-zoom").forEach(geoRestore)')
     assert body.count('data-view="${esc(viewKey)}:') == 3
+
+
+def test_the_legend_sits_under_the_views_so_they_take_the_width():
+    """Beside the views the legend took a third of the panel and held each drawing to
+    300 px (2026-10-09: "put the text below the 3 visualizations ... so they are larger
+    on the page"). Now the views share the panel's width -- three across, two and then
+    one as it narrows -- and the caption and the legend follow them."""
+    css = DASH[DASH.index("  .geo-fig {"):DASH.index("  .geo-note {")]
+    assert ".geo-fig { display: flex; flex-direction: column;" in css
+    assert "grid-template-columns: repeat(auto-fit, minmax(240px, 1fr))" in css
+    assert "width: 100%; height: auto; aspect-ratio: 1 / 1;" in css, "each drawing fills its column"
+    assert "flex: 1 1 300px" not in css and "flex: none" not in css
+    assert "columns: 340px 2" in css
+    body = _draw_geometry()
+    assert body.index('${geoControls("elevation")}') < body.index('<div class="geo-caption">') \
+        < body.index('<div class="geo-legend">')

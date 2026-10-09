@@ -8,6 +8,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.42.2] - 2026-10-09
+
+### Changed
+- **Site Geometry's three views use the panel's whole width.** The legend sat beside them and
+  took a third of the panel, holding each drawing to 300 px; it now follows them, under the
+  caption that names them, in two columns where two fit. The plan, isometric and elevation share
+  the width -- three across (about 460 px each on a 1680 px window), two and then one as the
+  window narrows -- and zoom, pan and the zoom buttons work as before.
+
 ## [0.42.1] - 2026-10-09
 
 ### Added
