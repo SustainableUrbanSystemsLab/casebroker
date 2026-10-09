@@ -16,6 +16,7 @@ anything outside the broker's own API:
 - **Deep links**: the address bar says where you are, so any view -- a case, a filtered
   list, a drawer -- is a link you can bookmark or send
 - **Sharing**: an admin makes a read-only link for someone with no account, from the page
+- **Push notifications**: the broker tells a phone or a laptop what happened, with every tab closed
 
 ## Getting in
 
@@ -193,3 +194,121 @@ complete, fail or release a case, or add new ones.
 
 Never put a **write** token in a link you hand out; it has none of these
 restrictions.
+
+## Push notifications: told with the tab closed
+
+**Settings ▸ Preferences** has two kinds of notification. *Browser notifications* are the
+page's own: it compares one refresh with the next, so they fire only while a dashboard tab
+is open. **Push notifications** are sent by the broker itself
+([`casebroker/push.py`](../casebroker/push.py)) through the browser vendor's push service to
+a small service worker (`/sw.js`), so they arrive with every tab closed, on a phone in a
+pocket included.
+
+**Turn on for this device** asks for the browser's permission, registers the worker,
+subscribes and hands the subscription to the broker. Tick what this device should be told;
+each change is saved on the broker at once. **Send a test** pushes one notice now and says
+what the push service answered. **Turn off** removes it from the broker, then from the
+browser. Signing out does the same, so a shared browser is not told the signed-out
+account's notices.
+
+| Kind | When | Default | Who |
+| --- | --- | --- | --- |
+| a machine asks to join | a node runs `E3D --setup-sim-node` and waits for approval (Settings ▸ Machines); lapses in 10 min | on | admins |
+| cases finish | batched: at most one notice per half minute, and the count on screen adds up until it is dismissed | on | anyone |
+| a case is quarantined | its attempts ran out, or a node called the site broken. The land audit and a re-spec, which an operator ran, are not announced | on | anyone |
+| the broker drains a failing machine | `CASEBROKER_FAIL_BURST_CASES` cases failed on one machine within `CASEBROKER_FAIL_BURST_SECONDS` (an operator's own drain is not announced) | on | anyone |
+| a machine holding a case goes silent | not heard from for `CASEBROKER_PUSH_SILENT_MINUTES` (20) while its case is leased | **off** | anyone |
+| a node's update fails | it tried a new build, could not start it, and went back | on | anyone |
+| the part store is nearly full | 90% of `CASEBROKER_PARTS_MAX_GB`, or the volume's free space down to 1.11× `CASEBROKER_PARTS_RESERVE_GB` | on | admins |
+| nothing finishes for hours | cases are leased and none finished for `CASEBROKER_PUSH_STALL_HOURS` (6) | on | anyone |
+| the queue runs dry | no case is pending any more | on | anyone |
+
+*Silent* is off by default because a cluster job between allocations, or a preempted one,
+is silent by design while its case waits: on a PACE chain that is every gap. The last four
+are **conditions**: each is announced once when it becomes true and again only after it has
+cleared (the store at below 85%), so a condition that lasts a day is one notice.
+
+**Two levels of on/off, both on the broker.** Each subscription keeps its own list. An admin
+also sees **Broker-wide** switches: a kind switched off there is sent to nobody, whatever
+their device asked for (`PUT /v1/push/policy`, audited as a setting change).
+`CASEBROKER_PUSH=0` switches push off entirely.
+
+A click on a notice brings an open dashboard tab forward on the place it is about -- the
+case, `#state=done`, Settings ▸ Machines, the Storage drawer, through the same
+[deep links](#deep-links) -- or opens one. A second notice of a kind replaces the first
+(`case_done` shares its tag with the tab's own finished-case notification, so a browser with
+both on sees one).
+
+### Where it cannot work, and what the page says instead
+
+- **Plain http.** The Push API exists only in a secure context: https, or `localhost`.
+- **iPhone and iPad.** Safari offers push only to a site added to the Home Screen
+  (iOS 16.4+): Share ▸ **Add to Home Screen**, open the dashboard from that icon, sign in
+  there (a Home Screen app keeps cookies of its own) and turn push on. The
+  `/manifest.webmanifest` the page links is what makes it open as an app of its own.
+- **Notifications blocked** for the site in the browser's settings: allow them there.
+- **A browser with no Push API**: only the in-tab notifications are available.
+
+### How it is built, and why
+
+- **Every 30 s** a background thread started with the app reads the `events` table after a
+  cursor kept in `settings` (`push_state`), and judges the four conditions. Every transition
+  the broker records is written there inside the transaction that made it true, so reading it
+  back announces only what committed. The new state is claimed with a compare-and-set before
+  anything is sent, so two broker processes overlapping in a deploy never both announce one
+  event. Rows are read once they are 10 s old, stopping at the first younger one, so a row
+  that commits a moment late is not skipped; rows older than an hour are passed over, so a
+  broker that was down for a day does not wake everyone with the backlog. The first run
+  starts from now.
+- **One push per kind per subscription per tick**: "3 cases finished: …". Time to live is 6 h
+  (a laptop closed overnight still hears the queue ran dry), 10 min for a pairing request,
+  which is useless once it lapses. Urgency is *high* for a pairing request, a drained
+  machine and a failed update, which may wake a phone in power saving.
+- **A subscription the push service calls gone** (404/410) is deleted at once; any other
+  refusal counts, and ten in a row delete it. Its last error is shown on the device.
+- **Who subscribed is re-checked at every send.** A subscription belongs to the credential
+  that made it -- an account, a share link, a read or write token -- and only that credential
+  can read, change, test or delete it (anyone else gets `404`). A revoked share link or a
+  deleted account is told nothing more and its subscriptions are dropped; a demoted admin
+  stops getting the admin-only kinds; a token taken out of the environment ends its own.
+- **The broker POSTs only to push services.** A subscription names a URL the broker will
+  request from inside the server's network, and any reader may submit one, so that is an
+  open door into the LAN unless it is closed: only `https` endpoints on FCM
+  (`fcm.googleapis.com`: Chrome, Edge, Opera, Brave, Samsung), Mozilla
+  (`updates.push.services.mozilla.com`), Apple (`web.push.apple.com`, `*.push.apple.com`) and
+  WNS (`*.notify.windows.com`) are accepted, with bounded lengths, and redirects are never
+  followed. `CASEBROKER_PUSH_HOSTS` adds hosts. Keys and endpoints are never logged (the
+  host only). At most 25 subscriptions per credential (the least recently used goes) and 500
+  in all.
+- **VAPID** (RFC 8292) is what makes a push service carry a message only for the server the
+  browser subscribed to. The key is `CASEBROKER_VAPID_PRIVATE_KEY` when set (the raw
+  base64url form `web-push generate-vapid-keys` prints, or a PEM); otherwise the broker makes
+  one on first use and keeps it in `settings` (`push_vapid_private`, never written to the audit
+  trail). Changing it orphans every subscribed browser -- a subscription is bound to the key
+  it was made with -- and the page then offers to subscribe again. The `sub` claim is
+  `CASEBROKER_VAPID_SUBJECT` (`mailto:` or `https:`); unset, it is the dashboard's own public
+  https origin, learned from the first browser that subscribes from it, because Apple refuses
+  a subject naming localhost and the broker, behind a proxy, cannot otherwise know its address.
+- The **service worker** is a separate file (`casebroker/static/sw.js`) only because a browser
+  runs one from a script URL of the site's own. It shows pushes, folds a batch into the notice
+  of its kind still on screen, and routes clicks; it caches nothing and intercepts none of the
+  page's requests. `/sw.js` is served `no-cache`: Cloudflare caches `.js` by extension, and a
+  stale worker at the edge would pin every browser to it.
+
+| Variable | Default | |
+| --- | --- | --- |
+| `CASEBROKER_PUSH` | on | `0` switches push off |
+| `CASEBROKER_VAPID_PRIVATE_KEY` | made and kept in `settings` | the server's VAPID key |
+| `CASEBROKER_VAPID_SUBJECT` | the dashboard's https origin | contact for the push services |
+| `CASEBROKER_PUSH_SILENT_MINUTES` | 20 | *a machine goes silent* |
+| `CASEBROKER_PUSH_STALL_HOURS` | 6 | *nothing finishes for hours* |
+| `CASEBROKER_PUSH_HOSTS` | (none) | push service hosts beyond the four, `push.example.org,*.example.net` |
+
+The API, all under read scope except the policy: `GET /v1/push/key` (public key, whether
+push is on), `GET /v1/push/events` (the catalog, the broker-wide switch of each kind and
+whether the caller may have it), `POST /v1/push/subscriptions`
+(`{subscription: PushSubscription.toJSON(), events}`), `GET /v1/push/subscriptions?endpoint=`,
+`PUT /v1/push/subscriptions` (`{endpoint, events}`), `DELETE /v1/push/subscriptions`
+(`{endpoint}`), `POST /v1/push/test` (`{endpoint}`) and `PUT /v1/push/policy`
+(`{events: {kind: bool}}`, admin). Admin-only kinds asked for by anyone else are dropped
+silently.

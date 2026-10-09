@@ -481,6 +481,30 @@ CREATE TABLE IF NOT EXISTS case_blobs (
     PRIMARY KEY (case_id, part)
 );
 CREATE INDEX IF NOT EXISTS idx_case_blobs_sha ON case_blobs(sha256);
+
+-- A browser that asked to be told things with its tab closed (casebroker/push.py).
+-- `endpoint` is the push service's URL for that browser; p256dh and auth are the
+-- keys a message to it is encrypted with (RFC 8291), so they are never logged.
+-- `events` is the JSON list of notice kinds this browser wants. Who subscribed is
+-- kept as the credential that did it -- an account, a share link, a token -- and
+-- re-checked at every send: a revoked link or a deleted account must not go on
+-- being told about the campaign, and a demoted admin stops getting admin notices.
+-- `failures` counts sends in a row the push service refused; past ~10 the row is
+-- dropped (a 404 or 410 drops it at once: the browser unsubscribed).
+CREATE TABLE IF NOT EXISTS push_subscriptions (
+    endpoint        TEXT PRIMARY KEY,
+    p256dh          TEXT NOT NULL,
+    auth            TEXT NOT NULL,
+    events          TEXT NOT NULL,
+    subscriber_kind TEXT NOT NULL,
+    subscriber      TEXT NOT NULL,
+    role            TEXT,
+    user_agent      TEXT,
+    created_at      INTEGER NOT NULL,
+    last_sent_at    INTEGER,
+    last_error      TEXT,
+    failures        INTEGER NOT NULL DEFAULT 0
+);
 """
 
 # Same schema, Postgres-flavoured: no PRAGMAs (meaningless there), and the
@@ -902,6 +926,30 @@ CREATE TABLE IF NOT EXISTS case_blobs (
     PRIMARY KEY (case_id, part)
 );
 CREATE INDEX IF NOT EXISTS idx_case_blobs_sha ON case_blobs(sha256);
+
+-- A browser that asked to be told things with its tab closed (casebroker/push.py).
+-- `endpoint` is the push service's URL for that browser; p256dh and auth are the
+-- keys a message to it is encrypted with (RFC 8291), so they are never logged.
+-- `events` is the JSON list of notice kinds this browser wants. Who subscribed is
+-- kept as the credential that did it -- an account, a share link, a token -- and
+-- re-checked at every send: a revoked link or a deleted account must not go on
+-- being told about the campaign, and a demoted admin stops getting admin notices.
+-- `failures` counts sends in a row the push service refused; past ~10 the row is
+-- dropped (a 404 or 410 drops it at once: the browser unsubscribed).
+CREATE TABLE IF NOT EXISTS push_subscriptions (
+    endpoint        TEXT PRIMARY KEY,
+    p256dh          TEXT NOT NULL,
+    auth            TEXT NOT NULL,
+    events          TEXT NOT NULL,
+    subscriber_kind TEXT NOT NULL,
+    subscriber      TEXT NOT NULL,
+    role            TEXT,
+    user_agent      TEXT,
+    created_at      INTEGER NOT NULL,
+    last_sent_at    INTEGER,
+    last_error      TEXT,
+    failures        INTEGER NOT NULL DEFAULT 0
+);
 """
 
 
@@ -4694,6 +4742,7 @@ _TABLE_NOTES = {
     "build_stats": "per-build outcome counters",
     "settings": "broker settings",
     "schema_meta": "schema version",
+    "push_subscriptions": "browsers that asked for push notifications",
 }
 
 
@@ -6103,6 +6152,11 @@ def create_pairing(conn, user_code: str, name: str, token_hash: str,
             " requested_ip, status, created_at, expires_at)"
             " VALUES (?,?,?,?,?,?,'pending',?,?)",
             (user_code, name, token_hash, host, platform, requested_ip, now, now + ttl))
+        # The moment an admin has ten minutes to act on, so it is in the trail
+        # (and push.py announces it) -- not the code: approving needs the
+        # Machines tab, where the code is shown, so the trail needs only who.
+        _event(conn, None, name, "pair-request",
+               " · ".join(x for x in (host, platform) if x) or None, now)
         conn.execute("COMMIT")
     except Exception:
         conn.execute("ROLLBACK")
@@ -6160,3 +6214,246 @@ def resolve_pairing(conn, user_code: str, approve: bool, by: str,
         conn.execute("ROLLBACK")
         raise
     return status
+
+
+# -- push notifications (casebroker/push.py) -------------------------------------
+#
+# The statements behind browser push, here for the reason every statement is: this
+# module owns the SQL and the lock. push.py keeps three settings rows. `push_policy`
+# (the broker-wide switch per notice kind) is written through set_setting, which
+# audits it, because a switch an admin flips is what a trail is for. The other two
+# are written here and NOT audited: `push_state` moves on every tick, and
+# `push_vapid_private` is a private key, which an audit line would copy into every
+# trail that lists settings changes.
+
+PUSH_VAPID_KEY = "push_vapid_private"
+PUSH_STATE_KEY = "push_state"
+PUSH_POLICY_KEY = "push_policy"
+PUSH_ORIGIN_KEY = "push_origin"
+
+
+@_locked
+def push_setting(conn, key: str) -> str | None:
+    """push.py's policy, state or learned origin. Not the VAPID key, which has its
+    own reader, so nothing that asks for "a push setting" can be handed it by name."""
+    if key not in (PUSH_STATE_KEY, PUSH_POLICY_KEY, PUSH_ORIGIN_KEY):
+        raise ValueError("not a push setting: %s" % key)
+    return _setting(conn, key)
+
+
+@_locked
+def remember_push_origin(conn, origin: str, now: int | None = None) -> bool:
+    """The dashboard's public https origin, as a browser subscribing from it named
+    it: the VAPID subject when none is configured. Learned, not set, so not audited,
+    and written only when it changes -- a subscribe is not otherwise a settings write."""
+    if _setting(conn, PUSH_ORIGIN_KEY) == origin:
+        return False
+    conn.execute("INSERT INTO settings(key, value, updated_at, updated_by) VALUES (?,?,?,?)"
+                 " ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+                 (PUSH_ORIGIN_KEY, origin, now or _now(), "push"))
+    return True
+
+
+@_locked
+def push_vapid_key(conn, generate: Callable[[], str], now: int | None = None) -> str:
+    """This broker's VAPID private key, made by ``generate`` on first use and kept.
+
+    Inserted with DO NOTHING and then read back, so two processes starting at once
+    agree on ONE key. A second key would orphan every browser subscribed under the
+    first: a subscription is bound to the public key it was made with, and a push
+    signed by any other is refused."""
+    have = _setting(conn, PUSH_VAPID_KEY)
+    if have:
+        return have
+    conn.execute("INSERT INTO settings(key, value, updated_at, updated_by) VALUES (?,?,?,?)"
+                 " ON CONFLICT(key) DO NOTHING", (PUSH_VAPID_KEY, generate(), now or _now(), "push"))
+    return _setting(conn, PUSH_VAPID_KEY)
+
+
+@_locked
+def claim_push_state(conn, old: str | None, new: str, now: int | None = None) -> bool:
+    """Move the notifier's state from ``old`` to ``new`` unless somebody moved it
+    first -- compare-and-set, so two broker processes overlapping in a deploy never
+    both announce one event. True when this caller won."""
+    now = now or _now()
+    if old is None:
+        cur = conn.execute("INSERT INTO settings(key, value, updated_at, updated_by) VALUES (?,?,?,?)"
+                           " ON CONFLICT(key) DO NOTHING", (PUSH_STATE_KEY, new, now, "push"))
+    else:
+        cur = conn.execute("UPDATE settings SET value = ?, updated_at = ? WHERE key = ? AND value = ?",
+                           (new, now, PUSH_STATE_KEY, old))
+    return bool(cur.rowcount)
+
+
+@_locked
+def push_events_after(conn, after_id: int, events: Iterable[str], before: int,
+                      not_before: int = 0, limit: int = 500) -> tuple[list[dict[str, Any]], int]:
+    """``(rows, cursor)``: the named events after ``after_id``, oldest first, each
+    with its case's spec, and how far a reader has now read.
+
+    Read in id order and stopped at the first row of ANY kind stamped at or after
+    ``before`` (a few seconds ago): a row whose transaction took a moment to commit
+    can land with a lower id than one already visible, and reading past it would
+    skip it for good. Rows older than ``not_before`` are passed over rather than
+    announced -- a broker that was down for a day does not wake everyone with it."""
+    names = list(events)
+    stop = conn.execute("SELECT MIN(id) AS n FROM events WHERE id > ? AND ts >= ?",
+                        (after_id, before)).fetchone()["n"]
+    upper = int(stop) if stop is not None else None
+    sql = ("SELECT e.id, e.ts, e.case_id, e.worker_id, e.event, e.detail, c.spec"
+           " FROM events e LEFT JOIN cases c ON c.case_id = e.case_id"
+           " WHERE e.id > ? AND e.ts >= ? AND e.event IN (%s)" % ",".join("?" * len(names)))
+    params: list[Any] = [after_id, not_before, *names]
+    if upper is not None:
+        sql += " AND e.id < ?"
+        params.append(upper)
+    rows = [dict(r) for r in conn.execute(sql + " ORDER BY e.id LIMIT ?", (*params, limit)).fetchall()]
+    if len(rows) >= limit:
+        return rows, int(rows[-1]["id"])
+    if upper is not None:
+        return rows, upper - 1
+    top = conn.execute("SELECT MAX(id) AS n FROM events WHERE id > ?", (after_id,)).fetchone()["n"]
+    return rows, int(top) if top is not None else after_id
+
+
+@_locked
+def push_snapshot(conn, silent_before: int) -> dict[str, Any]:
+    """What push.py judges its standing conditions from, in one locked read: cases
+    by state, the leased cases whose worker was last heard from before
+    ``silent_before``, when the oldest current lease began, when a case last
+    finished, and the newest event id."""
+    by_state = {r["state"]: int(r["n"]) for r in conn.execute(
+        "SELECT state, COUNT(*) AS n FROM cases GROUP BY state").fetchall()}
+    silent = [dict(r) for r in conn.execute(
+        "SELECT c.case_id, c.lease_worker AS worker_id, w.last_seen FROM cases c"
+        " JOIN workers w ON w.worker_id = c.lease_worker"
+        " WHERE c.state = 'leased' AND w.last_seen < ? ORDER BY c.case_id",
+        (silent_before,)).fetchall()]
+    oldest = conn.execute("SELECT MIN(leased_at) AS t FROM cases WHERE state = 'leased'").fetchone()["t"]
+    last_done = conn.execute("SELECT MAX(ts) AS t FROM events WHERE event = 'done'").fetchone()["t"]
+    newest = conn.execute("SELECT MAX(id) AS n FROM events").fetchone()["n"]
+    return {"by_state": by_state, "silent": silent,
+            "oldest_lease": int(oldest) if oldest is not None else None,
+            "last_done": int(last_done) if last_done is not None else None,
+            "newest_event": int(newest) if newest is not None else 0}
+
+
+def _push_row(r) -> dict[str, Any]:
+    d = dict(r)
+    try:
+        d["events"] = [str(e) for e in json.loads(d.get("events") or "[]")]
+    except ValueError:
+        d["events"] = []
+    return d
+
+
+@_locked
+def save_push_subscription(conn, endpoint: str, p256dh: str, auth: str, events: list[str],
+                           subscriber_kind: str, subscriber: str, role: str | None,
+                           user_agent: str | None, now: int | None = None,
+                           per_subscriber: int = 25, total: int = 500) -> str:
+    """Insert or replace one browser's subscription; ``created`` or ``updated``.
+
+    Bounded, because every row is a POST this broker makes on every notice and
+    any reader may add one: past ``total`` rows a new one is refused
+    (ValueError("too-many")), and past ``per_subscriber`` for one credential its
+    least recently used is dropped -- browsers that were reset or thrown away
+    leave rows behind, and the person adding a new one is the one who knows."""
+    now = now or _now()
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        had = conn.execute("SELECT 1 FROM push_subscriptions WHERE endpoint = ?", (endpoint,)).fetchone()
+        if had is None:
+            if conn.execute("SELECT COUNT(*) AS n FROM push_subscriptions").fetchone()["n"] >= total:
+                raise ValueError("too-many")
+            mine = conn.execute(
+                "SELECT endpoint FROM push_subscriptions WHERE subscriber_kind = ? AND subscriber = ?"
+                " ORDER BY COALESCE(last_sent_at, created_at), created_at",
+                (subscriber_kind, subscriber)).fetchall()
+            for r in mine[:max(0, len(mine) - per_subscriber + 1)]:
+                conn.execute("DELETE FROM push_subscriptions WHERE endpoint = ?", (r["endpoint"],))
+        conn.execute(
+            "INSERT INTO push_subscriptions(endpoint, p256dh, auth, events, subscriber_kind,"
+            " subscriber, role, user_agent, created_at, failures) VALUES (?,?,?,?,?,?,?,?,?,0)"
+            " ON CONFLICT(endpoint) DO UPDATE SET p256dh = excluded.p256dh, auth = excluded.auth,"
+            " events = excluded.events, subscriber_kind = excluded.subscriber_kind,"
+            " subscriber = excluded.subscriber, role = excluded.role,"
+            " user_agent = excluded.user_agent, failures = 0, last_error = NULL",
+            (endpoint, p256dh, auth, json.dumps(list(events)), subscriber_kind, subscriber,
+             role, user_agent, now))
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    return "updated" if had is not None else "created"
+
+
+@_locked
+def push_subscription(conn, endpoint: str) -> dict[str, Any] | None:
+    row = conn.execute("SELECT * FROM push_subscriptions WHERE endpoint = ?", (endpoint,)).fetchone()
+    return _push_row(row) if row is not None else None
+
+
+@_locked
+def push_subscriptions(conn) -> list[dict[str, Any]]:
+    return [_push_row(r) for r in conn.execute(
+        "SELECT * FROM push_subscriptions ORDER BY created_at, endpoint").fetchall()]
+
+
+@_locked
+def set_push_subscription_events(conn, endpoint: str, events: list[str]) -> bool:
+    return bool(conn.execute("UPDATE push_subscriptions SET events = ? WHERE endpoint = ?",
+                             (json.dumps(list(events)), endpoint)).rowcount)
+
+
+@_locked
+def delete_push_subscription(conn, endpoint: str) -> bool:
+    return bool(conn.execute("DELETE FROM push_subscriptions WHERE endpoint = ?",
+                             (endpoint,)).rowcount)
+
+
+@_locked
+def note_push_delivery(conn, endpoint: str, error: str | None = None, gone: bool = False,
+                       drop_after: int = 10, now: int | None = None) -> str:
+    """Record one send: ``sent``, ``failed`` or ``dropped``. ``gone`` is the push
+    service saying the browser unsubscribed (404/410), which drops the row at once;
+    any other failure counts, and ``drop_after`` of them in a row drop it."""
+    now = now or _now()
+    if gone:
+        conn.execute("DELETE FROM push_subscriptions WHERE endpoint = ?", (endpoint,))
+        return "dropped"
+    if error is None:
+        conn.execute("UPDATE push_subscriptions SET last_sent_at = ?, failures = 0, last_error = NULL"
+                     " WHERE endpoint = ?", (now, endpoint))
+        return "sent"
+    conn.execute("UPDATE push_subscriptions SET failures = failures + 1, last_error = ?"
+                 " WHERE endpoint = ?", (error[:300], endpoint))
+    row = conn.execute("SELECT failures FROM push_subscriptions WHERE endpoint = ?", (endpoint,)).fetchone()
+    if row is not None and int(row["failures"]) >= drop_after:
+        conn.execute("DELETE FROM push_subscriptions WHERE endpoint = ?", (endpoint,))
+        return "dropped"
+    return "failed"
+
+
+@_locked
+def push_subscriber_role(conn, kind: str, who: str, now: int | None = None) -> str | None:
+    """The role the credential behind a subscription has NOW, or None when it is
+    gone: an account (its current role), a share link (viewer while it is live), a
+    machine credential (operator while it is not revoked). The environment's tokens
+    are not in this database; app.py answers for those."""
+    if kind == "user":
+        row = conn.execute("SELECT role FROM users WHERE username = ?", (who,)).fetchone()
+        return row["role"] if row is not None else None
+    if kind == "share":
+        try:
+            link_id = int(who)
+        except ValueError:
+            return None
+        row = conn.execute("SELECT expires_at, revoked_at FROM share_links WHERE id = ?",
+                           (link_id,)).fetchone()
+        return "viewer" if row is not None and share_link_state(dict(row), now) == "live" else None
+    if kind == "machine":
+        row = conn.execute("SELECT 1 FROM worker_tokens WHERE name = ? AND revoked_at IS NULL",
+                           (who,)).fetchone()
+        return "operator" if row is not None else None
+    return None

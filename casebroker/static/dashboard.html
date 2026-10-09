@@ -4,6 +4,9 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>E3D Simulation Broker</title>
+<!-- Lets iOS add the dashboard to the Home Screen as an app of its own, the only
+     place Safari on an iPhone or iPad offers push (app.py, /manifest.webmanifest). -->
+<link rel="manifest" href="/manifest.webmanifest" />
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A//www.w3.org/2000/svg%27%20viewBox%3D%270%200%2024%2024%27%3E%3Crect%20width%3D%2724%27%20height%3D%2724%27%20rx%3D%276%27%20fill%3D%27%2322272e%27/%3E%3Cpath%20d%3D%27M17.7%207.7a2.5%202.5%200%201%201%201.8%204.3H2M9.6%204.6A2%202%200%201%201%2011%208H2M12.6%2019.4A2%202%200%201%200%2014%2016H2%27%20fill%3D%27none%27%20stroke%3D%27%2357ab5a%27%20stroke-width%3D%272.2%27%20stroke-linecap%3D%27round%27%20stroke-linejoin%3D%27round%27/%3E%3C/svg%3E" />
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -574,6 +577,11 @@
   @media (max-width: 640px) { .drawer-resize { display: none; } }
   .notify-events { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 12.5px; }
   .notify-events label { display: flex; align-items: center; gap: 6px; margin: 0; font-weight: 500; cursor: pointer; }
+  /* Push kinds carry a line each on what they mean, so they stack. */
+  .push-events { flex-direction: column; flex-wrap: nowrap; gap: 5px; }
+  .push-events label { align-items: baseline; }
+  .push-events label.off { opacity: 0.5; cursor: default; }
+  .push-events .label-hint { font-weight: 400; }
   .storage-total { font-size: 28px; font-weight: 700; letter-spacing: -0.01em; }
   .storage-sub { color: var(--text-secondary); font-size: 12.5px; margin-top: 2px; }
   .storage-meter { height: 8px; border-radius: 4px; background: var(--surface-hover);
@@ -2309,6 +2317,25 @@
       <div id="notifyEvents" class="notify-events" style="margin:8px 0 0 26px;"></div>
       <div class="panel-subtitle" style="margin-top:6px;">
         Announces only what happens after you switch it on, and only while this tab is open.
+      </div>
+
+      <!-- Push: the broker itself sends these, to a closed tab or a phone, so what
+           this browser asked for is kept ON THE BROKER, unlike the rest of this tab. -->
+      <div class="detail-card" id="pushCard" style="margin-top:16px;">
+        <h3>Push notifications <span class="label-hint" style="font-weight:400;">(arrive with the tab closed)</span></h3>
+        <div id="pushStatus" class="panel-subtitle" style="margin-bottom:10px;">Checking…</div>
+        <div class="row" style="gap:8px; align-items:center;">
+          <button id="pushToggle" type="button" style="display:none;">Turn on for this device</button>
+          <button id="pushTest" type="button" class="subtle" style="display:none;">Send a test</button>
+        </div>
+        <div id="pushEvents" class="notify-events push-events" style="margin-top:12px;"></div>
+        <div id="pushPolicyBox" hidden style="margin-top:16px;">
+          <div class="panel-subtitle" style="margin-bottom:6px;">
+            <strong>Broker-wide</strong> (admin) &mdash; a kind switched off here is sent to nobody,
+            whatever their device asked for.
+          </div>
+          <div id="pushPolicy" class="notify-events"></div>
+        </div>
       </div>
 
       <div class="field" style="margin-top:18px;">
@@ -7443,6 +7470,229 @@
     else if (grew > 0) fireNotification([`${grew} case(s)`], doneCount);
   }
 
+  // -- Push notifications: with the tab closed ---------------------------------
+  // The notifications above end with the tab. These do not: the BROKER sends them
+  // (casebroker/push.py), through the browser vendor's push service, to /sw.js,
+  // which shows them -- a phone in a pocket included. What this device asked for is
+  // kept on the broker, per subscription; an admin also gets the broker-wide switch
+  // per kind.
+  //
+  // Every way a browser cannot do this is SAID rather than left as a button that
+  // fails: no https, no Push API (Safari on an iPhone outside the Home Screen above
+  // all), notifications blocked, push switched off on the broker, nobody signed in.
+  let pushInfo = null;       // GET /v1/push/events: {enabled, reason, admin, events}
+  let pushSub = null;        // this browser's PushSubscription, or null
+  let pushServer = null;     // the broker's record of it, or null when it has none
+  let pushBusy = false;
+
+  /// userCall, plus the bearer token when the page runs on one: a subscription
+  /// belongs to whichever credential made it, and a read token may make one.
+  function pushCall(path, opts) {
+    const o = Object.assign({}, opts || {});
+    const token = $("token").value.trim();
+    if (token) o.headers = Object.assign({}, o.headers || {}, { Authorization: "Bearer " + token });
+    return userCall(path, o);
+  }
+
+  function pushIsIos() {
+    return /iPad|iPhone|iPod/.test(navigator.userAgent)
+      || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+  }
+
+  /// Why this browser cannot take push at all, or "" when it can.
+  function pushUnsupported() {
+    if (window.isSecureContext === false) {
+      return "Push needs https (or localhost), and this page was opened over plain http.";
+    }
+    if (!("serviceWorker" in navigator) || !("PushManager" in window) || typeof Notification === "undefined") {
+      const homeScreen = window.navigator.standalone === true
+        || (window.matchMedia && window.matchMedia("(display-mode: standalone)").matches);
+      if (pushIsIos() && !homeScreen) {
+        return "On an iPhone or iPad, push works only from the Home Screen: tap Share ▸ Add to Home Screen, "
+          + "open the dashboard from that icon, and sign in there (it keeps cookies of its own).";
+      }
+      return "This browser has no Push API, so it can only be told while a tab is open (above).";
+    }
+    return "";
+  }
+
+  function pushKeyBytes(s) {
+    const b = atob(s.replace(/-/g, "+").replace(/_/g, "/") + "===".slice((s.length + 3) % 4));
+    return Uint8Array.from(b, (c) => c.charCodeAt(0));
+  }
+
+  /// A subscription is bound to the key it was made with: after the broker's key
+  /// changed (CASEBROKER_VAPID_PRIVATE_KEY), the old one can never be reached.
+  function pushSameKey(sub, key) {
+    try {
+      const a = new Uint8Array(sub.options.applicationServerKey), b = pushKeyBytes(key);
+      return a.length === b.length && a.every((x, i) => x === b[i]);
+    } catch (e) { return true; }      // a browser that does not say cannot be judged
+  }
+
+  function pushChosen() {
+    return [...$("pushEvents").querySelectorAll("[data-push-ev]:checked")].map((x) => x.dataset.pushEv);
+  }
+
+  async function pushRefresh() {
+    pushSub = null; pushServer = null;
+    try {
+      pushInfo = await pushCall("/v1/push/events");
+    } catch (e) {
+      pushInfo = null;
+      pushRender(/log in|401/i.test(e.message) ? "Sign in to choose push notifications for this device."
+                                              : "Could not ask the broker about push: " + e.message);
+      return;
+    }
+    const why = pushUnsupported();
+    if (!why && pushInfo.enabled) {
+      try {
+        const reg = await navigator.serviceWorker.getRegistration("/");
+        pushSub = reg ? await reg.pushManager.getSubscription() : null;
+      } catch (e) { pushSub = null; }
+      if (pushSub) {
+        try {
+          pushServer = await pushCall("/v1/push/subscriptions?endpoint=" + encodeURIComponent(pushSub.endpoint));
+        } catch (e) { pushServer = null; }
+      }
+    }
+    pushRender(why);
+  }
+
+  function pushRender(note) {
+    const info = pushInfo;
+    const on = !!(pushSub && pushServer);
+    const denied = typeof Notification !== "undefined" && Notification.permission === "denied";
+    let msg = note || "";
+    if (!msg && info && !info.enabled) msg = info.reason || "Push is switched off on this broker.";
+    if (!msg && denied) {
+      msg = "Notifications are blocked for this site in the browser's settings. Allow them there, then reload.";
+    }
+    if (!msg && on) {
+      msg = "On for this device."
+        + (pushServer.last_error ? " The last send failed: " + pushServer.last_error
+           : pushServer.last_sent_at ? " Last sent " + new Date(pushServer.last_sent_at * 1000).toLocaleString() + "." : "");
+    } else if (!msg && pushSub) {
+      msg = "This device was subscribed, but the broker no longer holds it -- dropped after sends failed, "
+        + "or made by another sign-in. Turn it on again.";
+    } else if (!msg) {
+      msg = "Off for this device. Turned on, the broker sends what is ticked below, with every dashboard tab closed.";
+    }
+    $("pushStatus").textContent = msg;
+    const canAct = !!info && info.enabled && !note && !denied;
+    // style.display, not `hidden`: the page's button rule sets display, which
+    // wins over the attribute.
+    $("pushToggle").style.display = canAct ? "" : "none";
+    $("pushToggle").textContent = on ? "Turn off for this device" : "Turn on for this device";
+    $("pushTest").style.display = canAct && on ? "" : "none";
+    const kinds = (info && info.events) || [];
+    // Before it is on, the ticks are what turning it on will ask for; after, each
+    // change is saved to the broker at once.
+    const mine = new Set(on ? pushServer.events : kinds.filter((k) => k.default).map((k) => k.key));
+    $("pushEvents").innerHTML = kinds.filter((k) => k.allowed).map((k) =>
+      `<label class="${k.broker ? "" : "off"}"><input type="checkbox" data-push-ev="${esc(k.key)}"`
+      + `${mine.has(k.key) ? " checked" : ""}${canAct && k.broker ? "" : " disabled"} />`
+      + `<span>${esc(k.label)} <span class="label-hint">— ${esc(k.help)}`
+      + `${k.broker ? "" : " (switched off for everyone on this broker)"}</span></span></label>`).join("");
+    $("pushPolicyBox").hidden = !(info && info.admin);
+    $("pushPolicy").innerHTML = info && info.admin ? kinds.map((k) =>
+      `<label><input type="checkbox" data-push-policy="${esc(k.key)}"${k.broker ? " checked" : ""} /> ${esc(k.label)}</label>`
+    ).join("") : "";
+  }
+
+  async function pushEnable() {
+    // First, and inside the click: Safari ignores a permission request that is
+    // not the direct result of one.
+    if (Notification.permission !== "granted"
+        && await Notification.requestPermission() !== "granted") {
+      showToast("Notification permission was not granted");
+      return;
+    }
+    const key = await pushCall("/v1/push/key");
+    if (!key.enabled) { showToast(key.reason || "Push is switched off on this broker"); return; }
+    const reg = await navigator.serviceWorker.register("/sw.js", { scope: "/" });
+    await navigator.serviceWorker.ready;
+    let sub = await reg.pushManager.getSubscription();
+    if (sub && !pushSameKey(sub, key.public_key)) { await sub.unsubscribe(); sub = null; }
+    if (!sub) {
+      sub = await reg.pushManager.subscribe({ userVisibleOnly: true,
+                                              applicationServerKey: pushKeyBytes(key.public_key) });
+    }
+    await pushCall("/v1/push/subscriptions", jsonBody("POST", { subscription: sub.toJSON(), events: pushChosen() }));
+    showToast("Push notifications on for this device");
+  }
+
+  /// Off on the broker first, then in the browser: the other order leaves a row
+  /// the broker keeps sending to until the push service says it is gone.
+  async function pushForget() {
+    const sub = pushSub;
+    pushSub = null; pushServer = null;
+    if (!sub) return;
+    try { await pushCall("/v1/push/subscriptions", jsonBody("DELETE", { endpoint: sub.endpoint })); } catch (e) {}
+    try { await sub.unsubscribe(); } catch (e) {}
+  }
+
+  $("pushToggle").addEventListener("click", async () => {
+    if (pushBusy) return;
+    pushBusy = true;
+    $("pushToggle").disabled = true;
+    try {
+      if (pushSub && pushServer) { await pushForget(); showToast("Push notifications off for this device"); }
+      else await pushEnable();
+    } catch (e) {
+      showToast("Push: " + ((e && e.message) || e));
+    } finally {
+      pushBusy = false;
+      $("pushToggle").disabled = false;
+      await pushRefresh();
+    }
+  });
+
+  $("pushTest").addEventListener("click", async () => {
+    if (!pushSub) return;
+    try {
+      const r = await pushCall("/v1/push/test", jsonBody("POST", { endpoint: pushSub.endpoint }));
+      showToast(r.ok ? "Sent; it should arrive within seconds"
+        : "Not delivered: " + (r.error || "no answer") + (r.dropped ? " (the subscription was removed)" : ""));
+    } catch (e) { showToast(e.message); }
+    pushRefresh();
+  });
+
+  $("pushEvents").addEventListener("change", async (e) => {
+    if (!e.target.closest("[data-push-ev]") || !(pushSub && pushServer)) return;
+    try {
+      const r = await pushCall("/v1/push/subscriptions", jsonBody("PUT", { endpoint: pushSub.endpoint, events: pushChosen() }));
+      pushServer.events = r.events;
+      showToast("Saved on the broker");
+    } catch (err) { showToast(err.message); }
+    pushRender(pushUnsupported());
+  });
+
+  $("pushPolicy").addEventListener("change", async (e) => {
+    const box = e.target.closest("[data-push-policy]");
+    if (!box) return;
+    try {
+      pushInfo = await pushCall("/v1/push/policy", jsonBody("PUT", { events: { [box.dataset.pushPolicy]: box.checked } }));
+      showToast(box.checked ? "Sent to whoever asks for it" : "Sent to nobody");
+    } catch (err) { showToast(err.message); }
+    pushRender(pushUnsupported());
+  });
+
+  // A click on a notice: sw.js focuses this tab and names the place. A fragment
+  // is a step the page already takes without reloading (onRouteChange).
+  if ("serviceWorker" in navigator) {
+    navigator.serviceWorker.addEventListener("message", (e) => {
+      const d = e.data || {};
+      if (d.type !== "casebroker-open" || typeof d.url !== "string") return;
+      let u;
+      try { u = new URL(d.url, location.origin); } catch (err) { return; }
+      if (u.origin !== location.origin) return;
+      if (u.pathname !== location.pathname) location.assign(u.href);
+      else if (u.hash !== location.hash) location.hash = u.hash;
+    });
+    try { navigator.serviceWorker.startMessages(); } catch (e) { /* older browsers start them anyway */ }
+  }
+
   // -- Identity ----------------------------------------------------------------
   // Three states, decided by the server rather than guessed here: a deployment
   // with no accounts offers SETUP (that endpoint closes itself after the first
@@ -7512,6 +7762,7 @@
       authSkeleton(false);
       $("authPanel").style.display = "none";
       renderWizard();
+      pushRefresh();
       return;
     }
     authSkeleton(false);
@@ -7574,6 +7825,7 @@
     if (isAdmin) { loadMachines(); loadPairings(); loadUsers(); loadShares(); } else machineCount = null;
     loadReleases();
     renderWizard();
+    pushRefresh();     // who is signed in decides what push may offer
   }
 
   async function submitAuth(e) {
@@ -7609,6 +7861,9 @@
   }
 
   async function doLogout() {
+    // Signing out ends this device's push too: a shared browser must not go on
+    // being told the signed-out account's notices, admin-only ones included.
+    await pushForget();
     try {
       await fetch($("broker").value.trim() + "/v1/auth/logout",
                   { method: "POST", credentials: "include" });
