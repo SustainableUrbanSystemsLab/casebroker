@@ -46,7 +46,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from starlette.middleware.gzip import DEFAULT_EXCLUDED_CONTENT_TYPES, GZipMiddleware
 from pydantic import BaseModel, Field
 
-from . import __version__, auth, dataset, db, footprints, ids, partstore, places, umag
+from . import __version__, auth, dataset, db, footprints, ids, partstore, places, push, umag
 
 MAX_LEASE_SECONDS = 24 * 3600
 
@@ -648,7 +648,8 @@ def _encoded(request: Request, plain: bytes, gz: bytes, headers: dict) -> tuple[
 def create_app(db_path: str | None = None, tokens: list[str] | None = None,
                readonly_tokens: list[str] | None = None,
                setup_token: str | None = None,
-               parts_dir: str | None = None) -> FastAPI:
+               parts_dir: str | None = None,
+               push_notifier: bool | None = None) -> FastAPI:
     """Build an app bound to one database and token set(s).
 
     Two independent buckets, not one list with a flag on each entry: ``tokens``
@@ -708,7 +709,21 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         # Fields stored before the broker summarised them on arrival get their
         # statistics now, a few at a time so a lease never waits long behind them.
         threading.Thread(target=_summarise_stored_fields, name="field-stats", daemon=True).start()
-        yield
+        # Browser push (casebroker/push.py). Only for a broker configured from the
+        # environment -- the deployment -- unless asked: the suite builds apps with
+        # an explicit db_path, and a notifier thread outliving its test would read
+        # the next test's database.
+        notifier = None
+        if (push_notifier if push_notifier is not None else from_env) and push.enabled():
+            notifier = push.Notifier(conn, role_of=_push_role_of,
+                                     store_usage=(store.usage if store is not None else None))
+            notifier.start()
+        app.state.push_notifier = notifier
+        try:
+            yield
+        finally:
+            if notifier is not None:
+                notifier.stop()
 
     app = FastAPI(title="E3D Simulation Broker", version=__version__,
                   lifespan=_lifespan)
@@ -3323,6 +3338,176 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
                              limit=limit, offset=offset, sort=sort, direction=direction,
                              include_spec=include_spec, label=label, recipe=recipe or None,
                              after=after)
+
+    # -- browser push: told with the tab closed (casebroker/push.py) ----------------
+    #
+    # Any READER may subscribe a browser -- an account of any role, a share link, a
+    # read token -- since a notice says no more than the dashboard already shows
+    # them, and the admin-only kinds are dropped for everyone else. A subscription
+    # belongs to the credential that made it: only that credential can read, change,
+    # test or delete it, and the notifier re-checks it at every send.
+
+    def _token_tag(token: str) -> str:
+        """Which env token made a subscription, without keeping the token: 64 bits of
+        its SHA-256, enough to tell the configured tokens apart and useless to log in."""
+        return hashlib.sha256(token.encode("utf-8", "surrogatepass")).hexdigest()[:16]
+
+    def _push_principal(request: Request) -> tuple[str, str, str]:
+        """(kind, who, role) of the caller, most specific credential first, as whoami."""
+        user = _session_principal(request)
+        if user:
+            return "user", user["username"], user["role"]
+        machine = _machine_principal(request)
+        if machine:
+            return "machine", machine["name"], "operator"
+        supplied = _supplied_token(request)
+        if supplied and _env_token_ok(supplied, tokens):
+            return "token", "write:" + _token_tag(supplied), "operator"
+        if supplied and _env_token_ok(supplied, readonly_tokens):
+            return "token", "read:" + _token_tag(supplied), "viewer"
+        share = _share_principal(request)
+        if share:
+            return "share", str(share["id"]), "viewer"
+        if _auth_is_open():
+            return "open", "open", "admin"
+        raise HTTPException(401, "log in, or send a valid bearer token")
+
+    def _push_role_of(sub: dict[str, Any]) -> str | None:
+        """For the notifier: the role a subscription's credential has now, or None.
+        An env token removed from the environment ends its subscriptions too."""
+        kind, who = sub["subscriber_kind"], sub["subscriber"]
+        if kind == "token":
+            scope, _, tag = who.partition(":")
+            bucket = tokens if scope == "write" else readonly_tokens
+            return sub.get("role") if any(_ct_eq(_token_tag(t), tag) for t in bucket) else None
+        if kind == "open":
+            return "admin" if _auth_is_open() else None
+        return push.default_role_of(conn, sub)
+
+    app.state.push_role_of = _push_role_of        # what the notifier is handed; a test can too
+
+    def _own_subscription(request: Request, endpoint: str) -> tuple[dict[str, Any], str]:
+        """The caller's own subscription and their role. Somebody else's is a 404,
+        the same answer as none at all, so an endpoint cannot be probed for."""
+        kind, who, role = _push_principal(request)
+        row = db.push_subscription(conn, endpoint)
+        if row is None or (row["subscriber_kind"], row["subscriber"]) != (kind, who):
+            raise HTTPException(404, "this browser has no push subscription here")
+        return row, role
+
+    def _push_on() -> None:
+        if not push.enabled():
+            raise HTTPException(409, "push notifications are switched off on this broker (CASEBROKER_PUSH=0)")
+
+    sw_source: list[bytes] = []
+
+    @app.get("/sw.js", include_in_schema=False)
+    def service_worker() -> Response:
+        """The service worker that shows a push (static/sw.js). At the root so its
+        scope is the whole dashboard. `no-cache` because a browser keeps running the
+        worker it has until it sees a different one, and Cloudflare caches .js by
+        extension: a stale copy at the edge would pin every browser to it."""
+        if not sw_source:
+            sw_source.append((_STATIC_DIR / "sw.js").read_bytes())
+        return Response(content=sw_source[0], media_type="application/javascript",
+                        headers={"Cache-Control": "no-cache"})
+
+    @app.get("/manifest.webmanifest", include_in_schema=False)
+    def web_manifest() -> Response:
+        """What lets iOS put the dashboard on the Home Screen, where alone Safari on an
+        iPhone or iPad offers push (push.MANIFEST)."""
+        return Response(content=json.dumps(push.MANIFEST), media_type="application/manifest+json",
+                        headers={"Cache-Control": "no-cache"})
+
+    @app.get("/v1/push/key", dependencies=[ReadAuth])
+    def push_key() -> dict[str, Any]:
+        """The VAPID public key a browser subscribes with, and whether push is on."""
+        return push.key_state(conn)
+
+    @app.get("/v1/push/events", dependencies=[ReadAuth])
+    def push_events(request: Request) -> dict[str, Any]:
+        """The catalog: each kind, its broker-wide switch, and whether the caller may
+        receive it."""
+        _, _, role = _push_principal(request)
+        state = push.key_state(conn)
+        return {"enabled": state["enabled"], "reason": state["reason"], "role": role,
+                "admin": role == "admin", "events": push.catalog(conn, role)}
+
+    @app.post("/v1/push/subscriptions", dependencies=[ReadAuth])
+    def push_subscribe(body: push.SubscribeIn, request: Request) -> dict[str, Any]:
+        """Subscribe this browser: ``{subscription: PushSubscription.toJSON(), events}``.
+        Posting the same endpoint again replaces it (new keys, new kinds)."""
+        _push_on()
+        kind, who, role = _push_principal(request)
+        sub = body.subscription
+        why = push.check_endpoint(sub.endpoint) or push.check_keys(sub.keys.p256dh, sub.keys.auth)
+        if why:
+            raise HTTPException(422, why)
+        requested = body.events
+        old = db.push_subscription(conn, body.replaces) if body.replaces else None
+        if old is not None and (old["subscriber_kind"], old["subscriber"]) != (kind, who):
+            old = None
+        if requested is None and old is not None:
+            requested = old["events"]
+        events = push.events_for(requested, role)
+        try:
+            made = db.save_push_subscription(
+                conn, sub.endpoint, sub.keys.p256dh, sub.keys.auth, events, kind, who, role,
+                (request.headers.get("user-agent") or "")[:300] or None)
+        except ValueError:
+            raise HTTPException(429, "this broker holds as many push subscriptions as it will; "
+                                     "ask an admin to clear out old ones") from None
+        if old is not None and old["endpoint"] != sub.endpoint:
+            db.delete_push_subscription(conn, old["endpoint"])
+        # The address the page was opened on, which a browser names in Origin: the
+        # VAPID subject a push service (Apple's, strictly) is happy with. Only when it
+        # is the host this request reached, so it is how people reach the broker.
+        origin = push.origin_subject(request.headers.get("origin"))
+        if origin and urlsplit(origin).hostname == (request.headers.get("host") or "").split(":")[0].lower():
+            db.remember_push_origin(conn, origin)
+        return {"endpoint": sub.endpoint, "events": events, "status": made}
+
+    @app.get("/v1/push/subscriptions", dependencies=[ReadAuth])
+    def push_subscription(request: Request,
+                          endpoint: str = Query(..., min_length=12, max_length=push.ENDPOINT_MAX)) -> dict[str, Any]:
+        """This browser's subscription as the broker holds it (never its keys).
+        The endpoint in a query string reaches the proxy's log; that is not a way
+        in, since the push service carries a message to it only when it is signed
+        with this broker's VAPID key."""
+        row, role = _own_subscription(request, endpoint)
+        return {"endpoint": row["endpoint"], "events": row["events"], "role": role,
+                "created_at": row["created_at"], "last_sent_at": row["last_sent_at"],
+                "last_error": row["last_error"], "failures": row["failures"]}
+
+    @app.put("/v1/push/subscriptions", dependencies=[ReadAuth])
+    def push_set_events(body: push.EventsIn, request: Request) -> dict[str, Any]:
+        row, role = _own_subscription(request, body.endpoint)
+        events = push.events_for(body.events, role)
+        db.set_push_subscription_events(conn, row["endpoint"], events)
+        return {"endpoint": row["endpoint"], "events": events}
+
+    @app.delete("/v1/push/subscriptions", dependencies=[ReadAuth])
+    def push_unsubscribe(body: push.EndpointIn, request: Request) -> dict[str, Any]:
+        row, _ = _own_subscription(request, body.endpoint)
+        return {"deleted": db.delete_push_subscription(conn, row["endpoint"])}
+
+    @app.post("/v1/push/test", dependencies=[ReadAuth])
+    def push_test(body: push.EndpointIn, request: Request) -> dict[str, Any]:
+        """One push to this browser now, and what the push service said."""
+        _push_on()
+        row, _ = _own_subscription(request, body.endpoint)
+        return push.send_test(conn, row)
+
+    @app.put("/v1/push/policy")
+    def push_policy(body: push.PolicyIn, request: Request, user=AdminAuth) -> dict[str, Any]:
+        """The broker-wide switch per kind: off here, nobody is sent it, whatever
+        their browser asked for. Merged into what is set; audited as a setting."""
+        unknown = sorted(set(body.events) - set(push.CATALOG))
+        if unknown:
+            raise HTTPException(422, "no such notice kind: " + ", ".join(unknown))
+        merged = {**push.policy(conn), **body.events}
+        db.set_setting(conn, db.PUSH_POLICY_KEY, json.dumps(merged, sort_keys=True), by=user["username"])
+        return push_events(request)
 
     return app
 

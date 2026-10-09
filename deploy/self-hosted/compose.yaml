@@ -81,6 +81,14 @@ services:
       # Which kinds to keep: mesh, direction, archive. Meshes and archives of every
       # case fit in ~1 TB; the directions are what does not.
       CASEBROKER_PARTS_KEEP: ${CASEBROKER_PARTS_KEEP:-mesh,direction,archive}
+      # Push notifications. Forwarded so .env can set them; empty is each one's
+      # default (on; a VAPID key the broker makes and keeps in Postgres; the
+      # dashboard's https address as contact; 20 min; 6 h).
+      CASEBROKER_PUSH: ${CASEBROKER_PUSH:-}
+      CASEBROKER_VAPID_PRIVATE_KEY: ${CASEBROKER_VAPID_PRIVATE_KEY:-}
+      CASEBROKER_VAPID_SUBJECT: ${CASEBROKER_VAPID_SUBJECT:-}
+      CASEBROKER_PUSH_SILENT_MINUTES: ${CASEBROKER_PUSH_SILENT_MINUTES:-}
+      CASEBROKER_PUSH_STALL_HOURS: ${CASEBROKER_PUSH_STALL_HOURS:-}
     volumes:
       - /srv/casebroker-parts:/parts
     ports:

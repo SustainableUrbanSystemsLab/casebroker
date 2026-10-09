@@ -8,6 +8,42 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.41.0] - 2026-10-09
+
+### Added
+- **Push notifications that arrive with the tab closed.** The dashboard's notifications fired only
+  while a tab was open, and said so. The broker now sends them itself (`casebroker/push.py`), through
+  the browser vendor's push service to a service worker at `/sw.js`, so they reach a closed laptop or
+  a phone. **Settings ▸ Preferences ▸ Push notifications**: turn it on for this device, tick the kinds
+  (kept on the broker, per subscription), **Send a test**; an admin also gets a broker-wide switch per
+  kind, and `CASEBROKER_PUSH=0` switches push off. The kinds: a machine asks to join (admins; urgent,
+  10-minute lifetime), cases finish (batched per 30 s, and the count on screen adds up until dismissed),
+  a case is quarantined (not an operator's own land audit or re-spec), the broker drains a failing
+  machine, a machine holding a case goes silent (`CASEBROKER_PUSH_SILENT_MINUTES`, 20; off by default,
+  since a cluster job between allocations is silent by design), a node's update fails, the part store
+  is nearly full (admins; 90% of its limit or close to its reserve), nothing finishes for hours
+  (`CASEBROKER_PUSH_STALL_HOURS`, 6), the queue runs dry. A click opens the case, filter or drawer
+  through the existing deep links.
+  - Read from the `events` table after a cursor, every 30 s in a background thread started with the
+    app; the state is claimed with a compare-and-set before anything is sent, so two processes in a
+    deploy never both announce an event, and a row is read only once it is 10 s old so one that commits
+    late is not skipped. The four standing conditions fire once and re-arm only after clearing.
+    A machine's pairing request is now recorded in the trail (`pair-request`) for it.
+  - **The broker POSTs only to push services**: an endpoint is a URL any reader could make it request
+    from inside the server's network, so only https on FCM, Mozilla, Apple and WNS hosts is accepted
+    (`CASEBROKER_PUSH_HOSTS` adds more), redirects are never followed, and keys are never logged. A
+    subscription belongs to the credential that made it and is re-checked at every send: a revoked
+    share link or deleted account is dropped, a demoted admin stops getting admin notices. 404/410
+    deletes a subscription, ten other refusals in a row do too. Signing out ends this device's push.
+  - **VAPID**: `CASEBROKER_VAPID_PRIVATE_KEY`, or a key the broker makes once and keeps in `settings`
+    (never written to the audit trail); `CASEBROKER_VAPID_SUBJECT`, or the dashboard's own https origin,
+    learned from the first browser that subscribes from it (Apple refuses a localhost subject).
+  - **iPhone and iPad**: Safari offers push only from the Home Screen; the page says so, and links a
+    `/manifest.webmanifest` (`display: standalone`) so Add to Home Screen opens it as an app.
+  - API: `GET /v1/push/key`, `GET /v1/push/events`, `POST`/`GET`/`PUT`/`DELETE /v1/push/subscriptions`,
+    `POST /v1/push/test` (read scope), `PUT /v1/push/policy` (admin). New table `push_subscriptions`
+    on SQLite and Postgres; new dependency `pywebpush` (29 MB in the image).
+
 ## [0.40.2] - 2026-10-09
 
 ### Added

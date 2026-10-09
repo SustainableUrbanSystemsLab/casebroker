@@ -159,6 +159,7 @@ def cleanup_after_module(preflight):
     conn.execute("DELETE FROM sessions WHERE user_id IN "
                  "(SELECT id FROM users WHERE username LIKE ?)", (like,))
     conn.execute("DELETE FROM users WHERE username LIKE ?", (like,))
+    conn.execute("DELETE FROM push_subscriptions WHERE subscriber LIKE ?", (like,))
     # The scratch table the reconciler test creates, if that test ran.
     conn.execute("DROP TABLE IF EXISTS %s" % _RECON_TABLE)
 
@@ -1222,3 +1223,78 @@ def test_a_field_is_asked_questions_in_place_on_postgres():
     assert db.summarise_stored_fields(conn)["failed"] == 0
     for case_id in case_ids:
         conn.execute("DELETE FROM case_fields WHERE case_id = ?", (case_id,))
+
+
+# -- browser push (casebroker/push.py) ----------------------------------------------
+
+def test_push_subscriptions_round_trip_over_a_real_connection():
+    """The table's SQL as Postgres runs it: the upsert, the JSON list of kinds, the
+    per-credential bound, the failure count that drops a row, the role re-check."""
+    conn = fresh_conn()
+    who = prefix("push-user")
+
+    def ep(n):
+        return f"https://fcm.googleapis.com/fcm/send/{prefix('push')}-{n}"
+    for n in range(3):
+        assert db.save_push_subscription(conn, ep(n), "p", "a", ["case_done"], "user", who, "admin",
+                                         "ua", now=1000 + n, per_subscriber=2) == "created"
+    assert {s["endpoint"] for s in db.push_subscriptions(conn) if s["subscriber"] == who} == {ep(1), ep(2)}
+    assert db.save_push_subscription(conn, ep(2), "p2", "a2", ["queue_empty"], "user", who, "viewer", None) == "updated"
+    row = db.push_subscription(conn, ep(2))
+    assert row["events"] == ["queue_empty"] and row["p256dh"] == "p2" and row["role"] == "viewer"
+    assert db.set_push_subscription_events(conn, ep(2), ["case_done", "queue_empty"])
+    assert db.push_subscription(conn, ep(2))["events"] == ["case_done", "queue_empty"]
+    assert db.note_push_delivery(conn, ep(2), now=2000) == "sent"
+    assert db.push_subscription(conn, ep(2))["last_sent_at"] == 2000
+    assert db.note_push_delivery(conn, ep(2), error="503", drop_after=2) == "failed"
+    assert db.note_push_delivery(conn, ep(2), error="503", drop_after=2) == "dropped"
+    assert db.note_push_delivery(conn, ep(1), gone=True) == "dropped"
+    assert db.push_subscription(conn, ep(1)) is None and db.push_subscription(conn, ep(2)) is None
+
+    username = prefix("push-admin")
+    db.create_user(conn, username, auth.hash_password("a-long-enough-passphrase"), role="admin")
+    assert db.push_subscriber_role(conn, "user", username) == "admin"
+    assert db.push_subscriber_role(conn, "user", prefix("nobody")) is None
+    link = db.create_share_link(conn, prefix("push-link"), uuid.uuid4().hex)
+    assert db.push_subscriber_role(conn, "share", str(link["id"])) == "viewer"
+    db.revoke_share_link(conn, link["id"])
+    assert db.push_subscriber_role(conn, "share", str(link["id"])) is None
+
+
+def test_push_reads_the_events_and_the_snapshot_over_a_real_connection():
+    import time
+    conn = fresh_conn()
+    recipe = prefix("push-r")
+    (case_id,) = seed(1, "push", recipe=recipe)
+    start = db.push_snapshot(conn, 0)["newest_event"]
+    lease = db.lease(conn, prefix("w-push"), recipes=[recipe])[0]
+    assert lease.case_id == case_id
+    assert db.complete(conn, lease.lease_id, "file:///x", case_id=case_id)
+    now = int(time.time())
+    rows, cursor = db.push_events_after(conn, start, ["done", "quarantined"], before=now + 60)
+    mine = [r for r in rows if r["case_id"] == case_id]
+    assert [r["event"] for r in mine] == ["done"] and json.loads(mine[0]["spec"]) == {"i": 0}
+    assert cursor >= mine[0]["id"]
+    snap = db.push_snapshot(conn, now + 60)
+    assert snap["last_done"] is not None and snap["by_state"].get("done", 0) >= 1
+
+
+@scratch_only
+def test_push_state_and_key_are_claimed_once_across_connections():
+    """The compare-and-set that keeps two broker processes from both announcing an
+    event, and the insert-then-read that keeps two from minting two VAPID keys.
+    Scratch only: these are the settings rows a real broker's notifier owns."""
+    a, b = fresh_conn(), fresh_conn()
+    keys = (db.PUSH_STATE_KEY, db.PUSH_VAPID_KEY, db.PUSH_ORIGIN_KEY)
+    a.execute("DELETE FROM settings WHERE key IN (?,?,?)", keys)
+    try:
+        assert db.claim_push_state(a, None, '{"cursor":1}')
+        assert not db.claim_push_state(b, None, '{"cursor":2}'), "the second first-run loses"
+        assert db.claim_push_state(b, '{"cursor":1}', '{"cursor":3}')
+        assert not db.claim_push_state(a, '{"cursor":1}', '{"cursor":4}'), "a stale compare loses"
+        assert db.push_setting(a, db.PUSH_STATE_KEY) == '{"cursor":3}'
+        assert db.push_vapid_key(a, lambda: "first") == db.push_vapid_key(b, lambda: "second") == "first"
+        assert db.remember_push_origin(a, "https://x.example.org")
+        assert not db.remember_push_origin(b, "https://x.example.org")
+    finally:
+        a.execute("DELETE FROM settings WHERE key IN (?,?,?)", keys)
