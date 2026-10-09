@@ -221,8 +221,10 @@ only file it needs):
    check its sha256 against `release.json` in the same release, `scp` it to `~/windcomfort/bin/E3D`
    (nothing on ICE needs a GitHub login). After that, every job updates it: it runs
    `E3D node-release sync` before its node starts, which takes the fleet's target build from the
-   broker, checks it against the registered sha256 and swaps it in by a rename (a job running the
-   old file is not disturbed). An E3D from before `sync` (2026-10-09) cannot do that, so after
+   broker, checks it against the registered sha256 and swaps it in by a rename. Each job then runs
+   its node from its own copy on node-local scratch: `run-sim-node` starts every step of a case by
+   its own path, so a job running `~/windcomfort/bin/E3D` itself would switch builds mid-case when
+   another job's sync swapped one in. An E3D from before `sync` (2026-10-09) cannot do that, so after
    this lands, copy the binary by hand **once** more; a job running an old one says
    `E3D was not updated` and runs what is there. With no fleet target set, `sync` leaves E3D as it is.
 2. **Pairing.** On ICE: `~/windcomfort/bin/E3D setup-sim-node https://casebroker.eddy3d.com --name ice

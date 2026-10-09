@@ -55,6 +55,15 @@ if [[ "$chunk" =~ ^0+([.]0+)?$ ]]; then unset E3D_CHUNK_HOURS; else export E3D_C
 timeout 900 "$B/E3D" node-release sync --exe "$B/E3D" \
     || echo "E3D was not updated (the line above says why); this job runs the build installed"
 
+# From this job's own copy, as in ice_e3d_node.sbatch: run-sim-node starts each step by its own
+# path, and another job's sync must not switch this one's build mid-case.
+E3D=$B/E3D
+if bin=$(mktemp -d "${TMPDIR:-/tmp}/e3d-bin.XXXXXX") && cp "$B/E3D" "$bin/E3D"; then
+    E3D=$bin/E3D
+else
+    echo "could not copy E3D to node-local scratch; running $B/E3D itself, which another job's sync can replace mid-case"
+fi
+
 # Rootless podman on node-local scratch, wiped at job end (each job pulls the image again).
 export XDG_RUNTIME_DIR=${TMPDIR:-/tmp}/xdg; mkdir -p "$XDG_RUNTIME_DIR"; chmod 700 "$XDG_RUNTIME_DIR"
 export PACE_PSTORE=${TMPDIR:-/tmp}/pstore; mkdir -p "$PACE_PSTORE"
@@ -68,5 +77,5 @@ WORK=${TMPDIR:-/tmp}/e3d-work; mkdir -p "$WORK"
 
 echo "node phoenix-${SLURM_JOB_ID} on $(hostname), $(nproc) cores, restart ${SLURM_RESTART_COUNT:-0}, work=$WORK," \
      "chain prev=${CHAIN_PREV:-none}, ${E3D_CHUNK_HOURS:+hands a case on after $E3D_CHUNK_HOURS h}${E3D_CHUNK_HOURS:-never hands a case on}"
-exec "$B/E3D" run-sim-node --engine docker --cpus "${SLURM_NTASKS:-24}" --cluster Phoenix \
+exec "$E3D" run-sim-node --engine docker --cpus "${SLURM_NTASKS:-24}" --cluster Phoenix \
     --work "$WORK" --done "$DONE" ${MAX_CASES:+--max-cases "$MAX_CASES"} --drain --max-idle-polls 10

@@ -23,9 +23,11 @@ BASH = shutil.which("bash")
 pytestmark = pytest.mark.skipif(BASH is None, reason="bash is not installed")
 
 STUBS = {
-    # E3D: one line per call -- its arguments, then what it was given for the hand-off.
+    # E3D: one line per call -- its arguments, then what it was given for the hand-off; and, on a
+    # line of its own, the file that ran (the job's copy or the installed one).
     "E3D": """#!/bin/bash
 echo "E3D $* | E3D_CHUNK_HOURS=${E3D_CHUNK_HOURS-<unset>}" >> "$CALLS"
+echo "ran $0" >> "$CALLS"
 case "$1" in
   node-release) [ -n "${SYNC_SAYS:-}" ] && echo "$SYNC_SAYS"; exit "${SYNC_EXIT:-0}" ;;
 esac
@@ -104,6 +106,10 @@ def _e3d(cluster) -> list[str]:
     return [c for c in _calls(cluster) if c.startswith("E3D ")]
 
 
+def _ran(cluster) -> list[str]:
+    return [c[len("ran "):] for c in _calls(cluster) if c.startswith("ran ")]
+
+
 def _submissions(cluster) -> list[list[str]]:
     log = cluster["tmp"] / "submitted.log"
     return [block.split("\n") for block in log.read_text().strip("\n").split("\n\n")] if log.exists() else []
@@ -127,6 +133,21 @@ def test_a_job_takes_the_target_build_then_runs_the_node_handing_off_after_7_h(c
     # Never the option: an E3D from before --chunk-hours refuses the whole command line.
     assert "--chunk-hours" not in run
     assert "hands a case on after 7 h" in r.stdout
+    # sync replaces the installed E3D; the node runs from this job's own copy, which nothing
+    # replaces while the job runs (run-sim-node starts every step of a case by its own path).
+    synced_by, node = _ran(cluster)
+    assert synced_by == str(exe)
+    copy = pathlib.Path(node)
+    assert copy.name == "E3D" and copy.parent.name.startswith("e3d-bin.")
+    assert copy.parent.parent == pathlib.Path(cluster["env"]["TMPDIR"]), "node-local scratch, wiped with the job"
+
+
+@pytest.mark.parametrize("job,name", JOBS)
+def test_a_job_that_cannot_copy_e3d_runs_the_installed_one_and_says_so(cluster, job, name):
+    r = _run(cluster, ROOT / "slurm" / job, TMPDIR=str(cluster["tmp"] / "no-such-dir"))
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "could not copy E3D to node-local scratch" in r.stdout
+    assert _ran(cluster)[-1] == str(cluster["bin"] / "E3D")
 
 
 @pytest.mark.parametrize("job,name", JOBS)

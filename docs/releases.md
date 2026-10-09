@@ -172,8 +172,10 @@ E3D node-release sync --exe ~/windcomfort/bin/E3D
 
 It asks the broker what this worker should run, fetches the file (the release
 share first, else the broker), checks its sha256, asks the new file what build it
-is, and replaces `--exe` by a rename, so a job already running the old file is
-not disturbed. *Up to date*, *updated*, or a one-line reason; the job scripts run
+is, and replaces `--exe` by a rename. The job scripts then run the node from a
+copy on the job's own scratch, because `run-sim-node` starts every step of a case
+by its own path: a job running the shared file would switch builds mid-case when
+another job's sync swapped a new one in. *Up to date*, *updated*, or a one-line reason; the job scripts run
 the E3D that is installed whatever it says. An E3D from before `sync` cannot do
 this, so the first update on each cluster is by hand (docs/pace-hpc.md §8).
 

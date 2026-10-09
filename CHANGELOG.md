@@ -8,6 +8,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.42.3] - 2026-10-09
+
+### Fixed
+- **A PACE job no longer switches builds in the middle of a case.** Since 0.42.0 each job runs
+  `E3D node-release sync` against `~/windcomfort/bin/E3D` before it starts, and then ran its node from
+  that same file. `run-sim-node` starts every step of a case (build, solve, ...) by its own path, so
+  when a later job's sync swapped a new build in, a job already running started its next step on the
+  new build, mid-case. Each job now runs its node from its own copy on node-local scratch (same file
+  name, so a single-file build reuses what it unpacked under `~/.net`); a copy that cannot be made
+  falls back to the installed file and says so.
+
 ## [0.42.2] - 2026-10-09
 
 ### Changed
