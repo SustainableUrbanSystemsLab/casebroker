@@ -24,9 +24,9 @@ const helper = (name) => {
 const ctx = {};
 vm.createContext(ctx);
 vm.runInContext(helper('isObj') + '\n' + helper('finite') + '\n' + block +
-  '\nthis.api = { convergenceOf, highestStopResidual, convergenceTally };', ctx);
+  '\nthis.api = { convergenceOf, highestStopResidual, convergenceTally, residualTolerances, toleranceText, tolText };', ctx);
 const plain = (x) => JSON.parse(JSON.stringify(x));      // objects made in the vm carry its prototypes
-const { convergenceOf, highestStopResidual, convergenceTally } = ctx.api;
+const { convergenceOf, highestStopResidual, convergenceTally, residualTolerances, toleranceText, tolText } = ctx.api;
 const conv = (status, v) => plain(convergenceOf(status, v));
 
 // What a node writes (NativeCaseRunner: exit, converged, met_residual_control, converged_by, verdict,
@@ -136,6 +136,33 @@ assert.deepStrictEqual(tally.map((t) => [t.kind, t.n]), [
 ], 'worst first; a direction with no record is counted with the word it carried');
 assert.strictEqual(tally[1].label, 'hit the cap');
 assert.deepStrictEqual(plain(convergenceTally([])), []);
+
+// -- the tolerance the direction ran with (residual_control in its entry) ---------------------------------
+const tols = (v) => plain(residualTolerances(v));
+// One tolerance for every field, as WindRunSettings.ApplyResidualControl writes it today.
+assert.deepStrictEqual(tols({ residual_control: { tolerance: 1e-4, fields: ['p', 'U', 'k'] } }),
+  [{ value: 1e-4, fields: ['p', 'U', 'k'] }]);
+// Per field, as a hand-edited fvSolution may say: grouped, loosest first, a pattern kept as written.
+assert.deepStrictEqual(tols({ residual_control: { tolerance: { p: 1e-4, U: 1e-5, '(k|omega)': 1e-5 } } }),
+  [{ value: 1e-4, fields: ['p'] }, { value: 1e-5, fields: ['U', '(k|omega)'] }]);
+assert.deepStrictEqual(tols({ residual_control: { tolerance: 5e-4 } }), [{ value: 5e-4, fields: [] }]);
+for (const v of [null, {}, { residual_control: null }, { residual_control: {} }, { residual_control: { tolerance: 0 } },
+                 { residual_control: { tolerance: 'x' } }, { residual_control: { tolerance: { p: -1, U: null } } }, 7]) {
+  assert.strictEqual(residualTolerances(v), null, JSON.stringify(v));
+}
+assert.strictEqual(toleranceText(residualTolerances({ residual_control: { tolerance: { p: 1e-4, U: 1e-5, k: 1e-5 } } })),
+  '1e-4 on p; 1e-5 on U and k');
+assert.strictEqual(toleranceText(null), '');
+assert.deepStrictEqual([tolText(1e-4), tolText(1.5e-4), tolText(1e-3)], ['1e-4', '1.50e-4', '1e-3']);
+// ... and in what the note says: "met" and "not met" mean little without the number.
+const rc = { residual_control: { tolerance: 1e-4, fields: ['p', 'U', 'k'] } };
+assert.match(conv('converged', { ...byResidual, ...rc }).why, /met its residual tolerance of 1e-4 on p, U and k at iteration 942/);
+assert.match(conv('converged', { ...byShear, ...rc }).why,
+  /residual tolerance of 1e-4 on p, U and k was not met \(highest on a stop field: p 1\.15e-4\)/);
+assert.match(conv('converged', { ...atCap, ...rc }).why, /not the solver's residual tolerance of 1e-4 on p, U and k \(highest/);
+assert.deepStrictEqual(conv('converged', { ...byShear, ...rc }).tolerances, [{ value: 1e-4, fields: ['p', 'U', 'k'] }]);
+// Without it, what was said before.
+assert.match(conv('converged', byResidual).why, /on p, U and k \(and omega in a k-omega model; epsilon never counts\)/);
 
 console.log('convergence: ' + [a, b, c].map((x) => x.label).join(' | ') +
             ' are told apart; epsilon is never the field pointed at; a missing record claims nothing');

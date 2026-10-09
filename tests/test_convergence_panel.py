@@ -127,3 +127,14 @@ def test_a_verdict_as_a_node_writes_it_reaches_the_page_whole(admin):
     friend = TestClient(admin.app)
     assert friend.post("/v1/auth/share", json={"token": link["token"]}).status_code == 200
     assert friend.get(f"/v1/cases/{case}/parts").json()["parts"][1]["verdict"] == shear
+
+
+def test_the_tolerance_a_direction_ran_with_is_drawn_and_said():
+    """The verdict entry carries `residual_control` (the direction's own fvSolution), so the
+    page can say "met its tolerance of 1e-4 on p, U and k" and draw the line it was held to."""
+    inner = _body("function residualInner(")
+    assert "residualTolerances(entry)" in inner and "tol });" in inner
+    assert inner.index("const entry = ") < inner.index("residualSvg(s, {"), "read before the chart is drawn"
+    assert "dashed: the tolerance it ran with" in inner
+    svg = _body("function residualSvg(")
+    assert 'class="rs-tol"' in svg and "esc(toleranceText([t]))" in svg

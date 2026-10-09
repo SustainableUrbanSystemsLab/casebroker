@@ -1148,6 +1148,8 @@
   .rs-svg .rs-line { fill: none; stroke-width: 1.5; stroke-linejoin: round; stroke-linecap: round;
                      vector-effect: non-scaling-stroke; }
   .rs-svg .rs-cross { stroke: var(--text-secondary); stroke-width: 1; stroke-dasharray: 2 2; pointer-events: none; }
+  .rs-svg .rs-tol { stroke: var(--text-secondary); stroke-width: 1; stroke-dasharray: 6 3; opacity: 0.85; }
+  .rs-svg text.rs-tol-label { fill: var(--text-secondary); }
   .rs-svg .rs-hit { fill: transparent; }
   .rs-keys { display: flex; flex-wrap: wrap; gap: 3px 5px; margin-top: 6px; }
   button.rs-key { padding: 1px 6px; gap: 4px; border-radius: 6px; font-size: 10.5px; font-weight: 500;
@@ -5854,6 +5856,43 @@
     return name ? name + " " + worst.toExponential(2) : "";
   }
 
+  /// "1e-4", or "1.50e-4" for a tolerance that is not a round power of ten.
+  function tolText(x) {
+    const round = Number(x).toExponential(0);
+    return Number(round) === Number(x) ? round : Number(x).toExponential(2);
+  }
+
+  /// The residual tolerance a direction ran with, from its verdict entry's
+  /// `residual_control` -- {tolerance: a number or {field: number}, fields: [...]},
+  /// as the direction's own system/fvSolution set it -- as [{ value, fields }],
+  /// loosest first; null when the entry does not say (auto-stop off, or a node from
+  /// before the field). Field names are the dictionary's keys, a pattern included.
+  function residualTolerances(v) {
+    const rc = isObj(v) && isObj(v.residual_control) ? v.residual_control : null;
+    if (!rc) return null;
+    const groups = new Map();
+    const add = (value, field) => {
+      if (!finite(value) || !(Number(value) > 0)) return;
+      const k = Number(value);
+      if (!groups.has(k)) groups.set(k, []);
+      if (typeof field === "string" && field && !groups.get(k).includes(field)) groups.get(k).push(field);
+    };
+    if (finite(rc.tolerance)) {
+      const fields = Array.isArray(rc.fields) ? rc.fields : [];
+      if (fields.length) fields.forEach((f) => add(rc.tolerance, f)); else add(rc.tolerance, "");
+    } else if (isObj(rc.tolerance)) {
+      for (const f of Object.keys(rc.tolerance)) add(rc.tolerance[f], f);
+    }
+    if (!groups.size) return null;
+    return Array.from(groups, ([value, fields]) => ({ value, fields })).sort((a, b) => b.value - a.value);
+  }
+
+  /// "1e-4 on p, U and k", "1e-4 on p; 1e-5 on U and k", or just "1e-4".
+  function toleranceText(list) {
+    const and = (xs) => xs.length < 2 ? xs.join("") : xs.slice(0, -1).join(", ") + " and " + xs[xs.length - 1];
+    return (list || []).map((t) => tolText(t.value) + (t.fields.length ? " on " + and(t.fields) : "")).join("; ");
+  }
+
   const CONV_LABEL = { converged: "converged", stationary: "converged · shear", capped: "hit the cap" };
 
   /// What a direction's finish says, from the word its solve report carried
@@ -5891,17 +5930,21 @@
     const at = it ? "iteration " + it + (cap ? " of " + cap : "") : "";
     const hi = highestStopResidual(v.last_residuals);
     const worst = hi ? " (highest on a stop field: " + hi + ")" : "";
+    // The tolerance itself, when the entry records it: "met" and "not met" mean little without it.
+    const tol = residualTolerances(v);
+    const tolSaid = tol ? " of " + toleranceText(tol) : "";
     let why = "";
     if (kind === "converged" && byResidual) {
-      why = "The solver met its residual tolerance on p, U and k (and omega in a k-omega model; epsilon never counts)"
+      why = "The solver met its residual tolerance"
+        + (tol ? tolSaid : " on p, U and k (and omega in a k-omega model; epsilon never counts)")
         + (at ? " at " + at : "") + ".";
     } else if (kind === "stationary") {
       why = (at ? "Stopped at " + at + ". " : "")
-        + "The solver's residual tolerance was not met" + worst + ", but the wall shear on every patch stopped moving: "
+        + "The solver's residual tolerance" + tolSaid + " was not met" + worst + ", but the wall shear on every patch stopped moving: "
         + "within 0.1 % of its mean over the last 100 iterations, or a steady oscillation under 0.5 %. "
         + "The pipeline accepts that as converged.";
     } else if (kind === "capped") {
-      why = "Ran to " + (at || "its iteration cap") + ". Neither test was met: not the solver's residual tolerance" + worst
+      why = "Ran to " + (at || "its iteration cap") + ". Neither test was met: not the solver's residual tolerance" + tolSaid + worst
         + ", and not a steady wall shear. Its residuals were finite and not rising, which is why the gate still reports it"
         + " as converged; its own record says ended-without-meeting-tolerances.";
     } else if (kind === "plateaued") {
@@ -5921,7 +5964,7 @@
     } else if (kind === "unknown") {
       why = "No residual history to judge it by.";
     }
-    return { kind, label: CONV_LABEL[kind] || kind || "finished", why, record: true };
+    return { kind, label: CONV_LABEL[kind] || kind || "finished", why, record: true, tolerances: tol };
   }
 
   /// How many directions ended each way, the ones to look at first:
@@ -6207,10 +6250,17 @@
   /// The chart itself, as an <svg> string; "" when there is nothing to put on a log axis.
   /// o.off: the Set of fields switched off. o.toEnd: the cap a running direction is
   /// drawn towards. o.dots: a dot on every point (a sparse series). o.id: the case,
-  /// for the hover handler.
+  /// for the hover handler. o.tol: the tolerances it ran with (residualTolerances),
+  /// each a dashed line -- inside the axis even when every curve stayed above it.
   function residualSvg(series, o) {
-    const dec = residualDecades(series);
-    if (!dec) return "";
+    const found = residualDecades(series);
+    if (!found) return "";
+    const dec = found.slice();
+    const tols = (o.tol || []).filter((t) => finite(t.value) && t.value > 0);
+    for (const t of tols) {
+      dec[0] = Math.min(dec[0], Math.floor(Math.log10(t.value)));
+      dec[1] = Math.max(dec[1], Math.ceil(Math.log10(t.value)));
+    }
     const off = o.off || new Set();
     const names = Object.keys(series.fields);
     const dom = residualDomain(series, o.toEnd);
@@ -6244,6 +6294,12 @@
             + '" r="2" style="fill:' + c + '"></circle>';
         }
       }
+    }
+    for (const t of tols) {
+      const y = py(t.value).toFixed(1);
+      lines += '<line class="rs-tol" x1="' + L + '" x2="' + (W - R) + '" y1="' + y + '" y2="' + y + '"></line>'
+        + '<text class="rs-tol-label" x="' + (W - R - 4) + '" y="' + y + '" dy="-3" text-anchor="end">'
+        + esc(toleranceText([t])) + '</text>';
     }
     // The geometry rides on the element, for the pointer handler to map a pixel back to an iteration.
     return '<svg class="rs-svg" viewBox="0 0 ' + W + ' ' + H + '" role="img" data-case="' + esc(o.id)
@@ -6299,7 +6355,9 @@
     const going = running(data.direction) && s.complete !== true;
     const last = s.iterations[s.iterations.length - 1];
     const at = "iteration " + Number(last).toLocaleString() + (going && cap ? " / " + Number(cap).toLocaleString() : "");
-    const svg = residualSvg(s, { id: c.case_id, off: off, toEnd: going ? cap : 0, dots: meta.source === "reports" || s.iterations.length <= 40 });
+    const entry = vmap ? vmap.get(data.direction) || null : null;
+    const tol = running(data.direction) ? null : residualTolerances(entry);
+    const svg = residualSvg(s, { id: c.case_id, off: off, toEnd: going ? cap : 0, dots: meta.source === "reports" || s.iterations.length <= 40, tol });
     const basis = meta.source === "reports"
       ? "assembled from " + Number(meta.n).toLocaleString() + " solve reports; a node on a newer E3D build sends the solver's full curve"
       : finite(s.total) && Number(s.total) > s.iterations.length
@@ -6310,7 +6368,6 @@
     // numbers that do not look converged says nothing about why (see convergenceOf).
     let ended = "";
     const done = isObj(fin[data.direction]) ? fin[data.direction] : null;
-    const entry = vmap ? vmap.get(data.direction) || null : null;
     if (!running(data.direction) && (done || entry)) {
       const conv = convergenceOf(done && done.status, entry, { iterations: done && done.iterations, cap: meta.end_time });
       // Only once the verdicts have been asked for: "none" while they are on the way is not true yet.
@@ -6324,7 +6381,8 @@
       : "";
     return head + '<div class="rs-head">' + picker + '<span class="rs-at" data-rest="' + esc(at) + '">' + esc(at) + '</span></div>'
       + ended + '<div class="rs-plot">' + plot + '</div>' + residualKeysHtml(s, off) + epsilon
-      + '<div class="ms-note rs-note rs-basis">Initial residual per field, log scale; ' + esc(basis) + '.</div>';
+      + '<div class="ms-note rs-note rs-basis">Initial residual per field, log scale; ' + esc(basis)
+      + (tol && svg ? "; dashed: the tolerance it ran with" : "") + '.</div>';
   }
 
   /// The Solve card's residual block: the chart once its series has landed, a

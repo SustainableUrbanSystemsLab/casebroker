@@ -177,6 +177,33 @@ check(!/rs-verdict/.test(residualInner({ case_id: 'v2-abc', state: 'leased' }, {
 // Whatever a node sends is text.
 partsCache.set('v2-abc', { at: 0, verdicts: new Map([['case_349', { converged: false, verdict: evil, plateau_field: evil, last_residuals: { [evil]: 1 } }]]) });
 check(!/<img/.test(residualInner(finishedCase, { current: null, finished: { case_349: { status: evil } } }, finishedData(k))), 'a verdict a node made up is escaped');
+
+// -- the tolerance it ran with, as a dashed line ------------------------------------------
+const tolY = (svg) => [...svg.matchAll(/<line class="rs-tol"[^>]*y1="([\d.]+)"/g)].map((m) => Number(m[1]));
+// Every curve above the tolerance (the case that prompted this: p stopped at 1.15e-4 over 1e-4,
+// k at 1e-3 over 1e-5): the axis reaches down to it, so the line is drawn inside the frame.
+const above = { iterations: [1, 500, 942], fields: { p: [1, 1e-2, 1.15e-4] } };
+same(residualDecades(above), [-4, 0], 'the curves alone end at 1e-4');
+const drawn = residualSvg(above, { id: 'x', tol: [{ value: 1e-5, fields: ['k'] }, { value: 1e-6, fields: ['U'] }] });
+const ys = tolY(drawn), g = residualGeom();
+same(ys.length, 2, 'one dashed line per tolerance');
+check(ys.every((y) => y >= g.T && y <= g.H - g.B), 'inside the frame, though every curve stayed above them');
+check(ys[1] > ys[0], 'the tighter tolerance lower down');
+check(/class="rs-tol-label"[^>]*>1e-5 on k</.test(drawn) && />1e-6 on U</.test(drawn), 'each says what it is');
+same(tolY(residualSvg(above, { id: 'x' })).length, 0, 'none without a tolerance');
+same(tolY(residualSvg(above, { id: 'x', tol: [{ value: 0, fields: [] }, { value: -1, fields: [] }] })).length, 0, 'nor for a nonsense one');
+check(!/<script/.test(residualSvg(above, { id: 'x', tol: [{ value: 1e-4, fields: ['<script>'] }] })), 'a field name is escaped');
+// From the verdict entry, on the finished direction's chart and in its note.
+partsCache.set('v2-abc', { at: 0, verdicts: new Map([['case_349', {
+  exit: 0, converged: true, met_residual_control: false, converged_by: 'fieldStationarity', verdict: 'converged',
+  residual_control: { tolerance: 1e-4, fields: ['p', 'U', 'k'] },
+  last_residuals: { p: 1.15e-4, epsilon: 7.3e-3 }, last_iteration: 942, end_time: 2000 }]]) });
+cs = residualInner(finishedCase, solveDone, finishedData(k));
+same(tolY(cs).length, 1, 'the chart draws it');
+check(/residual tolerance of 1e-4 on p, U and k was not met \(highest on a stop field: p 1\.15e-4\)/.test(cs), 'the note holds p against it');
+check(/dashed: the tolerance it ran with/.test(cs), 'the basis line names the dashes');
+check(tolY(residualInner({ case_id: 'v2-abc', state: 'leased' }, { current: 'case_349' }, finishedData(k))).length === 0,
+  'a running direction has no verdict, so no line');
 partsCache.clear();
 
 console.log(bad === 0 ? `all ${checks} residual chart cases hold` : `${bad} of ${checks} mismatches`);

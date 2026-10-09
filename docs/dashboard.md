@@ -134,6 +134,11 @@ Where it shows:
 - The **direction picker** names the basis (`case_349 · converged · shear`), and a note under it
   says why, with the highest residual among the fields that can stop a solve (`p 1.15e-4`).
 - **Finished directions**: the same badge per direction, with the sentence as its tooltip.
+- **The tolerance itself**, where the entry records it (`residual_control`: `{tolerance, fields}`,
+  read from the direction's own `system/fvSolution`; a per-field `tolerance` is an object): a
+  dashed line on the residual chart, kept inside the axis even when every curve stayed above it,
+  and the number in the note (`the residual tolerance of 1e-4 on p, U and k was not met`). Nodes
+  from before the field record none, and the page then says what it said before.
 
 **epsilon never stops a solve.** Eddy3D leaves it out of `residualControl` (#911): under wall
 functions its initial residual floors near 1e-2 -- 7e-3 to 1.5e-2 measured on a street canyon --

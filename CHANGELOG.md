@@ -8,6 +8,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.42.1] - 2026-10-09
+
+### Added
+- **The case page shows the residual tolerance a direction was held to.** It said a direction
+  "met its residual tolerance" or that the tolerance "was not met" without saying what the
+  tolerance was, so p = 1.15e-4 against an unnamed target could not be judged. Where the node's
+  verdict entry records it (`residual_control`, from the direction's own `fvSolution`; Eddy3D
+  nodes write it from this release on), the residual chart draws it as a dashed line -- inside the
+  axis even when every curve stayed above it -- and the note names it: "the residual tolerance of
+  1e-4 on p, U and k was not met (highest on a stop field: p 1.15e-4)". Per-field tolerances are
+  grouped. An entry without it reads as before.
+
 ## [0.42.0] - 2026-10-09
 
 ### Added
