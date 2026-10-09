@@ -424,12 +424,14 @@ def test_the_case_list_does_not_carry_telemetry(env):
     assert "solve" in _telemetry(c, lease["case_id"])
 
 
-def test_the_page_columns_are_every_column_but_spec_and_telemetry():
+def test_the_page_columns_are_every_column_but_spec_telemetry_and_lease_id():
     """The page's column list is written out by hand (`cases.*` cannot subtract
     telemetry), so a column added to the schema must be added there too --
-    deliberately, which this makes a failing test rather than a quiet gap."""
+    deliberately, which this makes a failing test rather than a quiet gap.
+    `lease_id` is left out on purpose: it is a holder's proof of the lease, and a
+    page goes to every reader (test_machine_scoped_leases)."""
     listed = {c.strip().removeprefix("cases.") for c in db._CASE_COLS_WITHOUT_SPEC.split(",")}
-    assert listed == set(db.parse_schema_columns(db.SCHEMA)["cases"]) - {"spec", "telemetry"}
+    assert listed == set(db.parse_schema_columns(db.SCHEMA)["cases"]) - {"spec", "telemetry", "lease_id"}
 
 
 # -- the column itself ------------------------------------------------------------------

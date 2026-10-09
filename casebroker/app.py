@@ -1753,9 +1753,10 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         back off and retry, not treat it as an error."""
         # A per-machine credential may only claim work AS its own machine.
         #
-        # This is the only endpoint where identity is asserted: heartbeat,
-        # complete, fail and release are all keyed by lease_id, and the lease
-        # already records who holds it. So checking here covers the rest.
+        # Identity is asserted here, and every call keyed by the lease after it
+        # (heartbeat, complete, fail, release, telemetry, parts, fields) checks
+        # the lease's worker against the same rule: a lease_id alone is not proof
+        # of holding it (see _lease_holder_test).
         #
         # The dashboard has always told operators the token name "must match the
         # machine's CASEBROKER_WORKER_ID" and nothing enforced it, which made
@@ -1941,9 +1942,27 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
             raise HTTPException(404, f"no worker named {worker_id!r}")
         return {"worker_id": worker_id, "drain": False}
 
+    def _lease_holder_test(request: Request):
+        """For a per-machine credential, the test a lease's worker must pass for
+        that credential to act on it (the rule /v1/lease applies); None for a
+        session or a shared env token, which are not confined to one machine.
+
+        Every call after /v1/lease is keyed by lease_id, and a lease_id is no
+        secret: it used to be on every case row any reader could list. So "the
+        lease already records who holds it" was true and not enough -- nothing
+        compared that record with who was ASKING, and one machine's token could
+        heartbeat, complete, fail or release another machine's case.
+        """
+        machine = _machine_principal(request)
+        if not machine:
+            return None
+        name = machine["name"]
+        return lambda worker: bool(worker) and _may_lease_as(name, worker)  # noqa: E731
+
     @app.post("/v1/heartbeat", dependencies=[WriteAuth])
-    def heartbeat(body: HeartbeatIn) -> dict[str, bool]:
-        ok = db.heartbeat(conn, body.lease_id, body.lease_seconds, body.detail)
+    def heartbeat(body: HeartbeatIn, request: Request) -> dict[str, bool]:
+        ok = db.heartbeat(conn, body.lease_id, body.lease_seconds, body.detail,
+                          worker_ok=_lease_holder_test(request))
         # 409, not 404: the lease existed, it is just no longer the worker's. The
         # worker must abandon the case rather than retry the call.
         if not ok:
@@ -1952,24 +1971,27 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
 
 
     @app.post("/v1/complete", dependencies=[WriteAuth])
-    def complete(body: CompleteIn) -> dict[str, bool]:
+    def complete(body: CompleteIn, request: Request) -> dict[str, bool]:
         if not db.complete(conn, body.lease_id, body.result_uri, body.sha256,
-                           body.bytes, body.metrics, case_id=body.case_id):
+                           body.bytes, body.metrics, case_id=body.case_id,
+                           worker_ok=_lease_holder_test(request)):
             raise HTTPException(409, "lease expired or superseded; result rejected")
         return {"ok": True}
 
 
     @app.post("/v1/fail", dependencies=[WriteAuth])
-    def fail(body: FailIn) -> dict[str, bool]:
-        if not db.fail(conn, body.lease_id, body.error, body.retryable):
+    def fail(body: FailIn, request: Request) -> dict[str, bool]:
+        if not db.fail(conn, body.lease_id, body.error, body.retryable,
+                       worker_ok=_lease_holder_test(request)):
             raise HTTPException(409, "lease expired or superseded")
         return {"ok": True}
 
 
     @app.post("/v1/release", dependencies=[WriteAuth])
-    def release(body: ReleaseIn) -> dict[str, bool]:
+    def release(body: ReleaseIn, request: Request) -> dict[str, bool]:
         """Graceful preemption. Refunds the attempt, unlike fail()."""
-        if not db.release(conn, body.lease_id, body.reason):
+        if not db.release(conn, body.lease_id, body.reason,
+                          worker_ok=_lease_holder_test(request)):
             raise HTTPException(409, "lease expired or superseded")
         return {"ok": True}
 
@@ -1995,11 +2017,7 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
             # machine's name, and into the dataset's statistics. 409, never
             # 403 or 404: to the node it means "stop for this case", which is
             # the only right reaction to a lease it does not hold.
-            machine = _machine_principal(request)
-            worker_ok = None
-            if machine:
-                name = machine["name"]
-                worker_ok = lambda worker: bool(worker) and _may_lease_as(name, worker)  # noqa: E731
+            worker_ok = _lease_holder_test(request)
             outcome = db.post_telemetry(conn, body.lease_id, body.case_id, body.kind,
                                         body.data, worker_ok=worker_ok)
         if outcome == "ok":
@@ -2061,11 +2079,7 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         credential's (as /v1/telemetry), and when a direction was solved on a mesh
         that is no longer the case's -- in both, the node stops reporting for
         this case. Never 404: a node reads that as "a broker from before parts"."""
-        machine = _machine_principal(request)
-        worker_ok = None
-        if machine:
-            name = machine["name"]
-            worker_ok = lambda worker: bool(worker) and _may_lease_as(name, worker)  # noqa: E731
+        worker_ok = _lease_holder_test(request)
         outcome = db.report_part(conn, body.lease_id, body.case_id, body.part, body.archive,
                                  body.sha256, body.bytes, body.mesh_sha256, verdict=body.verdict,
                                  worker_ok=worker_ok)
@@ -2345,11 +2359,7 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
             raise HTTPException(413, f"the field is {len(blob)} bytes; the limit is {db.FIELD_MAX_BYTES}")
         if not blob:
             raise HTTPException(422, "the body is empty; send the umag/1 blob as application/octet-stream")
-        machine = _machine_principal(request)
-        worker_ok = None
-        if machine:
-            name = machine["name"]
-            worker_ok = lambda worker: bool(worker) and _may_lease_as(name, worker)  # noqa: E731
+        worker_ok = _lease_holder_test(request)
         outcome = db.put_field(conn, lease_id, case_id, direction, blob, worker_ok=worker_ok)
         if outcome == "ok":
             return {"ok": True, "bytes": len(blob)}
@@ -2372,11 +2382,7 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
             raise HTTPException(413, f"the field is {len(blob)} bytes; the limit is {db.FIELD_MAX_BYTES}")
         if not blob:
             raise HTTPException(422, "the body is empty; send the umag/1 blob as application/octet-stream")
-        machine = _machine_principal(request)
-        may = None
-        if machine:
-            name = machine["name"]
-            may = lambda worker: bool(worker) and _may_lease_as(name, worker)  # noqa: E731
+        may = _lease_holder_test(request)
         outcome = db.backfill_field(conn, case_id, direction, blob, may_act_as=may)
         if outcome == "ok":
             return {"ok": True, "bytes": len(blob)}
@@ -2997,6 +3003,9 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         row = db.get_case(conn, case_id)
         if row is None:
             raise HTTPException(404, "no such case")
+        # Never served: the lease id is what a holder presents on every call
+        # after the lease, and this record goes to any reader (see _CASE_COLS).
+        row.pop("lease_id", None)
         # Where it is -- country, nearest town and how far -- answered offline
         # (casebroker/places.py). Computed on read, so every case has it,
         # including the ones posted before this existed. Never fatal: a case

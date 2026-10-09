@@ -8,6 +8,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.36.3] - 2026-10-09
+
+### Security
+- **A machine's credential acts only on leases held under its own name -- on every call.**
+  `/v1/lease`, telemetry, parts and fields already checked the lease's worker against the
+  credential (`ice` covers `ice-<job>`); `/v1/heartbeat`, `/v1/complete`, `/v1/fail` and
+  `/v1/release` trusted the `lease_id` alone, and the case list showed every reader that id. One
+  machine's token could therefore quarantine another machine's case (`fail` with
+  `retryable=false`), confirm a result that never ran, or pull a live solve. They now answer 409
+  ("not your case, stop") for a lease another machine holds, and no case read (`GET /v1/cases`,
+  `GET /v1/cases/{id}`) carries `lease_id` any more; `lease_worker` still says who holds it.
+  Shared env tokens and sessions are unaffected.
+
 ## [0.36.2] - 2026-10-08
 
 ## [0.36.1] - 2026-10-08

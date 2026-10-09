@@ -2373,14 +2373,30 @@ def _still_progressing(conn, case_id: str, detail: str | None, now: int) -> bool
     return previous is not None and previous["ts"] >= now - LEASE_STALL_SECONDS
 
 
+def _not_theirs(row, worker_ok: Callable[[str | None], bool] | None) -> bool:
+    """Whether a per-machine credential is asking about a lease it does not hold.
+
+    `worker_ok` is the route's "may this credential act as that worker" test
+    (app._may_lease_as), passed only for a per-machine token. A lease_id is no
+    secret -- the case list used to show it to every reader -- so without this a
+    machine's token could heartbeat, complete, fail or release ANOTHER machine's
+    case: quarantine it with retryable=false, or mark it done with a result that
+    never ran. /v1/lease, telemetry, parts and fields already held the line; these
+    four did not. Answered exactly like a lease that is gone (409), because to the
+    caller it is one: not its case, stop.
+    """
+    return worker_ok is not None and not worker_ok(row["lease_worker"])
+
+
 @_locked
 def heartbeat(conn, lease_id: str, lease_seconds: int = 3600,
-              detail: str | None = None, now: int | None = None) -> bool:
+              detail: str | None = None, now: int | None = None,
+              worker_ok: Callable[[str | None], bool] | None = None) -> bool:
     """Extend a lease. Returns False when the lease is gone -- the worker must
     then STOP working that case, because someone else may already own it."""
     now = now or _now()
     row = _by_lease(conn, lease_id)
-    if row is None:
+    if row is None or _not_theirs(row, worker_ok):
         return False
     # A heartbeat cannot extend a lease indefinitely. Past MAX_LEASE_AGE_SECONDS
     # the case is released here rather than waiting for some other worker's
@@ -2447,11 +2463,17 @@ def heartbeat(conn, lease_id: str, lease_seconds: int = 3600,
 def complete(conn, lease_id: str, result_uri: str,
              sha256: str | None = None, nbytes: int | None = None,
              metrics: dict[str, Any] | None = None, now: int | None = None,
-             case_id: str | None = None) -> bool:
+             case_id: str | None = None,
+             worker_ok: Callable[[str | None], bool] | None = None) -> bool:
     now = now or _now()
     conn.execute("BEGIN IMMEDIATE")
     try:
         row = _by_lease(conn, lease_id)
+        if row is not None and _not_theirs(row, worker_ok):
+            # A live lease another machine holds: never the retry path below,
+            # which would confirm a result for a case this caller never ran.
+            conn.execute("ROLLBACK")
+            return False
         if row is None:
             # A complete whose RESPONSE was lost is retried by the worker with the
             # same lease_id -- which the successful first write already nulled, so
@@ -2568,12 +2590,13 @@ def _refund_timeout(conn, case_id: str, error: str, now: int) -> bool:
 
 @_locked
 def fail(conn, lease_id: str, error: str, retryable: bool = True,
-         now: int | None = None) -> bool:
+         now: int | None = None,
+         worker_ok: Callable[[str | None], bool] | None = None) -> bool:
     now = now or _now()
     conn.execute("BEGIN IMMEDIATE")
     try:
         row = _by_lease(conn, lease_id)
-        if row is None:
+        if row is None or _not_theirs(row, worker_ok):
             conn.execute("ROLLBACK")
             return False
         if retryable and _refund_timeout(conn, row["case_id"], error, now):
@@ -2657,7 +2680,8 @@ def _drain_on_burst(conn, worker_id: str | None, error: str, now: int) -> bool:
 
 @_locked
 def release(conn, lease_id: str, reason: str = "released",
-            now: int | None = None) -> bool:
+            now: int | None = None,
+            worker_ok: Callable[[str | None], bool] | None = None) -> bool:
     """Hand a case back untouched, without burning a retry.
 
     This is the preemption path: a SIGTERM'd worker calls it and the case becomes
@@ -2668,7 +2692,7 @@ def release(conn, lease_id: str, reason: str = "released",
     conn.execute("BEGIN IMMEDIATE")
     try:
         row = _by_lease(conn, lease_id)
-        if row is None:
+        if row is None or _not_theirs(row, worker_ok):
             conn.execute("ROLLBACK")
             return False
         # CASE, not MAX(attempts - 1, 0): SQLite has a two-argument scalar MAX
@@ -4668,13 +4692,17 @@ def list_cases(conn, state: str | None = None, split: str | None = None,
 # deliberate decision here too -- a reader that silently gained a field would be
 # the same accident in the other direction.
 #
+# `lease_id` is never on a page either: it is the bearer's proof of holding a
+# case on every call after /v1/lease, and a page goes to every reader -- viewer
+# sessions and share links included. The holder is `lease_worker`.
+#
 # `telemetry` is never on a PAGE, with or without the spec: it is up to 16 kinds
 # per case, the solve's per-direction table among them, and the case browser
 # fetches the one case it opens in full (get_case, which keeps `cases.*`).
 _CASE_COLS_WITHOUT_SPEC = (
     "cases.case_id, cases.recipe, cases.split, cases.lcz, cases.city_cluster,"
     " cases.priority, cases.state, cases.attempts, cases.max_attempts,"
-    " cases.lease_id, cases.lease_worker, cases.leased_at, cases.lease_expires,"
+    " cases.lease_worker, cases.leased_at, cases.lease_expires,"
     " cases.result_uri, cases.result_sha256, cases.result_bytes, cases.metrics,"
     " cases.last_error, cases.created_at, cases.updated_at"
 )
