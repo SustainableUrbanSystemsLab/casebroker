@@ -20,6 +20,7 @@ PACE ICE, PACE Phoenix, the lab workstation, anyone else's box — can each ask
 | [`docs/dashboard.md`](docs/dashboard.md) | The ops UI and read-only sharing |
 | [`docs/releases.md`](docs/releases.md) | Moving the fleet between builds while a campaign runs: catalog, canary, promote, roll back, the badges |
 | [`docs/e3d-contract.md`](docs/e3d-contract.md) | The seam to the CFD: what `E3D.exe` must do on the Python path, and why it never holds a broker credential there |
+| [`docs/dataset.md`](docs/dataset.md) | `casebroker export`: the campaign as a training snapshot (Parquet tables, a Zarr store of every field, a card), and how to read it |
 | `casebroker/` | The service: `app.py` (API), `db.py` (both engines, and the schema), `auth.py` (passwords, sessions, machine tokens), `worker.py` (the client), `cli.py` (`casebroker`), `ids.py` (case identity and splits) |
 | `runner/run_case.sh` | The seam to the CFD: geometry → mesh → solve → sample |
 | `slurm/` | Worker pools for Phoenix and ICE |
@@ -123,6 +124,7 @@ uv run casebroker release promote <worker> --broker URL       # canary is good: 
 uv run casebroker release rollback --broker URL [--block]     # back to the previous build (kill switch)
 uv run casebroker repro <case_id> --e3d E3D.exe --engine bluecfd  # re-run a failed case HERE
 uv run casebroker triage <study_dir>                          # name the known failure in its logs
+uv run --extra export casebroker export --broker URL --out ds # dataset snapshot; re-run fetches only what changed
 ```
 
 Full endpoint table in [docs/protocol.md](docs/protocol.md).

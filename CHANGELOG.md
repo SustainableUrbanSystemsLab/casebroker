@@ -8,6 +8,35 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.38.0] - 2026-10-09
+
+### Added
+- **`casebroker export` pulls the campaign down as a training snapshot.** The broker answers
+  questions of the wind field in place, which is the wrong shape for training: a data loader wants
+  every field of the selection on local disk, without a broker in the loop, plus a record of which
+  broker and which filters it came from, so that two runs of an experiment can be shown to have read
+  the same set. The export writes four things into `--out`. `cases.parquet` has one row per case:
+  identity, place, labels, `/v1/dataset`'s own registry of site numbers read the way it reads them,
+  `height_source`, `build` and the result. `fields.parquet` has one row per (case, direction):
+  grid, `u_ref`, `lambda_f`, and the `umag_*` and `vr_*` statistics. `fields.zarr` holds one
+  float32 |U| array per direction, NaN inside buildings, with its frame in the attributes.
+  `dataset.json` is the card: broker version, filters, counts by split, recipe and LCZ, and the
+  sha256 of every file. It uses the read API only, so a read token is enough. Filters:
+  `--recipe` / `--split` (repeat to OR), `--label` (repeat to AND), `--state`, `--height-m`,
+  `--limit`; `--workers` cases are downloaded at once. Layout and a pandas/xarray example:
+  `docs/dataset.md`.
+  - **Resumable.** Each array carries the sha256 of the umag/1 blob it came from, the hash the
+    broker's field record also carries, so a re-run over an unchanged campaign downloads no field.
+    The hash is written after the values, so an array cut short by a crash is fetched again. The
+    tables and the card are written under a temporary name and renamed into place, with the card
+    last. A narrower re-run removes the cases it no longer selects, so the store always holds
+    exactly what `fields.parquet` points at.
+  - **Checked on the way in.** A field whose bytes do not hash to the broker's record is not stored.
+    It is named on the card and on stderr, the command exits 1, and the next run retries it.
+  - **The `export` extra** (`pyarrow>=17`, `zarr>=3`) is opt-in. The server image does not carry
+    it: pyarrow alone is 122 MB. Without it the command names the extra and exits 2. The CI sqlite
+    job installs it, so these tests run there and do not skip.
+
 ## [0.37.1] - 2026-10-09
 
 ### Changed

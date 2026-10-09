@@ -17,6 +17,8 @@ step, and this has to run on a login node where ``uv sync`` may not have happene
 The ``account`` and ``init-db`` commands import ``casebroker.db``, which is also
 standard library only until it opens a Postgres DSN -- and they import it inside
 the command, so the commands that do not need a database stay unaffected.
+``export`` is the one command that needs more: it writes Parquet and Zarr, from
+the ``export`` extra, and imports them (and httpx) inside the command too.
 """
 
 from __future__ import annotations
@@ -913,6 +915,32 @@ def cmd_repro(args) -> int:
                            case_timeout=args.case_timeout)
 
 
+def cmd_export(args) -> int:
+    """Pull a dataset snapshot from a broker: Parquet tables, a Zarr store of every
+    field, and a card naming the broker, the filters and each file's sha256
+    (casebroker/export.py, docs/dataset.md)."""
+    from . import export
+    if not args.broker:
+        print("give --broker, or set CASEBROKER_URL", file=sys.stderr)
+        return 2
+    if args.limit is not None and args.limit < 1:
+        print("--limit must be at least 1", file=sys.stderr)
+        return 2
+    opts = export.Options(
+        broker=args.broker, out=pathlib.Path(args.out), token=_resolve_token(args.token, "read"),
+        recipes=args.recipe or [], splits=args.split or [], labels=args.label or [],
+        state=None if args.state in ("all", "any", "") else args.state, height_m=args.height_m,
+        limit=args.limit, workers=max(1, args.workers), fields=not args.no_fields)
+    try:
+        return export.run(opts)
+    except export.ExportError as e:
+        print(str(e) if str(e) == export.NEEDS_EXTRA else f"export: {e}", file=sys.stderr)
+        return 2
+    except OSError as e:                     # --out unwritable, or the disk filled
+        print(f"export: {e}", file=sys.stderr)
+        return 2
+
+
 def cmd_triage(args) -> int:
     from . import repro
     findings = repro.triage(args.study)
@@ -1210,6 +1238,28 @@ def main(argv: list[str] | None = None) -> int:
                      help="seconds before the node stops the case (default 3 h: enough to mesh and "
                           "reach a failure, not to solve 32 directions)")
     rp_.set_defaults(func=cmd_repro)
+
+    ex = sub.add_parser("export", help="pull a dataset snapshot from a broker: Parquet tables, a Zarr "
+                                       "store of every field, and a card (needs the export extra)")
+    ex.add_argument("--broker", default=os.environ.get("CASEBROKER_URL"),
+                    help="the broker to read (default: $CASEBROKER_URL)")
+    ex.add_argument("--token", default=os.environ.get("CASEBROKER_TOKEN"),
+                    help="a read token is enough ('-' reads stdin; default $CASEBROKER_TOKEN, "
+                         "else $CASEBROKER_READ_TOKENS)")
+    ex.add_argument("--out", required=True,
+                    help="the snapshot's folder; re-running into it fetches only what changed")
+    ex.add_argument("--recipe", action="append", help="only this recipe (repeatable: any of them)")
+    ex.add_argument("--split", action="append", help="only this split (repeatable: any of them)")
+    ex.add_argument("--label", action="append",
+                    help="only cases carrying key:value, or key (repeatable: all of them)")
+    ex.add_argument("--state", default="done", help="only cases in this state; 'all' for any (default: done)")
+    ex.add_argument("--height-m", type=float, default=1.75,
+                    help="the field height to take, exactly (default: 1.75, the published one)")
+    ex.add_argument("--limit", type=int, default=None, help="at most N cases, the first by case_id")
+    ex.add_argument("--workers", type=int, default=4, help="cases downloaded at once (default: 4)")
+    ex.add_argument("--no-fields", action="store_true",
+                    help="tables only: no field is downloaded and fields.zarr is left as it is")
+    ex.set_defaults(func=cmd_export)
 
     tr = sub.add_parser("triage", help="read a failed study's logs for the known failure signatures")
     tr.add_argument("study", help="the study directory (holds mesh*/ and case_*/)")

@@ -63,7 +63,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v3
-      - run: uv run --with pytest --with httpx python -m pytest tests/ --ignore=tests/test_db_postgres.py -v
+      # --extra export: tests/test_export.py writes Parquet and Zarr, which the
+      # server does not depend on; without the extra those tests skip, silently.
+      - run: uv run --extra export --with pytest --with httpx python -m pytest tests/ --ignore=tests/test_db_postgres.py -v
 
   postgres-throwaway:
     name: postgres (throwaway container)
