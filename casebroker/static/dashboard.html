@@ -1276,6 +1276,8 @@
   }
   .copy-btn:hover { background: var(--surface-elevated); color: var(--text-primary); }
   .copy-btn svg { width: 13px; height: 13px; }
+  /* A link just made: monospace, selected whole on focus, never wrapped. */
+  input.share-url { font-family: var(--font-mono); font-size: 12px; }
 
   /* Pager */
   .pager {
@@ -1457,6 +1459,19 @@
       </span>
 
       <div class="header-actions">
+        <!-- Admins only (display is set from /v1/auth/state): makes a read-only link
+             and sends it. A button's own display wins over the hidden attribute. -->
+        <button id="shareBtn" class="subtle icon-btn" title="Send a read-only link"
+                aria-label="Send a read-only link" style="display:none">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+               stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="18" cy="5" r="3"></circle>
+            <circle cx="6" cy="12" r="3"></circle>
+            <circle cx="18" cy="19" r="3"></circle>
+            <line x1="8.59" y1="13.51" x2="15.42" y2="17.49"></line>
+            <line x1="15.41" y1="6.51" x2="8.59" y2="10.49"></line>
+          </svg>
+        </button>
         <button id="datasetBtn" class="subtle icon-btn" title="Dataset statistics"
                 aria-label="Dataset statistics" aria-haspopup="dialog" aria-expanded="false">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
@@ -1519,6 +1534,9 @@
         cannot lease, complete, fail or release cases, or add new ones, even by calling
         the API directly.</span>
     </div>
+    <!-- Only for someone looking through a share link: it ends their view. -->
+    <button class="subtle" id="leaveShare" type="button"
+            style="display:none;color:inherit;text-decoration:underline">Leave this view</button>
   </div>
   <div id="authNotice" class="notice-banner" role="status">
     <div style="display:flex;align-items:center;gap:8px">
@@ -1865,6 +1883,7 @@
     <button class="drawer-tab" role="tab" type="button" data-tab="setup" aria-selected="true">Setup</button>
     <button class="drawer-tab" role="tab" type="button" data-tab="connection" aria-selected="false">Connection</button>
     <button class="drawer-tab" role="tab" type="button" data-tab="users" aria-selected="false">Users</button>
+    <button class="drawer-tab" role="tab" type="button" data-tab="sharing" aria-selected="false">Sharing</button>
     <button class="drawer-tab" role="tab" type="button" data-tab="machines" aria-selected="false">Machines</button>
     <button class="drawer-tab" role="tab" type="button" data-tab="campaign" aria-selected="false">Campaign</button>
     <button class="drawer-tab" role="tab" type="button" data-tab="prefs" aria-selected="false">Preferences</button>
@@ -2014,6 +2033,77 @@
       </div>
       <div id="usersLocked" class="panel-subtitle">
         Sign in as an admin to manage accounts.
+      </div>
+    </section>
+
+    <!-- --------------------------------------------------------- Sharing -->
+    <!-- A read-only look for someone with no account: made here for a named
+         person and a stated time, sent from here, taken back here. -->
+    <section id="tab-sharing" class="drawer-pane" role="tabpanel" hidden>
+      <div id="sharing" style="display:none;">
+        <div class="panel-title-group" style="margin-bottom:4px;"><h2>Share a read-only link</h2></div>
+        <div class="panel-subtitle">
+          Anyone with the link can look at the campaign -- every case, its results and the fleet, what a
+          <b>viewer</b> account sees -- and change nothing. They need no account. You can take the link
+          back here at any time.
+        </div>
+
+        <div class="row" style="margin-top:14px;">
+          <div class="field" style="flex:2; min-width:180px;">
+            <label for="shareLabel">Who is it for
+              <span class="label-hint">(only you see this)</span>
+            </label>
+            <input type="text" id="shareLabel" autocomplete="off" maxlength="80"
+                   placeholder="Alice, TU Munich" />
+          </div>
+          <div class="field" style="flex:1; min-width:140px;">
+            <label for="shareTtl">Valid for</label>
+            <select id="shareTtl">
+              <option value="86400">1 day</option>
+              <option value="604800" selected>1 week</option>
+              <option value="2592000">30 days</option>
+              <option value="7776000">90 days</option>
+              <option value="never">Until I revoke it</option>
+            </select>
+          </div>
+        </div>
+        <label id="shareHereRow" style="display:none; align-items:center; gap:8px; margin:12px 0 0; font-weight:500; cursor:pointer;">
+          <input type="checkbox" id="shareHere" checked style="cursor:pointer;" />
+          <span id="shareHereText"></span>
+        </label>
+        <div style="margin-top:14px;">
+          <button id="shareCreate" type="button" class="primary">Create link</button>
+        </div>
+
+        <!-- The link just made. Only its hash is stored, so this is the one time
+             it can be read; the box keeps it until the next link or a reload. -->
+        <div id="shareIssued" class="detail-card" style="display:none; margin-top:16px;">
+          <div class="panel-subtitle" style="margin-bottom:8px;">
+            <b>Send it now</b> -- only its hash is stored, so it cannot be shown again.
+            <span id="shareIssuedFor"></span>
+          </div>
+          <input type="text" id="shareUrl" class="share-url" readonly spellcheck="false"
+                 aria-label="The read-only link" />
+          <div class="row" style="margin-top:10px; gap:8px;">
+            <button id="shareCopy" type="button" class="primary">Copy link</button>
+            <button id="shareMail" type="button">Email it</button>
+            <button id="shareNative" type="button" style="display:none">Share&hellip;</button>
+          </div>
+          <div id="shareLocalWarn" class="panel-subtitle" style="display:none; margin-top:8px; color:var(--warn);">
+            This page is open on an address that only works on this network or computer, so the
+            link will not open for someone elsewhere. Open the dashboard at its public address and
+            make the link there.
+          </div>
+          <div class="panel-subtitle" style="margin-top:8px;">
+            To see what they will see, open it in a private window: in this one you stay signed in.
+          </div>
+        </div>
+
+        <div class="panel-title-group" style="margin:24px 0 4px;"><h2>Links</h2></div>
+        <div id="shareList"></div>
+      </div>
+      <div id="sharingLocked" class="panel-subtitle">
+        Sign in as an admin to send a read-only link.
       </div>
     </section>
 
@@ -3891,6 +3981,294 @@
       button.disabled = false;
     }
   };
+
+  // -- Deep links ---------------------------------------------------------------
+  // The address bar says where you are, so a link opens the same place: a case, a
+  // filtered list, a drawer. It all lives in the URL's FRAGMENT --
+  //   #case=v2-00697fb4542aa4c6
+  //   #state=quarantined&split=test&sort=attempts&offset=50
+  //   #settings=users      #storage      #dataset
+  // -- which a browser keeps to itself: it is not sent to the server, not written
+  // to the proxy's log and not passed on in a Referer. (That is also why a share
+  // link's secret rides there: see redeemShareLink.) The query string keeps the
+  // two meanings it already had, ?pair= and ?token=&ro=1; this adds none.
+  //
+  // A fragment is read DEFENSIVELY. It comes from somebody's clipboard, and what
+  // it names is looked up by the server or put in a form field, so each part is
+  // checked against what this page itself offers -- a state it lists, a column it
+  // sorts by, a drawer tab it has -- and anything else is dropped, not passed on.
+  //
+  // With a case open the address is the case (and the recipe scope, which changes
+  // its percentiles) and nothing about the list under it: a link copied from the
+  // bar has to mean the same thing to whoever it is sent to, and a list page that
+  // has moved on by then does not.
+  //
+  // Opening or closing a case is a step in the history, so Back closes it. Every
+  // other change -- a filter, a page, a drawer -- rewrites the entry it is on, so
+  // Back is not a stack of keystrokes.
+  //
+  // The functions between the markers are pure, and tests/deeplink_check.js runs
+  // them as shipped, sliced out of this file.
+  // deep-links:pure begin
+  const ROUTE_DEFAULT_SORT = "updated_at";
+  const ROUTE_MAX_OFFSET = 10000000;
+
+  /// The key=value pairs of a fragment. A leading "#" is dropped, and a "/" or
+  /// "?" right after it, which is how people write these by hand.
+  function routeParams(hash) {
+    return new URLSearchParams(String(hash || "").replace(/^#[/?]?/, ""));
+  }
+
+  /// What a fragment asks for, as a route: only keys this page knows, only values
+  /// it offers (`allowed`: { states, sorts, tabs }), numbers as numbers.
+  function parseRoute(hash, allowed) {
+    const p = routeParams(hash);
+    const r = {};
+    // Free text from the address bar: bounded, and no control characters.
+    const text = (key, max) => {
+      const v = (p.get(key) || "").trim();
+      return v.length > 0 && v.length <= max && !/[\u0000-\u001f\u007f]/.test(v) ? v : "";
+    };
+    const caseId = text("case", 128);
+    if (caseId) r.case = caseId;
+    const state = p.get("state");
+    if (state && allowed.states.includes(state)) r.state = state;
+    for (const [key, max] of [["split", 64], ["city", 120], ["label", 120], ["recipe", 128]]) {
+      const v = text(key, max);
+      if (v) r[key] = v;
+    }
+    const sort = p.get("sort");
+    if (sort && allowed.sorts.includes(sort)) r.sort = sort;
+    const dir = p.get("dir");
+    if (dir === "asc" || dir === "desc") r.dir = dir;
+    const offset = Number(p.get("offset"));
+    if (Number.isInteger(offset) && offset > 0 && offset <= ROUTE_MAX_OFFSET) r.offset = offset;
+    if (p.has("settings")) r.settings = allowed.tabs.includes(p.get("settings")) ? p.get("settings") : "setup";
+    if (p.has("storage")) r.storage = true;
+    if (p.has("dataset")) r.dataset = true;
+    return r;
+  }
+
+  /// The fragment for a route: only what differs from a fresh page, in a fixed
+  /// order, so one view is always one link. "" when the page is as it starts.
+  function routeHash(r) {
+    const p = new URLSearchParams();
+    if (r.case) p.set("case", r.case);
+    for (const key of ["state", "split", "city", "label", "recipe"]) if (r[key]) p.set(key, r[key]);
+    if (r.sort && r.sort !== ROUTE_DEFAULT_SORT) p.set("sort", r.sort);
+    if (r.dir && r.dir !== "desc") p.set("dir", r.dir);
+    if (r.offset) p.set("offset", String(r.offset));
+    if (r.settings) p.set("settings", r.settings);
+    if (r.storage) p.set("storage", "1");
+    if (r.dataset) p.set("dataset", "1");
+    // %20 for a space (mail clients linkify it; "+" they may not), and ":" kept
+    // as it is -- a label filter reads key:value.
+    const s = p.toString().replace(/\+/g, "%20").replace(/%3A/gi, ":");
+    return s ? "#" + s : "";
+  }
+
+  /// The link an admin sends: the secret first, then where it should land.
+  function shareLinkUrl(base, token, route) {
+    const where = routeHash(route || {});
+    return base + "#share=" + encodeURIComponent(token) + (where ? "&" + where.slice(1) : "");
+  }
+
+  /// A mail to the person a link is for: plain text, CRLF as RFC 6068 asks, and
+  /// the link last so a mail client that linkifies has nothing after it to cut.
+  function shareMailto(url, expiresAt) {
+    const until = expiresAt
+      ? "It works until " + new Date(expiresAt * 1000).toLocaleDateString(undefined, { dateStyle: "long" }) + "."
+      : "It works until I take it back.";
+    const body = ["Hi,", "",
+      "here is a read-only link to the E3D simulation campaign dashboard. You can look at the cases,",
+      "their results and the fleet; you cannot change anything, and you need no account.", "",
+      until, "", url].join("\r\n");
+    return "mailto:?subject=" + encodeURIComponent("A read-only look at the E3D simulation campaign")
+      + "&body=" + encodeURIComponent(body);
+  }
+  // deep-links:pure end
+
+  let settingsTab = "setup";     // the Settings tab on show (showTab keeps it)
+  // False until the page has read its first fragment and opened what it names:
+  // nothing is written to the address bar before, or the drawers a link asks for
+  // would be rubbed out by a refresh that started first.
+  let routeReady = false;
+  // A fragment is being applied: the changes it causes must not be written back.
+  let routeApplying = false;
+  let lastRouteCase = "";        // the case the address names, to tell a step from an edit
+  let shareNotice = "";          // why a link that was opened did not work, for the sign-in notice
+
+  /// What this page offers, which is all a fragment may ask for.
+  function routeAllowed() {
+    return {
+      states: STATE_ORDER,
+      sorts: CASE_COLUMNS.map((c) => c[1]),
+      tabs: Array.from(document.querySelectorAll(".drawer-tab")).map((t) => t.getAttribute("data-tab")),
+    };
+  }
+
+  /// The route the page is in, from its own state.
+  function currentRoute() {
+    const r = {};
+    const q = caseList;
+    const open = q.singleId || openDetailId;
+    if (open) {
+      r.case = open;
+    } else {
+      if (q.state) r.state = q.state;
+      if (q.split) r.split = q.split;
+      if (q.city) r.city = q.city;
+      if (q.label) r.label = q.label;
+      r.sort = q.sort;
+      r.dir = q.dir;
+      if (q.offset) r.offset = q.offset;
+    }
+    if (recipeScope) r.recipe = recipeScope;
+    if (settingsOpen()) r.settings = settingsTab;
+    if (storageOpen()) r.storage = true;
+    if (datasetOpen()) r.dataset = true;
+    return r;
+  }
+
+  /// A select that may not list `value` yet (the splits arrive with the status):
+  /// add it, so the control says what the table is filtered by.
+  function ensureOption(sel, value, prefix) {
+    if (value && !Array.from(sel.options).some((o) => o.value === value)) sel.add(new Option(prefix + value, value));
+    sel.value = value;
+  }
+
+  /// Open and close the drawers to match a route.
+  function applyDrawers(r) {
+    if (r.settings) {
+      if (!settingsOpen() || settingsTab !== r.settings) openSettings(r.settings);
+    } else if (settingsOpen()) {
+      closeSettings();
+    }
+    if (r.storage) { if (!storageOpen()) openStorage(); } else if (storageOpen()) closeStorage();
+    if (r.dataset) { if (!datasetOpen()) openDataset(); } else if (datasetOpen()) closeDataset();
+  }
+
+  /// Make the page show a route. `boot`: nothing has loaded yet, so only the
+  /// state is set -- the first load reads it, and the drawers wait for sign-in.
+  function applyRoute(r, boot) {
+    routeApplying = true;
+    try {
+      const q = caseList;
+      let query = false;                       // does the case table have to ask again?
+      const wantCase = r.case || null;
+      if (wantCase !== (q.singleId || openDetailId || null)) {
+        q.singleId = wantCase;
+        openDetailId = wantCase;
+        $("caseId").value = wantCase || "";
+        query = true;
+      }
+      // A case on show leaves the list's own question alone, so closing it
+      // brings back the list that was there.
+      if (!wantCase) {
+        const next = { state: r.state || "", split: r.split || "", city: r.city || "", label: r.label || "",
+                       sort: r.sort || ROUTE_DEFAULT_SORT, dir: r.dir || "desc", offset: r.offset || 0 };
+        for (const key of Object.keys(next)) {
+          if (q[key] !== next[key]) { q[key] = next[key]; query = true; }
+        }
+        $("caseState").value = q.state;
+        ensureOption($("caseSplitFilter"), q.split, "Split: ");
+        $("caseCityFilter").value = q.city;
+        $("caseLabelFilter").value = q.label;
+      }
+      // A link names a scope; a step back to an entry without one means all.
+      // At boot, one it does not name leaves the saved preference alone.
+      const scope = boot ? (r.recipe || recipeScope) : (r.recipe || "");
+      const rescope = scope !== recipeScope;
+      if (rescope) { recipeScope = scope; query = true; }
+      if (!boot) {
+        applyDrawers(r);
+        if (query) {
+          renderCasesHead();
+          if (rescope) refresh(); else requeryCases();
+        }
+      }
+      lastRouteCase = r.case || "";
+    } finally {
+      routeApplying = false;
+    }
+  }
+
+  /// Write the page's state to the address bar. Called wherever the state can
+  /// have moved; a no-op when the bar already says it.
+  function syncRoute() {
+    if (!routeReady || routeApplying) return;
+    const next = currentRoute();
+    const hash = routeHash(next);
+    const caseNow = next.case || "";
+    if (hash !== location.hash) {
+      try {
+        history[caseNow !== lastRouteCase ? "pushState" : "replaceState"](
+          null, "", location.pathname + location.search + hash);
+      } catch (e) { /* a sandboxed frame may refuse; the page works without a bar to write to */ }
+    }
+    lastRouteCase = caseNow;
+  }
+
+  /// Back, Forward, an edited address, a link pasted into a tab that is already
+  /// open (a change of fragment alone does not reload the page): all arrive here.
+  async function onRouteChange() {
+    let opened = false;
+    if (routeParams(location.hash).has("share")) {
+      opened = await redeemShareLink();
+      await loadAuthState();
+    }
+    if (!routeReady) return;
+    const r = parseRoute(location.hash, routeAllowed());
+    if (opened) {
+      // Signed in as nobody until a moment ago: ask again from the top.
+      applyRoute(r, true);
+      applyDrawers(r);
+      userRefresh();
+    } else {
+      applyRoute(r, false);
+    }
+    // The bar then says what the page shows, not what was typed: a hostile or
+    // half-valid fragment does not stay in it, and "+" becomes "%20". Same case,
+    // so this rewrites the entry rather than adding one.
+    syncRoute();
+  }
+
+  /// A share link's secret is in the fragment (#share=<token>). It is traded for
+  /// a read-only cookie and taken out of the address bar and this history entry
+  /// at once, before anything is awaited: the link is a credential, and what is
+  /// left in the bar is a link that can be copied again, not a way in.
+  /// Resolves true when this browser is now signed in through the link.
+  async function redeemShareLink() {
+    const token = routeParams(location.hash).get("share");
+    if (!token) return false;
+    try {
+      history.replaceState(null, "", location.pathname + location.search
+        + routeHash(parseRoute(location.hash, routeAllowed())));
+    } catch (e) { /* see syncRoute */ }
+    try {
+      const res = await fetch(brokerBase($("broker").value) + "/v1/auth/share", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        credentials: "include", body: JSON.stringify({ token }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        shareNotice = data.detail || ("that link did not work (" + res.status + ")");
+        showToast(shareNotice);
+        return false;
+      }
+      shareNotice = "";
+      if (data.already_signed_in) {
+        showToast("You are signed in as " + data.user + ", so this link changed nothing. "
+                  + "Open it in a private window to see what its holder sees.");
+        return false;
+      }
+      return true;
+    } catch (e) {
+      shareNotice = "Could not reach the broker to open that link.";
+      showToast(shareNotice);
+      return false;
+    }
+  }
 
   // -- State & Inputs ---------------------------------------------------------
   $("broker").value = localStorage.getItem(LS_URL) || window.location.origin;
@@ -6187,6 +6565,12 @@
                 <button class="copy-btn" onclick="copyText('${esc(c.case_id)}', 'Case ID copied')" title="Copy Case ID">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
                 </button>
+                <!-- data-* and the table's one delegated listener, never an inline
+                     handler: see the click handler on #casesTable. -->
+                <button class="copy-btn" data-case-link="${esc(c.case_id)}" title="Copy a link to this case" aria-label="Copy a link to this case">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg>
+                </button>
+                ${canShare() ? `<button class="copy-btn" data-case-share="${esc(c.case_id)}" title="Send a read-only link to this case" aria-label="Send a read-only link to this case"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="3"></circle><circle cx="6" cy="12" r="3"></circle><circle cx="18" cy="19" r="3"></circle><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"></line><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"></line></svg></button>` : ""}
               </dd>
               <dt>State</dt>
               <dd>${badge(c.state)}</dd>
@@ -6688,6 +7072,7 @@
         openDetailId = (openDetailId === id) ? null : id;
         if (openDetailId) caseDetailFailed.delete(id);   // opening it again IS the retry
         renderCasesTable(cases);
+        syncRoute();                // a case opening or closing is a step in the history
       });
     });
     // Every render rebuilds the open case's panel, so every render re-attaches
@@ -6717,6 +7102,9 @@
   /// tick as /healthz and /v1/status instead of after both have answered. What
   /// it returns is a promise and the shape to expect back, nothing more.
   function startCases() {
+    // Every question the table asks passes here, whoever asked it, so this is
+    // where the address learns the filters, the sort, the page and the lookup.
+    syncRoute();
     const gen = ++casesGen;
     if (caseList.singleId) {
       return { gen, single: true, dsGen: datasetGen(),
@@ -7092,7 +7480,7 @@
       + `<div style="font-size:13px">${skelBar("96px")}</div>`
       + `<div class="panel-subtitle">${skelBar("68%")}</div>`
       + `<div style="margin-top:12px">${skelLines(lines, 80)}</div></div></div>`;
-    for (const id of ["usersLocked", "machinesLocked", "campaignLocked"]) {
+    for (const id of ["usersLocked", "sharingLocked", "machinesLocked", "campaignLocked"]) {
       const locked = $(id);
       // Back to the markup's default; loadAuthState sets the real answer next.
       locked.style.display = on ? "none" : "";
@@ -7129,11 +7517,18 @@
     authSkeleton(false);
     const panel = $("authPanel");
     panel.style.display = "";
-    const signedIn = !!authState.user;
+    // Looking through a share link: a viewer who is nobody. Not signed in, but
+    // not asked to be -- there is nothing to sign in to.
+    const shared = !!authState.share;
+    const signedIn = !!authState.user || shared;
     const setup = authState.needs_setup;
 
-    $("authTitle").textContent = signedIn ? "Signed in" : (setup ? "Set up this broker" : "Sign in");
-    $("authSubtitle").textContent = signedIn
+    $("authTitle").textContent = shared ? "Shared link" : signedIn ? "Signed in" : (setup ? "Set up this broker" : "Sign in");
+    $("authSubtitle").textContent = shared
+      ? "You are looking at this broker through a read-only link"
+        + (authState.share.expires_at ? ", valid until " + new Date(authState.share.expires_at * 1000).toLocaleString() : "")
+        + ". It can change nothing."
+      : signedIn
       ? "Your session authenticates the dashboard -- no token to paste."
       : (setup
          ? "No account exists yet. The first one you create becomes the admin, and this form then closes for good."
@@ -7146,9 +7541,16 @@
     $("authWho").style.display = signedIn ? "flex" : "none";
     // The role matters now that it authorises something: a viewer sees the
     // campaign and cannot mint machine credentials or change anything.
-    $("authUser").textContent = signedIn
+    $("authUser").textContent = shared ? "read-only link"
+      : signedIn
       ? authState.user + (authState.role ? " (" + authState.role + ")" : "")
       : "";
+    $("logoutBtn").textContent = shared ? "Leave" : "Log out";
+    $("leaveShare").style.display = shared ? "" : "none";
+    // The banner says what a read-only view is; a link that was opened shows it
+    // whatever the address said, and it goes away when the visitor does.
+    if (shared) $("roBanner").style.display = "flex";
+    else if (urlParams.get("ro") !== "1") $("roBanner").style.display = "none";
     const isAdmin = signedIn && authState.role === "admin";
     // Campaign housekeeping is WRITE-scoped, not admin-only: the broker gates it
     // with _may_write_as(("admin", "operator")), and an operator running the
@@ -7158,12 +7560,18 @@
     $("machinesLocked").style.display = isAdmin ? "none" : "";
     $("users").style.display = isAdmin ? "" : "none";
     $("usersLocked").style.display = isAdmin ? "none" : "";
+    $("sharing").style.display = isAdmin ? "" : "none";
+    $("sharingLocked").style.display = isAdmin ? "none" : "";
+    $("shareBtn").style.display = isAdmin ? "" : "none";
+    // A link made a moment ago is a credential: it does not outlive the admin's
+    // session on this page.
+    if (!isAdmin) { shareIssued = null; renderShareIssued(); }
     $("campaign").style.display = canWrite ? "" : "none";
     $("campaignLocked").style.display = canWrite ? "none" : "";
     // A signed-in human has no use for the bearer-token form; it stays in the
     // DOM because everything still reads $("token").value.
     $("connectForm").style.display = signedIn ? "none" : "";
-    if (isAdmin) { loadMachines(); loadPairings(); loadUsers(); } else machineCount = null;
+    if (isAdmin) { loadMachines(); loadPairings(); loadUsers(); loadShares(); } else machineCount = null;
     loadReleases();
     renderWizard();
   }
@@ -7670,6 +8078,145 @@
     } catch (e) { showToast(e.message); }
   }
 
+  // -- Share links -------------------------------------------------------------
+  // How a friend gets a read-only look without an account: the admin makes a link
+  // here, for a named person and a stated time, and sends it from here. Only its
+  // hash is stored, so the link is shown once -- the box keeps it until the next
+  // one is made or the page is reloaded -- and the list below can only revoke.
+  let shareIssued = null;        // { url, label, expires_at } of the link just made
+  // Where a link made now lands. null: wherever the page is (read when the link
+  // is made, so it is never stale); otherwise the landing a case's own button asked
+  // for. Forgotten when Settings closes.
+  let shareRoute = null;
+  let sharesDrawn = false;
+  const SHARE_SKEL = [{ w: 110 }, { w: 80 }, { w: 70 }, { w: 64, h: 26, num: true }];
+
+  /// This page's own address without its fragment: what a link starts from.
+  function shareBase() { return location.origin + location.pathname; }
+
+  function canShare() { return !!(authState && authState.user && authState.role === "admin"); }
+
+  /// Where the page is, for a link to land on: never a drawer.
+  function viewRoute() {
+    const r = currentRoute();
+    delete r.settings; delete r.storage; delete r.dataset;
+    return r;
+  }
+
+  /// Open Sharing. `route`: where the link should land (a case's own button
+  /// says its case); by default, wherever the page is now.
+  function openShare(route) {
+    shareRoute = route || null;
+    $("shareHere").checked = true;
+    renderShareTarget();
+    openSettings("sharing");
+    $("shareLabel").focus();
+    loadShares();
+  }
+
+  function renderShareTarget() {
+    const route = shareRoute || viewRoute();
+    $("shareHereRow").style.display = routeHash(route) ? "flex" : "none";
+    $("shareHereText").textContent = route.case
+      ? "Open it on case " + route.case
+      : "Open it on this view of the case list";
+  }
+
+  function renderShareIssued() {
+    const box = $("shareIssued");
+    if (!shareIssued) { box.style.display = "none"; return; }
+    box.style.display = "";
+    $("shareUrl").value = shareIssued.url;
+    $("shareIssuedFor").textContent = "For " + shareIssued.label + ". "
+      + (shareIssued.expires_at
+         ? "It works until " + new Date(shareIssued.expires_at * 1000).toLocaleString() + "."
+         : "It works until you revoke it.");
+    // A link built on an address nobody else can reach is the one mistake this
+    // can catch: localhost, a LAN number, a .local name.
+    const local = /^(localhost|127\.|\[::1\]|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)|\.(local|lan|internal)$/i
+      .test(location.hostname);
+    $("shareLocalWarn").style.display = local ? "" : "none";
+    $("shareNative").style.display = navigator.share ? "" : "none";
+  }
+
+  async function createShare() {
+    const label = $("shareLabel").value.trim();
+    if (!label) { showToast("Say who it is for first"); $("shareLabel").focus(); return; }
+    const ttl = $("shareTtl").value;
+    const btn = $("shareCreate");
+    btn.disabled = true;
+    try {
+      const d = await userCall("/v1/shares", jsonBody("POST", {
+        label, ttl_seconds: ttl === "never" ? null : Number(ttl),
+      }));
+      const landing = shareRoute || viewRoute();
+      const route = $("shareHere").checked && routeHash(landing) ? landing : {};
+      shareIssued = { url: shareLinkUrl(shareBase(), d.token, route), label: d.label, expires_at: d.expires_at };
+      renderShareIssued();
+      $("shareLabel").value = "";
+      showToast("Link made -- send it now");
+      loadShares();
+    } catch (e) {
+      showToast(e.message);
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  async function loadShares() {
+    if (!canShare()) return;
+    if (!sharesDrawn) {
+      setHtml("shareList", `<table style="width:100%; border-collapse:collapse;" aria-hidden="true"><tbody>`
+        + skelTableRows(2, SHARE_SKEL, "padding:6px 8px;") + `</tbody></table>`);
+      setBusy($("shareList"), true);
+    }
+    try {
+      const rows = (await api("/v1/shares")).shares || [];
+      sharesDrawn = true;
+      setBusy($("shareList"), false);
+      if (!rows.length) {
+        $("shareList").innerHTML = '<div class="panel-subtitle">No links yet.</div>';
+        return;
+      }
+      $("shareList").innerHTML =
+        '<table style="width:100%; border-collapse:collapse;">' +
+        '<thead><tr>' +
+        '<th style="text-align:left; padding:6px 8px;">For</th>' +
+        '<th style="text-align:left; padding:6px 8px;">Valid</th>' +
+        '<th style="text-align:left; padding:6px 8px;">Last seen</th>' +
+        '<th style="padding:6px 8px;"></th></tr></thead><tbody>' +
+        rows.map((l) => {
+          const live = l.state === "live";
+          const valid = l.state === "revoked" ? "revoked " + relTime(l.revoked_at)
+            : l.state === "expired" ? "expired " + relTime(l.expires_at)
+            : l.expires_at ? "until " + new Date(l.expires_at * 1000).toLocaleDateString() : "until revoked";
+          return '<tr style="opacity:' + (live ? "1" : "0.5") + '">' +
+            '<td style="padding:6px 8px; font-weight:600;">' + esc(l.label) +
+              '<div class="label-hint" style="font-weight:400;">made ' + relTime(l.created_at) +
+              (l.created_by ? " by " + esc(l.created_by) : "") + '</div></td>' +
+            '<td style="padding:6px 8px;">' + esc(valid) + '</td>' +
+            '<td style="padding:6px 8px;">' + (l.last_used_at ? esc(relTime(l.last_used_at)) : "never") +
+              (l.opened ? ' <span class="label-hint">opened ' + Number(l.opened) + '&times;</span>' : "") + '</td>' +
+            '<td style="padding:6px 8px; text-align:right; white-space:nowrap;">' +
+              (live ? '<button type="button" data-share-revoke="' + Number(l.id) + '">Revoke</button>' : "") +
+            '</td></tr>';
+        }).join("") + '</tbody></table>';
+    } catch (e) {
+      sharesDrawn = false;
+      setBusy($("shareList"), false);
+      $("shareList").innerHTML = '<div class="panel-subtitle">Could not list the links: ' + esc(e.message) + '</div>';
+    }
+  }
+
+  async function revokeShare(id) {
+    if (!confirm("Revoke this link? It stops working on its holder's next click.")) return;
+    try {
+      await userCall("/v1/shares/" + encodeURIComponent(id), { method: "DELETE" });
+      showToast("Link revoked");
+    } catch (e) { showToast(e.message); }
+    loadShares();
+  }
+
   // -- Pairing requests --------------------------------------------------------
   // `?pair=CODE` is the link a node opens. It survives the sign-in detour (the
   // hint is read once, at load) and is stripped from the address bar as soon as
@@ -7691,7 +8238,8 @@
     }
     if (pairHint) {
       openSettings("machines");
-      window.history.replaceState({}, "", window.location.pathname);
+      // The fragment stays: it may name the drawer this just opened.
+      window.history.replaceState({}, "", window.location.pathname + window.location.hash);
     }
     const hinted = pairHint; pairHint = "";
     // Re-render only when the queue CHANGED. This runs on a 5 s timer, and
@@ -7865,12 +8413,18 @@
   let returnFocusTo = null;
 
   function showTab(name) {
+    settingsTab = name;
     document.querySelectorAll(".drawer-tab").forEach((t) => {
       t.setAttribute("aria-selected", t.getAttribute("data-tab") === name ? "true" : "false");
     });
     document.querySelectorAll(".drawer-pane").forEach((p) => {
       p.hidden = p.id !== "tab-" + name;
     });
+    // Arriving here by a link, or by the tab, says what the link would open on.
+    if (name === "sharing") renderShareTarget();
+    // From a click on a tab. openSettings calls this before the drawer is open,
+    // and writes the address itself once it is.
+    if (settingsOpen()) syncRoute();
   }
 
   function settingsOpen() {
@@ -7887,6 +8441,7 @@
     d.setAttribute("aria-hidden", "false");
     $("settingsBtn").setAttribute("aria-expanded", "true");
     $("settingsClose").focus();
+    syncRoute();
   }
 
   function closeSettings() {
@@ -7900,6 +8455,8 @@
     // Tab starts from nowhere.
     if (returnFocusTo && returnFocusTo.focus) returnFocusTo.focus();
     else $("settingsBtn").focus();
+    shareRoute = null;
+    syncRoute();
   }
 
   // -- Resizable drawers ----------------------------------------------------------
@@ -7971,6 +8528,7 @@
     $("storageBtn").setAttribute("aria-expanded", "true");
     $("storageClose").focus();
     loadStorage();
+    syncRoute();
   }
 
   function closeStorage() {
@@ -7980,6 +8538,7 @@
     $("storageBtn").setAttribute("aria-expanded", "false");
     if (returnFocusTo && returnFocusTo.focus) returnFocusTo.focus();
     else $("storageBtn").focus();
+    syncRoute();
   }
 
   // The drawer's first measurement has nothing to keep, and gets the shape of
@@ -8122,6 +8681,7 @@
     datasetDrawn = null;                       // draw from scratch: the copy may be newer
     datasetPeek();                             // fetches a stale or missing copy
     renderDataset();
+    syncRoute();
   }
 
   function closeDataset() {
@@ -8132,6 +8692,7 @@
     clearTimeout(datasetTick);
     if (returnFocusTo && returnFocusTo.focus) returnFocusTo.focus();
     else $("datasetBtn").focus();
+    syncRoute();
   }
 
   const LS_DATASET_REF = "casebroker.datasetRef";
@@ -8757,14 +9318,17 @@
       // A session counts: on an account-secured broker there is no token to
       // type, and checking only for a bearer token told a signed-in operator
       // to paste one that does not exist.
-      const signedIn = !!(authState && authState.user);
+      const signedIn = !!(authState && (authState.user || authState.share));
       if (health && health.auth && health.auth !== "OPEN" && !token && !signedIn) {
         setConn(null, "auth required");
         $("authNotice").style.display = "flex";
         showErr(null);
         const accounts = health.auth === "accounts";
         const how = accounts ? "Sign in above" : "Enter your bearer token above";
-        $("authNoticeText").innerHTML = "<strong>Authentication Required:</strong> "
+        // A link that was opened and did not work says why first: the visitor
+        // came to see something, and "sign in" alone would be a non-answer.
+        $("authNoticeText").innerHTML = (shareNotice ? "<strong>" + esc(shareNotice) + "</strong> " : "")
+          + "<strong>Authentication Required:</strong> "
           + (accounts
              ? "Sign in to display live campaign telemetry and cases."
              : "This broker requires a bearer token to display live campaign "
@@ -8802,6 +9366,9 @@
       // reachable when someone is actually debugging which instance they hit.
       $("connectedDb").title = (health && health.db) || "";
       $("connectedSummary").style.display = "flex";
+      // The env-token link is only for a broker that has a read token set; every
+      // other one makes links in Settings > Sharing.
+      $("copyRoLink").style.display = health && health.readonly_auth ? "" : "none";
       renderStatus(st);
       // Now, not only in the finally: step 5 waits on this payload, and the
       // finally is a case page and a notification poll away.
@@ -8819,7 +9386,14 @@
       // On error, re-show the connect form so the user can fix credentials
       $("connectForm").style.display = "";
       $("connectedSummary").style.display = "none";
-      if (e.status === 401) {
+      if (e.status === 401 && authState && authState.share) {
+        // A link that worked when this page opened and does not now: it expired
+        // or was withdrawn. "Bearer token" would mean nothing to its holder.
+        setConn("bad", "link ended");
+        shareNotice = "This shared link has expired or been withdrawn.";
+        showErr(shareNotice + " Ask whoever sent it for a new one.");
+        loadAuthState();           // so the page stops saying it is looking through one
+      } else if (e.status === 401) {
         setConn("bad", "unauthorized (401)");
         $("authNotice").style.display = "flex";
         showErr("Authentication failed: invalid or expired bearer token");
@@ -8910,7 +9484,7 @@
       window.copyText(url.toString(), "Read-only link copied to clipboard");
     } catch (e) {
       showToast(e.status === 404
-        ? "No read-only token is set on this broker (CASEBROKER_READ_TOKENS)"
+        ? "No read-only token is set on this broker (CASEBROKER_READ_TOKENS); make a link in Settings > Sharing"
         : "Could not create a read-only link — a write token is required");
     }
   });
@@ -9274,6 +9848,33 @@
 
   $("authForm").addEventListener("submit", submitAuth);
   $("logoutBtn").addEventListener("click", doLogout);
+  $("leaveShare").addEventListener("click", doLogout);
+  $("shareBtn").addEventListener("click", () => openShare());
+  $("shareCreate").addEventListener("click", createShare);
+  $("shareLabel").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); createShare(); } });
+  $("shareUrl").addEventListener("focus", (e) => e.target.select());
+  $("shareCopy").addEventListener("click", () => {
+    if (shareIssued) window.copyText(shareIssued.url, "Link copied");
+  });
+  $("shareMail").addEventListener("click", () => {
+    if (!shareIssued) return;
+    // An anchor, not location.href: a mailto: through the page's own address
+    // would be read by some browsers as leaving it.
+    const a = document.createElement("a");
+    a.href = shareMailto(shareIssued.url, shareIssued.expires_at);
+    a.click();
+  });
+  $("shareNative").addEventListener("click", async () => {
+    if (!shareIssued || !navigator.share) return;
+    try {
+      await navigator.share({ title: "E3D simulation campaign (read-only)",
+        text: "A read-only look at the E3D simulation campaign", url: shareIssued.url });
+    } catch (e) { /* closing the sheet is an AbortError, and not a failure */ }
+  });
+  $("shareList").addEventListener("click", (e) => {
+    const b = e.target.closest("[data-share-revoke]");
+    if (b) revokeShare(b.getAttribute("data-share-revoke"));
+  });
   $("issueBtn").addEventListener("click", issueMachine);
   wireReleases();
   $("addUserBtn").addEventListener("click", addUser);
@@ -9281,7 +9882,9 @@
   // no credential at all. Racing the two meant a /healthz that answered first
   // sent a signed-in operator down the "auth required" branch and left the
   // campaign empty until the next tick -- 60 s, or never with auto-refresh off.
-  const authReady = loadAuthState();
+  // A share link is redeemed first: the cookie it sets is what makes the state
+  // below the visitor's.
+  const authReady = redeemShareLink().then(() => loadAuthState());
 
   $("autoRefresh").addEventListener("change", (e) => {
     localStorage.setItem(LS_AUTO, e.target.checked ? "1" : "0");
@@ -9368,6 +9971,19 @@
   // buttons ask before ending a solve. Capture phase on the table, so the row's
   // own click (which would fold the case) never sees them.
   $("casesTable").addEventListener("click", (e) => {
+    // The two link buttons in an open case's first card.
+    const link = e.target.closest("[data-case-link]");
+    if (link) {
+      e.stopPropagation();
+      window.copyText(shareBase() + routeHash({ case: link.dataset.caseLink }), "Link to this case copied");
+      return;
+    }
+    const share = e.target.closest("[data-case-share]");
+    if (share) {
+      e.stopPropagation();
+      openShare({ case: share.dataset.caseShare });
+      return;
+    }
     const chip = e.target.closest("[data-label]");
     if (chip) {
       e.stopPropagation();
@@ -9453,6 +10069,17 @@
   // auth mode). Leaving that to refresh() alone meant any path that did not
   // reach refresh -- or reached it and threw -- left the badge hidden and the
   // running version invisible, which is exactly what happened.
+  // The address this page was opened with: set into the state now, so the first
+  // load asks for it; the drawers it names open once sign-in has settled.
+  const bootRoute = parseRoute(location.hash, routeAllowed());
+  applyRoute(bootRoute, true);
+  window.addEventListener("popstate", onRouteChange);
+  authReady.catch(() => {}).then(() => {
+    applyDrawers(bootRoute);
+    routeReady = true;
+    syncRoute();
+  });
+
   badgeSkeleton(true);
   checkHealth();
   // Drawn now rather than when the first probe answers: the Setup tab is the

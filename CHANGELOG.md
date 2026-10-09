@@ -8,7 +8,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
-## [0.39.0] - 2026-10-09
+## [0.40.0] - 2026-10-09
+
+### Security
+- **A machine's credential acts only on leases held under its own name -- on every call.**
+  `/v1/lease`, telemetry, parts and fields already checked the lease's worker against the
+  credential (`ice` covers `ice-<job>`); `/v1/heartbeat`, `/v1/complete`, `/v1/fail` and
+  `/v1/release` trusted the `lease_id` alone, and the case list showed every reader that id. One
+  machine's token could therefore quarantine another machine's case (`fail` with
+  `retryable=false`), confirm a result that never ran, or pull a live solve. They now answer 409
+  ("not your case, stop") for a lease another machine holds, and no case read (`GET /v1/cases`,
+  `GET /v1/cases/{id}`) carries `lease_id` any more; `lease_worker` still says who holds it.
+  Shared env tokens and sessions are unaffected.
 
 ### Added
 - **E3D nodes on Phoenix's free `embers` QOS** (`slurm/phoenix_e3d_node.sbatch`, `--requeue`).
@@ -17,34 +28,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
   <ice|phoenix> <mode> ...` queues either cluster from a workstation (`scripts/ice_workers.sh` is now
   its `ice` shorthand), and `submit_workers.sh` names the pairing a cluster needs from its job name.
   Both sbatch files pass `CHUNK_HOURS` to a node as `--chunk-hours` when set.
-
-### Removed
-- **The Python worker path.** `casebroker.worker`, `runner/` (`run_case.sh`, `run_case.cmd`, the
-  pedestrian and progress helpers), `slurm/ice_worker.sbatch` and `phoenix_worker.sbatch`,
-  `start_worker.sh`/`.ps1`, `bootstrap_worker.ps1`, `setup_windows.ps1`, `machine.env.example`,
-  `scripts/pull_done.sh`, `scripts/backfill_pedestrian.py`, `casebroker worker setup`, and
-  `docs/windows-worker.md` and `docs/MORNING.md`. Its runner could not build any campaign recipe --
-  it handed every case back with exit 69 -- so the Phoenix pool it ran had nothing it could solve,
-  while the E3D node does all of it: pairing, native geometry, parts, fields, backfill, updates.
-  The broker still leases a client that declares nothing exactly as before.
-
-### Changed
-- **The docs describe the system that runs.** README, AGENTS, fleet, operations, pace-hpc,
-  releases and the E3D contract (now version 3, node only) no longer describe production as
-  Supabase behind Render, a cluster run from a submodule checkout, or the invariant that "a case
-  never moves between machines mid-solve" -- it does, at a direction boundary, through the part
-  store. The README badge, `casebroker repro`'s default `--broker` and the scripts' examples point
-  at https://casebroker.eddy3d.com instead of the dead Render host. The dashboard's Machines hints
-  show pairing (`E3D setup-sim-node`) instead of `bootstrap_worker.ps1`.
-- **CI: the server image waits for the Postgres suite, and nothing points at production.**
-  `publish-image` now needs the throwaway-Postgres job: production is Postgres, and a change that
-  broke only that branch of `db.py` could ship while it was red. The "real postgres" job, which
-  ran the suite against the production database through the `DBSTRING` secret, is gone: the
-  self-hosted database is reachable only over WireGuard, so it could only ever skip.
-
-## [0.38.0] - 2026-10-09
-
-### Added
 - **`casebroker export` pulls the campaign down as a training snapshot.** The broker answers
   questions of the wind field in place, which is the wrong shape for training: a data loader wants
   every field of the selection on local disk, without a broker in the loop, plus a record of which
@@ -70,24 +53,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
   - **The `export` extra** (`pyarrow>=17`, `zarr>=3`) is opt-in. The server image does not carry
     it: pyarrow alone is 122 MB. Without it the command names the extra and exits 2. The CI sqlite
     job installs it, so these tests run there and do not skip.
-
-## [0.37.1] - 2026-10-09
-
-### Changed
-- **On Postgres the broker holds a small pool of connections, not one under a lock.** One shared
-  connection behind a process-wide lock made every database call wait for every other: a
-  heartbeat queued behind a dataset page, a `/v1/fields` scan or a 1 MB field insert. The lock was
-  only ever needed for SQLite; on Postgres the database already keeps concurrent callers apart
-  (`FOR UPDATE SKIP LOCKED` in the lease, `FOR UPDATE` on a lease's row), as it must across
-  machines. Each call now takes one of `CASEBROKER_PG_POOL` connections (default 4) for its whole
-  duration -- nested calls share it, so a transaction stays on one connection -- and a transaction
-  Postgres aborts to settle a race (deadlock, serialization failure) is run again, whole. A session
-  that comes back with a transaction still open is rolled back before anyone else gets it.
-  `CASEBROKER_PG_POOL=1` is the old behaviour; SQLite is unchanged.
-
-## [0.37.0] - 2026-10-09
-
-### Added
 - **Protocol 2: a node and the broker say what they can do, and the machine counts.**
   Additive; a node that sends none of it is leased as before (docs/protocol.md, "Protocol 2").
   - **Capabilities.** `/healthz` carries `protocol: 2` and `features`. A node used to decide
@@ -106,18 +71,72 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
     and kept from that host for `CASEBROKER_HANDOFF_COOLDOWN` (900 s) so another machine
     continues it from the broker's mesh.
 
-## [0.36.3] - 2026-10-09
+### Changed
+- **The docs describe the system that runs.** README, AGENTS, fleet, operations, pace-hpc,
+  releases and the E3D contract (now version 3, node only) no longer describe production as
+  Supabase behind Render, a cluster run from a submodule checkout, or the invariant that "a case
+  never moves between machines mid-solve" -- it does, at a direction boundary, through the part
+  store. The README badge, `casebroker repro`'s default `--broker` and the scripts' examples point
+  at https://casebroker.eddy3d.com instead of the dead Render host. The dashboard's Machines hints
+  show pairing (`E3D setup-sim-node`) instead of `bootstrap_worker.ps1`.
+- **CI: the server image waits for the Postgres suite, and nothing points at production.**
+  `publish-image` now needs the throwaway-Postgres job: production is Postgres, and a change that
+  broke only that branch of `db.py` could ship while it was red. The "real postgres" job, which
+  ran the suite against the production database through the `DBSTRING` secret, is gone: the
+  self-hosted database is reachable only over WireGuard, so it could only ever skip.
+- **On Postgres the broker holds a small pool of connections, not one under a lock.** One shared
+  connection behind a process-wide lock made every database call wait for every other: a
+  heartbeat queued behind a dataset page, a `/v1/fields` scan or a 1 MB field insert. The lock was
+  only ever needed for SQLite; on Postgres the database already keeps concurrent callers apart
+  (`FOR UPDATE SKIP LOCKED` in the lease, `FOR UPDATE` on a lease's row), as it must across
+  machines. Each call now takes one of `CASEBROKER_PG_POOL` connections (default 4) for its whole
+  duration -- nested calls share it, so a transaction stays on one connection -- and a transaction
+  Postgres aborts to settle a race (deadlock, serialization failure) is run again, whole. A session
+  that comes back with a transaction still open is rolled back before anyone else gets it.
+  `CASEBROKER_PG_POOL=1` is the old behaviour; SQLite is unchanged.
 
-### Security
-- **A machine's credential acts only on leases held under its own name -- on every call.**
-  `/v1/lease`, telemetry, parts and fields already checked the lease's worker against the
-  credential (`ice` covers `ice-<job>`); `/v1/heartbeat`, `/v1/complete`, `/v1/fail` and
-  `/v1/release` trusted the `lease_id` alone, and the case list showed every reader that id. One
-  machine's token could therefore quarantine another machine's case (`fail` with
-  `retryable=false`), confirm a result that never ran, or pull a live solve. They now answer 409
-  ("not your case, stop") for a lease another machine holds, and no case read (`GET /v1/cases`,
-  `GET /v1/cases/{id}`) carries `lease_id` any more; `lease_worker` still says who holds it.
-  Shared env tokens and sessions are unaffected.
+### Removed
+- **The Python worker path.** `casebroker.worker`, `runner/` (`run_case.sh`, `run_case.cmd`, the
+  pedestrian and progress helpers), `slurm/ice_worker.sbatch` and `phoenix_worker.sbatch`,
+  `start_worker.sh`/`.ps1`, `bootstrap_worker.ps1`, `setup_windows.ps1`, `machine.env.example`,
+  `scripts/pull_done.sh`, `scripts/backfill_pedestrian.py`, `casebroker worker setup`, and
+  `docs/windows-worker.md` and `docs/MORNING.md`. Its runner could not build any campaign recipe --
+  it handed every case back with exit 69 -- so the Phoenix pool it ran had nothing it could solve,
+  while the E3D node does all of it: pairing, native geometry, parts, fields, backfill, updates.
+  The broker still leases a client that declares nothing exactly as before.
+
+## [0.37.0] - 2026-10-09
+
+### Added
+- **Deep links: the address bar says where you are.** A reload lost the case you were reading and a
+  case could not be sent to anyone; the dashboard now keeps its state in the URL's fragment, so
+  `/#case=<id>`, `/#state=quarantined&split=test&sort=attempts`, `/#settings=users`, `/#storage` and
+  `/#dataset` each open that place -- cold, or in a tab that already has the page (a change of fragment
+  does not reload it, so the page listens for it). Back and Forward step through the cases you opened;
+  every other change (a filter, a page, a drawer) rewrites its own history entry. A fragment is not sent
+  to the broker, written to the proxy's log or passed on in a `Referer`. Each part of one is checked
+  against what the page offers -- a state it lists, a column it sorts by, a tab it has -- and the rest is
+  dropped. An open case has a **link** button beside its ID. `?pair=` no longer wipes the fragment.
+- **Share links: send a read-only view from the page.** The ways to show someone the dashboard were a
+  `viewer` account (a password to invent and hand over) and `CASEBROKER_READ_TOKENS` (one shared secret in
+  the host's environment, in the query string, with no name, no expiry and a redeploy to take it back).
+  An admin now makes a link in **Settings ▸ Sharing** (or the share button in the header, or in an open
+  case, which makes the link open on that case): for a named person, for a day to a year or until revoked,
+  then **Copy link**, **Email it** or **Share…**. The holder needs no account and sees what a `viewer`
+  sees; every mutating endpoint answers `403` "this is a read-only link", and the identity endpoints refuse
+  it. The token rides in the URL's **fragment** and is traded for an HttpOnly cookie at once, then taken out
+  of the address bar and the history entry; only its hash is stored, so it is shown once; and it is checked
+  against the database on every request, so **Revoke** ends it on its holder's next click. The list says
+  when each link was last used and how often it was opened; the label is the admin's note and is never
+  shown to the holder. At most 50 are live; ended ones stay a month.
+  - **`POST /v1/shares`**, **`GET /v1/shares`**, **`DELETE /v1/shares/{id}`** (admin) and
+    **`POST /v1/auth/share`** (public, throttled to 25 unknown tokens per address in 5 minutes; `410` for a
+    link that expired or was withdrawn, saying which). A link's token also reads as a bearer, so a script
+    can be given one. Someone already signed in who opens a link keeps their login.
+  - **`/v1/auth/state`** carries `share` (when the link ends) and `role: viewer` for such a visitor, and
+    **`/v1/whoami`** says `auth: share`; **`/v1/auth/logout`** clears the link's cookie as well.
+  - New table **`share_links`** (schema 8). The old **Copy read-only link** button now appears only on a
+    broker that has `CASEBROKER_READ_TOKENS`.
 
 ## [0.36.2] - 2026-10-08
 

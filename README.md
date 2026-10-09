@@ -17,7 +17,7 @@ PACE ICE, PACE Phoenix, the lab workstation, anyone else's box — can each ask
 | [`AGENTS.md`](AGENTS.md) | How to change this without breaking the campaign |
 | [`docs/protocol.md`](docs/protocol.md) | Client/server interaction, every endpoint, the state machine |
 | [`docs/operations.md`](docs/operations.md) | First run, accounts, tokens, storage, releases, deploying |
-| [`docs/dashboard.md`](docs/dashboard.md) | The ops UI and read-only sharing |
+| [`docs/dashboard.md`](docs/dashboard.md) | The ops UI, deep links, and read-only share links |
 | [`docs/releases.md`](docs/releases.md) | Moving the fleet between builds while a campaign runs: catalog, canary, promote, roll back, the badges |
 | [`docs/e3d-contract.md`](docs/e3d-contract.md) | The seam to the CFD: what a node (`E3D.exe`) is to the broker, where its contract lives, and the identity it declares |
 | [`docs/dataset.md`](docs/dataset.md) | `casebroker export`: the campaign as a training snapshot (Parquet tables, a Zarr store of every field, a card), and how to read it |

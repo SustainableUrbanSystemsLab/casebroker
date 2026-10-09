@@ -155,6 +155,7 @@ def cleanup_after_module(preflight):
     conn.execute("DELETE FROM cases WHERE case_id LIKE ?", (like,))
     conn.execute("DELETE FROM workers WHERE worker_id LIKE ?", (like,))
     conn.execute("DELETE FROM worker_tokens WHERE name LIKE ?", (like,))
+    conn.execute("DELETE FROM share_links WHERE label LIKE ?", (like,))
     conn.execute("DELETE FROM sessions WHERE user_id IN "
                  "(SELECT id FROM users WHERE username LIKE ?)", (like,))
     conn.execute("DELETE FROM users WHERE username LIKE ?", (like,))
@@ -322,6 +323,43 @@ def test_worker_token_issue_authenticate_and_revoke_over_a_real_connection():
         "the revoked credential must not come back to life with the name"
     rows = [t for t in db.list_worker_tokens(conn) if t["name"] == name]
     assert len(rows) == 1 and rows[0]["revoked_at"] is None
+
+
+def test_share_link_make_use_revoke_and_sweep_over_a_real_connection():
+    """A share link on a REAL engine: the SERIAL key, the hash lookup, the
+    live/expired/revoked states and the sweep -- everything the SQLite suite pins,
+    on the engine production runs. rowcount after UPDATE/DELETE is the part the
+    two drivers need not agree on."""
+    conn = fresh_conn()
+    label = prefix("friend")
+    token = auth.new_token()
+    token_hash = auth.hash_token(token)
+    now = 2_000_000_000
+
+    made = db.create_share_link(conn, label, token_hash, created_by=prefix("admin"),
+                                expires_at=now + 3600, now=now)
+    assert made["id"] and made["label"] == label and made["opened"] == 0
+
+    live = db.live_share_link(conn, token_hash, now=now + 10)
+    assert live is not None and live["id"] == made["id"]
+    assert db.live_share_link(conn, auth.hash_token("another"), now=now) is None
+    db.note_share_link_opened(conn, made["id"], now=now + 20)
+    row = [s for s in db.list_share_links(conn, now=now + 30) if s["label"] == label][0]
+    assert row["opened"] == 1 and row["state"] == "live" and row["last_used_at"] == now + 20
+
+    # Expiry is read from the row, not remembered.
+    assert db.live_share_link(conn, token_hash, now=now + 3601) is None
+    assert db.share_link_state(db.share_link_by_token(conn, token_hash), now + 3601) == "expired"
+
+    assert db.revoke_share_link(conn, made["id"], by=prefix("admin"), now=now + 40) is True
+    assert db.revoke_share_link(conn, made["id"], by=prefix("admin"), now=now + 41) is False
+    assert db.live_share_link(conn, token_hash, now=now + 50) is None
+    assert db.share_link_state(db.share_link_by_token(conn, token_hash), now + 50) == "revoked"
+
+    # Only this run's own row is counted on: the table may hold real links.
+    later = now + db.SHARE_LINK_KEEP_SECONDS + 100
+    db.purge_share_links(conn, now=later)
+    assert db.share_link_by_token(conn, token_hash) is None
 
 
 def test_connects_and_reports_a_real_engine():

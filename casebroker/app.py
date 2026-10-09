@@ -12,7 +12,9 @@ the database on every request so revoking one box takes effect on its next call
 rather than at the next redeploy -- and a machine token deliberately cannot mint
 more machine tokens. A SHARED ENVIRONMENT TOKEN is the older model and still
 works: the live fleet runs on one, and an auth change that stranded workers
-mid-lease would be worse than carrying both for a while.
+mid-lease would be worse than carrying both for a while. A SHARE LINK is the
+fourth: an admin makes one in the browser for a named person, it can only read,
+it expires, and revoking it ends it on its holder's next click.
 
 With no environment tokens and no accounts, auth is off entirely -- fine for a
 laptop smoke test, and ``/healthz`` says so rather than leaving it silent.
@@ -159,6 +161,29 @@ class UserIn(BaseModel):
     # colleague to watch the campaign should have to ask for admin explicitly,
     # not discover afterwards that they handed over the keys.
     role: str = Field(default="viewer")
+
+
+#: A link an admin makes lasts a week unless they say otherwise: long enough for a
+#: friend to get round to it, short enough that a forgotten one stops being a
+#: standing door.
+SHARE_DEFAULT_TTL = 7 * 24 * 3600
+SHARE_MAX_TTL = 365 * 24 * 3600
+#: How long the browser keeps the cookie a redeemed link sets. The link itself is
+#: checked against the database on every request, so this only decides how often
+#: a holder of a long-lived link has to click it again.
+SHARE_COOKIE_MAX_AGE = 30 * 24 * 3600
+
+
+class ShareIn(BaseModel):
+    # Who it is for. The admin's own note: shown in their list, never to the
+    # holder -- so it can be as blunt as it likes.
+    label: str = Field(min_length=1, max_length=80)
+    # Seconds the link stays valid. Omitted: a week. Explicitly null: until revoked.
+    ttl_seconds: int | None = Field(default=SHARE_DEFAULT_TTL, ge=300, le=SHARE_MAX_TTL)
+
+
+class ShareOpenIn(BaseModel):
+    token: str = Field(min_length=8, max_length=256)
 
 
 class PasswordIn(BaseModel):
@@ -724,6 +749,10 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         return header[len(prefix):] if header.startswith(prefix) else ""
 
     SESSION_COOKIE = "wsb_session"
+    # A second cookie rather than a second kind of session in the first: a person
+    # who is logged in and opens a share link (to see what it shows) keeps their
+    # login, and neither can overwrite the other.
+    SHARE_COOKIE = "wsb_share"
 
     def _session_principal(request: Request):
         """The logged-in human behind this request, if any."""
@@ -744,6 +773,21 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         if not supplied:
             return None
         return db.worker_token_owner(conn, auth.hash_token(supplied))
+
+    def _share_principal(request: Request):
+        """The share link behind this request, if it carries a LIVE one.
+
+        Either as the cookie the dashboard holds after a link was redeemed, or
+        as a bearer token (a script can read with it too). Checked against the
+        database every time, as a machine token is, so a revoked or expired link
+        stops working on its holder's very next request.
+        """
+        for raw in (request.cookies.get(SHARE_COOKIE), _supplied_token(request)):
+            if raw:
+                link = db.live_share_link(conn, auth.hash_token(raw))
+                if link:
+                    return link
+        return None
 
     def _auth_is_open() -> bool:
         """No env tokens configured AND no accounts: every caller has full
@@ -804,6 +848,11 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
                 status_code=403,
                 detail=f"this account is a {user['role']}; it can read the "
                        "campaign but not change it")
+        if _share_principal(request):
+            raise HTTPException(
+                status_code=403,
+                detail="this is a read-only link; it can look at the campaign "
+                       "but not change it")
         raise HTTPException(status_code=401, detail="log in, or send a valid bearer token")
 
     def require_purge(request: Request) -> None:
@@ -825,6 +874,11 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
                 status_code=403,
                 detail=f"this account is a {user['role']}; purging a campaign "
                        "needs an admin")
+        if _share_principal(request):
+            raise HTTPException(
+                status_code=403,
+                detail="this is a read-only link; it can look at the campaign "
+                       "but not change it")
         raise HTTPException(status_code=401, detail="log in, or send a valid bearer token")
 
     def _may_write_as(request: Request, roles: tuple[str, ...]) -> bool:
@@ -857,6 +911,10 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
             return
         if _env_token_ok(_supplied_token(request), (*tokens, *readonly_tokens)):
             return
+        # Last, and the only one of these that can say no without a reason to
+        # look: a share link is the credential most likely to be dead.
+        if _share_principal(request):
+            return
         raise HTTPException(status_code=401, detail="log in, or send a valid bearer token")
 
     def require_admin(request: Request):
@@ -888,7 +946,9 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         """
         if _session_principal(request) or _machine_principal(request):
             return True
-        return _env_token_ok(_supplied_token(request), (*tokens, *readonly_tokens))
+        if _env_token_ok(_supplied_token(request), (*tokens, *readonly_tokens)):
+            return True
+        return _share_principal(request) is not None
 
     def require_session(request: Request):
         """Any logged-in human, viewer included. For the endpoints a viewer must
@@ -1107,6 +1167,8 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
             return {"scope": "write", "auth": "token"}
         if _env_token_ok(supplied, readonly_tokens):
             return {"scope": "read", "auth": "token"}
+        if _share_principal(request):
+            return {"scope": "read", "auth": "share"}
         if _auth_is_open():
             return {"scope": "write", "auth": "OPEN",
                     "detail": "no tokens and no accounts; every caller has full access"}
@@ -1168,6 +1230,9 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         obvious from whether logging in is possible.
         """
         user = _session_principal(request)
+        # A person who is logged in is that person, whatever else the browser
+        # holds. Otherwise a visitor through a share link: a viewer who is nobody.
+        share = None if user else _share_principal(request)
         return {
             "needs_setup": db.count_users(conn) == 0,
             # So the setup form can ask for the bootstrap secret up front
@@ -1175,7 +1240,11 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
             # itself a secret; its value never leaves the server.
             "setup_token_required": bool(setup_token or tokens) and db.count_users(conn) == 0,
             "user": user["username"] if user else None,
-            "role": user["role"] if user else None,
+            "role": user["role"] if user else ("viewer" if share else None),
+            # Set while this visitor is looking through a share link. Only WHEN
+            # it ends: the label is the admin's private note on the link, and
+            # the holder is not told it.
+            "share": {"expires_at": share["expires_at"]} if share else None,
             # An env token still works; the UI says so, so the transition is
             # visible rather than a mystery when a pasted token keeps working.
             "env_tokens": bool(tokens or readonly_tokens),
@@ -1368,7 +1437,131 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         if raw:
             db.end_session(conn, auth.hash_token(raw))
         response.delete_cookie(SESSION_COOKIE, path="/")
+        # Both: logging out of this browser leaves nothing of the broker behind
+        # in it, a share link's cookie included ("Leave this view").
+        response.delete_cookie(SHARE_COOKIE, path="/")
         return {"ok": True}
+
+    # -- share links -------------------------------------------------------
+    #
+    # How a friend looks at the dashboard without an account. An admin makes a
+    # link (POST /v1/shares); the friend's browser trades the token in it for a
+    # cookie (POST /v1/auth/share) and the token leaves the address bar; every
+    # read after that is checked against the database, so DELETE /v1/shares/{id}
+    # ends it at once. Only the hash of a token is ever stored.
+
+    @app.post("/v1/auth/share")
+    def auth_share(body: ShareOpenIn, request: Request, response: Response) -> dict[str, Any]:
+        """Redeem a share link: trade its token for a read-only cookie.
+
+        Unauthenticated by necessity -- the visitor has nothing else -- so it is
+        throttled per address on tokens this broker does not know. A token that
+        is known but dead (expired, withdrawn) is NOT counted: holding it already
+        proves the link was given to you, and a friend retrying a stale link
+        should be told so, not locked out.
+
+        Someone who is already logged in keeps their login and gets no cookie:
+        they can already see more than the link shows, and a second identity in
+        the same browser would only make "log out" mean two things. The reply
+        says so, so the page can tell them to open the link in a private window
+        if they want to see what the friend sees.
+        """
+        addr_key = f"|share|{_client_addr(request)}"
+        now_m = time.monotonic()
+        with _login_lock:
+            recent = [t for t in _login_failures.get(addr_key, [])
+                      if now_m - t < LOGIN_FAIL_WINDOW]
+            # An address with nothing to remember is not kept: a redeemed link
+            # must not grow this map by a key per visitor.
+            if recent:
+                _login_failures[addr_key] = recent
+            else:
+                _login_failures.pop(addr_key, None)
+            if len(recent) >= LOGIN_FAIL_ADDR_LIMIT:
+                raise HTTPException(
+                    429, "too many attempts with a link this broker does not know; "
+                         "wait a few minutes")
+        link = db.share_link_by_token(conn, auth.hash_token(body.token))
+        state = db.share_link_state(link) if link else None
+        if state != "live":
+            if state is None:
+                with _login_lock:
+                    _login_failures.setdefault(addr_key, []).append(now_m)
+                    if len(_login_failures) > LOGIN_FAIL_MAX_KEYS:
+                        stalest = min(_login_failures, key=lambda k: _login_failures[k][-1]
+                                      if _login_failures[k] else 0.0)
+                        _login_failures.pop(stalest, None)
+                raise HTTPException(
+                    401, "this broker does not know that link; it may have been cut "
+                         "short when it was copied")
+            raise HTTPException(
+                410, "this link has " + ("expired" if state == "expired" else "been withdrawn")
+                     + "; ask whoever sent it for a new one")
+        user = _session_principal(request)
+        if user:
+            # Not counted as an open: "last seen" and "opened" are how an admin
+            # learns that the PERSON looked, and their own preview in the same
+            # browser would read as the friend having done it.
+            return {"ok": True, "already_signed_in": True,
+                    "user": user["username"], "role": user["role"]}
+        db.note_share_link_opened(conn, link["id"])
+        now = int(time.time())
+        remaining = None if link["expires_at"] is None else int(link["expires_at"]) - now
+        max_age = SHARE_COOKIE_MAX_AGE if remaining is None else max(60, min(remaining, SHARE_COOKIE_MAX_AGE))
+        response.set_cookie(
+            SHARE_COOKIE, body.token,
+            max_age=max_age,
+            httponly=True,      # JavaScript must never be able to read it
+            samesite="lax",
+            secure=_is_https(request),
+            path="/",
+        )
+        return {"ok": True, "expires_at": link["expires_at"]}
+
+    @app.get("/v1/shares")
+    def list_shares(user=AdminAuth) -> dict[str, Any]:
+        """Every link on record, live or not, with when it was last used. The
+        token is not here and cannot be got back: see create_share."""
+        return {"shares": db.list_share_links(conn)}
+
+    @app.post("/v1/shares")
+    def create_share(body: ShareIn, request: Request, user=AdminAuth) -> dict[str, Any]:
+        """Make a read-only link and return it ONCE.
+
+        Admin-only, and never an escalation: the link sees what a `viewer`
+        account sees, which the admin who makes it can already see. It is a
+        credential, so only its hash is stored -- a response that could be asked
+        for again is a token an attacker could read out of the database -- and it
+        rides in the URL's FRAGMENT, which a browser does not send to the server
+        or put in a Referer, so the broker's own access log never holds it.
+        """
+        label = body.label.strip()
+        if not label or not label.isprintable():
+            raise HTTPException(422, "label: say who it is for, in plain text")
+        raw = auth.new_token()
+        now = int(time.time())
+        expires_at = None if body.ttl_seconds is None else now + body.ttl_seconds
+        try:
+            link = db.create_share_link(conn, label, auth.hash_token(raw),
+                                        created_by=user["username"],
+                                        expires_at=expires_at, now=now)
+        except ValueError:
+            raise HTTPException(
+                409, f"{db.MAX_ACTIVE_SHARE_LINKS} links are live already; revoke one "
+                     "you no longer need, then make this one")
+        link["state"] = "live"
+        scheme = "https" if _is_https(request) else "http"
+        host = request.headers.get("host") or request.url.netloc
+        return {**link, "token": raw, "url": f"{scheme}://{host}/#share={raw}",
+                "hint": "copy it now -- only its hash is stored, so it cannot be shown again"}
+
+    @app.delete("/v1/shares/{link_id}")
+    def revoke_share(link_id: int, user=AdminAuth) -> dict[str, Any]:
+        """Take a link back. Effective on its holder's next request: the check
+        is a row read, not something a cookie carries."""
+        if not db.revoke_share_link(conn, link_id, by=user["username"]):
+            raise HTTPException(404, f"no live link numbered {link_id}")
+        return {"id": link_id, "revoked": True}
 
     # -- per-machine credentials -------------------------------------------
 

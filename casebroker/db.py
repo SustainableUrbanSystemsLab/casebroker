@@ -267,6 +267,26 @@ CREATE TABLE IF NOT EXISTS worker_tokens (
 );
 CREATE INDEX IF NOT EXISTS idx_worker_tokens_hash ON worker_tokens(token_hash);
 
+-- A link someone can be sent to look at the campaign and change nothing: one row
+-- per link an admin made, so "who holds one, did they open it, take it back" can
+-- all be answered. The link carries a random token and only its SHA-256 is kept
+-- here, for the reason sessions and machine tokens are hashed -- a dump of this
+-- table must not hand over a working link. `expires_at` NULL means until revoked.
+-- A revoked or expired row stays for a month, so the list can say what became of
+-- it, and is then swept.
+CREATE TABLE IF NOT EXISTS share_links (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    token_hash   TEXT UNIQUE NOT NULL,
+    label        TEXT NOT NULL,
+    created_by   TEXT,
+    created_at   INTEGER NOT NULL,
+    expires_at   INTEGER,
+    last_used_at INTEGER,
+    opened       INTEGER NOT NULL DEFAULT 0,
+    revoked_at   INTEGER,
+    revoked_by   TEXT
+);
+
 -- A machine asking to join. The node generates its OWN token and sends only the
 -- SHA-256, so approving a request promotes a hash into worker_tokens and the raw
 -- credential never exists on the broker at all -- not in this table, not for the
@@ -677,6 +697,26 @@ CREATE TABLE IF NOT EXISTS worker_tokens (
 );
 CREATE INDEX IF NOT EXISTS idx_worker_tokens_hash ON worker_tokens(token_hash);
 
+-- A link someone can be sent to look at the campaign and change nothing: one row
+-- per link an admin made, so "who holds one, did they open it, take it back" can
+-- all be answered. The link carries a random token and only its SHA-256 is kept
+-- here, for the reason sessions and machine tokens are hashed -- a dump of this
+-- table must not hand over a working link. `expires_at` NULL means until revoked.
+-- A revoked or expired row stays for a month, so the list can say what became of
+-- it, and is then swept.
+CREATE TABLE IF NOT EXISTS share_links (
+    id           SERIAL PRIMARY KEY,
+    token_hash   TEXT UNIQUE NOT NULL,
+    label        TEXT NOT NULL,
+    created_by   TEXT,
+    created_at   INTEGER NOT NULL,
+    expires_at   INTEGER,
+    last_used_at INTEGER,
+    opened       INTEGER NOT NULL DEFAULT 0,
+    revoked_at   INTEGER,
+    revoked_by   TEXT
+);
+
 -- A machine asking to join. The node generates its OWN token and sends only the
 -- SHA-256, so approving a request promotes a hash into worker_tokens and the raw
 -- credential never exists on the broker at all -- not in this table, not for the
@@ -883,7 +923,7 @@ CREATE INDEX IF NOT EXISTS idx_case_blobs_sha ON case_blobs(sha256);
 # already existed, and only then build the indexes -- an index is very often the
 # thing that references the newly added column.
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 # A column definition that cannot be bolted onto a table that already exists.
 # Detected and reported by name, because the alternative -- quietly adding the
@@ -4649,6 +4689,7 @@ _TABLE_NOTES = {
     "sessions": "dashboard login sessions",
     "worker_tokens": "machine credentials (hashes only)",
     "pairings": "pending browser pairings",
+    "share_links": "read-only links an admin made (hashes only)",
     "releases": "node builds the broker points at",
     "build_stats": "per-build outcome counters",
     "settings": "broker settings",
@@ -5441,6 +5482,140 @@ def list_worker_tokens(conn) -> list[dict[str, Any]]:
     return [{"name": r["name"], "created_by": r["created_by"],
              "created_at": r["created_at"], "last_seen_at": r["last_seen_at"],
              "revoked_at": r["revoked_at"]} for r in rows]
+
+
+# -- share links: a read-only look at the campaign, for someone with no account ---
+#
+# The older ways to show a friend the dashboard were a `viewer` account (a
+# password to invent and hand over) and CASEBROKER_READ_TOKENS (one shared secret
+# in the host's environment: no name, no expiry, and taking it back is a
+# redeploy). A share link is the middle: an admin makes one in the browser, for
+# a named person, for a stated time, and revokes it with a click. The raw token
+# exists once, in the response that made it; only its hash is stored.
+
+#: How many links may be live at once. A link is a credential: a stuck button or
+#: a runaway script minting thousands would leave a pile nobody can audit.
+MAX_ACTIVE_SHARE_LINKS = 50
+
+#: A revoked or expired link stays this long, so the list can still say what
+#: became of it, and is then dropped.
+SHARE_LINK_KEEP_SECONDS = 30 * 24 * 3600
+
+#: `last_used_at` moves at most this often. It is stamped from the read gate, so
+#: on requests, and one dashboard refresh makes a dozen of them.
+SHARE_LINK_TOUCH_SECONDS = 60
+
+
+def share_link_state(link: dict[str, Any], now: int | None = None) -> str:
+    """`live`, `expired` or `revoked` -- revoked wins, because it is the answer
+    to "did somebody take this back", which an expiry date cannot undo."""
+    now = now or _now()
+    if link["revoked_at"] is not None:
+        return "revoked"
+    if link["expires_at"] is not None and int(link["expires_at"]) <= now:
+        return "expired"
+    return "live"
+
+
+def _share_row(r) -> dict[str, Any]:
+    # By column name, never position: a Postgres row is a dict.
+    return {"id": r["id"], "label": r["label"], "created_by": r["created_by"],
+            "created_at": r["created_at"], "expires_at": r["expires_at"],
+            "last_used_at": r["last_used_at"], "opened": r["opened"],
+            "revoked_at": r["revoked_at"], "revoked_by": r["revoked_by"]}
+
+
+@_locked
+def create_share_link(conn, label: str, token_hash: str, created_by: str | None = None,
+                      expires_at: int | None = None, now: int | None = None) -> dict[str, Any]:
+    """Store a link by the hash of its token. `ValueError("too-many")` once
+    MAX_ACTIVE_SHARE_LINKS are live: revoke one, or let one expire."""
+    now = now or _now()
+    purge_share_links(conn, now)
+    live = conn.execute(
+        "SELECT COUNT(*) n FROM share_links WHERE revoked_at IS NULL "
+        "AND (expires_at IS NULL OR expires_at > ?)", (now,)).fetchone()["n"]
+    if int(live) >= MAX_ACTIVE_SHARE_LINKS:
+        raise ValueError("too-many")
+    conn.execute(
+        "INSERT INTO share_links (token_hash, label, created_by, created_at, expires_at) "
+        "VALUES (?,?,?,?,?)", (token_hash, label, created_by, now, expires_at))
+    row = conn.execute("SELECT * FROM share_links WHERE token_hash = ?",
+                       (token_hash,)).fetchone()
+    return _share_row(row)
+
+
+@_locked
+def share_link_by_token(conn, token_hash: str) -> dict[str, Any] | None:
+    """The link a token belongs to in WHATEVER state it is in, or None.
+
+    The exchange endpoint needs the dead ones too: telling someone their link
+    expired, or was withdrawn, is kinder than "not valid", and says nothing a
+    stranger could use -- the token is 256 random bits, so it is only ever in
+    the hands of somebody it was given to."""
+    row = conn.execute("SELECT * FROM share_links WHERE token_hash = ?",
+                       (token_hash,)).fetchone()
+    return _share_row(row) if row else None
+
+
+@_locked
+def live_share_link(conn, token_hash: str, now: int | None = None) -> dict[str, Any] | None:
+    """The link behind a token if it can be used NOW, else None.
+
+    Checked against the database on every request, as a machine token is, so
+    revoking a link ends it on its holder's next click and not at some later
+    sweep. Stamps `last_used_at`, at most once a minute."""
+    now = now or _now()
+    link = share_link_by_token(conn, token_hash)
+    if link is None or share_link_state(link, now) != "live":
+        return None
+    last = link["last_used_at"]
+    if last is None or now - int(last) >= SHARE_LINK_TOUCH_SECONDS:
+        conn.execute("UPDATE share_links SET last_used_at = ? WHERE id = ?", (now, link["id"]))
+        link["last_used_at"] = now
+    return link
+
+
+@_locked
+def note_share_link_opened(conn, link_id: int, now: int | None = None) -> None:
+    """Somebody redeemed the link (as opposed to a request made under it)."""
+    now = now or _now()
+    conn.execute("UPDATE share_links SET opened = opened + 1, last_used_at = ? WHERE id = ?",
+                 (now, link_id))
+
+
+@_locked
+def list_share_links(conn, now: int | None = None) -> list[dict[str, Any]]:
+    """Every link still on record, newest first, each with its `state`. Never the
+    token, and not its hash either: nothing here can be used to sign in."""
+    now = now or _now()
+    rows = conn.execute("SELECT * FROM share_links ORDER BY created_at DESC, id DESC").fetchall()
+    out = []
+    for r in rows:
+        link = _share_row(r)
+        link["state"] = share_link_state(link, now)
+        out.append(link)
+    return out
+
+
+@_locked
+def revoke_share_link(conn, link_id: int, by: str | None = None, now: int | None = None) -> bool:
+    """Take a link back. False if there is no such link or it was already revoked."""
+    now = now or _now()
+    cur = conn.execute(
+        "UPDATE share_links SET revoked_at = ?, revoked_by = ? WHERE id = ? AND revoked_at IS NULL",
+        (now, by, link_id))
+    return bool(cur.rowcount)
+
+
+@_locked
+def purge_share_links(conn, now: int | None = None) -> int:
+    """Drop links that ended more than SHARE_LINK_KEEP_SECONDS ago."""
+    cutoff = (now or _now()) - SHARE_LINK_KEEP_SECONDS
+    cur = conn.execute(
+        "DELETE FROM share_links WHERE (revoked_at IS NOT NULL AND revoked_at < ?) "
+        "OR (expires_at IS NOT NULL AND expires_at < ?)", (cutoff, cutoff))
+    return int(cur.rowcount or 0)
 
 
 @_locked
