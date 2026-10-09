@@ -2365,6 +2365,50 @@ def delete_release(conn, build: str, by: str | None = None, now: int | None = No
     return n
 
 
+@_locked
+def release_row(conn, build: str, platform: str) -> dict[str, Any] | None:
+    """One registered file: {build, platform, file, sha256}, or None."""
+    row = conn.execute("SELECT build, platform, file, sha256 FROM releases WHERE build = ? AND platform = ?",
+                       (build, platform)).fetchone()
+    return dict(row) if row else None
+
+
+@_locked
+def release_shas(conn, build: str | None = None) -> set[str]:
+    """The content hashes the catalog names -- of one build, or of all of them."""
+    if build is None:
+        rows = conn.execute("SELECT DISTINCT sha256 FROM releases").fetchall()
+    else:
+        rows = conn.execute("SELECT DISTINCT sha256 FROM releases WHERE build = ?", (build,)).fetchall()
+    return {r["sha256"] for r in rows}
+
+
+@_locked
+def release_files_to_drop(conn, keep_builds: int, now: int | None = None) -> list[str]:
+    """The release files the broker may stop holding: those of builds older than the
+    newest ``keep_builds`` that nothing needs.
+
+    A build's files are ~535 MB (three platforms) and every push to Eddy3D ``dev``
+    publishes one, so holding every build ever registered fills the store in weeks.
+    Kept whatever their age: the fleet's target, the target before it (a roll back
+    goes there, and has to be able to fetch it), a canary's target, and what a live
+    worker runs (release_in_use). A hash a kept build or a case's part shares is
+    never listed. The catalog rows stay either way -- a build can be uploaded again.
+    """
+    now = now or _now()
+    builds = [r["build"] for r in conn.execute(
+        "SELECT build, MAX(added_at) AS at FROM releases GROUP BY build ORDER BY at DESC, build DESC").fetchall()]
+    keep = set(builds[:max(0, keep_builds)])
+    previous = _setting(conn, "previous_target")
+    if previous:
+        keep.add(previous)
+    keep |= {b for b in builds if b not in keep and release_in_use(conn, b, now=now)}
+    rows = conn.execute("SELECT build, sha256 FROM releases").fetchall()
+    held_elsewhere = {r["sha256"] for r in rows if r["build"] in keep}
+    held_elsewhere |= {r["sha256"] for r in conn.execute("SELECT DISTINCT sha256 FROM case_blobs").fetchall()}
+    return sorted({r["sha256"] for r in rows if r["build"] not in keep and r["sha256"] not in held_elsewhere})
+
+
 #: How long a worker may lag its target before it is called stuck, by how it
 #: was told to switch: "now" restarts at once, "direction" waits for the wind
 #: direction being solved, "case" for the case in flight -- which takes hours.
@@ -4031,8 +4075,12 @@ def drop_blob(conn, case_id: str, part: str, by: str | None = None, now: int | N
 
 @_locked
 def referenced_blobs(conn) -> set[str]:
-    """Every content hash some case's row refers to: what a sweep must keep."""
-    return {r["sha256"] for r in conn.execute("SELECT DISTINCT sha256 FROM case_blobs").fetchall()}
+    """Every content hash some case's row -- or the release catalog -- refers to: what a
+    sweep must keep. Release files live in the same store (a build's file is held here
+    for the nodes to fetch), and without the catalog's hashes here a sweep would delete
+    every one of them as an orphan."""
+    cases = {r["sha256"] for r in conn.execute("SELECT DISTINCT sha256 FROM case_blobs").fetchall()}
+    return cases | {r["sha256"] for r in conn.execute("SELECT DISTINCT sha256 FROM releases").fetchall()}
 
 
 @_locked

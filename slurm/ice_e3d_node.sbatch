@@ -14,11 +14,15 @@
 #
 # 24 ranks is the most one PACE job gets. A direction takes ~22 min on it, so a 32-direction case is
 # ~12 h and outlives this 8 h shift. That is fine: every finished direction is sent to the broker as
-# it finishes, the shift's SIGTERM (180 s before the wall) releases the case with its attempt
-# refunded, and the next worker continues it from the broker's copy of the mesh and the directions.
-# Only the direction in flight when the shift ends is lost.
+# it finishes, and after CHUNK_HOURS (default 7) of one lease the node hands the case on at the next
+# direction boundary, and the next worker continues it from the broker's copy of the mesh and the
+# directions. Should a direction still be running at the wall, SIGTERM (180 s before it) releases the
+# case with its attempt refunded and only that direction is lost.
 #
 # Not preemptible (coe-ice has no embers), so no --requeue.
+#
+#   CHUNK_HOURS=6.5   hand off after 6.5 h instead; CHUNK_HOURS=0 never hands off (a case then runs
+#                     until the wall's SIGTERM takes the direction in flight)
 
 set -uo pipefail
 
@@ -39,6 +43,24 @@ fi
 
 B=$HOME/windcomfort/bin
 
+# Hand the case on at a direction boundary before the wall. Passed as E3D_CHUNK_HOURS, not as
+# --chunk-hours: an E3D from before the option refuses the whole command line, and this job would
+# end in seconds; one from before the variable ignores it and runs as it always did.
+chunk=${CHUNK_HOURS:-7}
+if ! [[ "$chunk" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+    echo "CHUNK_HOURS=$chunk is not a number of hours (0 turns handing off off) -- not starting a worker"
+    exit 2
+fi
+if [[ "$chunk" =~ ^0+([.]0+)?$ ]]; then unset E3D_CHUNK_HOURS; else export E3D_CHUNK_HOURS=$chunk; fi
+
+# Take the fleet's target build from the broker first: a job runs E3D unsupervised, so nothing
+# else ever moves it to a new build. sync verifies the file against the hash the broker's admin
+# registered and replaces E3D by a rename, which leaves a job already running the old one
+# undisturbed. An E3D from before sync, a broker that cannot be reached or holds no file for the
+# target: this job runs the E3D that is installed, as before.
+timeout 900 "$B/E3D" node-release sync --exe "$B/E3D" \
+    || echo "E3D was not updated (the line above says why); this job runs the build installed"
+
 # Rootless podman needs a runtime dir and a graph root; both live on node-local scratch (wiped at
 # job end, so each job pulls the image again). The shim adds the rest.
 export XDG_RUNTIME_DIR=${TMPDIR:-/tmp}/xdg; mkdir -p "$XDG_RUNTIME_DIR"; chmod 700 "$XDG_RUNTIME_DIR"
@@ -51,9 +73,7 @@ export EDDY3D_CONTAINER_CLI=$B/podman-pace.sh
 DONE=${E3D_DONE:-/storage/ice1/0/3/pkastner3/windcomfort/done}; mkdir -p "$DONE"
 WORK=${TMPDIR:-/tmp}/e3d-work; mkdir -p "$WORK"
 
-echo "node ice-${SLURM_JOB_ID} on $(hostname), $(nproc) cores, work=$WORK, chain prev=${CHAIN_PREV:-none}"
-# CHUNK_HOURS=7 (optional) hands the case on at a direction boundary before the wall instead of
-# losing the direction in flight to SIGTERM; it needs an E3D build with --chunk-hours.
+echo "node ice-${SLURM_JOB_ID} on $(hostname), $(nproc) cores, work=$WORK, chain prev=${CHAIN_PREV:-none}," \
+     "${E3D_CHUNK_HOURS:+hands a case on after $E3D_CHUNK_HOURS h}${E3D_CHUNK_HOURS:-never hands a case on}"
 exec "$B/E3D" run-sim-node --engine docker --cpus "${SLURM_NTASKS:-24}" --cluster ICE \
-    --work "$WORK" --done "$DONE" ${MAX_CASES:+--max-cases "$MAX_CASES"} \
-    ${CHUNK_HOURS:+--chunk-hours "$CHUNK_HOURS"} --drain --max-idle-polls 10
+    --work "$WORK" --done "$DONE" ${MAX_CASES:+--max-cases "$MAX_CASES"} --drain --max-idle-polls 10

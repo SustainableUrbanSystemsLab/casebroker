@@ -106,7 +106,7 @@ uv run casebroker token check --broker URL --expect write     # what can this on
 uv run casebroker health  --broker URL                        # version and auth posture
 uv run casebroker doctor  --broker URL                        # find the broken piece
 uv run casebroker fleet   --broker URL --cluster ICE          # report squeue (login node)
-uv run casebroker release register release.json --broker URL  # add a node build to the catalog
+uv run casebroker release register release.json --upload . --broker URL  # add a node build, upload its files
 uv run casebroker release promote <worker> --broker URL       # canary is good: whole fleet onto it
 uv run casebroker release rollback --broker URL [--block]     # back to the previous build (kill switch)
 uv run casebroker repro <case_id> --e3d E3D.exe --engine bluecfd  # re-run a failed case HERE
@@ -123,9 +123,12 @@ Full endpoint table in [docs/protocol.md](docs/protocol.md).
 A node updates itself only when it runs under the **supervisor**, `E3D node`.
 Started as `E3D run-sim-node` (or `run-simulation-node`) it never switches, and
 says so at start-up: *"started directly, so it will not switch builds by
-itself"*. The broker never ships a file. It names the build and its SHA-256,
-and the node installs that file from its **release share**, by default
-`%LOCALAPPDATA%\Eddy3D\node\releases` (a folder on that machine: copy the file in).
+itself"* (a PACE job runs `E3D node-release sync` before it starts instead). The
+broker names the build and its SHA-256, and holds the file once it is uploaded
+(`release register --upload`, which Eddy3D's build does for every push to `dev`
+once its secrets are set). The node installs that file from its **release share**,
+by default `%LOCALAPPDATA%\Eddy3D\node\releases` (a folder on that machine),
+or else fetches it from the broker; either way only if it hashes to that SHA-256.
 The whole model, with the guards and badges, is in
 [docs/releases.md](docs/releases.md).
 

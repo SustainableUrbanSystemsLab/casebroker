@@ -1,19 +1,20 @@
 # Node releases: moving a fleet between builds while a campaign runs
 
 A campaign runs for months and its nodes are updated in the middle of it, with
-cases in flight, on machines nobody restarts in a hurry. The broker's answer is
-SLURM's: the controller says **which** build to run and never ships code. It
-holds a catalog of published builds with their hashes, one fleet target, a
-per-worker override for a canary, and the switches an operator flips while it
-runs; each node takes the file from its own release share and verifies it
-against the hash it was given.
+cases in flight, on machines nobody restarts in a hurry. The broker says
+**which** build to run: it holds a catalog of published builds with their
+hashes, one fleet target, a per-worker override for a canary, and the switches
+an operator flips while it runs. It also holds the files, once they are
+uploaded, and a node fetches its target from it over the channel it already
+authenticates on; whether the file came from the broker or from the node's own
+release share, the node runs it only if it hashes to what an admin registered.
 
 ## The words
 
 | | |
 | --- | --- |
 | **build** | `version+commit`, as in `1.14.0.827+e044a147`. The product version is the same for every push to `dev`, so the commit is what tells two nodes apart. `E3D version --json` prints it. Builds are **named, never ordered**: a roll back is just another target. |
-| **release** | one build's file for one platform (`win-x64`, `linux-x64`, `osx-arm64`), registered with its sha256. The broker never holds or serves the file. |
+| **release** | one build's file for one platform (`win-x64`, `linux-x64`, `osx-arm64`), registered with its sha256. The broker serves the file once it has been uploaded (`stored` in the catalog); see [The files](#the-files). |
 | **target** | the build the fleet should be on. A worker's own `target_build` overrides it: the canary. |
 | **apply** | when a node switches: `case` (after the case in flight), `direction` (after the wind direction being solved; `--resume` skips solved ones), `now` (the case is given back). |
 | **drain** | no new case for this worker; the one in flight finishes; it may still resume its own. |
@@ -26,22 +27,31 @@ against the hash it was given.
    publishes `E3D.exe`, `E3D-linux-x64` and `E3D-macos-arm64` to the rolling
    `e3d-node-latest` GitHub release, with `SHA256SUMS.txt` and `release.json`
    (`[{build, platform, file, sha256}]`).
-2. **Share.** Put the files on each node's release share: a folder on that machine
-   (`<node dir>/releases` unless the node names another), filled by whoever runs the
-   fleet -- a copy, a network share. Until 2026-10-06 it was a receive-only Syncthing
-   folder; nothing fills it by itself now. A machine can instead build `dev` itself
-   (Eddy3D `scripts/node-update`), which installs and switches to that build without
-   the broker; clear the fleet target while machines update that way, or it moves
-   them back.
-3. **Register.** From a terminal or a CI step:
+2. **Register and upload.** The same workflow does this itself once the Eddy3D
+   repository has the secrets `CASEBROKER_RELEASE_USER` and
+   `CASEBROKER_RELEASE_PASSWORD` (an admin account on the broker; the variable
+   `CASEBROKER_URL` names another broker). By hand, from the folder the release
+   was downloaded to:
 
    ```bash
-   casebroker release register release.json --broker https://casebroker.eddy3d.com --username ada
+   casebroker release register release.json --upload . --broker https://casebroker.eddy3d.com --username ada
    ```
 
    (`--password-stdin` for a CI secret; `--notes` for a line shown beside the
-   build.) Or paste `release.json` into the dashboard's *Register a published
-   build*.
+   build.) `--upload DIR` sends each row's `file` from `DIR` in chunks, resuming
+   where an interrupted upload stopped, and waits until the broker has checked
+   it against the registered sha256. Without it the build is only named: paste
+   `release.json` into the dashboard's *Register a published build* to do just
+   that.
+3. **Fetch.** Nothing to do. A node under the `E3D node` supervisor looks on
+   its release share first (`<node dir>/releases`, a folder on that machine)
+   and otherwise downloads the target from the broker, a piece at every
+   heartbeat, then installs and switches at the boundary chosen. A SLURM job
+   runs `E3D node-release sync` before it starts its node: see
+   [Nodes that cannot update themselves](#nodes-that-cannot-update-themselves).
+   A machine can instead build `dev` itself (Eddy3D `scripts/node-update`),
+   which installs and switches to that build without the broker; clear the
+   fleet target while machines update that way, or it moves them back.
 4. **Canary.** Point **one** worker at it: the *Canary target* select on the
    panel, `PUT /v1/workers/{id}/target`. Watch the *Node builds* table: done,
    unconverged and failed **with rates**, mean wall time, and — once both have
@@ -102,16 +112,19 @@ against the hash it was given.
 
 | | |
 | --- | --- |
-| `GET /v1/releases` | the catalog, target, `previous_target`, policy, `stuck_after`, per-build stats (`published`, `missing_platforms`, rates, `mean_wall_seconds`), and the `fleet` summary |
+| `GET /v1/releases` | the catalog (each row with `stored` and `bytes`: whether the broker holds that file), target, `previous_target`, policy, `stuck_after`, per-build stats (`published`, `missing_platforms`, rates, `mean_wall_seconds`), the `fleet` summary, and `release_files` (whether this broker can hold files at all) |
 | `POST /v1/releases` | register `{build, platform, file, sha256, notes}` |
-| `DELETE /v1/releases/{build}` | remove a build from the catalog (guarded) |
+| `POST /v1/releases/{build}/{platform}/upload` | `{sha256, bytes}` of the file in hand: begin, resume or ask after its upload. 409 unless it is the registered sha256. Answers `stored`, `verifying`, or `absent`/`partial` with the `offset` to send from |
+| `PUT /v1/releases/{build}/{platform}/upload?offset=&bytes=` | one chunk (at most 64 MiB) at `offset`; 409 with the broker's offset when that is not where the upload stands |
+| `GET /v1/releases/{build}/{platform}/file` | the file, for a node: `ETag` and `X-Sha256` are the hash, byte ranges are answered (a node resumes a broken download). 410 while the broker does not hold it |
+| `DELETE /v1/releases/{build}` | remove a build from the catalog (guarded), and its files with it (`files_removed`) |
 | `PUT /v1/releases/target` | `{build, apply, force}`; `build: null` clears it |
 | `PUT /v1/releases/policy` | `{require_build, blocked_builds, undeclared_recipes, release_repo}` — the repo (`owner/name`) gives the panel commit and compare links; `undeclared_recipes: null` clears that policy |
 | `POST /v1/releases/promote` | `{worker_id}` |
 | `POST /v1/releases/rollback` | `{block}` |
 | `PUT /v1/workers/{id}/target` | `{build, force}`; `null` follows the fleet |
 | `POST /v1/workers/{id}/drain`, `/undrain` | `{reason}` |
-| `GET /v1/node/release` | what this node should run: `target_build`, `canary`, `current`, `apply`, `file`, `sha256`, `drain`, `blocked` |
+| `GET /v1/node/release` | what this node should run: `target_build`, `canary`, `current`, `apply`, `file`, `sha256`, `drain`, `blocked`, and `url` + `bytes` (where to fetch the file, relative to the broker) when the broker holds it, else null |
 
 The broker also drains a worker by itself, when it fails
 `CASEBROKER_FAIL_BURST_CASES` (5) different cases within
@@ -120,11 +133,51 @@ broker:`, and it stays drained until someone undrains it.
 
 The terminal has the same: `casebroker release list|register|target|promote|rollback`.
 
+## The files
+
+A build is about 535 MB over its three platforms (Linux ~155 MB, Windows ~160 MB,
+macOS ~220 MB), and every push to `dev` makes one. They are kept in the part
+store, content-addressed like a case's parts, and only these are:
+
+- the newest `CASEBROKER_RELEASE_KEEP_BUILDS` builds (default 5);
+- whatever the fleet still needs, however old: the fleet's target, the target
+  before it (where *Roll back* goes), a canary's target, and any build a worker
+  seen in the last 24 hours is running.
+
+The others are let go when a new file lands; their catalog rows stay, and the
+panel says *files not held here* (red for the target or the previous one, which
+the fleet would need). Upload one again before pointing the fleet at it. Removing
+a build from the catalog removes its files, unless a build that stays is the same
+content. `/v1/parts/sweep` never touches a release file. Without a part store
+(`CASEBROKER_PARTS_DIR=""`) the broker holds no files and nodes use their shares.
+
+Who may do what is the same as for the catalog, and for the same reason:
+uploading is an admin's (or the CI step's admin login), and the content must hash
+to the sha256 an admin registered -- a chunk that does not is dropped when the
+upload is checked, and the node checks again before it installs. Fetching takes a
+credential that may write: a machine's token, or an operator's or admin's
+session. A viewer and a shared read-only link cannot: these are executables, built
+from a private repository.
+
 ## Nodes that cannot update themselves
 
 A node started as `E3D run-sim-node` (not under the `E3D node` supervisor) asks
-`/v1/node/release` but never switches; the fleet table says *cannot update
-itself*. Update it by hand -- copy the new `E3D.exe` over the old and start it
-again -- and it declares the new build with its next lease. (The Python worker,
+`/v1/node/release` but never switches while it runs; the fleet table says
+*cannot update itself*. That is how every PACE job runs, and each job therefore
+takes the target **before** it starts its node:
+
+```bash
+E3D node-release sync --exe ~/windcomfort/bin/E3D
+```
+
+It asks the broker what this worker should run, fetches the file (the release
+share first, else the broker), checks its sha256, asks the new file what build it
+is, and replaces `--exe` by a rename, so a job already running the old file is
+not disturbed. *Up to date*, *updated*, or a one-line reason; the job scripts run
+the E3D that is installed whatever it says. An E3D from before `sync` cannot do
+this, so the first update on each cluster is by hand (docs/pace-hpc.md §8).
+
+Anywhere else, update it by hand -- copy the new `E3D.exe` over the old and start
+it again -- and it declares the new build with its next lease. (The Python worker,
 `casebroker.worker`, which never asked at all, is retired: it could not build any
 campaign recipe.)

@@ -30,6 +30,7 @@ import pathlib
 import secrets
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 
@@ -703,8 +704,114 @@ def cmd_release_list(args) -> int:
     return 0
 
 
+def _sha256_file(path: pathlib.Path) -> str:
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while block := f.read(4 * 1024 * 1024):
+            h.update(block)
+    return h.hexdigest()
+
+
+def _put_bytes(opener, broker: str, path: str, data: bytes, timeout: float = 300.0):
+    """(status, decoded body) of one raw PUT: a chunk of a file, not JSON."""
+    req = urllib.request.Request(
+        broker.rstrip("/") + path, data=data, method="PUT",
+        headers={"Content-Type": "application/octet-stream", "User-Agent": USER_AGENT})
+    try:
+        with opener.open(req, timeout=timeout) as r:
+            return r.status, json.loads(r.read().decode() or "{}")
+    except urllib.error.HTTPError as e:
+        try:
+            return e.code, json.loads(e.read().decode() or "{}")
+        except Exception:                                    # noqa: BLE001
+            return e.code, {}
+
+
+#: Answers that mean "not now" rather than "no": a dropped connection (0), a proxy
+#: while the broker restarts for a deploy, a rate limit. 507 (the store is full) is a "no".
+_HICCUPS = (0, 429, 500, 502, 503, 504)
+_pause = time.sleep
+
+
+def _upload_release_file(opener, broker: str, row: dict, path: pathlib.Path,
+                         wait_seconds: float = 1800.0, hiccups: int = 8) -> bool:
+    """Send one registered build's file to the broker, in the chunks it asks for,
+    resuming wherever the upload stands -- a CI runner that loses its connection
+    halfway through 200 MB starts again from the broker's offset, not from zero.
+    True once the broker holds it (it hashes the whole file before saying so)."""
+    from urllib.parse import quote
+    build, platform = str(row.get("build")), str(row.get("platform"))
+    if not path.is_file():
+        print("%s %s: no file %s to upload" % (build, platform, path), file=sys.stderr)
+        return False
+    size = path.stat().st_size
+    sha = _sha256_file(path)
+    if sha != str(row.get("sha256") or "").lower():
+        print("%s hashes to %s, not the %s registered for %s %s"
+              % (path, sha, row.get("sha256"), build, platform), file=sys.stderr)
+        return False
+    where = "/v1/releases/%s/%s/upload" % (quote(build, safe=""), quote(platform, safe=""))
+    deadline = time.monotonic() + wait_seconds
+
+    def attempt(call):
+        try:
+            return call()
+        except OSError as exc:                       # URLError, a reset connection, a timeout
+            return 0, {"detail": str(getattr(exc, "reason", None) or exc)}
+
+    def ask():
+        return attempt(lambda: _call(opener, broker, "POST", where, {"sha256": sha, "bytes": size}, timeout=60))
+
+    status, body = ask()
+    missed = 0
+    while True:
+        if status in _HICCUPS and missed < hiccups:
+            # Wait, ask where the upload stands, and go on from there: a chunk that did
+            # arrive before the connection dropped is not sent twice.
+            missed += 1
+            print("  %s %s: %s; asking again in %d s" % (build, platform, body.get("detail", status), 5 * missed),
+                  file=sys.stderr)
+            _pause(5 * missed)
+            status, body = ask()
+            continue
+        if status != 200:
+            detail = body.get("detail", status)
+            print("%s %s: upload refused: %s" % (build, platform, detail), file=sys.stderr)
+            return False
+        state = body.get("state")
+        if state == "stored":
+            print("%s %s: the broker holds %s (%.0f MB)" % (build, platform, row.get("file"), size / 1e6))
+            return True
+        if time.monotonic() > deadline:
+            print("%s %s: still %s after %.0f s; giving up" % (build, platform, state, wait_seconds),
+                  file=sys.stderr)
+            return False
+        if state == "verifying":
+            _pause(2)
+            status, body = ask()
+            continue
+        offset = int(body.get("offset") or 0)
+        chunk = max(1, min(int(body.get("chunk_bytes") or 32 * 1024 * 1024),
+                           int(body.get("max_chunk_bytes") or 64 * 1024 * 1024)))
+        with open(path, "rb") as f:
+            f.seek(offset)
+            data = f.read(chunk)
+        status, body = attempt(lambda: _put_bytes(opener, broker, "%s?offset=%d&bytes=%d" % (where, offset, size), data))
+        if status == 409:
+            # Not where the broker's upload stands (a chunk that did arrive, retried): ask
+            # where it is and go on from there.
+            status, body = ask()
+            continue
+        if status == 200:
+            missed = 0
+            print("  %s %s: %.0f of %.0f MB" % (build, platform, int(body.get("offset") or 0) / 1e6, size / 1e6))
+
+
 def cmd_release_register(args) -> int:
-    """Register what a build workflow wrote: [{build, platform, file, sha256}]."""
+    """Register what a build workflow wrote: [{build, platform, file, sha256}] --
+    and with --upload DIR, send each file from DIR to the broker, which then holds
+    it for the nodes to fetch."""
     text = sys.stdin.read() if args.file == "-" else pathlib.Path(args.file).read_text(encoding="utf-8")
     try:
         rows = json.loads(text)
@@ -730,6 +837,13 @@ def cmd_release_register(args) -> int:
                       file=sys.stderr)
                 return 1
             print("registered %s for %s (%s)" % (payload["build"], payload["platform"], payload["file"]))
+        if args.upload:
+            folder = pathlib.Path(args.upload)
+            for row in rows:
+                # A bare name, as release.json writes it: never a path that leaves DIR.
+                name = pathlib.Path(str(row.get("file") or "")).name
+                if not name or not _upload_release_file(opener, args.broker, row, folder / name):
+                    return 1
     finally:
         _call(opener, args.broker, "POST", "/v1/auth/logout")
     return 0
@@ -1040,6 +1154,9 @@ def main(argv: list[str] | None = None) -> int:
                          "([{build, platform, file, sha256}], as the E3D node build writes it)"))
     rr.add_argument("file", help="release.json; '-' reads stdin")
     rr.add_argument("--notes", default=None, help="a line shown beside the build on the dashboard")
+    rr.add_argument("--upload", default=None, metavar="DIR",
+                    help="also send each row's file from DIR to the broker, which then holds it "
+                         "for the nodes to fetch (they no longer need a release share)")
     rr.set_defaults(func=cmd_release_register)
 
     rt = _release_admin(rl.add_parser("target", help="point the fleet at a build ('none' clears it)"))

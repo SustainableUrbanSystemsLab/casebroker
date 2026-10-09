@@ -442,6 +442,11 @@
   }
   select { cursor: pointer; }
 
+  /* `hidden` means hidden: a rule that sets display (a button's inline-flex, a
+     badge's) otherwise wins over the attribute, and Roll back showed with nothing
+     to roll back to. */
+  [hidden] { display: none !important; }
+
   /* Buttons */
   button {
     font-family: inherit;
@@ -8327,6 +8332,22 @@
       return r.release_repo && sha
         ? ` <a href="https://github.com/${esc(r.release_repo)}/commit/${esc(sha)}" target="_blank" rel="noopener" class="label-hint" title="the commit this build was made from">${esc(sha)}</a>` : "";
     };
+    // Whether the broker holds a build's files: a node fetches its build from here, and
+    // one whose files are not held can be had only from a release share.
+    const heldHint = (build, rows) => {
+      if (!r.release_files || !rows.length) return "";
+      const held = rows.filter((x) => x.stored), missing = rows.filter((x) => !x.stored).map((x) => x.platform);
+      if (!missing.length) {
+        const total = held.reduce((n, x) => n + (x.bytes || 0), 0);
+        return `<div class="label-hint" title="nodes fetch these files from the broker">held here, ${esc(formatBytes(total))}</div>`;
+      }
+      const needed = build === r.target_build || build === r.previous_target;
+      const tip = needed
+        ? "a node told to move to this build can fetch it only from a release share until it is uploaded: casebroker release register <release.json> --upload <dir>"
+        : "never uploaded, or let go to make room for newer builds: upload it again before pointing the fleet at it";
+      return `<div class="label-hint"${needed ? ' style="color:var(--bad)"' : ""} title="${esc(tip)}">`
+        + (held.length ? `not held here for ${esc(missing.join(", "))}` : "files not held here") + `</div>`;
+    };
     const compareLink = () => {
       const a = commitOf(r.previous_target), b = commitOf(r.target_build);
       return r.release_repo && a && b && a !== b
@@ -8351,6 +8372,7 @@
             <td>${(b.published || []).length ? esc(b.published.join(" ")) : `<span style="color:var(--text-muted)">not published</span>`}`
               + ((b.missing_platforms || []).length
                   ? `<div class="label-hint" style="color:var(--bad)" title="live workers on this platform would be told to move and could not">no file for ${esc(b.missing_platforms.join(", "))}</div>` : "")
+              + heldHint(b.build, rows)
               + (b.knows ? `<div class="label-hint" title="the recipes workers on this build declared">knows ${esc(b.knows.join(", ") || "no recipe")}</div>` : "")
               + ((b.missing_recipes || []).length
                   ? `<div class="label-hint" style="color:var(--bad)" title="queued cases need these; every node on this build would refuse them">does not know ${esc(b.missing_recipes.map((x) => `${x} (${(r.queue_recipes || {})[x] || 0} queued)`).join(", "))}</div>` : "")

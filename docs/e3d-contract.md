@@ -35,8 +35,9 @@ short, a node:
 - asks `GET /v1/node/release` before every lease and at every heartbeat, saying
   which build it is, what it is doing about the target (`state`), or that it
   tried a build and rolled back (`failed_build`);
-- takes a new build's file from its own release share and verifies it against
-  the hash the broker gave, over the channel already authenticated per machine;
+- takes a new build's file from its own release share, or else from the broker
+  (`url` in `/v1/node/release`, over the channel already authenticated per
+  machine), and verifies it against the hash the broker gave;
 - holds nothing but its own per-machine credential, which acts only on leases
   held under its own name.
 

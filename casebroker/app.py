@@ -39,7 +39,7 @@ import pathlib
 import sys
 import weakref
 from typing import Annotated, Any
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import quote, urlsplit, urlunsplit
 
 import numpy as np
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
@@ -1104,7 +1104,7 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
                 # What a node may count on (see FEATURES): read once at its start
                 # and again after an outage, in place of probing routes for a 404.
                 "protocol": PROTOCOL,
-                "features": sorted(FEATURES + (("part_store",) if store is not None else ())),
+                "features": sorted(FEATURES + (("part_store", "release_files") if store is not None else ())),
                 # kept for older dashboards that read this field by name
                 "readonly_auth": bool(readonly_tokens),
                 # Whether the broker can actually REACH its database, as opposed
@@ -2049,10 +2049,34 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
     # -- node releases -----------------------------------------------------
     #
     # The broker says WHICH build a node should run and what its file must hash
-    # to. It never serves the file: nodes take it from their own release share (a
-    # folder on the node, filled by whoever runs the fleet) and verify it against
-    # the hash given here, over the one channel that is already authenticated per
-    # machine.
+    # to, and -- when it holds the file (see "release files" in the part-store
+    # section) -- where to fetch it. A node verifies the file against the hash
+    # given here, over the one channel that is already authenticated per machine,
+    # whether it came from the broker or from a release share of its own.
+
+    def _held(sha: str | None) -> int | None:
+        """The size of a release file the broker holds, or None."""
+        if store is None or not sha:
+            return None
+        try:
+            path = store.object_path(sha)
+        except partstore.PartStoreError:
+            return None
+        try:
+            return path.stat().st_size
+        except OSError:
+            return None
+
+    def _catalog() -> dict[str, Any]:
+        """The release catalog, with whether the broker holds each file: a target whose
+        files are held is one the nodes can reach by themselves."""
+        out = db.list_releases(conn)
+        for r in out.get("releases", []):
+            size = _held(r.get("sha256"))
+            r["stored"] = size is not None
+            r["bytes"] = size
+        out["release_files"] = store is not None
+        return out
 
     @app.get("/v1/node/release", dependencies=[WriteAuth])
     def node_release(request: Request, worker_id: str, platform: str | None = None,
@@ -2064,18 +2088,28 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         `failed_build` is a node saying it TRIED a build, could not start it and
         rolled back: the one thing an unattended update must never hide.
         `state` is what it says about the move it was last told to make, shown
-        on the fleet table beside the target it is behind."""
+        on the fleet table beside the target it is behind.
+
+        `url` (with `bytes`) is where to fetch the target's file when the broker
+        holds it; null otherwise, and a node then looks on its release share."""
         machine = _machine_principal(request)
         if machine and not _may_lease_as(machine["name"], worker_id):
             raise HTTPException(403, f"this credential belongs to {machine['name']!r}")
-        return db.node_release(conn, worker_id, platform, build,
-                               failed_build=(failed_build or "")[:96] or None,
-                               failed_reason=failed_reason,
-                               state=(state or "")[:200] or None)
+        out = db.node_release(conn, worker_id, platform, build,
+                              failed_build=(failed_build or "")[:96] or None,
+                              failed_reason=failed_reason,
+                              state=(state or "")[:200] or None)
+        out["url"], out["bytes"] = None, None
+        size = _held(out.get("sha256")) if platform else None
+        if size is not None:
+            out["url"] = "/v1/releases/%s/%s/file" % (quote(out["target_build"], safe=""),
+                                                      quote(platform, safe=""))
+            out["bytes"] = size
+        return out
 
     @app.get("/v1/releases", dependencies=[ReadAuth])
     def releases() -> dict[str, Any]:
-        return db.list_releases(conn)
+        return _catalog()
 
     @app.post("/v1/releases")
     def register_release(body: ReleaseIn_, user=AdminAuth) -> dict[str, Any]:
@@ -2094,7 +2128,14 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         why = db.release_in_use(conn, build)
         if why:
             raise HTTPException(409, why)
-        return {"removed": db.delete_release(conn, build, by=user["username"])}
+        named = db.release_shas(conn, build)
+        removed = db.delete_release(conn, build, by=user["username"])
+        # Its files go with it, unless another build or a case's part is the same content.
+        freed = 0
+        if store is not None:
+            for sha in named - db.referenced_blobs(conn):
+                freed += bool(store.remove(sha))
+        return {"removed": removed, "files_removed": freed}
 
     @app.put("/v1/releases/target")
     def set_release_target(body: TargetIn, user=AdminAuth) -> dict[str, Any]:
@@ -2127,7 +2168,7 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
                          + "; every node on it would refuse those cases. Pass force=true to "
                            "point the fleet at it anyway")
             db.set_target(conn, body.build, by=user["username"])
-        return db.list_releases(conn)
+        return _catalog()
 
     @app.put("/v1/releases/policy")
     def set_release_policy(body: PolicyIn, user=AdminAuth) -> dict[str, Any]:
@@ -2152,7 +2193,7 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
             if repo and not re.fullmatch(r"[\w.-]+/[\w.-]+", repo):
                 raise HTTPException(422, "release_repo is owner/name on GitHub, e.g. Eddy3D-Dev/Eddy3D")
             db.set_setting(conn, "release_repo", repo or None, by=user["username"])
-        return db.list_releases(conn)
+        return _catalog()
 
     @app.post("/v1/releases/promote")
     def promote_canary(body: PromoteIn, user=AdminAuth) -> dict[str, Any]:
@@ -2163,7 +2204,7 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
             raise HTTPException(404, f"no worker named {body.worker_id!r}")
         except ValueError as e:
             raise HTTPException(409, str(e))
-        return db.list_releases(conn)
+        return _catalog()
 
     @app.post("/v1/releases/rollback")
     def roll_back(body: RollbackIn, user=AdminAuth) -> dict[str, Any]:
@@ -2172,7 +2213,7 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
             db.roll_back(conn, by=user["username"], block=body.block)
         except ValueError as e:
             raise HTTPException(409, str(e))
-        return db.list_releases(conn)
+        return _catalog()
 
     @app.put("/v1/workers/{worker_id}/target")
     def set_worker_target(worker_id: str, body: TargetIn, user=AdminAuth) -> dict[str, Any]:
@@ -2588,6 +2629,124 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
                     p.unlink()
         return {"dry_run": dry_run, "orphans": len(orphans), "orphan_bytes": sum(n for _, n in orphans),
                 "stale_uploads": len(stale), "stale_bytes": sum(n for _, n in stale)}
+
+    # -- release files: the builds the nodes fetch --------------------------------------
+    #
+    # The broker used to name a build and its hash and never serve the file: each node
+    # took it from a release share somebody filled. Since the Syncthing master was retired
+    # (2026-10-06) nobody does, so a node told to move waited at "the release share does
+    # not hold X yet" for ever, and the only way to update a SLURM job's E3D was a copy by
+    # hand. The files now live in this store, uploaded in chunks by whoever registers the
+    # build (an admin, or the node build's CI with an admin login), and the nodes fetch
+    # them over the channel they already authenticate on.
+    #
+    # What a node runs is still decided by the hash the ADMIN registered: an upload that
+    # does not hash to it is refused here, and the node checks it again before installing.
+    # Uploading is admin-only like registering; fetching takes a credential that may write
+    # (a machine's token), not a viewer's or a share link's -- these are executables, and
+    # the repository they are built from is private.
+
+    # A build is ~535 MB over three platforms and every push to Eddy3D dev makes one.
+    release_keep = max(1, int(os.environ.get("CASEBROKER_RELEASE_KEEP_BUILDS", "5") or 5))
+
+    def _release(build: str, platform: str) -> dict[str, Any]:
+        row = db.release_row(conn, build, platform)
+        if row is None:
+            raise HTTPException(404, f"{build} has no file registered for {platform}")
+        return row
+
+    def _release_stored(sha: str) -> None:
+        """A release file has landed: let go of the files of builds beyond the newest
+        `release_keep` that nothing needs any more (db.release_files_to_drop)."""
+        if store is None:
+            return
+        try:
+            for old in db.release_files_to_drop(conn, release_keep):
+                if old != sha:
+                    store.remove(old)
+        except Exception as exc:                             # noqa: BLE001
+            print(f"[releases] could not let go of old release files: {exc}", file=sys.stderr)
+
+    def _release_upload_state(sha: str, size: int) -> dict[str, Any]:
+        st = _parts_store()
+        if st.has(sha):
+            return {"state": "stored", "offset": size}
+        state = st.state(sha)
+        if state == "verifying":
+            return {"state": "verifying", "offset": size}
+        try:
+            offset = st.admit(sha, size)
+        except partstore.PartStoreError as exc:
+            raise _refused(exc)
+        if offset == size:
+            st.verify_in_background(sha, size, _release_stored)
+            return {"state": "verifying", "offset": size}
+        out = {"state": "partial" if offset else "absent", "offset": offset,
+               "chunk_bytes": partstore.SUGGESTED_CHUNK, "max_chunk_bytes": partstore.MAX_CHUNK}
+        if state.startswith("failed: "):
+            out["last_failure"] = state[len("failed: "):]
+        return out
+
+    @app.post("/v1/releases/{build}/{platform}/upload")
+    def start_release_upload(build: str, platform: str, body: UploadIn, user=AdminAuth) -> dict[str, Any]:
+        """Begin, resume or ask after the upload of a registered build's file:
+        ``{sha256, bytes}`` of the file in hand, which must be the hash registered for
+        it (409 otherwise -- register the file you mean). Answers like a part's upload:
+        ``stored``, ``verifying``, or ``absent``/``partial`` with the ``offset`` to send
+        from; 507 when the store would cut into its reserve. Admin only."""
+        row = _release(build, platform)
+        sha = body.sha256.lower()
+        if sha != row["sha256"]:
+            raise HTTPException(409, f"{sha} is not the sha256 registered for {build} {platform} "
+                                     f"({row['sha256']}); register the file you mean to upload")
+        return _release_upload_state(sha, body.bytes)
+
+    @app.put("/v1/releases/{build}/{platform}/upload")
+    async def put_release_chunk(build: str, platform: str, request: Request,
+                                offset: int = Query(ge=0), size: int = Query(alias="bytes", ge=1),
+                                user=AdminAuth) -> dict[str, Any]:
+        """One chunk of a build's file at ``offset``, as for a part: 409 with the
+        broker's offset when that is not where the upload stands, 413 over 64 MiB, all
+        or nothing; the last chunk starts the verification in the background."""
+        import anyio
+        st = _parts_store()
+        row = await anyio.to_thread.run_sync(_release, build, platform)
+        body = bytearray()
+        async for piece in request.stream():
+            body += piece
+            if len(body) > partstore.MAX_CHUNK:
+                raise HTTPException(413, f"a chunk is at most {partstore.MAX_CHUNK} bytes")
+        if not body:
+            raise HTTPException(422, "the chunk is empty")
+        sha = row["sha256"]
+        try:
+            await anyio.to_thread.run_sync(st.admit, sha, size)
+            new = await anyio.to_thread.run_sync(st.append, sha, size, offset, [body])
+        except partstore.PartStoreError as exc:
+            raise _refused(exc)
+        if new < size:
+            return {"state": "partial", "offset": new}
+        st.verify_in_background(sha, size, _release_stored)
+        return {"state": "verifying", "offset": new}
+
+    @app.get("/v1/releases/{build}/{platform}/file", dependencies=[WriteAuth])
+    def get_release_file(build: str, platform: str, request: Request) -> Response:
+        """A registered build's file, for a node to install. Byte ranges are answered,
+        so a node that loses its connection halfway through ~150 MB resumes rather
+        than starts over; the ETag is the sha256, which the node checks the file
+        against before it runs a byte of it. 410 while the broker does not hold it."""
+        st = _parts_store()
+        row = _release(build, platform)
+        path = st.object_path(row["sha256"])
+        if not path.is_file():
+            raise HTTPException(410, f"the broker does not hold {row['file']}: upload it "
+                                     "(casebroker release register <release.json> --upload <dir>)")
+        etag = '"' + row["sha256"] + '"'
+        headers = {"ETag": etag, "Cache-Control": "private, no-cache", "X-Sha256": row["sha256"]}
+        if _if_none_match(request.headers.get("if-none-match"), etag):
+            return Response(status_code=304, headers=headers)
+        from fastapi.responses import FileResponse as _FileResponse
+        return _FileResponse(path, media_type="application/octet-stream", filename=row["file"], headers=headers)
 
     # -- the pedestrian wind field: the answer, stored here ----------------------------------
     #

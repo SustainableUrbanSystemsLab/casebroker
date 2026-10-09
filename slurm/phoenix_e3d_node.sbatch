@@ -22,8 +22,9 @@
 # in flight (~22 min on 24 ranks) and an image pull, nothing else. The Python pool that ran here
 # (phoenix_worker.sbatch) could not build any campaign recipe and is retired.
 #
-# CHUNK_HOURS (optional, e.g. 7) hands the case on at a direction boundary before the 8 h wall
-# instead of losing the direction in flight to SIGTERM; it needs an E3D build with --chunk-hours.
+# After CHUNK_HOURS (default 7) of one lease the node hands the case on at the next direction
+# boundary, before the 8 h wall's SIGTERM would take the direction in flight. CHUNK_HOURS=0 never
+# hands off.
 
 set -uo pipefail
 
@@ -42,6 +43,18 @@ fi
 
 B=$HOME/windcomfort/bin
 
+# As ice_e3d_node.sbatch: the hand-off as E3D_CHUNK_HOURS (a build from before --chunk-hours would
+# refuse the option; one from before the variable ignores it), and the fleet's target build taken
+# from the broker before starting -- a requeued job takes it again.
+chunk=${CHUNK_HOURS:-7}
+if ! [[ "$chunk" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+    echo "CHUNK_HOURS=$chunk is not a number of hours (0 turns handing off off) -- not starting a worker"
+    exit 2
+fi
+if [[ "$chunk" =~ ^0+([.]0+)?$ ]]; then unset E3D_CHUNK_HOURS; else export E3D_CHUNK_HOURS=$chunk; fi
+timeout 900 "$B/E3D" node-release sync --exe "$B/E3D" \
+    || echo "E3D was not updated (the line above says why); this job runs the build installed"
+
 # Rootless podman on node-local scratch, wiped at job end (each job pulls the image again).
 export XDG_RUNTIME_DIR=${TMPDIR:-/tmp}/xdg; mkdir -p "$XDG_RUNTIME_DIR"; chmod 700 "$XDG_RUNTIME_DIR"
 export PACE_PSTORE=${TMPDIR:-/tmp}/pstore; mkdir -p "$PACE_PSTORE"
@@ -53,7 +66,7 @@ export EDDY3D_CONTAINER_CLI=$B/podman-pace.sh
 DONE=${E3D_DONE:-/storage/scratch1/3/pkastner3/windcomfort/done}; mkdir -p "$DONE"
 WORK=${TMPDIR:-/tmp}/e3d-work; mkdir -p "$WORK"
 
-echo "node phoenix-${SLURM_JOB_ID} on $(hostname), $(nproc) cores, restart ${SLURM_RESTART_COUNT:-0}, work=$WORK, chain prev=${CHAIN_PREV:-none}"
+echo "node phoenix-${SLURM_JOB_ID} on $(hostname), $(nproc) cores, restart ${SLURM_RESTART_COUNT:-0}, work=$WORK," \
+     "chain prev=${CHAIN_PREV:-none}, ${E3D_CHUNK_HOURS:+hands a case on after $E3D_CHUNK_HOURS h}${E3D_CHUNK_HOURS:-never hands a case on}"
 exec "$B/E3D" run-sim-node --engine docker --cpus "${SLURM_NTASKS:-24}" --cluster Phoenix \
-    --work "$WORK" --done "$DONE" ${MAX_CASES:+--max-cases "$MAX_CASES"} \
-    ${CHUNK_HOURS:+--chunk-hours "$CHUNK_HOURS"} --drain --max-idle-polls 10
+    --work "$WORK" --done "$DONE" ${MAX_CASES:+--max-cases "$MAX_CASES"} --drain --max-idle-polls 10

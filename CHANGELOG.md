@@ -8,6 +8,37 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.42.0] - 2026-10-09
+
+### Added
+- **The broker holds the node builds, and the nodes fetch them from it.** It used to name a build
+  and its hash and never serve the file; each node took it from a release share somebody filled.
+  Since the Syncthing master was retired (2026-10-06) nobody does, so a node told to move to a new
+  build waited at "the release share does not hold X yet" for ever, and a PACE job's E3D was only
+  ever updated by a copy by hand. `casebroker release register release.json --upload DIR` now
+  uploads each registered file in resumable chunks into the part store (admin only, and only the
+  content whose sha256 the admin registered); `GET /v1/node/release` adds `url` and `bytes` when the
+  broker holds the target's file; `GET /v1/releases/{build}/{platform}/file` serves it to a
+  credential that may write (a machine token -- not a viewer or a shared link), with byte ranges
+  so a broken download resumes. The newest `CASEBROKER_RELEASE_KEEP_BUILDS` builds (5) keep their
+  files, and so does whatever the fleet runs or would roll back to; the catalog says which files
+  are held (`stored`, `bytes`) and the *Node builds* panel shows it. `/healthz` lists
+  `release_files`. Eddy3D's node fetches from `url` when its share lacks the file, and its build
+  workflow registers and uploads every push to `dev` once it has the secrets
+  `CASEBROKER_RELEASE_USER` / `CASEBROKER_RELEASE_PASSWORD`.
+- **PACE jobs update their E3D themselves and hand a case on before the wall.** Each ICE/Phoenix
+  job runs `E3D node-release sync` before it starts its node (the target build from the broker,
+  checked, swapped in by a rename; an E3D from before `sync` says so and runs as before), and
+  hands its case on between directions after 7 h of its lease by default (`--chunk-hours H` on
+  `pace_workers.sh`/`submit_workers.sh`, `0` off). The hours reach E3D as `E3D_CHUNK_HOURS`, not
+  `--chunk-hours`, which an older E3D would refuse along with the whole command line. The scripts
+  are now tested end to end against stand-ins for SLURM, ssh and E3D (`tests/test_pace_scripts.py`).
+
+### Fixed
+- **Roll back and the kill switch no longer show with nothing to roll back to.** Both are
+  `hidden` until there is a previous target, and a button's `display: inline-flex` won over the
+  attribute; `[hidden]` now always hides.
+
 ## [0.41.2] - 2026-10-09
 
 ### Fixed

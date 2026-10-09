@@ -219,7 +219,12 @@ only file it needs):
 
 1. **The binary.** On your machine: `gh release download e3d-node-latest -R Eddy3D-Dev/Eddy3D -p E3D-linux-x64`,
    check its sha256 against `release.json` in the same release, `scp` it to `~/windcomfort/bin/E3D`
-   (nothing on ICE needs a GitHub login). Updating is the same three steps.
+   (nothing on ICE needs a GitHub login). After that, every job updates it: it runs
+   `E3D node-release sync` before its node starts, which takes the fleet's target build from the
+   broker, checks it against the registered sha256 and swaps it in by a rename (a job running the
+   old file is not disturbed). An E3D from before `sync` (2026-10-09) cannot do that, so after
+   this lands, copy the binary by hand **once** more; a job running an old one says
+   `E3D was not updated` and runs what is there. With no fleet target set, `sync` leaves E3D as it is.
 2. **Pairing.** On ICE: `~/windcomfort/bin/E3D setup-sim-node https://casebroker.eddy3d.com --name ice
    --no-browser` (on Phoenix, `--name phoenix`), then approve the printed code on the dashboard as an admin. Send its output to a
    file (`> pair.log &`) and read the code from there: through a pipe it appears only when the
@@ -243,17 +248,21 @@ with its attempt refunded, every finished direction is already at the broker, an
 (or any other node) continues it. Lost per preemption: the direction in flight and an image pull.
 `parallel N` is the shape there; a chain buys nothing when the scheduler restarts jobs itself.
 
-**`CHUNK_HOURS=7`** in the environment of `submit_workers.sh` (it passes `--export=ALL`) makes each
-node hand its case on at the first direction boundary after seven hours (`--chunk-hours`, protocol
-2 "sequential chunks"), so an 8 h shift ends between directions instead of losing one to the wall.
-It needs an E3D build that has the option.
+**Handing off before the wall.** Each node hands its case on at the first direction boundary after
+seven hours of its lease (protocol 2 "sequential chunks"), so an 8 h shift ends between directions
+instead of losing one to the wall. `--chunk-hours H` on `pace_workers.sh` / `submit_workers.sh`
+(or `CHUNK_HOURS=H` in the login node's environment) changes the seven; `0` turns it off. The job
+gives it to E3D as `E3D_CHUNK_HOURS`, not as `--chunk-hours`: an E3D from before the option would
+refuse the whole command line, one from before the variable ignores it. A value that is not a number
+ends the job before E3D starts, and the chain guard below stops the rest.
 
 **Why a chain.** 24 ranks is the most a PACE job gets and a direction takes about 22 min on them
 (the first, from a cold start, about an hour), so a 32-direction case is ~12 h and outlives the 8 h
 shift. That costs almost nothing: each finished direction goes to the broker as it finishes (a
-`case_NNN` part, ~230 MB), at the shift's end SIGTERM releases the case with its attempt refunded,
+`case_NNN` part, ~230 MB), after seven hours the node hands the case on between directions (a
+SIGTERM at the wall would release it with its attempt refunded, losing the direction in flight),
 and the next worker is handed it with its parts, fetches the mesh from the broker and solves only
-the directions that are missing. Lost per shift: the direction in flight, ~11 min on average.
+the directions that are missing.
 Check a hand-over in the job log (`~/windcomfort/logs/e3d_node_<job>.out`) for
 `continuing: fetching the mesh ice-<job>-0 made`, and `GET /v1/cases/<id>/parts` for what the
 broker holds.

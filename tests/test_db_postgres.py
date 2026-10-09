@@ -20,6 +20,7 @@ be left exactly as it was found, tables included but empty of test rows.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import pathlib
@@ -551,6 +552,31 @@ def test_the_release_catalog_and_target_roundtrip():
     finally:
         db.set_setting(conn, "target_build", None, by="pgtest")
         db.delete_release(conn, build, by="pgtest")
+        fresh_conn().execute("DELETE FROM events WHERE worker_id = 'pgtest'")
+
+
+@scratch_only
+def test_which_release_files_the_broker_keeps_over_a_real_connection():
+    """The queries behind the files the broker serves: the newest builds (ties broken by
+    name), and a hash a kept build shares never let go. Scratch only, as above."""
+    conn = fresh_conn()
+    old, mid, new = prefix("rf-a"), prefix("rf-b"), prefix("rf-c")
+    shas = {b: hashlib.sha256(b.encode()).hexdigest() for b in (old, mid, new)}
+    try:
+        db.register_release(conn, old, "linux-x64", "E3D-" + old, shas[old], by="pgtest")
+        db.register_release(conn, mid, "linux-x64", "E3D-" + mid, shas[mid], by="pgtest")
+        db.register_release(conn, mid, "win-x64", "E3D-shared", shas[new], by="pgtest")
+        db.register_release(conn, new, "linux-x64", "E3D-" + new, shas[new], by="pgtest")   # newest last
+        assert db.release_row(conn, mid, "linux-x64")["sha256"] == shas[mid]
+        assert db.release_row(conn, mid, "osx-arm64") is None
+        assert db.release_shas(conn, mid) == {shas[mid], shas[new]}
+        assert {shas[old], shas[mid], shas[new]} <= db.referenced_blobs(conn), "a sweep keeps them"
+        drop = set(db.release_files_to_drop(conn, 1))
+        assert shas[old] in drop and shas[mid] in drop
+        assert shas[new] not in drop, "the newest build's file, though an older build names it too"
+    finally:
+        for b in (old, mid, new):
+            db.delete_release(conn, b, by="pgtest")
         fresh_conn().execute("DELETE FROM events WHERE worker_id = 'pgtest'")
 
 

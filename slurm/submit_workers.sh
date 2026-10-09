@@ -15,6 +15,8 @@
 #   --script FILE   the sbatch script (default: ice_e3d_node.sbatch beside this file;
 #                   phoenix_e3d_node.sbatch on Phoenix, where `parallel N` is the usual shape:
 #                   embers jobs are preempted and requeue themselves)
+#   --chunk-hours H hand a case on after H hours of one lease (default 7, under the 8 h wall;
+#                   0: never, the wall's SIGTERM then takes the direction in flight)
 #   --dry-run       print the sbatch commands and submit nothing
 #
 # Prints every job id and each lane's last one; pass that as --after to add more to the lane.
@@ -28,10 +30,11 @@ set -euo pipefail
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 script="$here/ice_e3d_node.sbatch"
 after=""
+chunk=""
 dry=0
 max_total=200
 
-usage() { sed -n '2,25p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,26p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
 is_count() { [[ "${1:-}" =~ ^[1-9][0-9]*$ ]]; }
 
 [ $# -ge 1 ] || usage
@@ -41,6 +44,7 @@ while [ $# -gt 0 ]; do
     case $1 in
         --after)   after=${2:?--after needs a job id}; shift 2 ;;
         --script)  script=${2:?--script needs a file}; shift 2 ;;
+        --chunk-hours) chunk=${2:?--chunk-hours needs hours}; shift 2 ;;
         --dry-run) dry=1; shift ;;
         -h|--help) usage ;;
         *)         pos+=("$1"); shift ;;
@@ -57,6 +61,7 @@ is_count "$lanes" && is_count "$n" || usage
 [ $((lanes * n)) -le "$max_total" ] || { echo "refusing $((lanes * n)) jobs (limit $max_total)" >&2; exit 1; }
 [ -f "$script" ] || { echo "no such sbatch script: $script" >&2; exit 1; }
 [ -z "$after" ] || [[ "$after" =~ ^[0-9]+$ ]] || { echo "--after wants a job id, got '$after'" >&2; exit 1; }
+[ -z "$chunk" ] || [[ "$chunk" =~ ^[0-9]+([.][0-9]+)?$ ]] || { echo "--chunk-hours wants hours (0: never), got '$chunk'" >&2; exit 1; }
 
 name=$(awk '/^#SBATCH[[:space:]]+-J[[:space:]]/{print $3; exit}' "$script")
 pairing=${name#e3d-node-}          # the name this cluster's node pairs as: ice, phoenix
@@ -81,7 +86,7 @@ for lane in $(seq 1 "$lanes"); do
     prev=$after
     ids=()
     for i in $(seq 1 "$n"); do
-        args=(--parsable "--export=ALL,CHAIN_PREV=$prev")
+        args=(--parsable "--export=ALL,CHAIN_PREV=$prev${chunk:+,CHUNK_HOURS=$chunk}")
         if [ -n "$prev" ]; then args+=("--dependency=afterany:$prev"); fi
         if [ "$dry" = 1 ]; then
             echo "sbatch ${args[*]} $script"

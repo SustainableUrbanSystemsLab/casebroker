@@ -81,6 +81,9 @@ services:
       # Which kinds to keep: mesh, direction, archive. Meshes and archives of every
       # case fit in ~1 TB; the directions are what does not.
       CASEBROKER_PARTS_KEEP: ${CASEBROKER_PARTS_KEEP:-mesh,direction,archive}
+      # The node builds the broker serves (docs/releases.md, "The files"), ~535 MB
+      # each: the newest few, and any the fleet still runs or would roll back to.
+      CASEBROKER_RELEASE_KEEP_BUILDS: ${CASEBROKER_RELEASE_KEEP_BUILDS:-5}
       # Push notifications. Forwarded so .env can set them; empty is each one's
       # default (on; a VAPID key the broker makes and keeps in Postgres; the
       # dashboard's https address as contact; 20 min; 6 h).
