@@ -1,0 +1,46 @@
+name: e3d contract
+
+# A REAL broker from this commit against a REAL E3D node: the newest published
+# node build (Eddy3D's rolling `e3d-node-latest` release), paired for real, one
+# case leased, run with a script runner, reported. Each repo tests its side
+# against a fake of the other, and a fake agrees with whatever its author
+# believed; the protocol's 404 rules, 409 rules and protocol-2 fields are the
+# kind of thing that drifts between two codebases without either suite going
+# red. Eddy3D runs the same driver (tests/contract/e3d_node_contract.py)
+# against the node it has just built and casebroker main.
+#
+# Not a gate on the image the server pulls (publish-image in test.yml): it
+# depends on another repo's release, and the live fleet must not wait on that.
+# A red run here means the two sides disagree -- look before the next node build
+# reaches the fleet.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "17 6 * * *"     # daily: the node release moves without a push here
+  workflow_dispatch:
+
+jobs:
+  contract:
+    name: broker <-> E3D node
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+      - name: The newest published node, checked against its release.json
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p e3d
+          gh release download e3d-node-latest -R Eddy3D-Dev/Eddy3D \
+            -p E3D-linux-x64 -p release.json -D e3d
+          want=$(python3 -c "import json; print(next(r['sha256'] for r in json.load(open('e3d/release.json')) if r['platform'] == 'linux-x64'))")
+          got=$(sha256sum e3d/E3D-linux-x64 | cut -d' ' -f1)
+          [ "$want" = "$got" ] || { echo "::error::E3D-linux-x64 hashes to $got, release.json says $want"; exit 1; }
+          chmod +x e3d/E3D-linux-x64
+          e3d/E3D-linux-x64 version --json
+      - name: Run the contract
+        run: uv run python tests/contract/e3d_node_contract.py --e3d e3d/E3D-linux-x64

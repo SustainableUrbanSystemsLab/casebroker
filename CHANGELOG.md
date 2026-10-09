@@ -8,6 +8,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.40.2] - 2026-10-09
+
+### Added
+- **A contract test between a real broker and a real E3D node** (`tests/contract/e3d_node_contract.py`,
+  `.github/workflows/e3d-contract.yml`). Each repo tested its side against a fake of the other, and a
+  fake agrees with whatever its author believed. The driver starts a broker from the checkout, creates
+  an admin, pairs `E3D` for real (device code approved through the API), seeds a case, lets
+  `E3D run-sim-node` solve it with a script runner, and checks what the protocol promises: done, the
+  worker row's build, platform, features, cpus and mem_gb, the node's stages on the trail, telemetry
+  and the residual series. Protocol-2 checks run only where `/healthz` lists the feature. CI runs it
+  here against Eddy3D's newest published node (push, PR, daily) and Eddy3D runs it against the node it
+  has just built and casebroker `main`.
+
 ## [0.40.1] - 2026-10-09
 
 ### Fixed

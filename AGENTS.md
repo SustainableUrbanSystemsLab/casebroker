@@ -24,6 +24,10 @@ external dependencies.
   is the fast suite. It must stay green and needs nothing external.
 - `tests/test_db_postgres.py` runs against a real Postgres when
   `CASEBROKER_TEST_PG_DSN` is set; skipped otherwise.
+- A change to anything a node calls: run the contract test against a real node,
+  `uv run python tests/contract/e3d_node_contract.py --e3d <E3D binary>` (the newest is
+  `gh release download e3d-node-latest -R Eddy3D-Dev/Eddy3D -p E3D-linux-x64`, or
+  `-p E3D-macos-arm64`; it needs a container engine on the machine).
 - Don't hardcode the version anywhere. `tests/test_version.py` fails if you do,
   including a `v`-prefixed literal.
 - **Every commit advances the version.** Run `git config core.hooksPath .githooks`
