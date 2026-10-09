@@ -1042,6 +1042,13 @@
        empty boxes beside it. */
     align-items: start;
   }
+  /* Four across: the Mesh & Solve card spans two rows, so the first row is
+     only as tall as the tallest of the other three, and those three stretch
+     to that one height instead of ending ragged beside the tall fourth. */
+  @media (min-width: 1340px) {
+    .detail-grid { align-items: stretch; }
+    .detail-grid > .detail-card:nth-child(4) { grid-row: span 2; }
+  }
   @media (max-width: 1339px) { .detail-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
   @media (max-width: 759px) {
     .detail-grid { grid-template-columns: minmax(0, 1fr); }
