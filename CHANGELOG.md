@@ -8,6 +8,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.45.2] - 2026-10-10
+
+### Fixed
+- **The e3d contract warms podman as well as docker.** The runner has both CLIs and E3D picks podman
+  first, so warming docker alone left a cold rootless podman to miss the node's 10 s probe: the
+  driver read "docker daemon answered after 0.3 s" and the node, 13 s later, "did not respond within
+  10s". Every CLI present is warmed now, in E3D's order.
+
 ## [0.45.1] - 2026-10-10
 
 ### Added
