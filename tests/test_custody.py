@@ -189,3 +189,59 @@ def test_the_endpoints_record_refuse_and_list(tmp_path):
     assert c.get(f"/v1/cases/{cid}/receipts", headers=R).json()["receipts"][0]["sha256"] == SHA
     assert c.get(f"/v1/cases/{cid}", headers=R).json()["receipts"][0]["path"] == "done/x.tar.gz"
     assert c.get("/v1/custody", headers=R).json()["missing_archive"] == 0
+
+
+def test_a_case_is_not_stored_until_the_store_holds_every_part_its_nodes_shipped(conn):
+    """The archive leaves out what was shipped as parts -- the mesh, each direction -- so a case
+    whose archive arrived but whose direction did not is not on the broker. Before a disk that
+    still holds results is wiped (PACE's scratch, at the end of a semester), this is the list."""
+    db.add_cases(conn, [case(7)])
+    lease = db.lease(conn, "ice-4709-0", now=T0, recipes=[WIND])[0]
+    mesh, d0, d1 = "c" * 64, "d" * 64, "e" * 64
+    for part, sha in (("mesh", mesh), ("case_000", d0), ("case_090", d1)):
+        db.report_part(conn, lease.lease_id, lease.case_id, part, f"{lease.case_id}.{part}.tar.gz", sha,
+                       size=100, mesh_sha256=None if part == "mesh" else mesh, now=T0)
+    assert db.complete(conn, lease.lease_id, f"file:///storage/ice1/0/3/pkastner3/windcomfort/done/{lease.case_id}.tar.gz",
+                       sha256=SHA, nbytes=123, now=T0 + 1)
+    db.record_blob(conn, lease.case_id, "mesh", mesh, 100, now=T0 + 2)
+    db.record_blob(conn, lease.case_id, "case_000", d0, 100, now=T0 + 2)
+    db.record_blob(conn, lease.case_id, "archive", SHA, 123, now=T0 + 2)
+
+    view = db.custody(conn, now=T0 + 100)
+    row = view["cases"][0]
+    assert "parts" in row["missing"] and row["parts_missing"] == ["case_090"]
+    assert (view["missing_parts"], view["missing_parts_bytes"]) == (1, 100)
+    assert view["by_location"] == {"file:///storage/ice1/0/3/pkastner3/windcomfort/done": 1}
+
+    db.record_blob(conn, lease.case_id, "case_090", d1, 100, now=T0 + 3)
+    row = db.custody(conn, now=T0 + 100)["cases"]
+    assert not row or "parts" not in row[0]["missing"]
+
+
+def test_the_cli_says_whether_everything_is_on_the_broker(tmp_path, capsys):
+    import socket
+    import threading
+    import time
+
+    import uvicorn
+
+    from casebroker import cli
+
+    app = create_app(db_path=str(tmp_path / "cli.sqlite"), tokens=["w"], readonly_tokens=["r"])
+    conn = db.connect(app.state.db_path)
+    finish(conn, 1, directions=0)
+    s = socket.socket(); s.bind(("127.0.0.1", 0)); port = s.getsockname()[1]; s.close()
+    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="error"))
+    threading.Thread(target=server.run, daemon=True).start()
+    try:
+        while not server.started:
+            time.sleep(0.05)
+        rc = cli.main(["custody", "--broker", f"http://127.0.0.1:{port}", "--token", "r"])
+        out = capsys.readouterr().out
+        assert rc == 1 and "NOT everything is on the broker yet" in out and "c001" in out
+        db.record_blob(conn, "c001", "archive", SHA, 123)
+        rc = cli.main(["custody", "--broker", f"http://127.0.0.1:{port}", "--token", "r"])
+        out = capsys.readouterr().out
+        assert rc == 0 and "every finished case is on the broker" in out
+    finally:
+        server.should_exit = True

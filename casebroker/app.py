@@ -3118,7 +3118,12 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         or fewer pedestrian fields in the database than the case had directions. Oldest first;
         `older_than_hours` leaves out what may still be syncing. `stored` counts the done cases
         with nothing missing."""
-        return db.custody(conn, recipe=recipe, older_than=int(older_than_hours * 3600), limit=limit)
+        out = db.custody(conn, recipe=recipe, older_than=int(older_than_hours * 3600), limit=limit)
+        # What can arrive at all: without a store nothing does, and a kind this broker declines
+        # (CASEBROKER_PARTS_KEEP) stays on the node's disk however often it is offered.
+        out["part_store"] = {"enabled": store is not None,
+                             "keeps": sorted(keep) if store is not None else []}
+        return out
 
     @app.get("/v1/dataset", dependencies=[ReadAuth])
     def dataset_stats(recipe: str | None = Query(None, max_length=128)) -> dict[str, Any]:

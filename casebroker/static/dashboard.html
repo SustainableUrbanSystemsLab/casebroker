@@ -5150,6 +5150,7 @@
             <td>—</td>
             <td>${cluster ? `<span class="chip">${esc(cluster)}</span>` : "—"}</td>
             <td>—</td>
+            <td>—</td>
             <td><span class="badge pending" title="${esc(`SLURM: ${job.state}${job.reason ? ` (${job.reason})` : ""}`)}">Queued</span>
               <div class="label-hint" style="margin-top:4px">${esc(queueReason(job.reason))}</div></td>
             <td>${finite(job.submitted_at) ? esc(relTime(Number(job.submitted_at))) : "—"}</td>
@@ -9421,11 +9422,13 @@
     const waiting = c.done - c.stored;
     const list = (c.cases || []).map((x) => `<tr><td><code>${esc(x.case_id)}</code></td>`
       + `<td>${esc(x.missing.map((m) => m === "fields" && x.fields_expected != null
-          ? `fields ${x.fields}/${x.fields_expected}` : m).join(", "))}</td>`
+          ? `fields ${x.fields}/${x.fields_expected}`
+          : m === "parts" ? `parts ${(x.parts_missing || []).join(" ")}` : m).join(", "))}</td>`
       + `<td class="num">${esc(formatDuration(x.age_seconds))}</td></tr>`).join("");
     return `<div class="storage-sub" style="margin-top:14px"><strong>Custody</strong> · `
       + `${Number(c.stored).toLocaleString()} of ${Number(c.done).toLocaleString()} done cases stored`
       + (waiting ? ` · ${Number(c.missing_archive).toLocaleString()} without the archive on the master`
+          + ` · ${Number(c.missing_parts || 0).toLocaleString()} with a mesh or direction not in the store`
           + ` · ${Number(c.missing_fields).toLocaleString()} without every field` : "") + `</div>`
       + (list ? `<table><thead><tr><th>Case (oldest first)</th><th>Missing</th><th class="num">Done for</th></tr></thead>`
           + `<tbody>${list}</tbody></table>` : "");

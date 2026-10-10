@@ -35,6 +35,6 @@ script="${cluster}_e3d_node.sbatch"
 src=$(cd "$(dirname "${BASH_SOURCE[0]}")/../slurm" && pwd)
 opts=(-o "ControlPath=$sock")
 
-scp -q "${opts[@]}" "$src/submit_workers.sh" "$src/$script" "$src/podman-pace.sh" "$src/fleet_report.py" "$host:windcomfort/bin/"
+scp -q "${opts[@]}" "$src/submit_workers.sh" "$src/$script" "$src/podman-pace.sh" "$src/fleet_report.py" "$src/upload_done.sbatch" "$host:windcomfort/bin/"
 # shellcheck disable=SC2029  # the arguments are meant to expand here, quoted for the remote shell
 ssh "${opts[@]}" "$host" "chmod +x ~/windcomfort/bin/submit_workers.sh ~/windcomfort/bin/podman-pace.sh && ~/windcomfort/bin/submit_workers.sh $(printf '%q ' "$@") --script ~/windcomfort/bin/$script"

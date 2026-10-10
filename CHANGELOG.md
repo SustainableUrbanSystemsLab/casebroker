@@ -8,6 +8,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.45.1] - 2026-10-10
+
+### Added
+- **Custody checks every part, and `casebroker custody` says whether everything is on the broker.**
+  A finished case is its archive plus the parts its nodes shipped -- the mesh and each direction,
+  which the archive leaves out -- and custody checked only the archive and the pedestrian fields. It
+  now lists a case whose shipped part the store does not hold with the reported hash (`parts`,
+  `parts_missing`, `missing_parts_bytes`), counts the incomplete cases by the folder their result was
+  left in (`by_location`), and says what the store keeps (`part_store`). `casebroker custody --under
+  /storage/ice1` prints it and exits 1 while anything is missing; `slurm/upload_done.sbatch` runs
+  Eddy3D's new `E3D node-parts sweep` on ICE to send it all. For ICE's end-of-semester purge
+  (docs/pace-hpc.md, "Before a purge").
+
 ## [0.45.0] - 2026-10-10
 
 ### Added

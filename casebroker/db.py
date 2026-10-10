@@ -4215,7 +4215,11 @@ def expected_fields(recipe: str | None, telemetry: Any) -> int | None:
 def custody(conn, recipe: str | None = None, older_than: int = 0, limit: int = 200,
             now: int | None = None) -> dict[str, Any]:
     """The done cases whose result has not all arrived where results are kept: no archive
-    receipt from the master, or fewer pedestrian fields in the database than directions.
+    receipt, a part its nodes shipped (the mesh, a direction) that the part store does not
+    hold with the hash they reported -- the archive leaves out what was shipped, so it is
+    not the whole case without them -- or fewer pedestrian fields in the database than
+    directions. ``by_location`` counts the incomplete cases by where their result was left
+    (the directory of ``result_uri``): what is lost when that disk is.
 
     ``older_than`` (seconds since the case finished) leaves out what is still syncing, so the
     list is what needs someone: a node that went away before its archive left it, a field
@@ -4229,12 +4233,21 @@ def custody(conn, recipe: str | None = None, older_than: int = 0, limit: int = 2
         + " AND ".join(where) + " ORDER BY updated_at", params).fetchall()
     archived = {r["case_id"] for r in conn.execute(
         "SELECT DISTINCT case_id FROM case_artifacts WHERE kind = 'archive'").fetchall()}
+    held = {(r["case_id"], r["part"]): (r["sha256"] or "").lower()
+            for r in conn.execute("SELECT case_id, part, sha256 FROM case_blobs").fetchall()}
+    unheld: dict[str, list[tuple[str, int]]] = {}
+    for r in conn.execute("SELECT p.case_id, p.part, p.sha256, p.bytes FROM case_parts p"
+                          " JOIN cases c ON c.case_id = p.case_id WHERE c.state = 'done'").fetchall():
+        if held.get((r["case_id"], r["part"])) != (r["sha256"] or "").lower():
+            unheld.setdefault(r["case_id"], []).append((r["part"], int(r["bytes"] or 0)))
     lo, hi = _FIELD_HEIGHT_BAND
     fields = {r["case_id"]: int(r["n"]) for r in conn.execute(
         "SELECT case_id, COUNT(DISTINCT direction) AS n FROM case_fields"
         " WHERE height_m >= ? AND height_m <= ? GROUP BY case_id", (lo, hi)).fetchall()}
     out: list[dict[str, Any]] = []
-    stored = no_archive = short_fields = 0
+    stored = no_archive = short_fields = short_parts = 0
+    parts_bytes = 0
+    by_location: dict[str, int] = {}
     for r in rows:
         try:
             telemetry = json.loads(r["telemetry"]) if r["telemetry"] else {}
@@ -4247,21 +4260,30 @@ def custody(conn, recipe: str | None = None, older_than: int = 0, limit: int = 2
             missing.append("archive")
         if want is not None and have < want:
             missing.append("fields")
+        parts = sorted(unheld.get(r["case_id"], []))
+        if parts:
+            missing.append("parts")
         if not missing:
             stored += 1
             continue
         no_archive += "archive" in missing
         short_fields += "fields" in missing
+        short_parts += bool(parts)
+        parts_bytes += sum(n for _, n in parts)
+        uri = r["result_uri"] or ""
+        where = uri.rsplit("/", 1)[0] if "/" in uri else (uri or "unknown")
+        by_location[where] = by_location.get(where, 0) + 1
         age = now - int(r["updated_at"] or now)
         if age < older_than:
             continue
         out.append({"case_id": r["case_id"], "recipe": r["recipe"], "done_at": r["updated_at"],
                     "age_seconds": age, "missing": missing, "fields": have, "fields_expected": want,
-                    "result_uri": r["result_uri"]})
+                    "parts_missing": [part for part, _ in parts], "result_uri": r["result_uri"]})
     out.sort(key=lambda c: -c["age_seconds"])
     return {"done": len(rows), "stored": stored, "missing_archive": no_archive,
-            "missing_fields": short_fields, "listed": len(out[:limit]), "total": len(out),
-            "cases": out[:limit]}
+            "missing_fields": short_fields, "missing_parts": short_parts,
+            "missing_parts_bytes": parts_bytes, "by_location": by_location,
+            "listed": len(out[:limit]), "total": len(out), "cases": out[:limit]}
 
 
 # -- telemetry: what the node measured while it worked -------------------------

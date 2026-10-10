@@ -278,6 +278,28 @@ command line). `submit_workers.sh` runs it after submitting; each job runs it wh
 the cluster's card turns dashed after 15 minutes: the last count, marked stale. Where cron is allowed,
 `*/5 * * * * python3 ~/windcomfort/bin/fleet_report.py --cluster ICE --name e3d-node-ice` keeps it current.
 
+**Before a purge.** ICE's scratch (`/storage/ice1`) is purged at the end of every semester, and a
+done folder there may hold parts the broker does not have yet: a direction whose upload did not finish
+before the wall, a case from before the broker kept parts, a part it declined. Nothing else would ever
+send them -- a node's own sweep runs only in a node job, and gives a case up after two offers. So:
+
+1. Ask the broker what it lacks, from your own machine (exit 1 while anything is missing):
+   `casebroker custody --broker https://casebroker.eddy3d.com --username <you> --under /storage/ice1`.
+   It checks every done case for its archive, every part its nodes shipped (the mesh, each
+   direction: the archive leaves those out) and its pedestrian fields, and counts what is
+   incomplete by the folder its result was left in.
+2. Send it: `sbatch ~/windcomfort/bin/upload_done.sbatch` on ICE (copied there by
+   `scripts/pace_workers.sh`). It runs `E3D node-parts sweep --done <folder> --again`, which asks
+   the broker about every case again, uploads what it lacks in resumable chunks, waits until it
+   has arrived, and leases nothing. Exit 1: submit it again; it resumes.
+3. Ask again (step 1) until it says *every finished case is on the broker*; only then let the
+   purge come. A case still listed with no file left on ICE was lost before this existed.
+
+Everything goes up as the node packed it: tar + gzip (the fields are written binary). The broker
+must keep every kind (`CASEBROKER_PARTS_KEEP=mesh,direction,archive`, the default) and have room
+(`CASEBROKER_PARTS_MAX_GB`, `CASEBROKER_PARTS_RESERVE_GB`): a part it declines or cannot fit stays on
+ICE, and `custody` says so.
+
 **Guard.** A job whose predecessor ended in under 15 minutes (`CHAIN_MIN_SECONDS`) starts no worker,
 so the rest of the chain falls through instead of leasing cases to fail them. The same stops it on
 demand: `scancel` one pending job of a lane. `scancel -u $USER -n e3d-node-ice` stops everything; a

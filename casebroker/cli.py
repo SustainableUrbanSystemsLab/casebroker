@@ -647,6 +647,73 @@ def _admin_session(args):
     return opener
 
 
+def cmd_custody(args) -> int:
+    """Is every finished case's data on the broker? Exit 0 only when it is.
+
+    `done` is the node's word; this is what has ARRIVED (GET /v1/custody): the archive, every
+    part the nodes shipped -- the mesh and each direction, which the archive leaves out -- and
+    each direction's pedestrian field. Asked before a disk that still holds results is wiped
+    (PACE purges its scratch at the end of a semester): `--under /storage/ice1` lists only the
+    cases whose result was left there."""
+    if args.username:
+        opener = _cookie_opener()
+        import getpass
+        password = (sys.stdin.readline().rstrip("\r\n") if args.password_stdin
+                    else getpass.getpass("password for %s: " % args.username))
+        status, body = _call(opener, args.broker, "POST", "/v1/auth/login",
+                             {"username": args.username, "password": password})
+        if status != 200:
+            print("login failed: %s" % body.get("detail", status), file=sys.stderr)
+            return 2
+    else:
+        opener = urllib.request.build_opener()
+        token = _resolve_token(args.token, "read")
+        if token:
+            opener.addheaders = [("Authorization", "Bearer " + token)]
+    status, c = _call(opener, args.broker, "GET", "/v1/custody?limit=5000&older_than_hours=%g" % args.older_than_hours,
+                      timeout=300)
+    if status != 200:
+        print("%s: %s" % (status, c.get("detail", "")), file=sys.stderr)
+        return 2
+    store = c.get("part_store") or {}
+    print("done cases            : %s" % f"{c['done']:,}")
+    print("with everything stored: %s" % f"{c['stored']:,}")
+    print("without the archive   : %s" % f"{c['missing_archive']:,}")
+    print("with parts not stored : %s (%.1f GB)" % (f"{c.get('missing_parts', 0):,}",
+                                                    (c.get("missing_parts_bytes") or 0) / 1e9))
+    print("without every field   : %s" % f"{c['missing_fields']:,}")
+    if not store.get("enabled"):
+        print("!! this broker keeps no parts (CASEBROKER_PARTS_DIR): nothing can arrive", file=sys.stderr)
+    elif set(store.get("keeps") or []) != {"mesh", "direction", "archive"}:
+        print("!! this broker keeps only %s (CASEBROKER_PARTS_KEEP): the other kinds stay on the nodes' disks"
+              % ", ".join(store.get("keeps") or []), file=sys.stderr)
+    where = c.get("by_location") or {}
+    if where:
+        print("\nincomplete, by where the result was left:")
+        for loc, n in sorted(where.items(), key=lambda kv: -kv[1]):
+            print("  %6s  %s" % (f"{n:,}", loc))
+    cases = [x for x in c.get("cases", []) if not args.under or (x.get("result_uri") or "").find(args.under) >= 0]
+    if cases:
+        print("\n%-24s %-26s %s" % ("case", "missing", "result"))
+        for x in cases:
+            what = []
+            for m in x["missing"]:
+                if m == "fields" and x.get("fields_expected") is not None:
+                    what.append("fields %s/%s" % (x["fields"], x["fields_expected"]))
+                elif m == "parts":
+                    what.append("parts " + ",".join(x.get("parts_missing") or [])[:60])
+                else:
+                    what.append(m)
+            print("%-24s %-26s %s" % (x["case_id"], "; ".join(what)[:26], x.get("result_uri") or ""))
+        if c.get("total", 0) > len(c.get("cases", [])):
+            print("... %d more" % (c["total"] - len(c["cases"])))
+    complete = c["stored"] == c["done"]
+    print("\n" + ("every finished case is on the broker" if complete
+                  else "NOT everything is on the broker yet: run the done-folder upload where the results were left "
+                       "(docs/pace-hpc.md, 'Before a purge')"))
+    return 0 if complete else 1
+
+
 def _print_catalog(r: dict) -> None:
     f = r.get("fleet") or {}
     target = r.get("target_build")
@@ -1176,6 +1243,18 @@ def main(argv: list[str] | None = None) -> int:
     rb.add_argument("--block", action="store_true",
                     help="also refuse the current target to every node at once (the kill switch)")
     rb.set_defaults(func=cmd_release_rollback)
+
+    cu = sub.add_parser("custody", help="is every finished case's data on the broker? "
+                                        "(archive, mesh, every direction, fields; exit 1 while not)")
+    cu.add_argument("--broker", required=True)
+    cu.add_argument("--username", default=None, help="log in as this account (any role); else a read token")
+    cu.add_argument("--password-stdin", action="store_true", help="read the password from stdin")
+    cu.add_argument("--token", default=None, help="read token; '-' reads stdin; omitted reads the environment")
+    cu.add_argument("--under", default=None, metavar="PATH",
+                    help="list only cases whose result was left under this path, e.g. /storage/ice1")
+    cu.add_argument("--older-than-hours", type=float, default=0,
+                    help="leave out cases finished more recently (still uploading)")
+    cu.set_defaults(func=cmd_custody)
 
     pt = sub.add_parser("parts", help="what of a case its nodes already shipped "
                                       "(mesh, finished directions)").add_subparsers(

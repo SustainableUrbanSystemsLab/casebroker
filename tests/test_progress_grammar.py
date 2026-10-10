@@ -68,6 +68,10 @@ def test_a_worker_row_says_what_it_is_holding():
     row = html[html.index('$("workersBody").innerHTML'):]
     row = row[:row.index("}).join")]
     assert row.count("<td") == 9, f"the workers row draws {row.count('<td')} cells"
+    # ...and so does a queued job's row, listed after the workers.
+    queued = html[html.index('<tr class="queued-job">'):]
+    queued = queued[:queued.index("</tr>")]
+    assert queued.count("<td") == 9, f"a queued job's row draws {queued.count('<td')} cells"
     assert "w.current_case" in html and "w.current_progress" in html
 
 
