@@ -20,6 +20,8 @@ PACE ICE, PACE Phoenix, the lab workstation, anyone else's box — can each ask
 | [`docs/dashboard.md`](docs/dashboard.md) | The ops UI, deep links, and read-only share links |
 | [`docs/releases.md`](docs/releases.md) | Moving the fleet between builds while a campaign runs: catalog, canary, promote, roll back, the badges |
 | [`docs/e3d-contract.md`](docs/e3d-contract.md) | The seam to the CFD: what a node (`E3D.exe`) is to the broker, where its contract lives, and the identity it declares |
+| [`docs/thermal.md`](docs/thermal.md) | The surface-temperature recipe: what a Radiance case computes, its spec, progress, telemetry and archive |
+| [`docs/mrt.md`](docs/mrt.md) | The mean-radiant-temperature recipe, built on a site's finished surface-temperature case; the `needs` gate |
 | [`docs/dataset.md`](docs/dataset.md) | `casebroker export`: the campaign as a training snapshot (Parquet tables, a Zarr store of every field, a card), and how to read it |
 | `casebroker/` | The service: `app.py` (API), `db.py` (both engines, and the schema), `auth.py` (passwords, sessions, machine tokens), `cli.py` (`casebroker`), `export.py` (`casebroker export`), `ids.py` (case identity and splits) |
 | `slurm/` | E3D node jobs for PACE ICE and Phoenix, and the script that queues them |

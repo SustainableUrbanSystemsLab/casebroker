@@ -115,13 +115,15 @@ def test_the_workers_table_sorts_every_column_it_draws():
     block = block[:block.index("];")]
     import re
     labels = re.findall(r'\["([^"]+)",\s*"([^"]+)"\]', block)
-    # 8: the Build column added one, the Reliability column (done / done+failed)
+    # 9: the Build column added one, the Reliability column (done / done+failed)
     # was dropped, and so were the Done and Failed counts themselves (2026-09-24;
-    # /v1/status still carries them).
-    assert len(labels) == 8, f"the workers table draws {len(labels)} headers"
+    # /v1/status still carries them); the Recipes column added one (2026-10-10).
+    assert len(labels) == 9, f"the workers table draws {len(labels)} headers"
     # Status is a reading of last_seen; it has to sort by something real rather
     # than by a missing field.
     by_label = dict(labels)
     assert by_label["Status"] == "last_seen"
     assert by_label["Build"] == "build"
+    # Recipes is a list; the sorter joins it, so declared sets sort together.
+    assert by_label["Recipes"] == "recipes"
     assert "Reliability" not in by_label

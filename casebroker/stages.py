@@ -22,9 +22,10 @@ from typing import Any
 #: says before it picks up where it stopped; "gate" is the convergence gate.
 #: A Radiance surface-temperature case (docs/thermal.md) goes geometry, "scene"
 #: (sensors and materials), "trace" (Radiance), "surface" (the admittance solve),
-#: archive.
+#: archive. An MRT case (docs/mrt.md) goes geometry, scene, trace, "longwave"
+#: (the ray pass over the surface temperatures), archive.
 STAGES = ("geometry", "build-case", "resume", "mesh", "solve", "gate",
-          "scene", "trace", "surface", "archive")
+          "scene", "trace", "surface", "longwave", "archive")
 
 _SOLVER = re.compile(r"foamrun|simplefoam|urbanmicroclimatefoam|foammultirun|potentialfoam", re.I)
 _LEGACY_STEP = re.compile(r"^step\s+\d+/\d+:\s*(?P<name>\S+)", re.I)
@@ -58,6 +59,9 @@ def stage_of(detail: str | None) -> str | None:
         return "trace"
     if line.startswith("surface"):
         return "surface"
+    # The MRT recipe's own phase (docs/mrt.md, "Progress").
+    if line.startswith("longwave"):
+        return "longwave"
     m = _LEGACY_STEP.match(line)
     if m:
         name = m.group("name")

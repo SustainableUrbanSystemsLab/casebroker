@@ -8,9 +8,11 @@ coding errors but disagreements about what one of these words meant.
 
 ## Case
 
-A **site** plus a **recipe**. One simulation job: a CFD wind case, or (since
+A **site** plus a **recipe**. One simulation job: a CFD wind case, (since
 2026-09) a Radiance surface-temperature case, whose contract is
-[`docs/thermal.md`](docs/thermal.md). A recipe is a training set, so the
+[`docs/thermal.md`](docs/thermal.md), or (since 2026-10) a mean-radiant-
+temperature case built on the site's finished surface-temperature case,
+[`docs/mrt.md`](docs/mrt.md). A recipe is a training set, so the
 dashboard, the ETA and the dataset can each be scoped to one. Its **version is
 part of its name** (`surf-1008/rad6R0P2-fft-v2`): a change that alters the
 numbers is a new recipe, with new case ids, never an edit to the old one, so two
@@ -25,6 +27,7 @@ versions are never pooled.
 | `state` | `pending` → `leased` → `done` \| `quarantined` |
 | `attempts` / `max_attempts` | Retry budget, default 3. |
 | `priority` | Lease order, ascending. Default 100. |
+| `needs_case` | A case this one is built on (an MRT case's surface-temperature case). Leased to no node until that one is `done`. |
 | `result_uri`, `result_sha256`, `result_bytes` | Where the archive lives. The broker never opens it. |
 | `case_fields` rows | The pedestrian wind field itself, per direction: \|U\| at 1.75 m on the 2 m grid, sent by the node as each direction finishes. The one result the broker HOLDS rather than points at (since 0.24.0). The broker summarises each as it stores it (`n_valid`, `umag_mean` .. `umag_max`), and answers questions of it in place: across cases (`GET /v1/fields`), at a point (`/umag`), over a region (`/umag/stats`). |
 

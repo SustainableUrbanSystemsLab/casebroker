@@ -211,6 +211,9 @@ class CaseIn(BaseModel):
     # Free key/value labels ("campaign": "v2-pilot"): filtered by later, shown
     # on the case. Re-posting a case rewrites them.
     labels: dict[str, str] | None = None
+    # A case this one is built on and waits for (docs/mrt.md): leased to no node
+    # until that case is done. Must name a case the broker has.
+    needs: str | None = Field(default=None, max_length=64)
 
 
 class ReceiptIn(BaseModel):
@@ -1853,6 +1856,12 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         """
         if len(cases) > 5000:
             raise HTTPException(413, "post at most 5000 cases per request")
+        # A need names a case the broker has, or it is a typo that would wait
+        # forever: refused before anything in the batch is written.
+        needed = {c.needs for c in cases if c.needs}
+        for need in sorted(needed):
+            if db.get_case(conn, need) is None:
+                raise HTTPException(422, f"needs: no such case {need}")
         rows, rejected = [], []
         for c in cases:
             if not footprints.on_land(c.lat, c.lon):
@@ -1872,6 +1881,7 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
                 "priority": c.priority,
                 "max_attempts": c.max_attempts,
                 "labels": _check_labels(c.labels),
+                "needs_case": c.needs,
             })
         out: dict[str, Any] = dict(db.add_cases(conn, rows))
         # Always present, so a caller can read it without a version check, and

@@ -5770,12 +5770,70 @@
 
   // -- Surface temperatures: the thermal recipe's report (docs/thermal.md) --------
 
-  /// A Radiance surface-temperature case rather than a CFD one. The recipe's
-  /// prefix says so before the case has reported anything; its own telemetry
-  /// says so after.
+  /// A Radiance case rather than a CFD one: surface temperatures (docs/thermal.md)
+  /// or MRT built on them (docs/mrt.md). Neither has a mesh, directions, residuals
+  /// or a pedestrian wind field. The recipe's prefix says so before the case has
+  /// reported anything; its own telemetry says so after.
   function isThermal(c) {
     const t = parseMaybeJson(c && c.telemetry);
-    return String((c && c.recipe) || "").startsWith("surf-") || isObj(t && t.thermal);
+    const r = String((c && c.recipe) || "");
+    return r.startsWith("surf-") || r.startsWith("mrt-") || isObj(t && (t.thermal || t.mrt));
+  }
+
+  /// The MRT recipe in particular: its card reads telemetry.mrt and metrics.mrt.
+  function isMrt(c) {
+    const t = parseMaybeJson(c && c.telemetry);
+    return String((c && c.recipe) || "").startsWith("mrt-") || isObj(t && t.mrt);
+  }
+
+  /// What the node reported (telemetry.mrt) and, once done, what it found
+  /// (metrics.mrt, metrics.mrt_day). Every value is escaped or formatted as a
+  /// number: all of it arrives from a worker.
+  function mrtCardHtml(c) {
+    const tel = parseMaybeJson(c.telemetry);
+    const t = isObj(tel) && isObj(tel.mrt) ? tel.mrt : {};
+    const m = parseMaybeJson(c.metrics);
+    const spec = parseMaybeJson(c.spec);
+    const num = (x) => Number(x).toLocaleString();
+    const rows = [];
+    if (finite(t.sensors)) rows.push(["Sensors", `${num(t.sensors)} at 1.75 m`]);
+    const surf = t.surf_case || (isObj(spec) && spec.surf_case) || c.needs_case;
+    if (surf) {
+      const state = c.needs_state ? ` · ${esc(c.needs_state)}` : "";
+      rows.push(["Surface case", `<a href="#case=${encodeURIComponent(surf)}" class="mono" title="the finished surface-temperature case this one reads t_surface.npy from">${esc(surf)}</a>${state}`]);
+    }
+    if (isObj(t.weather) && t.weather.key) {
+      rows.push(["Weather", esc(t.weather.key)
+        + (finite(t.weather.distance_km) ? ` · ${Number(t.weather.distance_km).toFixed(1)} km away` : "")]);
+    }
+    if (finite(t.daylight_hours)) rows.push(["Daylight hours", num(t.daylight_hours)]);
+    if (isObj(t.radiance)) {
+      const r = t.radiance;
+      const said = [r.engine, r.image, r.params].filter((x) => x).map((x) => esc(x));
+      if (finite(r.seconds)) said.push(esc(formatDuration(Math.round(Number(r.seconds)))));
+      if (said.length) rows.push(["Radiance", said.join(" · ")]);
+    }
+    if (isObj(t.longwave)) {
+      const l = t.longwave;
+      const said = [];
+      if (finite(l.rays)) said.push(`${num(l.rays)} rays`);
+      if (finite(l.seconds)) said.push(esc(formatDuration(Math.round(Number(l.seconds)))));
+      if (said.length) rows.push(["Long-wave", said.join(" · ")]);
+    }
+    if (t.body) rows.push(["Body", esc(t.body)]);
+    if (isObj(m)) {
+      for (const [key, label] of [["mrt", "MRT, °C"], ["mrt_day", "MRT by day, °C"]]) {
+        const k = m[key];
+        if (!isObj(k)) continue;
+        const said = ["p50", "p95", "max"].filter((q) => finite(k[q]))
+          .map((q) => `${q} ${Number(k[q]).toFixed(1)}`);
+        if (said.length) rows.push([label, said.join(" · ")]);
+      }
+    }
+    const body = rows.length
+      ? `<dl class="kv-list">${rows.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${v}</dd>`).join("")}</dl>`
+      : `<div style="color:var(--text-muted);font-size:12px;">Nothing reported yet.</div>`;
+    return `<div class="detail-card"><h3>Mean radiant temperature</h3>${body}</div>`;
   }
 
   /// What the node reported (telemetry.thermal) and, once done, what it found
@@ -6913,6 +6971,15 @@
               <dd class="mono" title="${esc(moveNote(c.moved_to))}">${esc(c.moved_to.recipe || "—")} as <span style="white-space:nowrap">${esc(c.moved_to.case_id || "—")}</span></dd>` : ""}
               ${c.moved_from ? `<dt title="this case is a site moved here from another recipe">Moved from</dt>
               <dd class="mono" title="${esc(moveNote(c.moved_from))}">${esc(c.moved_from.recipe || "—")}, <span style="white-space:nowrap">${esc(c.moved_from.case_id || "—")}</span></dd>` : ""}
+              <!-- A case built on another waits for it (docs/mrt.md): leased to no
+                   node until that one is done. Only the full record says where
+                   the needed case stands. -->
+              ${c.needs_case ? `<dt title="this case reads another case's archive, and is handed to no node until that case is done">Needs</dt>
+              <dd class="mono"><a href="#case=${encodeURIComponent(c.needs_case)}" style="white-space:nowrap">${esc(c.needs_case)}</a>${
+                c.needs_state === undefined ? "" :
+                c.needs_state === "done" ? ` <span class="badge done" title="the need is met: this case can lease">done</span>` :
+                c.needs_state === "missing" ? ` <span class="badge quarantined" title="the broker has no such case any more: this case will never lease. Cancel it, or admit the surface case again">missing</span>` :
+                ` <span class="badge ${esc(c.needs_state === "quarantined" ? "quarantined" : "pending")}" title="${esc(c.needs_state === "quarantined" ? "the case this one needs is parked: this case waits until it is reopened and done" : "this case leases once the case it needs is done")}">${esc(c.needs_state)}</span>`}</dd>` : ""}
               <dt>LCZ</dt>
               <dd>${esc(c.lcz || "—")}</dd>
               <dt title="country from the polygon the site is in; nearest town of 15,000+ people (GeoNames) and how far it is">Location</dt>
@@ -7025,7 +7092,7 @@
 
           <!-- Mesh & Solve: the node's own reports (telemetry.mesh / .solve); a
                Radiance case has neither, and reports telemetry.thermal instead. -->
-          ${thermal ? thermalCardHtml(c) : meshSolveCardHtml(c)}
+          ${thermal ? (isMrt(c) ? mrtCardHtml(c) : thermalCardHtml(c)) : meshSolveCardHtml(c)}
         </div>
 
         ${pctCardHtml(c)}
@@ -7155,8 +7222,8 @@
   /// counts the reader has to decode -- the raw line stays in the tooltip.
   function progressLabel(text, head, outer, inner, countsFinished) {
     const word = head.trim().split(/[\s]/)[0].toLowerCase();
-    // The thermal recipe's two counted phases (docs/thermal.md).
-    const thermal = { trace: "Radiance", surface: "Surface temperatures" }[word];
+    // The Radiance recipes' counted phases (docs/thermal.md, docs/mrt.md).
+    const thermal = { trace: "Radiance", surface: "Surface temperatures", longwave: "Long-wave" }[word];
     const phase = thermal || (SOLVER_STEP.test(text) || word === "solve" || countsFinished ? "Solving" : "Meshing");
     if (countsFinished) {
       // Units FINISHED, so the one under way is the next.

@@ -95,7 +95,12 @@ CREATE TABLE IF NOT EXISTS cases (
     -- (total_cells). Unlike `telemetry` it is NOT cleared when a new attempt
     -- starts over: it describes the site, and is what lets lease() keep a case
     -- from a node too small to hold its mesh (the memory gate).
-    mesh_cells     INTEGER
+    mesh_cells     INTEGER,
+    -- A case this one is built ON, and so waits for: an MRT case (docs/mrt.md)
+    -- reads the site's finished surface-temperature archive, and is handed to
+    -- no node until that case is done. A column, not a spec key, so the lease
+    -- query checks it without opening a spec. NULL for every other case.
+    needs_case     TEXT
 );
 
 -- The claim query filters on state and orders by (priority, case_id); this index
@@ -569,7 +574,9 @@ CREATE TABLE IF NOT EXISTS cases (
     -- (total_cells). Unlike `telemetry` it is NOT cleared when a new attempt
     -- starts over: it describes the site, and is what lets lease() keep a case
     -- from a node too small to hold its mesh (the memory gate).
-    mesh_cells     BIGINT
+    mesh_cells     BIGINT,
+    -- A case this one is built on and waits for (docs/mrt.md); see the SQLite schema.
+    needs_case     TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_cases_claim ON cases(state, priority, case_id);
@@ -1003,7 +1010,7 @@ CREATE TABLE IF NOT EXISTS push_subscriptions (
 # already existed, and only then build the indexes -- an index is very often the
 # thing that references the newly added column.
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 # A column definition that cannot be bolted onto a table that already exists.
 # Detected and reported by name, because the alternative -- quietly adding the
@@ -1399,6 +1406,11 @@ LEASE_STALL_SECONDS = int(os.environ.get("CASEBROKER_LEASE_STALL", str(86400)))
 
 # The newest 'progress' event of a case -- heartbeat records one only when the
 # line CHANGED, so this is when the worker last said something new.
+#: The recipes that are not CFD jobs: Radiance surface temperatures (docs/thermal.md)
+#: and MRT built on them (docs/mrt.md). No mesh, no directions, no pedestrian wind
+#: field; progress is counted in chunks and the long phase is the trace.
+RADIANCE_RECIPE_PREFIXES = ("surf-", "mrt-")
+
 _LAST_PROGRESS_SQL = ("COALESCE((SELECT MAX(e.ts) FROM events e WHERE e.case_id = cases.case_id"
                       " AND e.event = 'progress'), 0)")
 
@@ -1811,7 +1823,7 @@ def add_cases(conn, rows: Iterable[dict[str, Any]]) -> dict[str, int]:
     now = _now()
     added = skipped = 0
     columns = (" (case_id, spec, recipe, city_cluster, lcz, split, priority,"
-              "  max_attempts, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)")
+              "  max_attempts, created_at, updated_at, needs_case) VALUES (?,?,?,?,?,?,?,?,?,?,?)")
     # Same idempotent-insert intent, two dialects: SQLite's OR IGNORE clause sits
     # on INSERT itself, Postgres's sits after the VALUES list as ON CONFLICT.
     insert_sql = (
@@ -1827,7 +1839,7 @@ def add_cases(conn, rows: Iterable[dict[str, Any]]) -> dict[str, int]:
                 insert_sql,
                 (r["case_id"], json.dumps(r["spec"], sort_keys=True), r["recipe"],
                  r["city_cluster"], r.get("lcz"), r["split"], r.get("priority", 100),
-                 r.get("max_attempts", 3), now, now),
+                 r.get("max_attempts", 3), now, now, r.get("needs_case")),
             )
             if cur.rowcount:
                 added += 1
@@ -1943,6 +1955,12 @@ GB_PER_MCELL = float(os.environ.get("CASEBROKER_GB_PER_MCELL", "2.0"))
 
 # Which of a pending case's meshes the BROKER holds: the case another node
 # started, which a node that fetches from the part store can continue.
+# A case built on another (cases.needs_case, docs/mrt.md) is handed out only once
+# that one is done. Checked in the fresh-case query alone: a resume is this
+# worker's own case, which it could only hold if the need was met when it leased.
+_NEEDS_MET_SQL = (" AND (cases.needs_case IS NULL OR EXISTS (SELECT 1 FROM cases n"
+                  " WHERE n.case_id = cases.needs_case AND n.state = 'done'))")
+
 _MESHED_AT_BROKER_SQL = (
     "EXISTS (SELECT 1 FROM case_parts p JOIN case_blobs b"
     " ON b.case_id = p.case_id AND b.part = 'mesh' AND b.sha256 = p.sha256"
@@ -2162,7 +2180,7 @@ def lease(conn, worker_id: str, count: int = 1,
                 "            OR (leased_at IS NOT NULL AND leased_at < ?"
                 "                AND " + _LAST_PROGRESS_SQL + " < ?))))"
                 + split_sql + recipe_sql + continue_sql + _RECENTLY_FAILED_HERE_SQL +
-                _RECENTLY_HANDED_OFF_HERE_SQL + hw_sql +
+                _RECENTLY_HANDED_OFF_HERE_SQL + hw_sql + _NEEDS_MET_SQL +
                 # Every worker targets the same "lowest" rows. That is contention by
                 # design, not by accident: under SKIP LOCKED a locked row is simply
                 # skipped, and case_id is a hash so the tiebreak is effectively random
@@ -4178,8 +4196,8 @@ def case_receipts(conn, case_id: str) -> list[dict[str, Any]]:
 def expected_fields(recipe: str | None, telemetry: Any) -> int | None:
     """How many pedestrian fields a done case should have reached the database with: one per
     wind direction, as its telemetry counted them (solve.directions_total, else mesh.directions);
-    None for a recipe without fields (the thermal recipe) or a case that never said."""
-    if not recipe or recipe.startswith("surf-"):
+    None for a recipe without fields (the thermal and MRT recipes) or a case that never said."""
+    if not recipe or recipe.startswith(RADIANCE_RECIPE_PREFIXES):
         return None
     t = telemetry if isinstance(telemetry, dict) else {}
     for block, key in (("solve", "directions_total"), ("mesh", "directions")):
@@ -4974,8 +4992,8 @@ def _solve_fraction(line: str | None) -> float | None:
     if not line:
         return None
     head, _, rest = line.partition("\u00b7")
-    # A Radiance surface-temperature case's long phase is the trace, "trace 12/36
-    # chunks" -- chunks FINISHED, like directions (docs/thermal.md).
+    # A Radiance case's long phase is the trace, "trace 12/36 chunks" -- chunks
+    # FINISHED, like directions (docs/thermal.md, docs/mrt.md).
     if not head.strip().lower().startswith(("solve", "trace")):
         return None
     outer = _PAIR.search(head)
@@ -5248,7 +5266,7 @@ _CASE_COLS_WITHOUT_SPEC = (
     " cases.priority, cases.state, cases.attempts, cases.max_attempts,"
     " cases.lease_worker, cases.leased_at, cases.lease_expires,"
     " cases.result_uri, cases.result_sha256, cases.result_bytes, cases.metrics,"
-    " cases.last_error, cases.created_at, cases.updated_at, cases.mesh_cells"
+    " cases.last_error, cases.created_at, cases.updated_at, cases.mesh_cells, cases.needs_case"
 )
 
 _CASE_COLS = (
@@ -5378,6 +5396,16 @@ def get_case(conn, case_id: str) -> dict[str, Any] | None:
     # detail card had the age of the last line but not when the solve should
     # end, which is the more useful of the two once a direction is a day in.
     out["eta"] = _solve_eta(conn, case_id, row["leased_at"]) if row["state"] == "leased" else None
+    # The state of the case this one waits for (docs/mrt.md): a pending MRT case
+    # whose surface case failed or was parked would otherwise wait forever and
+    # say nothing. None when it needs none; "missing" when the broker has no such
+    # case (it was purged after the need was posted).
+    need = row["needs_case"] if "needs_case" in row.keys() else None
+    if need:
+        n = conn.execute("SELECT state FROM cases WHERE case_id = ?", (need,)).fetchone()
+        out["needs_state"] = n["state"] if n else "missing"
+    else:
+        out["needs_state"] = None
     return out
 
 

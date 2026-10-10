@@ -8,6 +8,28 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.45.0] - 2026-10-10
+
+### Added
+- **The MRT recipe, `mrt-1008/rad6R0P2-solarcal-v1`** (docs/mrt.md): a third kind of case, the hourly
+  mean radiant temperature a standing person feels at every point of the wind campaign's pedestrian
+  lattice (1.75 m, 2 m apart, the ±504 m core), for a year. Short-wave from Radiance on an upward
+  plane through SolarCal (ASHRAE 55 App C, facing unknown); long-wave from 400 rays per point against
+  the site, each ray meeting the sky (the EPW's horizontal infrared), a crown (air) or a surface at the
+  temperature of the nearest sensor in the site's finished `surf-1008/rad6R0P2-fft-v2` archive. The
+  node side is Eddy3D's `MrtCaseRunner`, declared wherever Radiance is.
+- **A case can need another case.** `POST /v1/cases` takes `needs: <case id>`; such a case is handed to
+  no node until the named case is `done` (a column, `needs_case`, checked by the lease query, so no
+  spec is opened), and a `needs` the broker has no case for is 422. `GET /v1/cases/{id}` answers
+  `needs_case` and `needs_state` (`missing` when the needed case was purged), and the case page shows
+  them. The stage grammar knows the recipe's `longwave` phase; the case page has a Mean radiant
+  temperature card.
+- **`scripts/admit_mrt.py`** posts an MRT case beside every finished surface-temperature case whose
+  site has none, with `needs` set, the weather and links carried over; a dry run by default.
+
+### Fixed
+- The two tests that count the workers table's columns now expect the Recipes column added in 0.44.2.
+
 ## [0.44.2] - 2026-10-10
 
 ### Added
