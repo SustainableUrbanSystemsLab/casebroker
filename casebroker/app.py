@@ -2081,14 +2081,17 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
     @app.get("/v1/node/release", dependencies=[WriteAuth])
     def node_release(request: Request, worker_id: str, platform: str | None = None,
                      build: str | None = None, failed_build: str | None = None,
-                     failed_reason: str | None = None, state: str | None = None) -> dict[str, Any]:
+                     failed_reason: str | None = None, state: str | None = None,
+                     unfit: str | None = None) -> dict[str, Any]:
         """What this node should be running. Asked before every lease, and
         during a solve so an update does not have to wait for the case.
 
         `failed_build` is a node saying it TRIED a build, could not start it and
         rolled back: the one thing an unattended update must never hide.
         `state` is what it says about the move it was last told to make, shown
-        on the fleet table beside the target it is behind.
+        on the fleet table beside the target it is behind. `unfit` is why it will
+        not take a case at all -- its own check refused (a full disk, an engine that
+        is not running) -- shown on its row until it says nothing or leases.
 
         `url` (with `bytes`) is where to fetch the target's file when the broker
         holds it; null otherwise, and a node then looks on its release share."""
@@ -2098,7 +2101,10 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         out = db.node_release(conn, worker_id, platform, build,
                               failed_build=(failed_build or "")[:96] or None,
                               failed_reason=failed_reason,
-                              state=(state or "")[:200] or None)
+                              state=(state or "")[:200] or None,
+                              # A row is made for a node that has never leased; not for an id
+                              # longer than any a node uses.
+                              unfit=unfit if len(worker_id) <= 200 else None)
         out["url"], out["bytes"] = None, None
         size = _held(out.get("sha256")) if platform else None
         if size is not None:

@@ -177,7 +177,13 @@ CREATE TABLE IF NOT EXISTS workers (
     -- and the memory it has. Declared with every lease; NULL = never said.
     features         TEXT,
     cpus             INTEGER,
-    mem_gb           REAL
+    mem_gb           REAL,
+    -- Why the node will not take a case, in its own words (a full disk, an engine
+    -- that is not running), and since when. Said with its release asks, which it
+    -- goes on making while it waits; cleared when it says nothing, and by its next
+    -- lease. A node that refused on its own side used to look like one that died.
+    unfit            TEXT,
+    unfit_since      INTEGER
 );
 -- What a SCHEDULER holds that has not reached the broker yet. A worker queued in
 -- SLURM has never contacted this service -- it does not exist here until its
@@ -633,7 +639,13 @@ CREATE TABLE IF NOT EXISTS workers (
     -- and the memory it has. Declared with every lease; NULL = never said.
     features         TEXT,
     cpus             INTEGER,
-    mem_gb           REAL
+    mem_gb           REAL,
+    -- Why the node will not take a case, in its own words (a full disk, an engine
+    -- that is not running), and since when. Said with its release asks, which it
+    -- goes on making while it waits; cleared when it says nothing, and by its next
+    -- lease. A node that refused on its own side used to look like one that died.
+    unfit            TEXT,
+    unfit_since      INTEGER
 );
 -- What a SCHEDULER holds that has not reached the broker yet. A worker queued in
 -- SLURM has never contacted this service -- it does not exist here until its
@@ -971,7 +983,7 @@ CREATE TABLE IF NOT EXISTS push_subscriptions (
 # already existed, and only then build the indexes -- an index is very often the
 # thing that references the newly added column.
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 # A column definition that cannot be bolted onto a table that already exists.
 # Detected and reported by name, because the alternative -- quietly adding the
@@ -2154,7 +2166,10 @@ def lease(conn, worker_id: str, count: int = 1,
             " last_seen=excluded.last_seen, host=excluded.host, cluster=excluded.cluster,"
             " build=excluded.build, version=excluded.version,"
             " platform=excluded.platform, recipes=excluded.recipes,"
-            " features=excluded.features, cpus=excluded.cpus, mem_gb=excluded.mem_gb",
+            " features=excluded.features, cpus=excluded.cpus, mem_gb=excluded.mem_gb,"
+            # Asking for a case is a node past its own check: whatever it said it could
+            # not do, it can now.
+            " unfit=NULL, unfit_since=NULL",
             (worker_id, host, cluster, now, now, build, version, platform,
              json.dumps(list(recipes)) if recipes else None,
              json.dumps(sorted(set(features))) if features else None, cpus, mem_gb))
@@ -2696,7 +2711,8 @@ def lease_refusal(conn, build: str | None) -> str | None:
 @_locked
 def node_release(conn, worker_id: str, platform: str | None, build: str | None,
                  failed_build: str | None = None, failed_reason: str | None = None,
-                 state: str | None = None, now: int | None = None) -> dict[str, Any]:
+                 state: str | None = None, now: int | None = None,
+                 unfit: str | None = None) -> dict[str, Any]:
     """What one node should be running, and whether it may take new work.
 
     Asked before every lease and during a solve. The answer names a build, the
@@ -2707,10 +2723,23 @@ def node_release(conn, worker_id: str, platform: str | None, build: str | None,
     waiting for the file, installed and verified, switching after the case --
     kept until it is on target. Without it an operator who set a target saw
     every worker as "behind" and nothing about whether anything was happening.
+
+    `unfit` is why the node will not take a case at all -- its own check refused:
+    a full disk, a container engine that is not running, no MPI. Kept, with when
+    it began, until an ask says nothing or the node leases; the moment it begins
+    is an event (and a push notice). A node that has never leased gets a worker
+    row for it: a machine that cannot run from its first start is exactly the
+    one nobody would otherwise see.
     """
     now = now or _now()
+    unfit = (unfit or "").strip()[:300] or None
+    if unfit:
+        conn.execute(
+            "INSERT INTO workers(worker_id, first_seen, last_seen, build, platform)"
+            " VALUES (?,?,?,?,?) ON CONFLICT(worker_id) DO NOTHING",
+            (worker_id, now, now, build, platform))
     w = conn.execute(
-        "SELECT drain, drain_reason, target_build, update_failed FROM workers WHERE worker_id = ?",
+        "SELECT drain, drain_reason, target_build, update_failed, unfit FROM workers WHERE worker_id = ?",
         (worker_id,)).fetchone()
     canary = bool(w and w["target_build"])
     target = (w["target_build"] if canary else None) or _setting(conn, "target_build")
@@ -2723,6 +2752,17 @@ def node_release(conn, worker_id: str, platform: str | None, build: str | None,
             conn.execute("UPDATE workers SET update_failed = ? WHERE worker_id = ?", (said, worker_id))
             if said:
                 _event(conn, None, worker_id, "update-failed", said, now)
+        # Why it will not take a case. The text moves on every ask (a disk's free GB),
+        # so the spell is dated from its first ask, and only its start is an event.
+        if unfit and not w["unfit"]:
+            conn.execute("UPDATE workers SET unfit = ?, unfit_since = ? WHERE worker_id = ?",
+                         (unfit, now, worker_id))
+            _event(conn, None, worker_id, "unfit", unfit, now)
+        elif unfit:
+            conn.execute("UPDATE workers SET unfit = ? WHERE worker_id = ?", (unfit, worker_id))
+        elif w["unfit"]:
+            conn.execute("UPDATE workers SET unfit = NULL, unfit_since = NULL WHERE worker_id = ?",
+                         (worker_id,))
         # The ask itself is evidence -- a node that never asks cannot update
         # itself -- and what it says about the move is kept until it is there.
         if not target or target == build:
@@ -4990,8 +5030,11 @@ def status(conn, now: int | None = None, recipe: str | None = None) -> dict[str,
             "    AND e.case_id = (SELECT c.case_id FROM cases c WHERE c.lease_worker = w.worker_id"
             "                       AND c.state = 'leased' ORDER BY c.leased_at DESC LIMIT 1)"
             "    ORDER BY e.id DESC LIMIT 1) AS current_progress_at"
-            " FROM workers w WHERE w.last_seen > ? ORDER BY w.last_seen DESC LIMIT 500",
-            (_now() - 86400,))]
+            # Seen, or still asking what to run: a node that refuses work on its own side
+            # (a full disk) never leases, and used to age off this list while it waited.
+            " FROM workers w WHERE w.last_seen > ? OR w.release_asked_at > ?"
+            " ORDER BY w.last_seen DESC LIMIT 500",
+            (_now() - 86400, _now() - 86400))]
     for w in workers:
         w["current_eta"] = _solve_eta(conn, w["current_case"], w["current_leased_at"]) \
             if w.get("current_case") else None

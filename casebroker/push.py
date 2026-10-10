@@ -182,6 +182,12 @@ EVENTS: tuple[Kind, ...] = (
     Kind("update_failed", "a node's update fails",
          "it tried a new build, could not start it, and went back to the one before",
          True, urgency="high", many="{n} node updates failed", many_url="/#settings=machines"),
+    # When the spell begins, not on every ask: a lab machine with a full disk asks
+    # every few minutes for as long as nobody empties it.
+    Kind("worker_unfit", "a machine cannot run cases",
+         "its own check refused: a full disk, a container engine that is not running, no MPI; "
+         "it takes no case until that is fixed",
+         True, many="{n} machines cannot run cases", many_url="/#settings=machines"),
     Kind("store_nearly_full", "the part store is nearly full",
          "90% of its size limit, or close to the free space it keeps in reserve; uploads stop there",
          True, admin_only=True, many_url="/#storage"),
@@ -196,7 +202,7 @@ _ORDER = {k.key: i for i, k in enumerate(EVENTS)}
 #: events-table names -> notice kinds. db.py writes each of these already except
 #: pair-request, which create_pairing records for this.
 _FROM_EVENT = {"done": "case_done", "quarantined": "case_quarantined", "drain": "worker_drained",
-               "update-failed": "update_failed", "pair-request": "pair_request"}
+               "update-failed": "update_failed", "pair-request": "pair_request", "unfit": "worker_unfit"}
 #: Quarantines an operator caused on purpose -- the land audit, a re-spec -- move
 #: hundreds of cases at once, and the person who clicked does not need telling.
 _SWEEPS = ("not on land:", "moved to ")
@@ -549,6 +555,9 @@ def _from_event(row: dict[str, Any]) -> Notice | None:
         return Notice(kind, f"Update failed on {_line(worker, 64)}",
                       _line(f"Tried {build} and went back to the build before: {why or 'it could not be started'}", 300),
                       "/#settings=machines", worker)
+    if kind == "worker_unfit" and worker:
+        return Notice(kind, f"{_line(worker, 64)} cannot run cases",
+                      _line(detail or "its own check refused", 300), "/#settings=machines", worker)
     if kind == "pair_request" and worker:
         lead = f"{_line(detail, 120)}. " if detail else ""
         return Notice(kind, f"{_line(worker, 64)} asks to join",
@@ -680,7 +689,7 @@ def compose(kind: str, items: list[Notice], now: int, admin: bool) -> dict[str, 
         title = k.many.format(n=f"{n:,}") if k.many else items[-1].title
         body = _listed(listed, n) if listed else items[-1].body
         url = k.many_url
-    if kind == "update_failed" and not admin:
+    if kind in ("update_failed", "worker_unfit") and not admin:
         url = "/"        # Settings > Machines is an admin's tab
     payload = {"kind": kind, "tag": "casebroker-done" if kind == "case_done" else f"casebroker-{kind}",
                "title": _line(title, 120), "body": _line(body, 600), "url": url, "ts": now,

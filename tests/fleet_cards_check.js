@@ -8,6 +8,17 @@ for (let k = src.indexOf('{', i); k < src.length; k++) {
   if (src[k] === '{') d++; else if (src[k] === '}') { d--; if (d === 0) { end = k + 1; break; } }
 }
 eval(src.slice(i, end));
+// What fleetCards reads each worker with: the page's own, so the cards and the table agree.
+const grab = (name) => {
+  const at = src.indexOf(`function ${name}(`);
+  let depth = 0;
+  for (let k = src.indexOf('{', src.indexOf(')', at)); k < src.length; k++) {
+    if (src[k] === '{') depth++; else if (src[k] === '}') { depth--; if (depth === 0) return src.slice(at, k + 1); }
+  }
+  throw new Error('not found: ' + name);
+};
+eval(src.match(/const finite = .*;/)[0].replace(/^const /, 'var '));
+eval(grab('workerCondition'));
 
 const NOW = 1_000_000;
 let bad = 0;

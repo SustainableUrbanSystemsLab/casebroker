@@ -711,6 +711,8 @@
   .fleet-card .fc-lbl { font-size: 11px; color: var(--text-muted); margin-left: 4px; }
   .fleet-card .fc-age { font-size: 10.5px; font-family: var(--font-mono); }
   .fleet-card.stale { border-style: dashed; }
+  /* Why a worker will not take a case, under its status badge: the node's own words. */
+  .worker-unfit { font-size: 11px; line-height: 1.4; color: var(--bad); max-width: 44ch; margin-top: 4px; white-space: normal; }
   .fleet-card.stale .fc-n, .fleet-card.stale .fc-name { color: var(--text-muted); }
 
   .geo-wrap { min-height: 40px; }
@@ -5026,6 +5028,7 @@
             ${c.queued === null
               ? `<span><span class="fc-n">${c.idle}</span><span class="fc-lbl">idle</span></span>`
               : `<span><span class="fc-n">${c.queued}</span><span class="fc-lbl">queued</span></span>`}
+            ${c.unfit ? `<span title="their own check refuses work -- a full disk, a container engine that is not running; the Workers table says why"><span class="fc-n" style="color:var(--bad)">${c.unfit}</span><span class="fc-lbl">can't run</span></span>` : ""}
             ${c.offline ? `<span title="not heard from for 5 min or more"><span class="fc-n" style="color:var(--text-muted)">${c.offline}</span><span class="fc-lbl">offline</span></span>` : ""}
           </div>
           ${c.detail ? `<div class="fc-age" style="color:var(--text-muted);margin-top:3px">${esc(c.detail)}</div>` : ""}
@@ -5089,8 +5092,16 @@
       $("workersTableWrap").style.display = "block";
       $("workersTable").style.display = "table";
       renderWorkersHead();
+      const nowS = Math.floor(Date.now() / 1000);
       $("workersBody").innerHTML = workers.map((w) => {
-        const isRecent = (Math.floor(Date.now() / 1000) - w.last_seen) < 300;
+        const cond = workerCondition(w, nowS);
+        const condTitle = cond.key === "unfit"
+          ? `${w.unfit}${cond.since ? ` (since ${relTime(cond.since)})` : ""}`
+          : cond.key === "refusing"
+            ? `It asks what to run (last asked ${relTime(w.release_asked_at)}) but last asked for a case ${relTime(w.last_seen)}: `
+              + "its own check is refusing work -- a full disk, a container engine that is not running, no MPI. "
+              + "Its console says which; a node on an E3D build from 2026-10-10 on says it here."
+            : cond.key === "active" ? "heard from in the last 5 minutes" : "not heard from for 5 minutes or more";
 
         return `
           <tr>
@@ -5106,9 +5117,9 @@
             <td>${w.cluster ? `<span class="chip">${esc(w.cluster)}</span>` : "—"}</td>
             <td>${buildCell(w)}</td>
             <td>
-              <span class="badge ${isRecent ? "done" : "quarantined"}">
-                ${isRecent ? "Active" : "Offline"}
-              </span>
+              <span class="badge ${cond.cls}" title="${esc(condTitle)}">${esc(cond.label)}</span>
+              ${cond.key === "unfit"
+                ? `<div class="worker-unfit" title="${esc(condTitle)}">${esc(firstSentence(w.unfit))}${cond.since ? ` · since ${esc(relTime(cond.since))}` : ""}</div>` : ""}
               ${w.drain ? `<span class="badge leased" title="${esc(w.drain_reason || "no new cases; the one in flight finishes")}">${w.current_case ? "Draining" : "Drained"}</span>` : ""}
             </td>
             <td>${relTime(w.first_seen)}</td>
@@ -7145,6 +7156,31 @@
     return `${phase} \u00b7 step ${outer.a}/${outer.b}` + (name ? ` \u00b7 ${name}` : "");
   }
 
+  /// What a worker is doing, for the Status column and the fleet cards, as one reading so
+  /// the two never disagree. `unfit`: the node said why it will not take a case (a full
+  /// disk, an engine that is not running). `refusing`: it goes on asking what to run but
+  /// not for a case, which is how a build from before it could say so looks -- it refuses
+  /// on its own side and, to the broker, only stops leasing. Otherwise heard from in the
+  /// last 5 minutes (`active`), or not (`offline`).
+  function workerCondition({ unfit, unfit_since, last_seen, release_asked_at, current_case }, now) {
+    const seen = finite(last_seen) ? now - Number(last_seen) : Infinity;
+    const asked = finite(release_asked_at) ? now - Number(release_asked_at) : Infinity;
+    if (unfit) return { key: "unfit", label: "Cannot run cases", cls: "quarantined",
+                        since: finite(unfit_since) ? Number(unfit_since) : null };
+    if (seen < 300) return { key: "active", label: "Active", cls: "done", since: null };
+    if (asked < 1800 && seen > 1800 && !current_case)
+      return { key: "refusing", label: "Not taking cases", cls: "leased", since: finite(last_seen) ? Number(last_seen) : null };
+    return { key: "offline", label: "Offline", cls: "quarantined", since: null };
+  }
+
+  /// The first sentence of what a node said, for a line under its badge; the rest -- what
+  /// to do about it -- is the tooltip.
+  function firstSentence(text) {
+    const t = String(text || "");
+    const end = t.search(/\.\s/);
+    return end > 0 ? t.slice(0, end) : t;
+  }
+
   /// One card per place work happens, from BOTH sources.
   ///
   /// The strip used to be the reported SLURM queues alone, so a panel titled
@@ -7161,7 +7197,7 @@
     const byName = new Map();
     const card = (name) => {
       if (!byName.has(name)) byName.set(name, {
-        name, working: 0, idle: 0, offline: 0, queued: null, detail: "",
+        name, working: 0, idle: 0, offline: 0, unfit: 0, queued: null, detail: "",
         age_seconds: null, stale: false, age_title: "", newest_seen: null,
       });
       return byName.get(name);
@@ -7174,7 +7210,11 @@
       // A worker unheard-from for 300 s is OFFLINE, by the Workers table's own
       // rule. Counted as idle, two machines that had been gone for 16 h read
       // "2 idle" on this card while the table below called them Offline.
-      if (w.last_seen == null || nowSeconds - w.last_seen >= 300) c.offline++;
+      // A machine that refuses work on its own side is not offline: it asks what to run
+      // and says why it will not take a case (workerCondition).
+      const cond = workerCondition(w, nowSeconds).key;
+      if (cond === "unfit" || cond === "refusing") c.unfit++;
+      else if (w.last_seen == null || nowSeconds - w.last_seen >= 300) c.offline++;
       else if (w.current_case) c.working++;
       else c.idle++;
       if (c.newest_seen === null || w.last_seen > c.newest_seen) c.newest_seen = w.last_seen;

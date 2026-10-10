@@ -5,7 +5,12 @@ anything outside the broker's own API:
 
 - campaign status (counts by state and by split, expired leases, 24h throughput, ETA),
   auto-refreshing every 60s by default
-- the worker table, including which host/cluster each worker actually ran on
+- the worker table, including which host/cluster each worker actually ran on, and
+  **why a machine takes no cases**: *Cannot run cases* with the node's own words under
+  it (`the disk holding … has 11.7 GB free, under the 20.0 GB a case needs`, a container
+  engine that is not running, no MPI) and since when; *Not taking cases* for an older
+  build that cannot say why but goes on asking what to run and never for a case. The
+  fleet cards count both as *can't run* rather than *offline*.
 - a browsable, paginated, filterable case list — click a row to expand every
   field the broker holds on it: state, split, LCZ, attempts, **which machine
   produced it** (worker/host/cluster, from the runner's own report at
@@ -264,6 +269,7 @@ account's notices.
 | the broker drains a failing machine | `CASEBROKER_FAIL_BURST_CASES` cases failed on one machine within `CASEBROKER_FAIL_BURST_SECONDS` (an operator's own drain is not announced) | on | anyone |
 | a machine holding a case goes silent | not heard from for `CASEBROKER_PUSH_SILENT_MINUTES` (20) while its case is leased | **off** | anyone |
 | a node's update fails | it tried a new build, could not start it, and went back | on | anyone |
+| a machine cannot run cases | a node's own check refuses work (a full disk, a container engine that is not running, no MPI); once when it begins, not on every ask | on | anyone |
 | the part store is nearly full | 90% of `CASEBROKER_PARTS_MAX_GB`, or the volume's free space down to 1.11× `CASEBROKER_PARTS_RESERVE_GB` | on | admins |
 | nothing finishes for hours | cases are leased and none finished for `CASEBROKER_PUSH_STALL_HOURS` (6) | on | anyone |
 | the queue runs dry | no case is pending any more | on | anyone |

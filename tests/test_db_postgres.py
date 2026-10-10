@@ -556,6 +556,27 @@ def test_the_release_catalog_and_target_roundtrip():
 
 
 @scratch_only
+def test_a_node_that_cannot_run_is_recorded_and_cleared_over_a_real_connection():
+    """node_release's unfit: a row for a node that has never leased (INSERT ... ON CONFLICT DO
+    NOTHING), the spell dated once, cleared by a lease; and status lists a worker that only
+    asks what to run."""
+    conn = fresh_conn()
+    w = prefix("w-unfit")
+    try:
+        db.node_release(conn, w, "win-x64", "1.0+a", unfit="the disk is full")
+        db.node_release(conn, w, "win-x64", "1.0+a", unfit="the disk is still full")
+        row = conn.execute("SELECT unfit, unfit_since FROM workers WHERE worker_id = ?", (w,)).fetchone()
+        assert row["unfit"] == "the disk is still full" and row["unfit_since"]
+        assert any(x["worker_id"] == w and x["unfit"] for x in db.status(conn)["workers"])
+        db.lease(conn, w, count=0)
+        assert conn.execute("SELECT unfit FROM workers WHERE worker_id = ?", (w,)).fetchone()["unfit"] is None
+    finally:
+        tidy = fresh_conn()
+        tidy.execute("DELETE FROM events WHERE worker_id = ?", (w,))
+        tidy.execute("DELETE FROM workers WHERE worker_id = ?", (w,))
+
+
+@scratch_only
 def test_which_release_files_the_broker_keeps_over_a_real_connection():
     """The queries behind the files the broker serves: the newest builds (ties broken by
     name), and a hash a kept build shares never let go. Scratch only, as above."""

@@ -8,6 +8,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.43.0] - 2026-10-10
+
+### Added
+- **A machine that refuses work on its own side says why, on the page.** A lab machine with 11.7 GB
+  free under the 20 GB a case needs printed "this machine cannot run cases" to a console nobody
+  watched; it never leased, so the Workers table called it *Offline*, and after a day it dropped off
+  the list -- while it was alive and asking what to run every few minutes. A node now sends the
+  reason with those asks (`unfit` on `GET /v1/node/release`, Eddy3D dev 2026-10-10 on); the broker
+  keeps it on the worker's row (`unfit`, `unfit_since`) until the node says nothing or leases, makes a
+  row for a node that never leased, and announces the start of each spell ("a machine cannot run
+  cases", a new push kind, on by default). The Workers table shows *Cannot run cases* with the
+  node's own words under it and since when, and the fleet cards count it as *can't run*. An older
+  build that cannot say why shows as *Not taking cases* when it goes on asking what to run and never
+  for a case, and a worker that only asks what to run stays listed instead of aging off after a day.
+
 ## [0.42.5] - 2026-10-10
 
 ### Fixed

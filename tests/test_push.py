@@ -129,7 +129,7 @@ def test_a_reader_subscribes_reads_changes_and_removes_its_own_browser(app):
     # The defaults, less what a viewer may not have and what is off by default.
     assert r.json()["status"] == "created"
     assert r.json()["events"] == ["case_done", "case_quarantined", "worker_drained", "update_failed",
-                                  "campaign_stalled", "queue_empty"]
+                                  "worker_unfit", "campaign_stalled", "queue_empty"]
     got = c.get("/v1/push/subscriptions", params={"endpoint": sub["endpoint"]}).json()
     assert got["events"] == r.json()["events"] and got["role"] == "viewer"
     assert sub["keys"]["auth"] not in json.dumps(got), "the keys are never handed back"
