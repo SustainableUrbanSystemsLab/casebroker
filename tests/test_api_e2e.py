@@ -708,3 +708,19 @@ def test_healthz_tells_the_internet_less_than_it_tells_an_operator(broker):
 
     named = broker.get("/healthz").json()          # the fixture carries a token
     assert named["db"], "an authenticated operator still gets the detail"
+
+
+def test_the_header_logo_and_the_favicon_are_one_flat_mark():
+    """The header's tile was a pink gradient with a shadow and the favicon a dark tile with a
+    green mark: two logos. Now one flat green tile with the same white wind, in both."""
+    import re
+    import urllib.parse
+    page = (pathlib.Path(__file__).resolve().parents[1] / "casebroker" / "static" / "dashboard.html").read_text(encoding="utf-8")
+    icon = urllib.parse.unquote(re.search(r'<link rel="icon" type="image/svg\+xml" href="data:image/svg\+xml,([^"]+)"', page).group(1))
+    css = page[page.index("  .brand-logo {"):page.index("  .brand-logo svg")]
+    green = re.search(r"background: (#[0-9a-f]{6});", css).group(1)
+    assert f"fill='{green}'" in icon and "stroke='#ffffff'" in icon
+    assert "linear-gradient(" not in css and "box-shadow:" not in css, "flat"
+    assert "[data-theme=\"dark\"] .brand-logo" not in page, "the same in both themes"
+    for d in re.findall(r'<path d="([^"]+)"/>', page[page.index('<div class="brand-logo"'):][:600]):
+        assert d in icon, d

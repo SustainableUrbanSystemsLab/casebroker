@@ -8,6 +8,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.44.1] - 2026-10-10
+
+### Changed
+- **One flat green logo.** The header's tile was a pink gradient with a shadow and the favicon a dark
+  tile with a green mark. Both are now the same flat mark -- a green (#2da44e) tile with the wind in
+  white -- in both themes, and the home-screen manifest's theme colour matches.
+
 ## [0.44.0] - 2026-10-10
 
 ### Added

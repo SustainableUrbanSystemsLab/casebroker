@@ -7,7 +7,7 @@
 <!-- Lets iOS add the dashboard to the Home Screen as an app of its own, the only
      place Safari on an iPhone or iPad offers push (app.py, /manifest.webmanifest). -->
 <link rel="manifest" href="/manifest.webmanifest" />
-<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A//www.w3.org/2000/svg%27%20viewBox%3D%270%200%2024%2024%27%3E%3Crect%20width%3D%2724%27%20height%3D%2724%27%20rx%3D%276%27%20fill%3D%27%2322272e%27/%3E%3Cpath%20d%3D%27M17.7%207.7a2.5%202.5%200%201%201%201.8%204.3H2M9.6%204.6A2%202%200%201%201%2011%208H2M12.6%2019.4A2%202%200%201%200%2014%2016H2%27%20fill%3D%27none%27%20stroke%3D%27%2357ab5a%27%20stroke-width%3D%272.2%27%20stroke-linecap%3D%27round%27%20stroke-linejoin%3D%27round%27/%3E%3C/svg%3E" />
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg%20xmlns=%27http://www.w3.org/2000/svg%27%20viewBox=%270%200%2024%2024%27%3E%3Crect%20width=%2724%27%20height=%2724%27%20rx=%276%27%20fill=%27%232da44e%27/%3E%3Cg%20fill=%27none%27%20stroke=%27%23ffffff%27%20stroke-width=%272.2%27%20stroke-linecap=%27round%27%20stroke-linejoin=%27round%27%3E%3Cpath%20d=%27M17.7%207.7a2.5%202.5%200%201%201%201.8%204.3H2%27/%3E%3Cpath%20d=%27M9.6%204.6A2%202%200%201%201%2011%208H2%27/%3E%3Cpath%20d=%27M12.6%2019.4A2%202%200%201%200%2014%2016H2%27/%3E%3C/g%3E%3C/svg%3E" />
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -172,10 +172,6 @@
     background: #be185d;                      /* brand-700 */
     border-color: #9d174d;
   }
-  [data-theme="dark"] .brand-logo {
-    background: linear-gradient(135deg, #96236f 0%, #b12a83 50%, #e23c80 100%);
-    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3);
-  }
 
 
   * { box-sizing: border-box; }
@@ -228,15 +224,13 @@
     width: 32px;
     height: 32px;
     border-radius: 8px;
-    /* The ramp out of the RhinoPackages logo (#96236f -> #b12a83 -> #e23c80),
-       not the state scale's green-to-blue. This is the one place the brand is
-       allowed to be purely decorative. */
-    background: linear-gradient(135deg, #96236f 0%, #b12a83 50%, #e23c80 100%);
+    /* Flat, and the same mark as the favicon in <head>: one green tile, the wind in
+       white, in both themes -- no gradient, no shadow. */
+    background: #2da44e;
     display: flex;
     align-items: center;
     justify-content: center;
     color: #ffffff;
-    box-shadow: 0 2px 6px rgba(var(--accent-rgb), 0.3);
   }
   .brand-logo svg { width: 18px; height: 18px; }
   .brand-title {

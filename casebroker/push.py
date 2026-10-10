@@ -852,5 +852,5 @@ MANIFEST = {
     "scope": "/",
     "display": "standalone",
     "background_color": "#22272e",
-    "theme_color": "#22272e",
+    "theme_color": "#2da44e",
 }
