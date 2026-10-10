@@ -185,6 +185,38 @@ def node_environment(tmp: Path) -> dict[str, str]:
     return env
 
 
+def warm_container_engine(env: dict[str, str], timeout: float = 120) -> None:
+    """Ask the container daemon to answer once, with time to spare, BEFORE the node asks it.
+
+    ``run-sim-node`` probes the engine with ``docker info`` under a 10 s limit -- right for a node
+    on a machine whose daemon is up, and the whole reason this driver fails on a CI runner whose
+    daemon is still coming up: the daily run of 2026-10-10 read ``Docker daemon did not respond
+    within 10s`` 17 s after the job started, with the very build that had passed the same driver
+    on Eddy3D's runner twelve hours earlier (there, minutes of dotnet build run first). A probe in
+    a test is given generous time; a daemon that is DOWN still shows, as the node's own refusal,
+    with how long it was waited for printed here."""
+    cli = next((c for c in ("docker", "podman") if shutil.which(c)), None)
+    if cli is None:
+        say("engine: no docker or podman CLI on PATH; the node will say so")
+        return
+    started = time.monotonic()
+    last = ""
+    while True:
+        try:
+            probe = subprocess.run([cli, "info"], env=env, capture_output=True, text=True, timeout=30)
+            if probe.returncode == 0:
+                say(f"engine: {cli} daemon answered after {time.monotonic() - started:.1f} s")
+                return
+            last = (probe.stderr or probe.stdout).strip().splitlines()[-1:] or ["exit %d" % probe.returncode]
+            last = last[0]
+        except subprocess.TimeoutExpired:
+            last = "no answer within 30 s"
+        if time.monotonic() - started > timeout:
+            say(f"engine: {cli} daemon did not answer in {timeout:.0f} s ({last}); the node will say so")
+            return
+        time.sleep(2)
+
+
 def broker_environment(tmp: Path) -> dict[str, str]:
     """No env tokens and no setup token: the from-scratch path, secured by the first account."""
     env = {k: v for k, v in os.environ.items() if not k.startswith("CASEBROKER_")}
@@ -239,6 +271,7 @@ def run(args: argparse.Namespace, tmp: Path, checks: Checks, logs: list[Logged])
     node_v2 = "--heartbeat" in help_text
     say(f"node:   {identity.get('build')} ({identity.get('platform')})" +
         ("" if node_v2 else "  -- a node from before protocol 2: its new fields are not asked for"))
+    warm_container_engine(node_env)
 
     # -- the broker ------------------------------------------------------------------------
     broker = Logged("broker", [sys.executable, "-m", "uvicorn", args.app, "--host", "127.0.0.1",

@@ -8,6 +8,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.42.5] - 2026-10-10
+
+### Fixed
+- **The e3d contract no longer fails on a CI runner whose container daemon is slow to answer.** The
+  daily run of 2026-10-10 passed the token, the hash, the pairing and the seeding, then the node
+  refused with `docker: Docker daemon did not respond within 10s` -- the very build that had passed
+  the same driver on Eddy3D's runner twelve hours earlier. 10 s is the node's own probe limit, right
+  for a machine whose daemon is up; this driver asks the daemon to answer once first (`docker info`
+  or `podman info`, retried for up to two minutes) and prints how long that took. A daemon that is
+  down still fails the run, through the node's own refusal, now with the wait printed beside it.
+
 ## [0.42.4] - 2026-10-09
 
 ### Fixed
