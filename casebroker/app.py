@@ -334,11 +334,22 @@ class DrainIn(BaseModel):
     reason: str | None = Field(default=None, max_length=200)
 
 
+class FleetJobIn(BaseModel):
+    """One job a scheduler holds: what the Worker Fleet table lists for a job that has
+    not started yet, and so has no worker row."""
+    id: str = Field(min_length=1, max_length=32)
+    state: str = Field(min_length=1, max_length=24)
+    reason: str | None = Field(default=None, max_length=80)
+    submitted_at: int | None = None
+    start_at: int | None = None       # the scheduler's own estimate, when it has one
+
+
 class FleetIn(BaseModel):
     cluster: str
     queued: int = Field(default=0, ge=0)
     running: int = Field(default=0, ge=0)
     detail: str | None = None
+    jobs: list[FleetJobIn] | None = Field(default=None, max_length=500)
 
 
 class LeaseOut(BaseModel):
@@ -2082,7 +2093,7 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
     def node_release(request: Request, worker_id: str, platform: str | None = None,
                      build: str | None = None, failed_build: str | None = None,
                      failed_reason: str | None = None, state: str | None = None,
-                     unfit: str | None = None) -> dict[str, Any]:
+                     unfit: str | None = None, cpu: str | None = None) -> dict[str, Any]:
         """What this node should be running. Asked before every lease, and
         during a solve so an update does not have to wait for the case.
 
@@ -2091,7 +2102,9 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         `state` is what it says about the move it was last told to make, shown
         on the fleet table beside the target it is behind. `unfit` is why it will
         not take a case at all -- its own check refused (a full disk, an engine that
-        is not running) -- shown on its row until it says nothing or leases.
+        is not running) -- shown on its row until it says nothing or leases. `cpu`
+        is how busy the whole machine is, in percent: taken as text and dropped when
+        it is not a percentage, so a measurement can never fail the ask.
 
         `url` (with `bytes`) is where to fetch the target's file when the broker
         holds it; null otherwise, and a node then looks on its release share."""
@@ -2104,7 +2117,7 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
                               state=(state or "")[:200] or None,
                               # A row is made for a node that has never leased; not for an id
                               # longer than any a node uses.
-                              unfit=unfit if len(worker_id) <= 200 else None)
+                              unfit=unfit if len(worker_id) <= 200 else None, cpu=cpu)
         out["url"], out["bytes"] = None, None
         size = _held(out.get("sha256")) if platform else None
         if size is not None:
@@ -3131,7 +3144,8 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         Write-scoped because it is an assertion about the campaign that the
         dashboard will show as fact, not a read.
         """
-        db.report_fleet(conn, body.cluster, body.queued, body.running, body.detail)
+        db.report_fleet(conn, body.cluster, body.queued, body.running, body.detail,
+                        jobs=[j.model_dump() for j in body.jobs] if body.jobs is not None else None)
         return {"cluster": body.cluster}
 
     @app.get("/v1/storage", dependencies=[ReadAuth])

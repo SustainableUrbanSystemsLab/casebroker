@@ -183,7 +183,12 @@ CREATE TABLE IF NOT EXISTS workers (
     -- goes on making while it waits; cleared when it says nothing, and by its next
     -- lease. A node that refused on its own side used to look like one that died.
     unfit            TEXT,
-    unfit_since      INTEGER
+    unfit_since      INTEGER,
+    -- How busy the whole machine is (percent of every core, its solve and anything else
+    -- on it -- a lab workstation in use, a node shared with another job), and when the
+    -- node measured it. Said with its release asks; NULL from a node that does not.
+    cpu_pct          REAL,
+    cpu_at           INTEGER
 );
 -- What a SCHEDULER holds that has not reached the broker yet. A worker queued in
 -- SLURM has never contacted this service -- it does not exist here until its
@@ -197,7 +202,12 @@ CREATE TABLE IF NOT EXISTS fleet (
     queued       INTEGER NOT NULL DEFAULT 0,
     running      INTEGER NOT NULL DEFAULT 0,
     detail       TEXT,
-    reported_at  INTEGER NOT NULL
+    reported_at  INTEGER NOT NULL,
+    -- The jobs themselves, as JSON [{id, state, reason, submitted_at, start_at}]:
+    -- what the Worker Fleet table lists for a job that has not started, so it has
+    -- not yet called the broker and has no worker row. NULL from a reporter that
+    -- sends counts only.
+    jobs         TEXT
 );
 
 -- What a case will be meshed from -- GlobalBuildingAtlas footprints and heights,
@@ -645,7 +655,12 @@ CREATE TABLE IF NOT EXISTS workers (
     -- goes on making while it waits; cleared when it says nothing, and by its next
     -- lease. A node that refused on its own side used to look like one that died.
     unfit            TEXT,
-    unfit_since      INTEGER
+    unfit_since      INTEGER,
+    -- How busy the whole machine is (percent of every core, its solve and anything else
+    -- on it -- a lab workstation in use, a node shared with another job), and when the
+    -- node measured it. Said with its release asks; NULL from a node that does not.
+    cpu_pct          REAL,
+    cpu_at           INTEGER
 );
 -- What a SCHEDULER holds that has not reached the broker yet. A worker queued in
 -- SLURM has never contacted this service -- it does not exist here until its
@@ -659,7 +674,12 @@ CREATE TABLE IF NOT EXISTS fleet (
     queued       INTEGER NOT NULL DEFAULT 0,
     running      INTEGER NOT NULL DEFAULT 0,
     detail       TEXT,
-    reported_at  INTEGER NOT NULL
+    reported_at  INTEGER NOT NULL,
+    -- The jobs themselves, as JSON [{id, state, reason, submitted_at, start_at}]:
+    -- what the Worker Fleet table lists for a job that has not started, so it has
+    -- not yet called the broker and has no worker row. NULL from a reporter that
+    -- sends counts only.
+    jobs         TEXT
 );
 
 -- What a case will be meshed from -- GlobalBuildingAtlas footprints and heights,
@@ -2712,7 +2732,7 @@ def lease_refusal(conn, build: str | None) -> str | None:
 def node_release(conn, worker_id: str, platform: str | None, build: str | None,
                  failed_build: str | None = None, failed_reason: str | None = None,
                  state: str | None = None, now: int | None = None,
-                 unfit: str | None = None) -> dict[str, Any]:
+                 unfit: str | None = None, cpu: float | None = None) -> dict[str, Any]:
     """What one node should be running, and whether it may take new work.
 
     Asked before every lease and during a solve. The answer names a build, the
@@ -2730,8 +2750,18 @@ def node_release(conn, worker_id: str, platform: str | None, build: str | None,
     is an event (and a push notice). A node that has never leased gets a worker
     row for it: a machine that cannot run from its first start is exactly the
     one nobody would otherwise see.
+
+    `cpu` is how busy the whole machine is, in percent, as the node measured it since
+    its last ask: kept with its time. A value that is not a percentage is dropped --
+    a measurement must never be what fails the ask.
     """
     now = now or _now()
+    try:
+        cpu = float(cpu) if cpu is not None else None
+    except (TypeError, ValueError):
+        cpu = None
+    if cpu is not None and not (math.isfinite(cpu) and -0.5 <= cpu <= 100.5):
+        cpu = None
     unfit = (unfit or "").strip()[:300] or None
     if unfit:
         conn.execute(
@@ -2763,6 +2793,9 @@ def node_release(conn, worker_id: str, platform: str | None, build: str | None,
         elif w["unfit"]:
             conn.execute("UPDATE workers SET unfit = NULL, unfit_since = NULL WHERE worker_id = ?",
                          (worker_id,))
+        if cpu is not None:
+            conn.execute("UPDATE workers SET cpu_pct = ?, cpu_at = ? WHERE worker_id = ?",
+                         (round(min(100.0, max(0.0, cpu)), 1), now, worker_id))
         # The ask itself is evidence -- a node that never asks cannot update
         # itself -- and what it says about the move is kept until it is there.
         if not target or target == build:
@@ -4775,22 +4808,26 @@ def get_footprints(conn, case_id: str):
 
 @_locked
 def report_fleet(conn, cluster: str, queued: int, running: int,
-                 detail: str | None = None, now: int | None = None) -> None:
+                 detail: str | None = None, now: int | None = None,
+                 jobs: list[dict[str, Any]] | None = None) -> None:
     """Record what a scheduler currently holds for one cluster.
 
     Upsert on cluster, so a reporter can run on a timer and simply overwrite its
-    own last snapshot rather than accumulating history nobody reads.
+    own last snapshot rather than accumulating history nobody reads. ``jobs`` is
+    the snapshot's job list, replaced with it; None (a reporter that sends counts
+    only) leaves no list.
     """
     now = now or _now()
+    listed = json.dumps(jobs) if jobs is not None else None
     conn.execute("BEGIN IMMEDIATE")
     try:
         updated = conn.execute(
-            "UPDATE fleet SET queued=?, running=?, detail=?, reported_at=? WHERE cluster=?",
-            (queued, running, detail, now, cluster)).rowcount
+            "UPDATE fleet SET queued=?, running=?, detail=?, reported_at=?, jobs=? WHERE cluster=?",
+            (queued, running, detail, now, listed, cluster)).rowcount
         if not updated:
             conn.execute(
-                "INSERT INTO fleet (cluster, queued, running, detail, reported_at)"
-                " VALUES (?, ?, ?, ?, ?)", (cluster, queued, running, detail, now))
+                "INSERT INTO fleet (cluster, queued, running, detail, reported_at, jobs)"
+                " VALUES (?, ?, ?, ?, ?, ?)", (cluster, queued, running, detail, now, listed))
         conn.execute("COMMIT")
     except Exception:
         conn.execute("ROLLBACK")
@@ -4807,9 +4844,15 @@ def fleet(conn, now: int | None = None) -> list[dict[str, Any]]:
     current is the specific way this feature could mislead.
     """
     now = now or _now()
-    return [{**dict(r), "age_seconds": now - r["reported_at"]}
-            for r in conn.execute(
-                "SELECT * FROM fleet ORDER BY cluster")]
+    out = []
+    for r in conn.execute("SELECT * FROM fleet ORDER BY cluster"):
+        row = {**dict(r), "age_seconds": now - r["reported_at"]}
+        try:
+            row["jobs"] = json.loads(row["jobs"]) if row.get("jobs") else None
+        except (TypeError, ValueError):
+            row["jobs"] = None
+        out.append(row)
+    return out
 
 
 # What each table is for, in the words an operator needs when one of them turns

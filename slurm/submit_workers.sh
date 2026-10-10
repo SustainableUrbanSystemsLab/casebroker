@@ -105,4 +105,14 @@ for lane in $(seq 1 "$lanes"); do
     echo "  last: $prev   (add more to this lane: --after $prev)"
 done
 
-if [ "$dry" = 0 ]; then squeue -u "$USER" -n "$name" -o '%.10i %.9T %.10M %.11L %R' | head -$((lanes * n + 1)); fi
+if [ "$dry" = 0 ]; then
+    # What SLURM now holds for these jobs, to the broker's Worker Fleet: a queued job has never
+    # called the broker, so it shows there only through this report (fleet_report.py, which each
+    # job repeats while it runs). The cluster is the one the job script's node names.
+    cluster=$(grep -oE -- '--cluster [A-Za-z0-9_-]+' "$script" | head -1 | awk '{print $2}')
+    if command -v python3 >/dev/null && [ -f "$here/fleet_report.py" ] && [ -n "$cluster" ]; then
+        python3 "$here/fleet_report.py" --cluster "$cluster" --name "$name" \
+            || echo "the queue was not reported to the broker (the line above says why)"
+    fi
+    squeue -u "$USER" -n "$name" -o '%.10i %.9T %.10M %.11L %R' | head -$((lanes * n + 1))
+fi

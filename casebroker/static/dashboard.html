@@ -5025,9 +5025,10 @@
                   title="${esc(c.age_title)}">${esc(age)}</span></div>
           <div class="fc-nums">
             <span><span class="fc-n" style="color:var(--primary)">${c.working}</span><span class="fc-lbl">working</span></span>
-            ${c.queued === null
-              ? `<span><span class="fc-n">${c.idle}</span><span class="fc-lbl">idle</span></span>`
-              : `<span><span class="fc-n">${c.queued}</span><span class="fc-lbl">queued</span></span>`}
+            ${c.queued === null || c.idle
+              ? `<span><span class="fc-n">${c.idle}</span><span class="fc-lbl">idle</span></span>` : ""}
+            ${c.queued !== null
+              ? `<span title="jobs the scheduler holds that have not started; the table below lists them"><span class="fc-n">${c.queued}</span><span class="fc-lbl">queued</span></span>` : ""}
             ${c.unfit ? `<span title="their own check refuses work -- a full disk, a container engine that is not running; the Workers table says why"><span class="fc-n" style="color:var(--bad)">${c.unfit}</span><span class="fc-lbl">can't run</span></span>` : ""}
             ${c.offline ? `<span title="not heard from for 5 min or more"><span class="fc-n" style="color:var(--text-muted)">${c.offline}</span><span class="fc-lbl">offline</span></span>` : ""}
           </div>
@@ -5068,9 +5069,16 @@
     const bits = [];
     if (w.cpus) bits.push(`${w.cpus} cpu`);
     if (w.mem_gb) bits.push(`${Math.round(w.mem_gb)} GB`);
+    // How busy the whole machine is -- this node's solve and anything else on it: a lab
+    // workstation somebody is using, a cluster node shared with another job. Measured by
+    // the node between its release asks; not shown once it is a quarter of an hour old.
+    const cpuAge = finite(w.cpu_at) ? Date.now() / 1000 - Number(w.cpu_at) : Infinity;
+    const cpu = finite(w.cpu_pct) && cpuAge < 900 ? Math.round(Number(w.cpu_pct)) : null;
+    if (cpu !== null) bits.push(`CPU ${cpu}%`);
     if (!bits.length) return "";
     const can = (w.features || []).length ? `can: ${w.features.join(", ")}` : "declared no features";
-    return `<div class="mono" style="font-size:10.5px;color:var(--text-muted);margin-top:2px;white-space:nowrap" title="${esc(can)}">${esc(bits.join(" · "))}</div>`;
+    const said = cpu !== null ? `; machine CPU in use: ${cpu}% (all of it, not only this node's), measured ${relTime(Number(w.cpu_at))}` : "";
+    return `<div class="mono" style="font-size:10.5px;color:var(--text-muted);margin-top:2px;white-space:nowrap" title="${esc(can + said)}">${esc(bits.join(" · "))}</div>`;
   }
 
   function renderWorkersHead() {
@@ -5086,8 +5094,9 @@
 
   // Workers Table
     const workers = sortWorkers(st.workers || []);
-    $("workerCountBadge").textContent = `${workers.length} known`;
-    if (workers.length) {
+    const queued = queuedJobs(st.fleet);
+    $("workerCountBadge").textContent = `${workers.length} known` + (queued.length ? ` · ${queued.length} queued` : "");
+    if (workers.length || queued.length) {
       $("workersEmpty").style.display = "none";
       $("workersTableWrap").style.display = "block";
       $("workersTable").style.display = "table";
@@ -5137,7 +5146,20 @@
                     + `</div>`
                   : "—"}</td>
           </tr>`;
-      }).join("");
+      }).join("") + queued.map(({ cluster, age, job }) => `
+          <tr class="queued-job">
+            <td><code class="inline" title="SLURM job ${esc(job.id)}: it calls the broker, and gets a worker row, when it starts">job ${esc(job.id)}</code></td>
+            <td>—</td>
+            <td>${cluster ? `<span class="chip">${esc(cluster)}</span>` : "—"}</td>
+            <td>—</td>
+            <td><span class="badge pending" title="${esc(`SLURM: ${job.state}${job.reason ? ` (${job.reason})` : ""}`)}">Queued</span>
+              <div class="label-hint" style="margin-top:4px">${esc(queueReason(job.reason))}</div></td>
+            <td>${finite(job.submitted_at) ? esc(relTime(Number(job.submitted_at))) : "—"}</td>
+            <td title="when the scheduler was last asked">${age === null ? "—" : esc(`reported ${relTime(Math.floor(Date.now() / 1000) - age)}`)}</td>
+            <td>${finite(job.start_at) && Number(job.start_at) > Date.now() / 1000
+                  ? `<span class="label-hint" title="the scheduler's own estimate, which moves">starts ~${esc(new Date(Number(job.start_at) * 1000).toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit" }))}</span>`
+                  : "—"}</td>
+          </tr>`).join("");
     } else {
       $("workersEmpty").style.display = "block";
       // `st.fleet`, not a bare `fleet`: that local was removed when the strip
@@ -7171,6 +7193,32 @@
     if (asked < 1800 && seen > 1800 && !current_case)
       return { key: "refusing", label: "Not taking cases", cls: "leased", since: finite(last_seen) ? Number(last_seen) : null };
     return { key: "offline", label: "Offline", cls: "quarantined", since: null };
+  }
+
+  /// The jobs a cluster's scheduler holds that have not started (casebroker's POST /v1/fleet,
+  /// sent by slurm/fleet_report.py): a queued job has never called the broker, so it has no
+  /// worker row, and without these the Worker Fleet showed nothing until one began.
+  function queuedJobs(fleet) {
+    const out = [];
+    for (const f of fleet || []) {
+      for (const j of Array.isArray(f.jobs) ? f.jobs : []) {
+        if (!j || /^(RUNNING|COMPLETING|COMPLETED|CANCELLED|FAILED|TIMEOUT)$/i.test(String(j.state || ""))) continue;
+        out.push({ cluster: f.cluster, age: finite(f.age_seconds) ? Number(f.age_seconds) : null, job: j });
+      }
+    }
+    return out;
+  }
+
+  /// SLURM's reason for a pending job, in words; the scheduler's own word is the tooltip.
+  function queueReason(reason) {
+    const r = String(reason || "");
+    if (r === "Priority") return "behind higher-priority jobs";
+    if (r === "Resources") return "waiting for nodes to free up";
+    if (r === "Dependency") return "after the job before it in its chain";
+    if (r === "BeginTime") return "not before its start time";
+    if (r === "JobHeldUser" || r === "JobHeldAdmin") return "held";
+    if (/^QOS|AssocGrp|AssocMax/.test(r)) return "at a limit of the account or QOS";
+    return r && r !== "None" ? r : "waiting";
   }
 
   /// The first sentence of what a node said, for a line under its badge; the rest -- what

@@ -48,6 +48,12 @@ printf '%s\\n' "$@" >> "$SUBMITTED"; echo >> "$SUBMITTED"
 echo "$n;fake"
 """,
     "squeue": "#!/bin/bash\nexit 0\n",
+    # python3 runs only fleet_report.py here: recorded, never run (its own tests run it).
+    "python3": """#!/bin/bash
+echo "python3 $*" >> "$CALLS"
+""",
+    # The jobs' report loop sleeps between reports: here it ends at once instead of lingering.
+    "sleep": "#!/bin/bash\nexit 1\n",
     # scp copies onto the fake cluster home; ssh runs the remote command there.
     "scp": """#!/bin/bash
 echo "scp $*" >> "$CALLS"
@@ -78,6 +84,7 @@ def cluster(tmp_path):
     shim = bin_ / "podman-pace.sh"
     shim.write_text("#!/bin/bash\n")
     shim.chmod(0o755)
+    (bin_ / "fleet_report.py").write_text("# copied beside the job scripts by pace_workers.sh\n")
     cred = home / ".local" / "share" / "Eddy3D" / "node" / "credential.json"
     cred.parent.mkdir(parents=True)
     cred.write_text('{"name": "ice"}')
@@ -104,6 +111,17 @@ def _calls(cluster) -> list[str]:
 
 def _e3d(cluster) -> list[str]:
     return [c for c in _calls(cluster) if c.startswith("E3D ")]
+
+
+def _eventually(cluster, line: str, seconds: float = 5.0) -> bool:
+    """A call a script made in the background: it may land just after the script exits."""
+    import time
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        if line in _calls(cluster):
+            return True
+        time.sleep(0.05)
+    return False
 
 
 def _ran(cluster) -> list[str]:
@@ -137,6 +155,8 @@ def test_a_job_takes_the_target_build_then_runs_the_node_handing_off_after_7_h(c
     # replaces while the job runs (run-sim-node starts every step of a case by its own path).
     synced_by, node = _ran(cluster)
     assert synced_by == str(exe)
+    # And what SLURM holds for these jobs goes to the broker's Worker Fleet, in the background.
+    assert _eventually(cluster, f"python3 {cluster['bin'] / 'fleet_report.py'} --cluster {name} --name e3d-node-{name.lower()}")
     copy = pathlib.Path(node)
     assert copy.name == "E3D" and copy.parent.name.startswith("e3d-bin.")
     assert copy.parent.parent == pathlib.Path(cluster["env"]["TMPDIR"]), "node-local scratch, wiped with the job"
@@ -230,6 +250,9 @@ def test_from_this_machine_to_the_e3d_command_line(cluster):
     assert second[1:3] == ["--export=ALL,CHAIN_PREV=1001,CHUNK_HOURS=6.5", "--dependency=afterany:1001"]
     assert "lane 1 (2 jobs): 1001 -> 1002" in r.stdout
     assert (cluster["home"] / "windcomfort" / "logs").is_dir(), "where #SBATCH -o writes"
+    # The queue just made goes to the broker's Worker Fleet, from the login node, under the
+    # cluster name the job's node uses -- so the queued jobs and the workers share one card.
+    assert f"python3 {cluster['bin'] / 'fleet_report.py'} --cluster ICE --name e3d-node-ice" in _calls(cluster)
 
     # Now run the second job as SLURM would: its script, with what --export gave it, after the first ended.
     script = pathlib.Path(second[-1])

@@ -269,6 +269,15 @@ Check a hand-over in the job log (`~/windcomfort/logs/e3d_node_<job>.out`) for
 `continuing: fetching the mesh ice-<job>-0 made`, and `GET /v1/cases/<id>/parts` for what the
 broker holds.
 
+**Queued jobs on the dashboard.** A job that has not started has never called the broker, so the
+Worker Fleet knows of it only through `fleet_report.py` (copied beside the job files): it runs
+`squeue` for this account's node jobs and posts the counts and the jobs -- state, SLURM's reason,
+the scheduler's start estimate -- with the node's own credential (read from its file, never put on a
+command line). `submit_workers.sh` runs it after submitting; each job runs it when it starts and every
+`FLEET_REPORT_SECONDS` (300, `0` never) while it runs. With every job still waiting, nothing runs it, and
+the cluster's card turns dashed after 15 minutes: the last count, marked stale. Where cron is allowed,
+`*/5 * * * * python3 ~/windcomfort/bin/fleet_report.py --cluster ICE --name e3d-node-ice` keeps it current.
+
 **Guard.** A job whose predecessor ended in under 15 minutes (`CHAIN_MIN_SECONDS`) starts no worker,
 so the rest of the chain falls through instead of leasing cases to fail them. The same stops it on
 demand: `scancel` one pending job of a lane. `scancel -u $USER -n e3d-node-ice` stops everything; a

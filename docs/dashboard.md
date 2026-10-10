@@ -11,6 +11,12 @@ anything outside the broker's own API:
   engine that is not running, no MPI) and since when; *Not taking cases* for an older
   build that cannot say why but goes on asking what to run and never for a case. The
   fleet cards count both as *can't run* rather than *offline*.
+  Each worker's host line has the machine's **CPU in use** (all of it, not only the node's
+  solve: a lab workstation somebody is working at shows), as the node last measured it;
+  nothing once the measurement is a quarter of an hour old. **Queued jobs** the scheduler
+  holds for a cluster are listed after the workers -- *job 4711 · Queued · behind
+  higher-priority jobs · starts ~Sat 13:57* -- from the cluster's queue report, since a job
+  that has not started has never called the broker.
 - a browsable, paginated, filterable case list — click a row to expand every
   field the broker holds on it: state, split, LCZ, attempts, **which machine
   produced it** (worker/host/cluster, from the runner's own report at

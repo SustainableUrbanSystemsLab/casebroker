@@ -8,6 +8,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.44.0] - 2026-10-10
+
+### Added
+- **Queued jobs are listed in the Worker Fleet.** A SLURM job that has not started has never called
+  the broker, so twenty node jobs waiting in PACE's queue looked like nothing being scheduled.
+  `slurm/fleet_report.py` (python3's standard library and the node's own credential, read from its
+  file) posts what `squeue` holds for this account's node jobs -- counts, a summary line, and each job
+  with its state, SLURM's reason and the scheduler's start estimate (`POST /v1/fleet` takes a `jobs`
+  list, up to 500) -- and the Worker Fleet table lists the waiting ones after the workers ("job 4711 ·
+  Queued · behind higher-priority jobs · starts ~Sat 13:57"), its badge counts them, and the cluster's
+  card shows queued and idle together. `submit_workers.sh` reports after submitting; each job reports
+  when it starts and every `FLEET_REPORT_SECONDS` (300) while it runs.
+- **Each worker's machine says how busy it is.** The release ask carries `cpu`: the whole machine's
+  CPU in use, measured by the node since its last ask (Eddy3D dev 2026-10-10 on). The Worker Fleet shows
+  it beside the cores and memory -- "4 cpu · 32 GB · CPU 63%" -- so a lab workstation somebody is
+  working at, or a cluster node shared with another job, shows as busy; a measurement a quarter of an
+  hour old is not shown. A value that is not a percentage is dropped and never fails the ask.
+
 ## [0.43.0] - 2026-10-10
 
 ### Added

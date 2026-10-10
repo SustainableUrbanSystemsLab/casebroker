@@ -72,6 +72,18 @@ else
     echo "could not copy E3D to node-local scratch; running $B/E3D itself, which another job's sync can replace mid-case"
 fi
 
+# What SLURM holds for these jobs, to the broker's Worker Fleet -- now, and every
+# FLEET_REPORT_SECONDS (300; 0: never) while this job runs: a job that has not started has
+# never called the broker, so the dashboard knows of it only through this (fleet_report.py).
+fleet_report() { python3 "$B/fleet_report.py" --cluster ICE --name "${SLURM_JOB_NAME:-e3d-node-ice}" >/dev/null 2>&1; }
+if command -v python3 >/dev/null && [ -f "$B/fleet_report.py" ]; then
+    fleet_report &
+    every=${FLEET_REPORT_SECONDS:-300}
+    if [[ "$every" =~ ^[0-9]+$ ]] && [ "$every" -gt 0 ]; then
+        ( while sleep "$every"; do fleet_report; done ) >/dev/null 2>&1 &
+    fi
+fi
+
 # Rootless podman needs a runtime dir and a graph root; both live on node-local scratch (wiped at
 # job end, so each job pulls the image again). The shim adds the rest.
 export XDG_RUNTIME_DIR=${TMPDIR:-/tmp}/xdg; mkdir -p "$XDG_RUNTIME_DIR"; chmod 700 "$XDG_RUNTIME_DIR"
