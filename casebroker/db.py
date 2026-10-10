@@ -5085,6 +5085,15 @@ def status(conn, now: int | None = None, recipe: str | None = None) -> dict[str,
             w["features"] = json.loads(w["features"]) if w.get("features") else None
         except (TypeError, ValueError):
             w["features"] = None
+        # The recipes it declared with its last lease, or None for a worker that
+        # declares none (handed the `undeclared_recipes` policy's, or anything).
+        # The workers table shows them beside the queue: the one answer to "why
+        # does a surface-temperature case sit pending while twenty nodes idle" is
+        # that none of the twenty declares it, and nothing else on the page said so.
+        try:
+            w["recipes"] = json.loads(w["recipes"]) if w.get("recipes") else None
+        except (TypeError, ValueError):
+            w["recipes"] = None
     return {
         "fleet": fleet(conn, now),
         "recipe": recipe,

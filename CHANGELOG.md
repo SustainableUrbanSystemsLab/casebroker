@@ -8,6 +8,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.44.2] - 2026-10-10
+
+### Added
+- **The Worker Fleet says which recipes each node declares.** A node is handed only the recipes it
+  declares with its lease, and the thermal recipe (`surf-1008/rad6R0P2-fft-v2`) is declared only where
+  Radiance answers -- so a surface-temperature case that sat pending while twenty nodes idled had no
+  line on the page saying why. `GET /v1/status` now carries each worker's declared `recipes`, the
+  table gains a Recipes column (declared ones as chips, queued ones the worker lacks struck through,
+  "none declared" explained from the release policy), and one line per queued recipe above the table
+  counts pending, leased and how many of the fleet declare it; red when none does. docs/releases.md,
+  "What the Recipes column says".
+- **PACE jobs warm podman before E3D probes it.** E3D asks the engine `info` with a 5 s budget before
+  it pulls the Radiance image, and a cold rootless store on node-local scratch can miss that, which
+  left the node without the thermal recipe for its whole shift. Both sbatch files run `podman info`
+  first; docs/pace-hpc.md section 8 says how to read the job log for which recipes a shift declared.
+
 ## [0.44.1] - 2026-10-10
 
 ### Changed

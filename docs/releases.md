@@ -79,6 +79,20 @@ release share, the node runs it only if it hashes to what an admin registered.
 | `undeclared` | its client sent no build: update it by hand once (`gh release download e3d-node-latest -R Eddy3D-Dev/Eddy3D -p E3D.exe --clobber`, then `E3D node`), and it declares itself from then on |
 | `shared id?` | its build flipped back and forth within minutes: two clients share this worker id — two E3D nodes started under one name (or, before it was retired, an E3D node and a Python worker sharing a `machine.env`). Stop one |
 
+## What the Recipes column says
+
+A node is handed only the recipes it declares with its lease, so the column
+beside Build is where a recipe that never leaves pending is explained.
+
+| chip | meaning |
+| --- | --- |
+| `of12-v6`, `rad6R0P2-fft-v2` | a recipe this worker declared with its last lease (hover for the family: `cyl-1008/…`, `surf-1008/…`). An E3D node declares the wind recipes it can build, `of12-v6` only where its site build has a canopy source, and the thermal recipe only where Radiance answers — the `radiance-energyplus` image through a container engine, or a native rad6R0P2 install. Its console says which at start: *declares the thermal recipe …* or *does not declare the thermal recipe …: <why>* |
+| ~~`rad6R0P2-fft-v2`~~ (struck through) | the queue holds this recipe and this worker did not declare it, so it is never handed one |
+| `none declared` | its lease names no recipes: an E3D from before declarations, or a `--runner` script. It is handed what the policy's *Recipes for nodes that declare none* says, or **anything** when that is unset — a Radiance case included, which it gives back with exit 69 and stops |
+
+Above the table, one line per recipe the queue holds: *rad6R0P2-fft-v2: 48
+pending · 2 leased · 3 of 20 workers declare it*. In red when no worker does.
+
 ## The guards
 
 - A target, fleet or canary, must be a **published** build, and must have a file

@@ -283,6 +283,20 @@ so the rest of the chain falls through instead of leasing cases to fail them. Th
 demand: `scancel` one pending job of a lane. `scancel -u $USER -n e3d-node-ice` stops everything; a
 running job releases its case on the way out (`-n e3d-node-phoenix` on Phoenix).
 
+**The thermal recipe on PACE.** A node declares `surf-1008/rad6R0P2-fft-v2`
+(casebroker `docs/thermal.md`) only where Radiance answers. On PACE that is the
+`docker.io/pkastner/radiance-energyplus` image through the podman shim, which E3D
+pulls when the node starts (multi-GB, again every job: the store is on node-local
+scratch, and Docker Hub's anonymous pull limit applies — the same as the
+OpenFOAM image). Before it pulls, E3D asks the engine `info` with a 5 s budget,
+and a cold rootless store can take longer than that the first time; the node
+then starts without the recipe for the whole shift and says so. Both sbatch
+files warm podman first for that reason. The job log says what happened, right
+after the sync lines: *declares the thermal recipe surf-1008/rad6R0P2-fft-v2*,
+or *does not declare the thermal recipe …: <why>*. The dashboard's Recipes
+column (workers table) shows the same per worker, and the line above the table
+counts how many of the fleet declare each queued recipe.
+
 Traps met setting this up (2026-10-07):
 
 - **mpirun refuses to run as root**, which the container is (`--user 0:0`, section 3):

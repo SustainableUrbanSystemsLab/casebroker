@@ -1704,6 +1704,7 @@
     </div>
 
     <div id="fleetQueue" class="fleet-queue" style="display:none"></div>
+    <div id="workersDeclare" class="label-hint" style="display:none;margin:0 0 8px"></div>
 
     <div id="workersEmpty" class="empty-state">—</div>
     <div class="table-wrap" id="workersTableWrap" style="display:none">
@@ -5036,7 +5037,7 @@
 
     const WORKER_COLUMNS = [
     ["Worker ID", "worker_id"], ["Host", "host"], ["Cluster", "cluster"],
-    ["Build", "build"], ["Status", "last_seen"], ["First seen", "first_seen"], ["Last seen", "last_seen"],
+    ["Build", "build"], ["Recipes", "recipes"], ["Status", "last_seen"], ["First seen", "first_seen"], ["Last seen", "last_seen"],
     ["Working on", "current_case"],
   ];
 
@@ -5047,6 +5048,7 @@
     const sign = workerSort.dir === "asc" ? 1 : -1;
     const value = (w) => {
       const v = w[key];
+      if (Array.isArray(v)) return v.join(" ");          // recipes: declared ones sort together
       return v === null || v === undefined ? "" : v;
     };
     return [...workers].sort((a, b) => {
@@ -5096,6 +5098,7 @@
       $("workersTable").style.display = "table";
       renderWorkersHead();
       const nowS = Math.floor(Date.now() / 1000);
+      renderWorkersDeclare(workers, st);
       $("workersBody").innerHTML = workers.map((w) => {
         const cond = workerCondition(w, nowS);
         const condTitle = cond.key === "unfit"
@@ -5119,6 +5122,7 @@
             <td>${w.host ? `<span class="chip mono">${esc(w.host)}</span>` : "—"}${machineLine(w)}</td>
             <td>${w.cluster ? `<span class="chip">${esc(w.cluster)}</span>` : "—"}</td>
             <td>${buildCell(w)}</td>
+            <td>${recipesCell(w, st)}</td>
             <td>
               <span class="badge ${cond.cls}" title="${esc(condTitle)}">${esc(cond.label)}</span>
               ${cond.key === "unfit"
@@ -5165,6 +5169,7 @@
         : "No workers have leased cases yet.";
       $("workersTableWrap").style.display = "none";
       $("workersTable").style.display = "none";
+      $("workersDeclare").style.display = "none";
     }
 
     // What this answer drew, for the next load's skeletons (shapeOf).
@@ -8311,6 +8316,76 @@
   let lastReleases = null;
 
   function shortBuild(b) { return b ? String(b) : ""; }
+
+  /// A recipe's own part: "cyl-1008/of12-v6" -> "of12-v6", "surf-1008/rad6R0P2-fft-v2" ->
+  /// "rad6R0P2-fft-v2". The family before the slash is the hover.
+  function shortRecipe(r) {
+    const s = String(r || "");
+    const i = s.lastIndexOf("/");
+    return i >= 0 ? s.slice(i + 1) : s;
+  }
+
+  /// The recipes the queue still holds (pending or leased), from the unscoped
+  /// per-recipe counts every status answer carries.
+  function queuedRecipes(st) {
+    return Object.entries(st.by_recipe || {})
+      .filter(([, s]) => (s.pending || 0) + (s.leased || 0) > 0)
+      .map(([r, s]) => [r, (s.pending || 0), (s.leased || 0)])
+      .sort((a, b) => a[0].localeCompare(b[0]));
+  }
+
+  /// What a worker said it can build with its last lease, and -- struck through --
+  /// what the queue holds that it did not declare, since a node is never handed a
+  /// recipe it does not declare (protocol: "A node is handed only the recipes it
+  /// declares"). A worker that declares none is handed what the release policy's
+  /// `undeclared_recipes` names, or anything when that is unset; the tooltip says
+  /// which, from the catalog's last answer.
+  function recipesCell(w, st) {
+    if (!w.recipes || !w.recipes.length) {
+      const r = lastReleases;
+      const policy = r ? r.undeclared_recipes : undefined;
+      const title = policy === undefined
+        ? "its lease names no recipes: an E3D from before declarations, or a --runner script. What it is handed depends on the release policy's undeclared_recipes"
+        : policy === null
+          ? "its lease names no recipes, and no undeclared_recipes policy is set, so it is handed ANY recipe -- a Radiance case included, which such a worker gives back with exit 69 and stops. Set the policy (Node builds panel) before posting one"
+          : policy.length
+            ? `its lease names no recipes; the policy hands such a worker ${policy.join(", ")}`
+            : "its lease names no recipes, and the policy hands such a worker nothing";
+      return `<span style="color:var(--text-muted)" title="${esc(title)}">none declared</span>`;
+    }
+    const has = new Set(w.recipes);
+    const chips = w.recipes.map((x) =>
+      `<span class="chip mono" title="${esc(x)}">${esc(shortRecipe(x))}</span>`);
+    for (const [x, pending, leased] of queuedRecipes(st)) {
+      if (has.has(x)) continue;
+      chips.push(`<span class="chip mono" style="color:var(--text-muted);text-decoration:line-through" `
+        + `title="${esc(`${x}: ${pending} pending, ${leased} leased. This worker does not declare it, so it is never handed one. An E3D node declares the thermal recipe only where Radiance answers (the radiance-energyplus image through a container engine, or a native rad6R0P2 install): its console says which at start`)}">`
+        + `${esc(shortRecipe(x))}</span>`);
+    }
+    return `<div style="display:flex;flex-wrap:wrap;gap:4px;min-width:120px">${chips.join("")}</div>`;
+  }
+
+  /// One line per recipe the queue holds: how much of it waits, and how many of
+  /// the workers seen could take it. "0 of 20 declare it" is the whole diagnosis
+  /// for a recipe that never leaves pending.
+  function renderWorkersDeclare(workers, st) {
+    const el = $("workersDeclare");
+    const queued = queuedRecipes(st);
+    if (!queued.length || !workers.length) { el.style.display = "none"; return; }
+    const undeclared = workers.filter((w) => !w.recipes || !w.recipes.length).length;
+    el.innerHTML = queued.map(([r, pending, leased]) => {
+      const n = workers.filter((w) => (w.recipes || []).includes(r)).length;
+      const none = n === 0;
+      const also = undeclared && !none ? ` (+${undeclared} that declare nothing)` : "";
+      return `<div${none ? ' style="color:var(--bad)"' : ""}>`
+        + `<span class="mono" title="${esc(r)}">${esc(shortRecipe(r))}</span>: ${pending} pending · ${leased} leased · `
+        + (none
+            ? `<b>no worker declares it</b>${undeclared ? `; ${undeclared} declare nothing and take it only if the release policy hands it to them` : ""}`
+            : `${n} of ${workers.length} workers declare it${also}`)
+        + `</div>`;
+    }).join("");
+    el.style.display = "block";
+  }
 
   /// "6h", "35m", "2.5d": a duration, not a time, for a badge.
   function ageShort(seconds) {

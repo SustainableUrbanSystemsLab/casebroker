@@ -90,6 +90,14 @@ export XDG_RUNTIME_DIR=${TMPDIR:-/tmp}/xdg; mkdir -p "$XDG_RUNTIME_DIR"; chmod 7
 export PACE_PSTORE=${TMPDIR:-/tmp}/pstore; mkdir -p "$PACE_PSTORE"
 export EDDY3D_CONTAINER_CLI=$B/podman-pace.sh
 
+# Warm podman before E3D probes it. At start E3D asks the engine `info` with a 5 s budget and
+# pulls the Radiance image only when that answers; a cold rootless store on node-local scratch
+# can take longer, and the node then runs the whole shift WITHOUT the thermal recipe
+# (surf-1008/..., casebroker docs/thermal.md) and says so: "does not declare the thermal recipe".
+# A shim that does not answer at all means no containers, so no cases of any recipe.
+timeout 300 "$B/podman-pace.sh" info >/dev/null 2>&1 \
+    || echo "podman did not answer within 300 s; E3D will find no container engine (docs/pace-hpc.md section 3)"
+
 # --done is on the persistent scratch so a part that did not finish uploading before the wall is
 # still there for the next job's sweep. --work is node-local: a case in flight is not resumed here,
 # the next worker continues it from the broker.

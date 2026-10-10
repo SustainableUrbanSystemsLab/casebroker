@@ -66,6 +66,22 @@ def test_status_scoped_to_a_recipe_counts_and_projects_that_recipe_alone(conn):
     assert thermal["recipe"] == THERMAL and everything["recipe"] is None
 
 
+def test_status_says_which_recipes_each_worker_declares(conn):
+    """The Recipes column: a worker's declared recipes ride on its status row, parsed,
+    and a worker that declares none says None -- the dashboard then explains that one
+    from the release policy, and strikes through the queued recipes the other lacks."""
+    db.lease(conn, "foam-1", count=1, build="b1", recipes=[WIND])
+    db.lease(conn, "rad-1", count=1, build="b1", recipes=[WIND, THERMAL])
+    db.lease(conn, "old-1", count=1)
+    workers = {w["worker_id"]: w for w in db.status(conn)["workers"]}
+    assert workers["foam-1"]["recipes"] == [WIND]
+    assert workers["rad-1"]["recipes"] == [WIND, THERMAL]
+    assert workers["old-1"]["recipes"] is None
+    # ...and the queue's per-recipe states are there, unscoped, for the line
+    # above the table to count against.
+    assert set(db.status(conn, recipe=WIND)["by_recipe"]) == {WIND, THERMAL}
+
+
 def test_the_case_browser_filters_by_recipe(conn):
     page = db.list_cases(conn, recipe=THERMAL)
     assert page["total"] == 2 and {c["recipe"] for c in page["cases"]} == {THERMAL}
