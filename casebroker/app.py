@@ -2564,7 +2564,9 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         if not body:
             raise HTTPException(422, "the chunk is empty")
         sha = want["sha256"]
-        by = _by(request)
+        # Off the event loop, like every database call in an async route (see put_field):
+        # who is asking is two lookups, each waiting for a PgPool session.
+        by = await anyio.to_thread.run_sync(_by, request)
         try:
             await anyio.to_thread.run_sync(st.admit, sha, size)
             new = await anyio.to_thread.run_sync(st.append, sha, size, offset, [body])
@@ -2804,8 +2806,17 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
             raise HTTPException(413, f"the field is {len(blob)} bytes; the limit is {db.FIELD_MAX_BYTES}")
         if not blob:
             raise HTTPException(422, "the body is empty; send the umag/1 blob as application/octet-stream")
-        worker_ok = _lease_holder_test(request)
-        outcome = db.put_field(conn, lease_id, case_id, direction, blob, worker_ok=worker_ok)
+        # On a worker thread, never on the event loop. Both the credential lookup and the
+        # insert wait for one of the PgPool's sessions (CASEBROKER_PG_POOL, 4), with no
+        # timeout; run here, that wait held the ONE event loop, so while the sync routes had
+        # every session nothing was accepted or answered -- heartbeats included. A node from
+        # before Eddy3D 529fa324 lost its whole heartbeat to one beat that ran past 30 s;
+        # 33 v6 cases were quarantined "its lease expired" on 2026-10-10..11, and every stall
+        # the nodes logged sat beside a 250-325 MB part upload (a field and ~5 chunks a direction).
+        import anyio
+        outcome = await anyio.to_thread.run_sync(
+            lambda: db.put_field(conn, lease_id, case_id, direction, blob,
+                                 worker_ok=_lease_holder_test(request)))
         if outcome == "ok":
             return {"ok": True, "bytes": len(blob)}
         if outcome == "gone":
@@ -2827,8 +2838,11 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
             raise HTTPException(413, f"the field is {len(blob)} bytes; the limit is {db.FIELD_MAX_BYTES}")
         if not blob:
             raise HTTPException(422, "the body is empty; send the umag/1 blob as application/octet-stream")
-        may = _lease_holder_test(request)
-        outcome = db.backfill_field(conn, case_id, direction, blob, may_act_as=may)
+        # Off the event loop, as put_field (why there).
+        import anyio
+        outcome = await anyio.to_thread.run_sync(
+            lambda: db.backfill_field(conn, case_id, direction, blob,
+                                      may_act_as=_lease_holder_test(request)))
         if outcome == "ok":
             return {"ok": True, "bytes": len(blob)}
         if outcome == "exists":

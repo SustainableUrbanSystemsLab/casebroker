@@ -8,6 +8,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.46.1] - 2026-10-11
+
+### Fixed
+- **A field or a part upload no longer freezes the broker.** The three async routes
+  (`PUT .../fields/{direction}`, `PUT .../fields/{direction}/backfill`, `PUT .../parts/{part}/upload`)
+  made their database calls on the event loop itself: the credential lookup and the field insert, and
+  who sent each chunk. In production each call waits, with no timeout, for one of the
+  `CASEBROKER_PG_POOL` (4) Postgres sessions. So whenever the sync routes held every session, ONE
+  upload stopped the only event loop, and nothing at all was accepted or answered, heartbeats
+  included. A node from before Eddy3D 529fa324 lost its whole heartbeat to one beat past 30 s. 33 v6
+  cases were quarantined "its lease expired" on 2026-10-10..11, and every stall the nodes logged sat
+  beside a 250-325 MB part upload (a field and ~5 chunks per direction). All three routes now make
+  every database call on a worker thread, as the chunk's own store calls already did.
+  `tests/test_event_loop_db.py` fails if a database call in them runs on the loop.
+
 ## [0.46.0] - 2026-10-11
 
 ### Added
