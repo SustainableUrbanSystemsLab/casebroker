@@ -2351,18 +2351,6 @@
         </div>
       </div>
 
-      <div class="field" style="margin-top:18px;">
-        <label for="fieldBase">Wind-field source <span class="label-hint">(fallback: where &lt;case&gt;.wfld files are served)</span></label>
-        <input type="text" id="fieldBase" autocomplete="off" spellcheck="false"
-               placeholder="http://localhost:8765" />
-        <div class="panel-subtitle" style="margin-top:4px;">
-          A case's field comes from the broker's own database when its node sent one (every node since
-          2026-09-28 does). For a case that has none there, the page fetches
-          <span class="mono">&lt;source&gt;/&lt;case_id&gt;.wfld</span> from here -- on the master,
-          <span class="mono">scripts/serve_fields.py</span> serves them; a bucket's public URL works the same
-          way. Empty: open such a case's file from disk instead.
-        </div>
-      </div>
     </section>
 
   </div>
@@ -3298,20 +3286,18 @@
   //      the node sent the moment the direction was solved -- float32, exact,
   //      no arrows. Since 2026-09-28, when the fleet's database stopped being
   //      the constraint.
-  //   2. A <case_id>.wfld (runner/lib/ped_field.py, `bundle`) from a wind-field
-  //      source or from disk: one byte per point plus arrows every 16 m, for a
-  //      case that finished before the node sent fields.
+  //   2. A <case_id>.wfld (the retired runner/lib/ped_field.py, `bundle`) opened
+  //      from disk: one byte per point plus arrows every 16 m, for a case that
+  //      finished before nodes sent fields. Nothing makes new ones, and the
+  //      "wind-field source" that served them from the Syncthing master went
+  //      with the master (removed 2026-10-10).
   // Both decode to the same shape ({h, dirs[{deg, mag, vec?, exact?}]}) so one
   // drawer serves both. State lives here, keyed by case, because the panel's
   // DOM is rebuilt on every refresh.
-  const LS_FIELD_BASE = "casebroker.fieldBase";
   const wfStates = new Map();       // case_id -> {status, field, err, dir, mode, arrows, src}
   const WF_KEEP = 6;                // decoded fields held (~8 MB each); oldest dropped first
-
-  function fieldBase() {
-    try { return (localStorage.getItem(LS_FIELD_BASE) || "").trim().replace(/\/+$/, ""); }
-    catch (e) { return ""; }
-  }
+  // The setting's old key, dropped once from every browser that still holds it.
+  try { localStorage.removeItem("casebroker.fieldBase"); } catch (e) {}
 
   function wfState(id) {
     let s = wfStates.get(id);
@@ -3437,7 +3423,7 @@
   }
 
   async function wfFetch(id) {
-    const s = wfState(id), base = fieldBase();
+    const s = wfState(id);
     s.status = "loading"; s.src = "the broker"; wfRedraw(id);
     // The broker first: a case whose node sent its fields needs no source at all.
     try {
@@ -3449,22 +3435,10 @@
         return;
       }
     } catch (e) {
-      // A broker from before fields (404) or one that is down: the .wfld path below still works.
+      // A broker from before fields (404) or one that is down: a .wfld from disk still opens.
       if (!(e.status === 404 || e.status === 405)) { s.brokerErr = e.message || String(e); }
     }
-    if (!base) { s.status = "absent"; s.src = ""; s.err = ""; wfRedraw(id); return; }
-    s.src = `${base}/${id}.wfld`; wfRedraw(id);
-    try {
-      const r = await fetch(s.src, { cache: "force-cache" });
-      if (r.status === 404) { s.status = "absent"; s.err = ""; }
-      else if (!r.ok) { s.status = "error"; s.err = `${r.status} ${r.statusText}`; }
-      else { s.field = await wfDecode(await r.arrayBuffer()); s.status = "ready"; wfTrim(); }
-    } catch (e) {
-      s.status = "error";
-      // A fetch that never got an answer is almost always the source being down
-      // or refusing cross-origin reads; say which URL, since that is what to check.
-      s.err = e.message || String(e);
-    }
+    s.status = "absent"; s.src = ""; s.err = "";
     wfRedraw(id);
   }
 
@@ -3628,19 +3602,16 @@
     const openBtn = `<button class="subtle wf-open" type="button">Open .wfld file…</button>`
       + `<input type="file" accept=".wfld" class="wf-file" hidden />`;
     if (s.status !== "ready") {
-      const base = fieldBase();
       let msg;
       if (s.status === "loading") msg = `Loading <span class="mono">${esc(s.src)}</span>…`;
       else if (s.status === "absent")
-        msg = `The broker holds no field for this case${s.src ? `, and there is none at <span class="mono">${esc(s.src)}</span>` : ""}.
+        msg = `The broker holds no field for this case.
                A node built before fields went to the broker sent none; the node that still holds the case's
                archive sends it when it next sweeps its done folder (the broker lists what it lacks). A
-               <span class="mono">.wfld</span> from a wind-field source (Settings → Preferences) or this box
-               can still be opened.`
+               <span class="mono">.wfld</span> from this box can still be opened.`
           + (s.brokerErr ? ` <span style="color:var(--warn)">The broker could not be asked: ${esc(s.brokerErr)}.</span>` : "");
       else if (s.status === "error")
-        msg = `Could not read the field${s.src ? ` from <span class="mono">${esc(s.src)}</span>` : ""}: ${esc(s.err)}.`
-          + (s.src && s.src.startsWith("http") ? " Check that the source is running and allows reads from this page." : "");
+        msg = `Could not read the field${s.src ? ` from <span class="mono">${esc(s.src)}</span>` : ""}: ${esc(s.err)}.`;
       else msg = "";
       wrap.innerHTML = `<div class="wf-empty">${msg}</div><div style="margin-top:8px;">${openBtn}</div>`;
       setBusy(wrap, s.status === "loading");
@@ -10605,15 +10576,6 @@
   const autoOn = autoSaved === null ? true : autoSaved === "1";
   $("autoRefresh").checked = autoOn;
   setAutoRefresh(autoOn);
-
-  // The wind-field source: kept in this browser, and changing it re-reads every
-  // open case's field from the new place.
-  $("fieldBase").value = fieldBase();
-  $("fieldBase").addEventListener("change", () => {
-    try { localStorage.setItem(LS_FIELD_BASE, $("fieldBase").value.trim()); } catch (e) {}
-    for (const s of wfStates.values()) if (!s.field || s.src.startsWith("http")) { s.status = "idle"; s.field = null; }
-    wfAttach();
-  });
 
   $("authForm").addEventListener("submit", submitAuth);
   $("logoutBtn").addEventListener("click", doLogout);

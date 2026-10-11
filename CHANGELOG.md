@@ -8,6 +8,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.45.3] - 2026-10-10
+
+### Removed
+- **The Wind-field source setting** (Settings -> Preferences) and `scripts/serve_fields.py`. They served
+  `<case_id>.wfld` files from the Syncthing master for cases whose field the broker lacked. Nothing makes
+  `.wfld` files any more, the master was retired on 2026-10-06, and every node since 2026-09-28 sends its
+  fields to the broker (older archives arrive by backfill). An old `.wfld` can still be opened from disk on
+  the case's panel.
+
 ## [0.45.2] - 2026-10-10
 
 ### Fixed

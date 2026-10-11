@@ -232,12 +232,12 @@ value lands 1.75 m above the terrain to 1 mm median, 5.6 cm p99.
   what ParaView draws for the same slice; a cellPoint-exact grid would need the
   interpolation done outside OpenFOAM from the archived mesh and fields.
 
-**Seeing it**: the dashboard reads `<source>/<case_id>.wfld`. On the master,
-`uv run python scripts/serve_fields.py <folder of .wfld>` serves them on
-`http://localhost:8765` (read-only, CORS and Chrome's private-network header
-set); put that URL in Settings -> Preferences -> Wind-field source. A bucket's
-public URL works the same way once there is one. Or drag a `.wfld` onto an
-opened case.
+**Seeing it**: the dashboard reads the field from the broker's own database.
+A case that has none there (finished before nodes sent fields, and not yet
+backfilled) can still be shown from an old `.wfld` opened from disk on the
+case's panel. The *Wind-field source* setting and `scripts/serve_fields.py`,
+which served `.wfld` files from the Syncthing master, were removed on
+2026-10-10, after the master was retired.
 
 ## Where a finished case goes
 
