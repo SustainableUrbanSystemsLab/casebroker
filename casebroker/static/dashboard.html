@@ -8525,7 +8525,8 @@
     const r = lastReleases;
     if (!r || !$("relTarget")) return;
     const names = [...new Set((r.releases || []).map((x) => x.build))];
-    $("relTarget").innerHTML = `<option value="">(none — nodes stay where they are)</option>`
+    $("relTarget").innerHTML = `<option value="">${names.length ? "(none — nodes stay where they are)"
+                                                                 : "(no build registered yet — see below)"}</option>`
       + names.map((b) => `<option value="${esc(b)}"${b === r.target_build ? " selected" : ""}>${esc(b)}</option>`).join("");
     $("relApply").value = r.target_apply || "case";
     $("relRequire").checked = !!r.require_build;
@@ -8563,6 +8564,14 @@
       }
     } else {
       bits.push("no fleet target");
+    }
+    // An empty catalog said nothing but "(none)" in the list, and from 2026-10-06 to 10-11 it
+    // was empty because Eddy3D's CI skipped registering without its secrets: say why.
+    if (!(r.releases || []).length) {
+      bits.push("no build is registered, so there is nothing to target yet: Eddy3D's CI registers "
+        + "and uploads every push to dev once that repository has the Actions secrets "
+        + "CASEBROKER_RELEASE_USER and CASEBROKER_RELEASE_PASSWORD (a broker admin); by hand, "
+        + "casebroker release register release.json --upload <dir>");
     }
     if (f.undeclared) bits.push(`${f.undeclared} undeclared`);
     if (f.update_failed) bits.push(`${f.update_failed} rolled back from an update`);

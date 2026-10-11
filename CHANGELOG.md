@@ -8,6 +8,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.46.2] - 2026-10-11
+
+### Fixed
+- **Node builds says why the fleet-target list is empty.** With no build registered, the list
+  offered only "(none — nodes stay where they are)", which read like a missing field. It was
+  empty from 2026-10-06 to 10-11 because Eddy3D's CI skipped registration without its secrets
+  (CI now fails instead). The list now reads "(no build registered yet)", and the fleet line says
+  how a build gets registered: the CI secrets `CASEBROKER_RELEASE_USER`/`CASEBROKER_RELEASE_PASSWORD`,
+  or `casebroker release register release.json --upload <dir>`.
+
 ## [0.46.1] - 2026-10-11
 
 ### Fixed
