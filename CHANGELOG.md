@@ -8,6 +8,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.46.3] - 2026-10-11
+
+### Fixed
+- **Turning push on in Brave says what to change.** Brave keeps its push service off by default,
+  so subscribing failed with the browser's bare "Registration failed - push service error". The
+  dashboard now names the setting (brave://settings/privacy ▸ *Use Google services for push
+  messaging*, then relaunch), and in another browser says the push service could not be reached.
+
 ## [0.46.2] - 2026-10-11
 
 ### Fixed

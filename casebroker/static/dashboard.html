@@ -7996,6 +7996,20 @@
     ).join("") : "";
   }
 
+  /// What a refused subscribe means. Chromium says "Registration failed - push
+  /// service error" when it cannot reach its push service (FCM): Brave ships with
+  /// that switched off, and an embedded Chromium (Electron) has none.
+  function pushSubscribeWhy(e) {
+    const raw = (e && e.message) || String(e);
+    if (!/push service error/i.test(raw)) return raw;
+    if (navigator.brave) {
+      return "Brave keeps push off by default. Open brave://settings/privacy, turn on "
+        + "\"Use Google services for push messaging\", relaunch Brave and try again.";
+    }
+    return "This browser could not reach its push service (" + raw + "). An embedded browser "
+      + "has none, and a firewall or VPN that blocks fcm.googleapis.com stops it too.";
+  }
+
   async function pushEnable() {
     // First, and inside the click: Safari ignores a permission request that is
     // not the direct result of one.
@@ -8011,8 +8025,12 @@
     let sub = await reg.pushManager.getSubscription();
     if (sub && !pushSameKey(sub, key.public_key)) { await sub.unsubscribe(); sub = null; }
     if (!sub) {
-      sub = await reg.pushManager.subscribe({ userVisibleOnly: true,
-                                              applicationServerKey: pushKeyBytes(key.public_key) });
+      try {
+        sub = await reg.pushManager.subscribe({ userVisibleOnly: true,
+                                                applicationServerKey: pushKeyBytes(key.public_key) });
+      } catch (e) {
+        throw new Error(pushSubscribeWhy(e));
+      }
     }
     await pushCall("/v1/push/subscriptions", jsonBody("POST", { subscription: sub.toJSON(), events: pushChosen() }));
     showToast("Push notifications on for this device");

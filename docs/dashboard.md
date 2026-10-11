@@ -304,6 +304,10 @@ both on sees one).
   there (a Home Screen app keeps cookies of its own) and turn push on. The
   `/manifest.webmanifest` the page links is what makes it open as an app of its own.
 - **Notifications blocked** for the site in the browser's settings: allow them there.
+- **"Registration failed - push service error"**: the browser could not reach its push
+  service. Brave keeps it off by default: brave://settings/privacy ▸ *Use Google services for
+  push messaging*, then relaunch. An embedded Chromium (Electron, an app's browser pane) has
+  none, and a network that blocks `fcm.googleapis.com` stops Chrome too. The page says which.
 - **A browser with no Push API**: only the in-tab notifications are available.
 
 ### How it is built, and why
