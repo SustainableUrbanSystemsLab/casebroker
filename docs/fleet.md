@@ -374,3 +374,34 @@ and no numerics setting reaches it.
   and undrain it. Then give back the attempts it charged with
   `POST /v1/cases/reopen?error_contains=<its error>&include_pending=true`: look
   at the dry run first, then repeat the call with `dry_run=false`.
+- `meshing exited 1: ... failed at step 03_snappyHexMesh: Container command
+  failed with exit code 1`, from a cluster job, within seconds of the lease:
+  read the job log before the mesh. ICE job 6093036 (2026-10-07 18:34, the
+  first `e3d-node-ice` job) ran the container as uid 0 without
+  `OMPI_ALLOW_RUN_AS_ROOT=1` and `OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1`. Open MPI
+  printed `mpirun has detected an attempt to run as root` and snappyHexMesh
+  never started. Three healthy cases (v2-002dd50f8134785d,
+  v2-004142492604f5cf, v2-004420ca019825d7) each lost an attempt in two
+  minutes, and the five-case drain did not trip. `slurm/podman-pace.sh` sets
+  both variables, and every job since 6093122 (18:41) has had them. The
+  broker's excerpt ends before the reason; `casebroker triage` names it from
+  the step log.
+- A quarantine whose last error is `the last attempt ended without a result
+  -- its lease expired`, `held by X; found by X` with the same machine both
+  times, and whose solved directions are all at the broker: the node gave the
+  lease up itself. Its console says `the heartbeat has not moved for N min`,
+  with no `heartbeat failed:` line before it. Up to Eddy3D 529fa324, one
+  heartbeat the broker took more than 30 s to answer ended the node's
+  heartbeat loop without a word: `HttpClient` reports its timeout as a
+  cancellation, and the loop took that for its own shutdown. The lease
+  lapsed 15 minutes later and the node's watchdog gave the case up at 20.
+  cod-pkast-7865 did this three times between 2026-10-06 and 10-09, each a
+  few minutes after shipping a ~300 MB direction to the broker, and
+  quarantined v2-004420ca019825d7 with 22 of 32 directions done. Nothing is
+  wrong with the case. Reopen it (`POST /v1/cases/reopen?case_id=<id>`, dry run first),
+  and the next lease resumes from the broker's mesh and directions. A build
+  from Eddy3D 1f0f6b4b on prints a stall report after that line;
+  `casebroker triage <study> --node-log <console dump>` reads either form. A
+  real broker outage looks different: a run of `heartbeat failed: HTTP
+  522/502`. It costs nothing, because a lease nobody else claimed takes the
+  next beat back.

@@ -160,3 +160,85 @@ job aborted:
     healthy = _study(tmp_path / "b", checkmesh=FIXED_CHECKMESH, snappy=SNAPPY_FINISHED, pf="",
                      runs={"run_01a_warmup.txt": HEALTHY_WARMUP})
     assert repro.signatures(repro.triage(healthy)) == []
+
+
+# ICE job 6093036 (2026-10-07), trimmed: the container ran as uid 0 without the two
+# OMPI_ALLOW_RUN_AS_ROOT variables, and three healthy cases were charged "meshing exited 1 at
+# 03_snappyHexMesh" in two minutes -- v2-004420ca019825d7's first attempt among them.
+SNAPPY_AS_ROOT = """\
+Number of processor faces = 22709
+Max number of cells = 9222 (1.4219269% above average 9092.7083)
+
+End
+
+--------------------------------------------------------------------------
+mpirun has detected an attempt to run as root.
+
+Running as root is *strongly* discouraged as any mistake (e.g., in
+defining TMPDIR) or bug can result in catastrophic damage to the OS
+file system, leaving your system in an unusable state.
+--------------------------------------------------------------------------
+"""
+
+
+def test_triage_names_mpirun_refusing_root_instead_of_a_snappy_that_died(tmp_path):
+    study = _study(tmp_path, checkmesh="", snappy=SNAPPY_AS_ROOT, pf="", runs={})
+    found = repro.signatures(repro.triage(study))
+
+    assert any("mpirun refused to start as root (03_snappyHexMesh.txt)" in f
+               and "OMPI_ALLOW_RUN_AS_ROOT" in f for f in found), found
+    # snappy never started, so "never finished" would send the reader to the mesh.
+    assert not any("never printed 'Finished meshing'" in f for f in found), found
+
+
+def test_triage_names_mpirun_refusing_root_in_a_direction(tmp_path):
+    study = _study(tmp_path, checkmesh=FIXED_CHECKMESH, snappy=SNAPPY_FINISHED,
+                   pf="Exec   : potentialFoam -initialiseUBCs -parallel\n" + SNAPPY_AS_ROOT, runs={})
+    found = repro.signatures(repro.triage(study))
+    assert any(f.startswith("case_000: mpirun refused") for f in found), found
+
+
+# cod-pkast-7865's console, 2026-10-09 (dumped from the window: "error" untagged, wrapped), and
+# what a build from Eddy3D 1f0f6b4b on writes to a redirected log.
+CONSOLE_STALL = """\
+info  case_214 of v2-004420ca019825d7 is at the broker (296.6 MB)
+error v2-004420ca019825d7: the heartbeat has not moved for 20 min -- something in this node is stuck where it cannot report from. The lease has
+      lapsed and another worker may be given the case, so it is abandoned here rather than solved for nobody.
+warn  lease lost on v2-004420ca019825d7; abandoning it (another worker may own it now)
+"""
+
+LOG_STALL_WITH_REPORT = """\
+[error] c1: the heartbeat has not moved for 20 min -- something in this node is stuck where it cannot report from. The lease has lapsed and another worker may be given the case, so it is abandoned here rather than solved for nobody.
+      thread pool: 512 threads, 3 work items waiting; process threads: 540; console: a redraw has held the output gate for 1203 s (the console is not taking output: a selection in the window, a dragged scrollbar?)
+[warn] lease lost on c1; abandoning it (another worker may own it now)
+"""
+
+
+def test_triage_names_a_lease_the_node_gave_up_itself(tmp_path):
+    study = _study(tmp_path, checkmesh=FIXED_CHECKMESH, snappy=SNAPPY_FINISHED, pf="",
+                   runs={"run_01a_warmup.txt": HEALTHY_WARMUP})
+    console = tmp_path / "console.txt"
+    console.write_text(CONSOLE_STALL)
+    log = tmp_path / "node.log"
+    log.write_text(LOG_STALL_WITH_REPORT)
+
+    [old] = repro.signatures(repro.triage(study, node_log=console))
+    assert old.startswith("node: v2-004420ca019825d7 was given up by its own node") and "20 min" in old
+    assert "older than 1f0f6b4b" in old and "529fa324" in old and "Reopen" in old
+
+    [new] = repro.signatures(repro.triage(study, node_log=log))
+    assert "stall report: thread pool: 512 threads, 3 work items waiting" in new
+    assert "held the output gate for 1203 s" in new
+
+    # The control: a node log with no stall says nothing, and the study alone is still clean.
+    quiet = tmp_path / "quiet.log"
+    quiet.write_text("[info] leased c1 (attempt 1)\n[warn] heartbeat failed: HTTP 522\n")
+    assert repro.signatures(repro.triage(study, node_log=quiet)) == []
+
+
+def test_triage_command_reads_the_node_log(tmp_path, capsys):
+    study = _study(tmp_path, checkmesh=FIXED_CHECKMESH, snappy=SNAPPY_FINISHED, pf="", runs={})
+    log = tmp_path / "node.log"
+    log.write_text(LOG_STALL_WITH_REPORT)
+    assert cli.main(["triage", str(study), "--node-log", str(log)]) == 1
+    assert "c1 was given up by its own node" in capsys.readouterr().out

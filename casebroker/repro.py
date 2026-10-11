@@ -43,6 +43,15 @@ _SKEW = re.compile(r"Max skewness = ([0-9.eE+-]+)")
 _ORTHO = re.compile(r"non-orthogonality Max: ([0-9.eE+-]+)")
 _TIME = re.compile(r"^Time = ", re.M)
 _CONTINUITY = re.compile(r"continuity errors : sum local = ([0-9.eE+-]+)")
+# Open MPI's refusal, printed in place of the step: the container ran as uid 0 without the two
+# OMPI_ALLOW_RUN_AS_ROOT variables. ICE job 6093036 (2026-10-07) failed three healthy cases with
+# it in two minutes, each charged as "meshing exited 1 ... 03_snappyHexMesh".
+_AS_ROOT = "mpirun has detected an attempt to run as root"
+# The node's own watchdog giving its lease up (Eddy3D NodeWorker), and the stall report that a
+# build from 1f0f6b4b on prints after it. Keyed on the text, not the "[error]" tag: a log
+# redirected to a file carries the tag, a dump of the console window shows "error" and wraps.
+_STALL = re.compile(r"(\S+): the heartbeat has not moved for (\d+) min")
+_STALL_REPORT = re.compile(r"thread pool: [^\n]*")
 
 
 def _read(path: pathlib.Path) -> str:
@@ -57,19 +66,57 @@ def _last(rx: re.Pattern, text: str) -> str | None:
     return found[-1] if found else None
 
 
-def triage(study: str | os.PathLike) -> list[str]:
+def _as_root(where: str, logs: list[str]) -> str:
+    return (f"{where}: mpirun refused to start as root ({', '.join(logs)}), so the step never ran. "
+            f"The container ran as uid 0 without OMPI_ALLOW_RUN_AS_ROOT=1 and "
+            f"OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1: a fault of that machine's container setup, not of "
+            f"the case. Every case it leased fails the same way within seconds; slurm/podman-pace.sh "
+            f"sets both. Give the attempts back with reopen.")
+
+
+def _node_stalls(node_log: pathlib.Path) -> list[str]:
+    text = _read(node_log)
+    out = []
+    for m in _STALL.finditer(text):
+        # Within the few lines after it (the message itself wraps on a console), never past the
+        # next stall's.
+        after = text[m.end():].split("\n", 4)
+        window = "\n".join(after[:4]).split("the heartbeat has not moved")[0]
+        report = _STALL_REPORT.search(window)
+        out.append(
+            f"node: {m.group(1)} was given up by its own node ('the heartbeat has not moved for "
+            f"{m.group(2)} min', {node_log.name}). The node's heartbeat stopped, not the case: the "
+            f"lease lapsed while the solve was healthy, and the attempt is charged to a case with "
+            f"nothing wrong with it. Builds before Eddy3D 529fa324 ended the heartbeat loop without a "
+            f"word on ONE beat the broker took over 30 s to answer (cod-pkast-7865 quarantined "
+            f"v2-004420ca019825d7 that way, 2026-10-09); "
+            + (f"this build's stall report: {report.group(0).strip()}." if report else
+               "this build printed no stall report, so it is older than 1f0f6b4b.")
+            + " Reopen it: a resume keeps every direction already at the broker.")
+    return out
+
+
+def triage(study: str | os.PathLike, node_log: str | os.PathLike | None = None) -> list[str]:
     """What a failed study's logs say, most decisive first. Lines starting
     ``info:`` are context (the mesh's numbers), not a signature; a list with no
     other line means nothing known was found -- worth saying, not a clean bill.
 
+    `node_log` is the node's own output for the run (`repro` writes node.log). It
+    is where a case the node gave up on itself shows: such a case leaves nothing in
+    the study.
+
     Every finding names the evidence it rests on, so it can be checked by eye.
     """
     root = pathlib.Path(study)
-    out: list[str] = []
+    out: list[str] = _node_stalls(pathlib.Path(node_log)) if node_log is not None else []
 
     for mesh in sorted(p for p in root.glob("mesh*") if p.is_dir()):
         snappy = _read(mesh / "03_snappyHexMesh.txt")
-        if snappy and "Finished meshing" not in snappy:
+        as_root = [p.name for p in sorted(mesh.glob("*.txt")) if _AS_ROOT in _read(p)]
+        if as_root:
+            # Not "snappy never finished": it never started, and the mesh on disk is no mesher's.
+            out.append(_as_root(mesh.name, as_root))
+        elif snappy and "Finished meshing" not in snappy:
             out.append(
                 f"{mesh.name}: snappyHexMesh never printed 'Finished meshing' "
                 f"(03_snappyHexMesh.txt). The mesh on disk is whatever the ranks last "
@@ -94,6 +141,10 @@ def triage(study: str | os.PathLike) -> list[str]:
     for case in sorted(p for p in root.glob("case_*") if p.is_dir()):
         pf = _read(case / "run_00b_potentialFoam.txt")
         logs = {p.name: _read(p) for p in sorted(case.glob("run_01*.txt"))}
+        as_root = [n for n, t in {"run_00b_potentialFoam.txt": pf, **logs}.items() if _AS_ROOT in t]
+        if as_root:
+            out.append(_as_root(case.name, as_root))
+            break  # every direction repeats it
         zero_pivot = [n for n, t in {"run_00b_potentialFoam.txt": pf, **logs}.items()
                       if "calcReciprocalD" in t]
         if zero_pivot:
@@ -233,7 +284,7 @@ def run_repro(case_id: str, *, source: str, source_token: str, e3d: str,
     if final.get("last_error"):
         print("  " + final["last_error"].splitlines()[0])
     study = run / "work" / "cases" / case_id / case_id
-    findings = triage(study)
+    findings = triage(study, node_log=run / "node.log")
     print(f"\ntriage of {study}:")
     for f in findings + ([] if signatures(findings) else
                          ["no known signature found -- read the step logs under mesh*/ and case_*/"]):

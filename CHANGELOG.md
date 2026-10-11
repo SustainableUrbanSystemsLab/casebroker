@@ -8,6 +8,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.46.0] - 2026-10-11
+
+### Added
+- **`casebroker triage` names two failures that are the machine's, not the case's.** Both were
+  behind v2-004420ca019825d7 (Tehran, cyl-1008/of12-v6), quarantined 3/3 although its site meshes
+  clean (3.53 M cells, checkMesh OK, reproduced) and 22 of its 32 directions are solved and at the
+  broker. Attempt 1 was ICE job 6093036 (2026-10-07), whose container ran mpirun as root without
+  `OMPI_ALLOW_RUN_AS_ROOT`. The broker's excerpt read only "Container command failed with exit
+  code 1", and triage would have said "snappyHexMesh never printed 'Finished meshing'", which points
+  at the mesh. It now reports Open MPI's refusal from any step log, in place of that line. Attempts
+  2 and 3 were cod-pkast-7865 giving the lease up itself: "the heartbeat has not moved for 20 min".
+  One heartbeat that timed out had ended its heartbeat loop without a word (fixed in Eddy3D
+  529fa324). That line is only in the node's output, so `triage --node-log <file>` reads it, from a
+  redirected log or a console dump, with the stall report a newer build prints after it. `repro`
+  passes its own node.log.
+  docs/fleet.md, "Where each thing can go wrong", has both and what to do.
+
 ## [0.45.3] - 2026-10-10
 
 ### Removed

@@ -112,7 +112,7 @@ uv run casebroker release register release.json --upload . --broker URL  # add a
 uv run casebroker release promote <worker> --broker URL       # canary is good: whole fleet onto it
 uv run casebroker release rollback --broker URL [--block]     # back to the previous build (kill switch)
 uv run casebroker repro <case_id> --e3d E3D.exe --engine bluecfd  # re-run a failed case HERE
-uv run casebroker triage <study_dir>                          # name the known failure in its logs
+uv run casebroker triage <study_dir> [--node-log node.log]   # name the known failure in its logs
 uv run --extra export casebroker export --broker URL --out ds # dataset snapshot; re-run fetches only what changed
 ```
 

@@ -992,7 +992,7 @@ def cmd_export(args) -> int:
 
 def cmd_triage(args) -> int:
     from . import repro
-    findings = repro.triage(args.study)
+    findings = repro.triage(args.study, node_log=args.node_log)
     for f in findings + ([] if repro.signatures(findings) else
                          ["no known signature found -- read the step logs under mesh*/ and case_*/"]):
         print(f"- {f}")
@@ -1313,6 +1313,9 @@ def main(argv: list[str] | None = None) -> int:
 
     tr = sub.add_parser("triage", help="read a failed study's logs for the known failure signatures")
     tr.add_argument("study", help="the study directory (holds mesh*/ and case_*/)")
+    tr.add_argument("--node-log", default=None,
+                    help="the node's own output for the run (repro writes node.log): where a case "
+                         "the node gave up on itself shows, which leaves nothing in the study")
     tr.set_defaults(func=cmd_triage)
 
     ar = sub.add_parser("archives", help="per case in a folder of archives: complete, waiting "
