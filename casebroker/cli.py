@@ -32,6 +32,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 from . import USER_AGENT, __version__
@@ -647,6 +648,53 @@ def _admin_session(args):
     return opener
 
 
+def cmd_reopen(args) -> int:
+    """Put quarantined cases back in the pool with their attempts refunded (POST
+    /v1/cases/reopen), as an admin. Says what matches first; reopens only with --apply,
+    then in batches until nothing more matches. The cases a machine failed rather than
+    the site: "its lease expired" (a node that lost its heartbeat), a stopped daemon."""
+    if not args.error_contains and not args.case_id:
+        print("say which cases: --error-contains <text> and/or --case-id <id> (repeatable)", file=sys.stderr)
+        return 2
+    opener = _admin_session(args)
+    if opener is None:
+        return 1
+
+    def call(dry: bool):
+        q = [("dry_run", "true" if dry else "false"), ("limit", str(args.limit))]
+        if args.error_contains:
+            q.append(("error_contains", args.error_contains))
+        q += [("case_id", c) for c in args.case_id or []]
+        return _call(opener, args.broker, "POST", "/v1/cases/reopen?" + urllib.parse.urlencode(q), timeout=120)
+
+    try:
+        status, got = call(True)
+        if status != 200:
+            print("refused: %s" % got.get("detail", status), file=sys.stderr)
+            return 1
+        print("%d quarantined case(s) match" % got.get("matched", 0))
+        for ex in got.get("examples") or []:
+            first = (ex.get("last_error") or "").splitlines()[0] if ex.get("last_error") else ""
+            print("  %s  %s" % (ex.get("case_id"), first[:110]))
+        if not args.apply:
+            print("dry run: pass --apply to reopen them")
+            return 0
+        total = 0
+        for _ in range(200):
+            status, got = call(False)
+            if status != 200:
+                print("refused after %d reopened: %s" % (total, got.get("detail", status)), file=sys.stderr)
+                return 1
+            n = int(got.get("reopened") or 0)
+            total += n
+            if n == 0 or not got.get("capped"):
+                break
+        print("reopened %d case(s), their attempts refunded" % total)
+    finally:
+        _call(opener, args.broker, "POST", "/v1/auth/logout")
+    return 0
+
+
 def cmd_custody(args) -> int:
     """Is every finished case's data on the broker? Exit 0 only when it is.
 
@@ -1255,6 +1303,15 @@ def main(argv: list[str] | None = None) -> int:
     cu.add_argument("--older-than-hours", type=float, default=0,
                     help="leave out cases finished more recently (still uploading)")
     cu.set_defaults(func=cmd_custody)
+
+    ro = _release_admin(sub.add_parser(
+        "reopen", help="put quarantined cases back in the pool, attempts refunded (admin; a dry run "
+                       "unless --apply)"))
+    ro.add_argument("--error-contains", default=None, help="the case's last failure contains this")
+    ro.add_argument("--case-id", action="append", default=None, help="a case by id (repeatable)")
+    ro.add_argument("--limit", type=int, default=50, help="cases per batch (the broker's cap)")
+    ro.add_argument("--apply", action="store_true", help="reopen them (default: say what matches)")
+    ro.set_defaults(func=cmd_reopen)
 
     pt = sub.add_parser("parts", help="what of a case its nodes already shipped "
                                       "(mesh, finished directions)").add_subparsers(

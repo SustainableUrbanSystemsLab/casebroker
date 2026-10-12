@@ -8,6 +8,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.48.2] - 2026-10-12
+
+### Added
+- **`casebroker reopen`.** As an admin (password on stdin), puts quarantined cases back in the pool with
+  their attempts refunded: `--error-contains <text>` and/or `--case-id <id>`, a dry run that says what
+  matches unless `--apply`, then batches until nothing more does. Eddy3D's `broker-ops` workflow runs it,
+  and `release target`, with the admin credentials kept in its CI secrets.
+
 ## [0.48.1] - 2026-10-12
 
 ### Changed
