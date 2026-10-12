@@ -14,3 +14,4 @@ __pycache__/
 .env.*
 !.env.example
 machine.env
+.DS_Store
