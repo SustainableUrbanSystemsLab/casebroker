@@ -8,6 +8,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.47.0] - 2026-10-12
+
+### Added
+- **Opening a case fetches its whole pedestrian wind field in the background.** The Wind at
+  pedestrian height card listed a case's directions and fetched each one's values (~800 kB) only
+  when it came on screen, so every change of direction waited for a download. As soon as the
+  listing lands, every direction is now fetched from the broker: the one on screen first, then
+  outward from it both ways, three at a time. It stops when the case is closed, resumes when it
+  is opened again, and skips connections that ask to save data. The page now keeps the fields of
+  the 3 most recent cases instead of 6, since a fully fetched one is ~40 MB.
+
 ## [0.46.4] - 2026-10-12
 
 ## [0.46.3] - 2026-10-11
