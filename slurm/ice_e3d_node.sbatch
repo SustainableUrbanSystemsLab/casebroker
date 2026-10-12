@@ -102,6 +102,12 @@ timeout 300 "$B/podman-pace.sh" info >/dev/null 2>&1 \
 # still there for the next job's sweep. --work is node-local: a case in flight is not resumed here,
 # the next worker continues it from the broker.
 DONE=${E3D_DONE:-/storage/ice1/0/3/pkastner3/windcomfort/done}; mkdir -p "$DONE"
+# ICE scratch is a 300 GB quota on a filesystem with petabytes free, so the disk never LOOKS low to
+# the node. Past this many GB of archives in --done, the node deletes the files of finished cases the
+# broker holds in full, oldest first, each only when its hash is the one the broker holds (Eddy3D
+# DonePrune, builds from 2026-10-12; an older build ignores the variable). 2026-10-11: 263 of 300 GB,
+# 79 GB of it done archives.
+export E3D_MAX_DONE_GB=${E3D_MAX_DONE_GB:-100}
 WORK=${TMPDIR:-/tmp}/e3d-work; mkdir -p "$WORK"
 
 echo "node ice-${SLURM_JOB_ID} on $(hostname), $(nproc) cores, work=$WORK, chain prev=${CHAIN_PREV:-none}," \

@@ -305,6 +305,15 @@ so the rest of the chain falls through instead of leasing cases to fail them. Th
 demand: `scancel` one pending job of a lane. `scancel -u $USER -n e3d-node-ice` stops everything; a
 running job releases its case on the way out (`-n e3d-node-phoenix` on Phoenix).
 
+**The done folder on ICE.** ICE's scratch is a 300 GB quota, and the done folder lives there. The
+node cannot see the quota (the filesystem shows petabytes free), so `ice_e3d_node.sbatch` caps the
+folder instead: `E3D_MAX_DONE_GB=100`. Past it, each node deletes the files of finished cases the
+broker holds in full -- the archive, every shipped part and every field, checked per case with
+casebroker `POST /v1/custody/cases` and per file by hash -- oldest first, until the folder is back
+under the cap. Set `E3D_MAX_DONE_GB` in the login node's environment to change it, `0` to turn it
+off. Before a semester purge, `slurm/upload_done.sbatch` and `casebroker custody --under` remain the
+check that nothing is left only there.
+
 **The thermal recipe on PACE.** A node declares `surf-1008/rad6R0P2-fft-v2`
 (casebroker `docs/thermal.md`) only where Radiance answers. On PACE that is the
 `docker.io/pkastner/radiance-energyplus` image through the podman shim, which E3D

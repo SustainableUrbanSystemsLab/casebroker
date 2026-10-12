@@ -8,6 +8,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.48.1] - 2026-10-12
+
+### Changed
+- **ICE's done folder is capped at 100 GB.** ICE scratch is a 300 GB quota the node cannot see (the
+  filesystem shows petabytes free), so `ice_e3d_node.sbatch` sets `E3D_MAX_DONE_GB=100`: past it, each
+  node deletes the files of finished cases the broker holds in full, oldest first, each only when its
+  hash is the one the broker holds (Eddy3D `DonePrune`, 0291f04f; `POST /v1/custody/cases`). Set it in
+  the login node's environment to change it, `0` to turn it off. docs/pace-hpc.md.
+
 ## [0.48.0] - 2026-10-12
 
 ### Added
