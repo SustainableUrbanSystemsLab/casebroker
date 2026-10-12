@@ -218,6 +218,58 @@ def test_a_case_is_not_stored_until_the_store_holds_every_part_its_nodes_shipped
     assert not row or "parts" not in row[0]["missing"]
 
 
+def test_a_node_may_delete_a_case_only_once_the_store_holds_every_part_with_its_hash(conn):
+    """POST /v1/custody/cases, what a node asks before it deletes a finished case's files to make
+    room: complete only when the broker's OWN store holds the archive (the completion's hash),
+    every shipped part (the reported hashes) and every field -- never on a master's receipt."""
+    db.add_cases(conn, [case(8)])
+    lease = db.lease(conn, "foam-2", now=T0, recipes=[WIND])[0]
+    cid = lease.case_id
+    mesh, d0 = "c" * 64, "d" * 64
+    for part, sha in (("mesh", mesh), ("case_000", d0)):
+        db.report_part(conn, lease.lease_id, cid, part, f"{cid}.{part}.tar.gz", sha,
+                       size=100, mesh_sha256=None if part == "mesh" else mesh, now=T0)
+    assert db.post_telemetry(conn, lease.lease_id, cid, "solve", {"directions_total": 1}, now=T0) == "ok"
+
+    leased = db.case_custody(conn, [cid])[cid]
+    assert not leased["complete"] and "not done" in leased["missing"]
+
+    assert db.put_field(conn, lease.lease_id, cid, "case_000",
+                        umag([1.0] * 6, direction="case_000", case_id=cid), now=T0) == "ok"
+    assert db.complete(conn, lease.lease_id, f"file:///C:/wind/done/{cid}.tar.gz", sha256=SHA, nbytes=123, now=T0 + 1)
+    # A master's receipt is not the store holding it.
+    db.record_receipt(conn, cid, "archive", "master", SHA, 123, now=T0 + 2)
+    view = db.case_custody(conn, [cid, "nope"])
+    assert set(view) == {cid}, "a case the broker does not have is left out"
+    assert not view[cid]["complete"] and set(view[cid]["missing"]) == {"archive", "parts"}
+
+    db.record_blob(conn, cid, "mesh", mesh, 100, now=T0 + 3)
+    db.record_blob(conn, cid, "archive", SHA, 123, now=T0 + 3)
+    view = db.case_custody(conn, [cid])[cid]
+    assert view["missing"] == ["parts"], "a shipped direction the store does not hold yet"
+
+    db.record_blob(conn, cid, "case_000", d0, 100, now=T0 + 4)
+    view = db.case_custody(conn, [cid])[cid]
+    assert view["complete"] and view["missing"] == []
+    assert view["held"] == {"mesh": mesh, "case_000": d0, "archive": SHA}
+
+
+def test_a_case_without_its_fields_is_not_complete_for_a_node_to_delete(conn):
+    cid = finish(conn, 9, directions=2, fields=1)
+    db.record_blob(conn, cid, "archive", SHA, 123, now=T0 + 3)
+    view = db.case_custody(conn, [cid])[cid]
+    assert not view["complete"] and view["missing"] == ["fields"]
+
+
+def test_the_custody_question_is_a_write_route_and_needs_a_store(tmp_path):
+    app = create_app(str(tmp_path / "a.sqlite"), ["w"], ["r"])
+    with TestClient(app) as client:
+        r = client.post("/v1/custody/cases", json={"case_ids": ["x"]}, headers={"Authorization": "Bearer r"})
+        assert r.status_code in (401, 403)
+        r = client.post("/v1/custody/cases", json={"case_ids": ["x"]}, headers={"Authorization": "Bearer w"})
+        assert r.status_code == 200 and r.json() == {"enabled": False, "cases": {}}
+
+
 def test_the_cli_says_whether_everything_is_on_the_broker(tmp_path, capsys):
     import socket
     import threading

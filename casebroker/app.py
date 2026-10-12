@@ -2599,6 +2599,21 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         from fastapi.responses import FileResponse as _FileResponse
         return _FileResponse(path, media_type="application/gzip", filename=name, headers=headers)
 
+    @app.post("/v1/custody/cases", dependencies=[WriteAuth])
+    def custody_of_cases(body: WantedIn) -> dict[str, Any]:
+        """Per case (at most 500), whether the broker's own part store holds ALL of it -- the
+        archive, every part its nodes shipped, every pedestrian field -- and the hash of each
+        part it holds. What a node asks before it deletes a finished case's files to make room
+        (Eddy3D's DonePrune): it deletes only a file whose hash is the one held here, of a case
+        whose ``complete`` is true. Without a part store nothing is held, so nothing is complete."""
+        found = db.case_custody(conn, body.case_ids)
+        if store is None:
+            for row in found.values():
+                row["complete"] = False
+                if "archive" not in row["missing"]:
+                    row["missing"].append("archive")
+        return {"enabled": store is not None, "cases": found}
+
     @app.post("/v1/parts/wanted", dependencies=[WriteAuth])
     def parts_wanted(body: WantedIn) -> dict[str, Any]:
         """Which parts of these cases the broker would take: those it knows the content of

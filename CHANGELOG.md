@@ -8,6 +8,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.48.0] - 2026-10-12
+
+### Added
+- **`POST /v1/custody/cases`: may a node delete this case's files?** For up to 500 cases, whether the
+  broker's OWN part store holds all of each -- the archive with the completion's hash, every part its
+  nodes shipped with the hashes they reported, every pedestrian field it should have -- and the hash of
+  each part held. A node whose done disk runs low deletes only a file whose hash is held here, of a case
+  that is `complete` (Eddy3D's DonePrune). Stricter than `/v1/custody`, which counts any archive
+  receipt, the retired Syncthing master's included. Without a part store nothing is complete.
+
 ## [0.47.0] - 2026-10-12
 
 ### Added

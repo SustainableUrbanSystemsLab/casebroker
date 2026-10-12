@@ -4286,6 +4286,62 @@ def custody(conn, recipe: str | None = None, older_than: int = 0, limit: int = 2
             "listed": len(out[:limit]), "total": len(out), "cases": out[:limit]}
 
 
+@_locked
+def case_custody(conn, case_ids: list[str]) -> dict[str, dict[str, Any]]:
+    """Per case, whether the broker's OWN part store holds all of it -- what a node asks before it
+    deletes a finished case's files from its done folder (Eddy3D's DonePrune) -- and the hash of
+    every part it holds, for the node to check each file it would delete against.
+
+    Stricter than :func:`custody`, which counts any archive receipt (the retired Syncthing
+    master's included): here the archive must be a part the store holds, with the hash the
+    completion reported. ``complete`` means the case is done and the store holds its archive and
+    every part its nodes shipped (mesh, each direction) with the hashes they reported, and the
+    database holds every pedestrian field the case should have. ``missing`` says what is not,
+    in custody's words, plus ``not done``. A case the broker does not have is left out."""
+    ids = list(dict.fromkeys(case_ids))
+    if not ids:
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    lo, hi = _FIELD_HEIGHT_BAND
+    for at in range(0, len(ids), 200):
+        part_ids = ids[at:at + 200]
+        marks = ",".join("?" for _ in part_ids)
+        rows = conn.execute("SELECT case_id, state, recipe, telemetry, result_sha256 FROM cases"
+                            " WHERE case_id IN (" + marks + ")", part_ids).fetchall()
+        held: dict[str, dict[str, str]] = {}
+        for r in conn.execute("SELECT case_id, part, sha256 FROM case_blobs WHERE case_id IN (" + marks + ")",
+                              part_ids).fetchall():
+            held.setdefault(r["case_id"], {})[r["part"]] = (r["sha256"] or "").lower()
+        shipped: dict[str, dict[str, str]] = {}
+        for r in conn.execute("SELECT case_id, part, sha256 FROM case_parts WHERE case_id IN (" + marks + ")",
+                              part_ids).fetchall():
+            shipped.setdefault(r["case_id"], {})[r["part"]] = (r["sha256"] or "").lower()
+        fields = {r["case_id"]: int(r["n"]) for r in conn.execute(
+            "SELECT case_id, COUNT(DISTINCT direction) AS n FROM case_fields"
+            " WHERE height_m >= ? AND height_m <= ? AND case_id IN (" + marks + ") GROUP BY case_id",
+            (lo, hi, *part_ids)).fetchall()}
+        for r in rows:
+            cid = r["case_id"]
+            mine = held.get(cid, {})
+            missing = []
+            if r["state"] != "done":
+                missing.append("not done")
+            want_sha = (r["result_sha256"] or "").lower()
+            if not want_sha or mine.get(BLOB_ARCHIVE) != want_sha:
+                missing.append("archive")
+            if any(mine.get(p) != sha for p, sha in shipped.get(cid, {}).items()):
+                missing.append("parts")
+            try:
+                telemetry = json.loads(r["telemetry"]) if r["telemetry"] else {}
+            except (TypeError, ValueError):
+                telemetry = {}
+            want = expected_fields(r["recipe"], telemetry)
+            if want is not None and fields.get(cid, 0) < want:
+                missing.append("fields")
+            out[cid] = {"state": r["state"], "complete": not missing, "missing": missing, "held": mine}
+    return out
+
+
 # -- telemetry: what the node measured while it worked -------------------------
 #
 # The completion metrics arrive once, at the end, and only for a case that
