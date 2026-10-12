@@ -7,3 +7,13 @@
 # so this class of bug can't be reintroduced by a future commit made on
 # Windows with autocrlf=true.
 *.sh text eol=lf
+# Same for everything else under slurm/ that a cluster executes: SLURM hands a .sbatch to bash,
+# so a CRLF there is "bad interpreter: /bin/bash^M" and the job dies before its first line, and
+# fleet_report.py is run on the login and compute nodes too. *.sh alone did not cover them, so a
+# clone with core.autocrlf=true (the Windows default) checked them out CRLF and
+# scripts/pace_workers.sh then scp'd them to ICE/Phoenix -- the blobs are LF, only the checkout
+# was wrong, which is why this never showed in the repository itself. Measured 2026-10-12 on a
+# Windows clone: phoenix_e3d_node.sbatch 101 CRs, ice_e3d_node.sbatch 110, fleet_report.py 136,
+# upload_done.sbatch 22, while both .sh files were correctly LF.
+*.sbatch text eol=lf
+slurm/* text eol=lf
