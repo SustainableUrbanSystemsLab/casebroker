@@ -8,6 +8,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.49.0] - 2026-10-15
+
+### Added
+- **An admin command can run without a password prompt.** `release target|register|promote|rollback`
+  took the admin password from a tty prompt or `--password-stdin`, so an unattended or agent-driven
+  run stalled on whoever was at the keyboard. `admin.env` (gitignored, beside `machine.env`; copy
+  `admin.env.example`) holds the broker URL, username and password, and `scripts/broker-admin.sh`
+  pipes the password to `--password-stdin`, never into argv. No standing session is created: the
+  CLI still logs out after every call.
+
 ## [0.48.2] - 2026-10-12
 
 ### Added
