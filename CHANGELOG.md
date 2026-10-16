@@ -8,7 +8,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
-## [0.49.1] - 2026-10-16
+## [0.49.2] - 2026-10-16
 
 ### Fixed
 - **A finished case's File Size is the whole case, not its manifest.** Since parts, a node ships the mesh
@@ -16,6 +16,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
   `result_bytes` read 6.99 KB for a completed 32-direction case. `GET /v1/cases/{id}` now carries
   `parts_count` and `parts_bytes`, and the dashboard's File Size shows archive + parts with the split in
   the tooltip.
+
+## [0.49.1] - 2026-10-16
 
 ## [0.49.0] - 2026-10-15
 
