@@ -7072,7 +7072,9 @@
                 ${c.result_uri ? `<button class="copy-btn" onclick="copyText('${esc(c.result_uri)}', 'Result URI copied')" title="Copy URI"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></button>` : ""}
               </dd>
               <dt>File Size</dt>
-              <dd>${formatBytes(c.result_bytes)}</dd>
+              <dd>${c.parts_count
+                ? `${formatBytes((c.result_bytes || 0) + (c.parts_bytes || 0))} <span class="label-hint" title="the case archive (${esc(formatBytes(c.result_bytes))}) plus ${c.parts_count} part${c.parts_count === 1 ? "" : "s"} shipped as the case ran (${esc(formatBytes(c.parts_bytes))})">in ${c.parts_count + 1} archives</span>`
+                : formatBytes(c.result_bytes)}</dd>
               <dt>SHA-256</dt>
               <dd class="mono">
                 <span style="overflow:hidden; text-overflow:ellipsis; max-width:180px;" title="${esc(c.result_sha256 || "")}">
