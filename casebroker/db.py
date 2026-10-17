@@ -5470,6 +5470,13 @@ def get_case(conn, case_id: str) -> dict[str, Any] | None:
     # Which case this one was moved to another recipe as, or from (respec_cases):
     # a parked case says where its site went, and the new one where it came from.
     out.update(_respec_links(trail, case_id))
+    # result_bytes is the case's OWN archive, which since parts is little more than
+    # the manifest (6.99 KB for a finished 32-direction case); the data is in the
+    # parts shipped as it went. A reader asking "how big is it" wants the sum.
+    agg = conn.execute("SELECT COUNT(*) AS n, COALESCE(SUM(bytes), 0) AS b"
+                       " FROM case_parts WHERE case_id=?", (case_id,)).fetchone()
+    out["parts_count"] = agg["n"]
+    out["parts_bytes"] = int(agg["b"])
     # Same estimate the Workers table shows for this case's own lease -- the
     # detail card had the age of the last line but not when the solve should
     # end, which is the more useful of the two once a direction is a day in.
