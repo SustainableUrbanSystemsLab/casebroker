@@ -8,6 +8,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.49.3] - 2026-10-16
+
+### Fixed
+- **A deploy from a Windows clone no longer ships CRLF job scripts to the clusters.** Only `*.sh`
+  was pinned to LF, so with `core.autocrlf=true` (the Windows default) the `.sbatch` files and
+  `fleet_report.py` checked out CRLF and `scripts/pace_workers.sh` copied those bytes to ICE and
+  Phoenix, where SLURM fails with `bad interpreter: /bin/bash^M` before the first line. Every file
+  under `slurm/` and every `*.sbatch` is now LF in every checkout; the committed blobs were always LF.
+
 ## [0.49.2] - 2026-10-16
 
 ### Fixed
