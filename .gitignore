@@ -15,3 +15,7 @@ __pycache__/
 !.env.example
 machine.env
 .DS_Store
+# admin.env holds a HUMAN ADMIN's broker password -- it can change what every
+# node in the fleet runs. Same reasoning as .env above, one step worse.
+# admin.env.example stays tracked; it contains only placeholders.
+admin.env

@@ -162,3 +162,15 @@ def test_the_api_takes_parts_hands_them_out_with_the_lease_and_lets_an_admin_res
 
     assert admin.delete(f"/v1/cases/{case}/parts").json()["dropped"] == 1
     assert admin.get(f"/v1/cases/{case}/parts", headers=W).json()["parts"] == []
+
+
+def test_get_case_sums_the_parts_into_its_size(conn):
+    # A finished case's own archive is the manifest; its size is the parts' plus that.
+    lease = db.lease(conn, "w")[0]
+    _ship(conn, lease, "mesh", MESH)
+    _ship(conn, lease, "case_000", "c0" * 32)
+    case = db.get_case(conn, CASE)
+    assert (case["parts_count"], case["parts_bytes"]) == (2, 2000)
+    conn.execute("DELETE FROM case_parts WHERE case_id=?", (CASE,))
+    case = db.get_case(conn, CASE)
+    assert (case["parts_count"], case["parts_bytes"]) == (0, 0)

@@ -3,6 +3,9 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
+<!-- Resolve the theme before first paint (full logic: "Theme Management" below), so a light-OS visitor in auto mode gets no dark flash. The id keeps
+     it out of app._DashboardBundle's split, which wants exactly one bare script tag. -->
+<script id="theme-boot">try{var t=localStorage.getItem("casebroker.theme");document.documentElement.dataset.theme=t==="light"||t==="dark"?t:matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light"}catch(e){}</script>
 <title>E3D Simulation Broker</title>
 <!-- Lets iOS add the dashboard to the Home Screen as an app of its own, the only
      place Safari on an iPhone or iPad offers push (app.py, /manifest.webmanifest). -->
@@ -2376,42 +2379,48 @@
   const recipeQuery = (sep) => recipeScope ? `${sep}recipe=${encodeURIComponent(recipeScope)}` : "";
 
   // -- Theme Management --------------------------------------------------------
-  function initTheme() {
-    const saved = localStorage.getItem(LS_THEME);
-    // Default to dark (soft dark / GitHub Dark Dimmed) if no preference saved
-    const theme = saved || "dark";
+  // The stored choice is "auto" (follow the OS, the default), "light" or "dark".
+  // data-theme always holds the RESOLVED light/dark, so the CSS and the wind-field
+  // observer never need to know about auto.
+  const THEME_ORDER = ["auto", "light", "dark"];
+  const osMedia = window.matchMedia("(prefers-color-scheme: dark)");
+  function themePref() {
+    let v = null;
+    try { v = localStorage.getItem(LS_THEME); } catch (e) {}
+    return THEME_ORDER.includes(v) ? v : "auto";
+  }
+
+  function applyTheme() {
+    const pref = themePref();
+    const theme = pref === "auto" ? (osMedia.matches ? "dark" : "light") : pref;
     document.documentElement.setAttribute("data-theme", theme);
-    updateThemeIcon();
+    updateThemeIcon(pref, theme);
   }
 
   function toggleTheme() {
-    const current = document.documentElement.getAttribute("data-theme") ||
-      (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
-    const next = current === "dark" ? "light" : "dark";
-    document.documentElement.setAttribute("data-theme", next);
-    localStorage.setItem(LS_THEME, next);
-    updateThemeIcon();
+    const next = THEME_ORDER[(THEME_ORDER.indexOf(themePref()) + 1) % THEME_ORDER.length];
+    try { localStorage.setItem(LS_THEME, next); } catch (e) {}
+    applyTheme();
   }
 
-  function updateThemeIcon() {
-    const isDark = document.documentElement.getAttribute("data-theme") === "dark" ||
-      (!document.documentElement.getAttribute("data-theme") && window.matchMedia("(prefers-color-scheme: dark)").matches);
+  function updateThemeIcon(pref, theme) {
     const btn = $("themeToggle");
     const icon = $("themeIcon");
-    if (btn) {
-      btn.title = isDark
-        ? "Switch to light theme"
-        : "Switch to soft dark theme (reduced contrast for low-light environments)";
-    }
+    const label = pref === "auto" ? `Theme: auto (system, currently ${theme})` : `Theme: ${pref}`;
+    const next = THEME_ORDER[(THEME_ORDER.indexOf(pref) + 1) % THEME_ORDER.length];
+    if (btn) btn.title = `${label} -- click for ${next}`;
     if (icon) {
-      icon.innerHTML = isDark
+      icon.innerHTML = pref === "auto"
+        ? `<rect x="2" y="3" width="20" height="14" rx="2"></rect><line x1="8" y1="21" x2="16" y2="21"></line><line x1="12" y1="17" x2="12" y2="21"></line>`
+        : pref === "dark"
         ? `<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>`
         : `<circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>`;
     }
   }
 
+  osMedia.addEventListener("change", applyTheme);
   $("themeToggle").addEventListener("click", toggleTheme);
-  initTheme();
+  applyTheme();
 
   // -- Site geometry ----------------------------------------------------------
   // Everything the mesh is built from, drawn from the broker's /footprints
@@ -7072,7 +7081,9 @@
                 ${c.result_uri ? `<button class="copy-btn" onclick="copyText('${esc(c.result_uri)}', 'Result URI copied')" title="Copy URI"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></button>` : ""}
               </dd>
               <dt>File Size</dt>
-              <dd>${formatBytes(c.result_bytes)}</dd>
+              <dd>${c.parts_count
+                ? `${formatBytes((c.result_bytes || 0) + (c.parts_bytes || 0))} <span class="label-hint" title="the case archive (${esc(formatBytes(c.result_bytes))}) plus ${c.parts_count} part${c.parts_count === 1 ? "" : "s"} shipped as the case ran (${esc(formatBytes(c.parts_bytes))})">in ${c.parts_count + 1} archives</span>`
+                : formatBytes(c.result_bytes)}</dd>
               <dt>SHA-256</dt>
               <dd class="mono">
                 <span style="overflow:hidden; text-overflow:ellipsis; max-width:180px;" title="${esc(c.result_sha256 || "")}">

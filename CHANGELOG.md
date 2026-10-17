@@ -8,7 +8,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
-## [0.48.3] - 2026-10-15
+## [0.49.3] - 2026-10-16
 
 ### Fixed
 - **A deploy from a Windows clone no longer ships CRLF job scripts to the clusters.** Only `*.sh`
@@ -16,6 +16,27 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
   `fleet_report.py` checked out CRLF and `scripts/pace_workers.sh` copied those bytes to ICE and
   Phoenix, where SLURM fails with `bad interpreter: /bin/bash^M` before the first line. Every file
   under `slurm/` and every `*.sbatch` is now LF in every checkout; the committed blobs were always LF.
+
+## [0.49.2] - 2026-10-16
+
+### Fixed
+- **A finished case's File Size is the whole case, not its manifest.** Since parts, a node ships the mesh
+  and each direction as it goes and the case's own archive is little more than the manifest, so
+  `result_bytes` read 6.99 KB for a completed 32-direction case. `GET /v1/cases/{id}` now carries
+  `parts_count` and `parts_bytes`, and the dashboard's File Size shows archive + parts with the split in
+  the tooltip.
+
+## [0.49.1] - 2026-10-16
+
+## [0.49.0] - 2026-10-15
+
+### Added
+- **An admin command can run without a password prompt.** `release target|register|promote|rollback`
+  took the admin password from a tty prompt or `--password-stdin`, so an unattended or agent-driven
+  run stalled on whoever was at the keyboard. `admin.env` (gitignored, beside `machine.env`; copy
+  `admin.env.example`) holds the broker URL, username and password, and `scripts/broker-admin.sh`
+  pipes the password to `--password-stdin`, never into argv. No standing session is created: the
+  CLI still logs out after every call.
 
 ## [0.48.2] - 2026-10-12
 
