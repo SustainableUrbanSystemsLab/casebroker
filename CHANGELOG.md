@@ -8,12 +8,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.49.8] - 2026-10-18
+
 ## [0.49.7] - 2026-10-18
 
 ### Changed
 - **The dashboard says less.** The refresh countdown moved into the Refresh button at a fixed width (it was
   a label beside it that shifted the layout every tick), "9 of 9 workers declare it" is "9 of 9 declared", and
   a worker row shows two recipe chips and a "+N" with the full list on hover instead of six identical ones.
+- **A worker's "last line 54s ago" is a dot.** The Working-on cell shows a small dot beside the case id --
+  green under 5 minutes, amber under 15, red beyond, the age on hover -- and the bar's caption drops the
+  leading "Solving · ", which a progress bar with a count already says.
 - **The phone header is one row, not four lines.** Title shortened to "E3D Broker", version badge and logo hidden,
   the connection pill reduced to its dot, icons tight; the sticky bar no longer takes a fifth of the screen.
 

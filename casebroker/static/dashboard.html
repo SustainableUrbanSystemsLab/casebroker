@@ -5185,13 +5185,15 @@
             <td>${relTime(w.last_seen)}</td>
             <td>${w.current_case
                   ? `<div style="display:flex;flex-direction:column;gap:4px;min-width:150px">`
+                    + `<div style="display:flex;align-items:center;gap:6px">`
                     + `<code class="inline">${esc(w.current_case)}</code>`
-                    + (w.current_progress ? progressCell(w.current_progress) : "")
-                    // The age, for the same reason the detail card carries it: the
-                    // bar's moving band means "a worker is on this now", and only
-                    // this line says when that worker last actually said anything.
-                    + (w.current_progress && w.current_progress_at
-                        ? `<span style="color:var(--text-muted);font-size:10px;">last line ${esc(relTime(w.current_progress_at))}</span>` : "")
+                    // Alive, not "last line 54s ago": the bar's moving band says a
+                    // worker is on this now, and this dot says whether it is still
+                    // talking -- green under 5 min, amber under 15, red past that.
+                    // The exact age is the hover.
+                    + (w.current_progress && w.current_progress_at ? aliveDot(w.current_progress_at) : "")
+                    + `</div>`
+                    + (w.current_progress ? progressCell(w.current_progress, true) : "")
                     + etaLine(w.current_eta)
                     + `</div>`
                   : "—"}</td>
@@ -7450,7 +7452,18 @@
     return `<span style="color:var(--text-muted);font-size:10px;" title="solve end, extrapolated from ${Math.round(eta.measured_over_s / 60)} min of this lease's progress; an upper estimate, since a direction that converges stops early">${esc(text)}</span>`;
   }
 
-  function progressCell(line) {
+  /// A dot for "the worker said something recently": green < 5 min, amber < 15,
+  /// red beyond. The age is its tooltip.
+  function aliveDot(at) {
+    const age = Math.max(0, Math.floor(Date.now() / 1000) - Number(at));
+    const colour = age < 300 ? "var(--accent)" : age < 900 ? "var(--warn)" : "var(--bad)";
+    return `<span title="last line ${esc(relTime(at))}" aria-label="last line ${esc(relTime(at))}" `
+      + `style="width:8px;height:8px;border-radius:50%;flex:none;background:${colour}"></span>`;
+  }
+
+  /// `bare` drops the leading "Solving · ": a bar with a count beside it already
+  /// says that, and the fleet table has no room to repeat it per row.
+  function progressCell(line, bare) {
     if (!line) return "\u2014";
     const p = progressParse(line);
     // A block, not an inline span: beside a case id in the fleet table an inline
@@ -7478,7 +7491,7 @@
       + (runPct > 0 ? `<div class="progress-segment leased active" style="width:${runPct}%"></div>` : "")
       + `</div>`
       + `<div class="progress-caption">`
-      + `<span class="progress-label">${esc(p.label)}</span>`
+      + `<span class="progress-label">${esc(bare ? p.label.replace(/^Solving\s*\u00b7\s*/, "") : p.label)}</span>`
       + (p.precise ? `<span class="progress-pct mono">${pct}%</span>` : "")
       + `</div></div>`;
   }
