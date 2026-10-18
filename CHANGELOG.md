@@ -8,6 +8,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.49.13] - 2026-10-18
+
+### Changed
+- **The ETA line stays on one line, and a worker's "+3" recipes expand.** `#etaText` wrapped under the
+  recipe selector at any width; it is `nowrap` now (a phone may still wrap). The "+N" chip is a button that
+  opens the rest in place (and "less" closes it); which rows are open survives the 60 s re-render.
+
 ## [0.49.12] - 2026-10-18
 
 ### Changed
