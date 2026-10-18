@@ -1703,7 +1703,11 @@
           Worker Fleet
         </h2>
       </div>
-      <span class="chip" id="workerCountBadge">0 known</span>
+      <div class="panel-title-group">
+        <button type="button" class="subtle" id="queuedToggle" hidden
+                title="Jobs the scheduler holds that have not started. They are counted in the badge either way.">Show queued jobs</button>
+        <span class="chip" id="workerCountBadge">0 known</span>
+      </div>
     </div>
 
     <div id="fleetQueue" class="fleet-queue" style="display:none"></div>
@@ -5099,8 +5103,11 @@
   // Workers Table
     const workers = sortWorkers(st.workers || []);
     const queued = queuedJobs(st.fleet);
+    const shown = showQueued ? queued : [];
     $("workerCountBadge").textContent = `${workers.length} known` + (queued.length ? ` · ${queued.length} queued` : "");
-    if (workers.length || queued.length) {
+    $("queuedToggle").hidden = !queued.length;
+    $("queuedToggle").textContent = showQueued ? "Hide queued jobs" : "Show queued jobs";
+    if (workers.length || shown.length) {
       $("workersEmpty").style.display = "none";
       $("workersTableWrap").style.display = "block";
       $("workersTable").style.display = "table";
@@ -5152,7 +5159,7 @@
                     + `</div>`
                   : "—"}</td>
           </tr>`;
-      }).join("") + queued.map(({ cluster, age, job }) => `
+      }).join("") + shown.map(({ cluster, age, job }) => `
           <tr class="queued-job">
             <td><code class="inline" title="SLURM job ${esc(job.id)}: it calls the broker, and gets a worker row, when it starts">job ${esc(job.id)}</code></td>
             <td>—</td>
@@ -5200,6 +5207,9 @@
   const caseList = { state: "", split: "", city: "", label: "", limit: 25, offset: 0, total: 0,
                      singleId: null, sort: "updated_at", dir: "desc" };
   const workerSort = { key: "last_seen", dir: "desc" };
+  // A queue can hold a chain of jobs that sit for days, and the rows say nothing a worker's
+  // row does; so they are opt-in. Not kept across a reload: hidden is the default each time.
+  let showQueued = false;
 
   /// A header cell that sorts. `active` decides the arrow, so a table always says
   /// what it is ordered by rather than leaving the reader to guess.
@@ -10686,6 +10696,10 @@
   $("autoRefresh").addEventListener("change", (e) => {
     localStorage.setItem(LS_AUTO, e.target.checked ? "1" : "0");
     setAutoRefresh(e.target.checked);
+  });
+  $("queuedToggle").addEventListener("click", () => {
+    showQueued = !showQueued;
+    if (lastStatus) renderStatus(lastStatus);        // re-render from what is already loaded
   });
 
   // Notifications: the toggle is disabled outright where the API cannot work

@@ -8,6 +8,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.49.4] - 2026-10-17
+
+### Changed
+- **The Worker Fleet hides queued SLURM jobs until asked.** A chain of pending jobs can sit for days, and
+  their rows say nothing a worker's row does. They stay counted in the badge ("1 known · 3 queued") and in
+  the cluster cards; "Show queued jobs" beside the badge lists them. The choice is not kept across a reload.
+
 ## [0.49.3] - 2026-10-16
 
 ### Fixed

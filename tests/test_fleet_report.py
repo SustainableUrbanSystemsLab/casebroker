@@ -167,5 +167,11 @@ console.log(JSON.stringify({
                             "waiting", "waiting", "Licenses"]
     # And where they are drawn: in the Worker Fleet table, after the workers, and counted in its badge.
     assert "const queued = queuedJobs(st.fleet);" in page and 'class="queued-job"' in page
-    assert "if (workers.length || queued.length) {" in page, "the table shows for queued jobs alone"
-    assert "queued.length ? ` · ${queued.length} queued`" in page
+    assert "queued.length ? ` · ${queued.length} queued`" in page, "hidden or not, the badge still counts them"
+    # Hidden until asked for: a queue of jobs waiting days on their chain is noise beside the workers.
+    assert "let showQueued = false;" in page
+    assert "const shown = showQueued ? queued : [];" in page
+    assert "if (workers.length || shown.length) {" in page, "the table shows for queued jobs alone once they are shown"
+    assert "shown.map(({ cluster, age, job })" in page, "the rows come from what is shown, not from every queued job"
+    assert 'id="queuedToggle"' in page and 'queuedToggle").hidden = !queued.length' in page, \
+        "the switch appears only when there is a queue to show"
