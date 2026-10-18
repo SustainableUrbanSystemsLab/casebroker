@@ -308,6 +308,19 @@
     gap: 8px;
   }
 
+  /* Phones: the sticky header was four lines (logo and a wrapped title, a
+     version badge, the connection pill, the icons) and ate a fifth of the
+     screen. One row now: the title short, the version badge gone (Settings
+     still names the build), the pill down to its dot, the icons tight. */
+  @media (max-width: 640px) {
+    .hide-sm, .brand-badge, .brand-logo, #connText { display: none !important; }
+    .header-inner { padding: 6px 12px; gap: 8px; flex-wrap: nowrap; }
+    .brand-title { font-size: 15px; white-space: nowrap; }
+    .header-meta { gap: 6px; }
+    .conn-pill { padding: 6px; }
+    .header-actions { gap: 2px; }
+  }
+
   /* Main Container */
   main {
     max-width: 1560px;
@@ -1350,13 +1363,16 @@
   }
 
   /* Refresh Countdown Ring */
-  .refresh-indicator {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    font-size: 12px;
-    color: var(--text-muted);
+  /* The countdown lives inside the Refresh button at a fixed width, so the
+     number ticking (or "off") never moves anything around it. */
+  .refresh-count {
+    display: inline-block;
+    min-width: 3ch;
+    text-align: left;
     font-family: var(--font-mono);
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-muted);
   }
   .spin { animation: spin 0.8s linear infinite; }
   @keyframes spin { 100% { transform: rotate(360deg); } }
@@ -1486,7 +1502,7 @@
       </div>
       <div>
         <h1 class="brand-title">
-          E3D Simulation Broker
+          E3D <span class="hide-sm">Simulation&nbsp;</span>Broker
           <span class="brand-badge" id="brokerDbBadge" hidden></span>
         </h1>
       </div>
@@ -1621,12 +1637,12 @@
            nobody can see is not a countdown. -->
       <div style="margin-left:auto; display:flex; align-items:center; gap:14px; flex-wrap:wrap;">
         <div id="expiredBannerWrap"></div>
-        <span class="refresh-indicator" id="nextRefreshCountdown">auto-refresh active</span>
-        <button id="refresh" type="button">
+        <button id="refresh" type="button" title="Refresh now. The number is seconds to the next automatic refresh.">
           <svg id="refreshIcon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
             <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/>
           </svg>
-          Refresh now
+          Refresh
+          <span class="refresh-count" id="nextRefreshCountdown">60s</span>
         </button>
       </div>
     </div>
@@ -8481,8 +8497,15 @@
       return `<span style="color:var(--text-muted)" title="${esc(title)}">none declared</span>`;
     }
     const has = new Set(w.recipes);
-    const chips = w.recipes.map((x) =>
+    // Two chips and a "+N": a node declares five or six, identical down the
+    // whole column, and the full list is one hover away.
+    const SHOWN = 2;
+    const chips = w.recipes.slice(0, SHOWN).map((x) =>
       `<span class="chip mono" title="${esc(x)}">${esc(shortRecipe(x))}</span>`);
+    if (w.recipes.length > SHOWN) {
+      chips.push(`<span class="chip mono" style="color:var(--text-muted)" title="${esc(w.recipes.map(shortRecipe).join("\n"))}">`
+        + `+${w.recipes.length - SHOWN}</span>`);
+    }
     for (const [x, pending, leased] of queuedRecipes(st)) {
       if (has.has(x)) continue;
       chips.push(`<span class="chip mono" style="color:var(--text-muted);text-decoration:line-through" `
@@ -8503,12 +8526,12 @@
     el.innerHTML = queued.map(([r, pending, leased]) => {
       const n = workers.filter((w) => (w.recipes || []).includes(r)).length;
       const none = n === 0;
-      const also = undeclared && !none ? ` (+${undeclared} that declare nothing)` : "";
+      const also = undeclared && !none ? ` (+${undeclared} undeclared)` : "";
       return `<div${none ? ' style="color:var(--bad)"' : ""}>`
         + `<span class="mono" title="${esc(r)}">${esc(shortRecipe(r))}</span>: ${pending} pending · ${leased} leased · `
         + (none
-            ? `<b>no worker declares it</b>${undeclared ? `; ${undeclared} declare nothing and take it only if the release policy hands it to them` : ""}`
-            : `${n} of ${workers.length} workers declare it${also}`)
+            ? `<b>none declared</b>${undeclared ? `; ${undeclared} undeclared (release policy decides)` : ""}`
+            : `${n} of ${workers.length} declared${also}`)
         + `</div>`;
     }).join("");
     el.style.display = "block";
@@ -10258,7 +10281,7 @@
   // Auto-refresh timer & countdown
   function updateCountdown() {
     if (!$("autoRefresh").checked) {
-      $("nextRefreshCountdown").textContent = "auto-refresh paused";
+      $("nextRefreshCountdown").textContent = "off";
       return;
     }
     nextRefreshSeconds--;
@@ -10266,7 +10289,7 @@
       nextRefreshSeconds = 60;
       refresh();
     }
-    $("nextRefreshCountdown").textContent = `refreshing in ${nextRefreshSeconds}s`;
+    $("nextRefreshCountdown").textContent = `${nextRefreshSeconds}s`;
   }
 
   function setAutoRefresh(on) {
@@ -10277,7 +10300,7 @@
       countdownTimer = setInterval(updateCountdown, 1000);
       updateCountdown();
     } else {
-      $("nextRefreshCountdown").textContent = "auto-refresh paused";
+      $("nextRefreshCountdown").textContent = "off";
     }
   }
 
