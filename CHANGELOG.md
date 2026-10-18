@@ -8,6 +8,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.49.12] - 2026-10-18
+
+### Changed
+- **The Worker Fleet hides its Cluster column when no worker has one.** Workstations declare no cluster, so
+  on a fleet of them the column was a row of dashes. It returns when a SLURM worker or queued job appears.
+
 ## [0.49.11] - 2026-10-18
 
 ### Fixed

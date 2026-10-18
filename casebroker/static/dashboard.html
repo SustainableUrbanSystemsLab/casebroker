@@ -977,6 +977,9 @@
   tr:hover td { background: var(--surface-hover); }
   td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 
+  #workersTable.no-cluster th:nth-child(3),
+  #workersTable.no-cluster td:nth-child(3) { display: none; }
+
   /* Phones: a table squeezed to the viewport wraps every cell -- a worker id
      broke over three lines and each row ran ~350px tall. Keep cells on one
      line and let .table-wrap scroll sideways; long ids truncate instead. */
@@ -5148,6 +5151,11 @@
       $("workersEmpty").style.display = "none";
       $("workersTableWrap").style.display = "block";
       $("workersTable").style.display = "table";
+      // Cluster is a SLURM pool's name; a fleet of workstations has none, and the
+      // column was a row of dashes. Hidden by CSS rather than dropped from the
+      // markup, so the cells still line up with WORKER_COLUMNS.
+      $("workersTable").classList.toggle("no-cluster",
+        !workers.some((w) => w.cluster) && !shown.some((j) => j.cluster));
       renderWorkersHead();
       const nowS = Math.floor(Date.now() / 1000);
       renderWorkersDeclare(workers, st);
