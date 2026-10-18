@@ -168,3 +168,17 @@ def test_a_thermal_case_gets_an_eta_from_its_trace(conn):
 
     # 6 chunks in 20 minutes: the other 27 take 90 more.
     assert eta is not None and eta["at"] == T0 + 60 + 1200 + 27 * 200
+
+
+def test_eta_survives_a_quiet_day(conn):
+    """65 done and none in the last 24h read "ETA unknown" because the rate came
+    from one day. A week's completions still give a rate; the divisor is the time
+    since the first of them, so a young campaign is not diluted by the whole week."""
+    for i in range(2):
+        finish(conn, f"w-{i}", WIND, T0 + i, 3600)
+    st = db.status(conn, now=T0 + 3 * 86400)
+    assert st["done_last_24h"] == 0
+    # 2 done in ~3 days, 3 still pending: 3 / (2/3 per day) = 4.5 days.
+    assert st["eta_days"] == 4.5 and st["eta_window_days"] == 3
+    # Nothing in 30 days is the one case with no rate to project.
+    assert db.status(conn, now=T0 + 40 * 86400)["eta_days"] is None
