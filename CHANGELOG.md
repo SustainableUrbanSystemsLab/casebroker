@@ -8,6 +8,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.49.5] - 2026-10-18
+
+### Fixed
+- **The dashboard's tables no longer wrap every cell on a phone.** Squeezed to the viewport, a worker id broke
+  over three lines and each Worker Fleet row ran ~350px tall. At 640px and below cells stay on one line, the
+  table scrolls sideways, long ids truncate, and the progress header and stat labels no longer double up.
+
 ## [0.49.4] - 2026-10-17
 
 ### Changed

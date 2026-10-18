@@ -964,6 +964,23 @@
   tr:hover td { background: var(--surface-hover); }
   td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 
+  /* Phones: a table squeezed to the viewport wraps every cell -- a worker id
+     broke over three lines and each row ran ~350px tall. Keep cells on one
+     line and let .table-wrap scroll sideways; long ids truncate instead. */
+  @media (max-width: 640px) {
+    .table-wrap td { white-space: nowrap; padding: 8px 10px; }
+    .table-wrap th { padding: 8px 10px; }
+    .table-wrap code.inline { display: inline-block; max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
+    .table-wrap .chip { max-width: 160px; }
+    .table-wrap .worker-unfit { white-space: normal; min-width: 180px; }
+    .progress-header { flex-wrap: wrap; gap: 2px 12px; }
+    .progress-header > span { white-space: nowrap; }
+    .progress-legend { flex-wrap: wrap; gap: 4px 12px; }
+    .stat-card { padding: 12px; }
+    .stat-card .label, .stat-card .subtext { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .stat-card .label { font-size: 10.5px; letter-spacing: 0.03em; }
+  }
+
   /* Badges */
   .badge {
     display: inline-flex;
