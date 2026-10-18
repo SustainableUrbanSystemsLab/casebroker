@@ -5151,6 +5151,26 @@ def status(conn, now: int | None = None, recipe: str | None = None) -> dict[str,
         done_24h = conn.execute(
             "SELECT COUNT(*) n FROM events WHERE event='done' AND ts > ?",
             (now - 86400,)).fetchone()["n"]
+    # The ETA's rate comes from the last 7 days, widened to 30 when the week was
+    # empty, not from the last 24h: a campaign with 65 done and none today read
+    # "ETA unknown", and a rate from one day swings with whichever hour you ask in.
+    # A young campaign is not diluted by days it did not exist: the divisor is the
+    # time since the window's first completion, never under a day.
+    rate_per_day, rate_days = None, None
+    for window_days in (7, 30):
+        if recipe:
+            n, first = (lambda r: (r["n"], r["t"]))(conn.execute(
+                "SELECT COUNT(*) n, MIN(e.ts) t FROM events e JOIN cases c ON c.case_id = e.case_id"
+                " WHERE e.event='done' AND e.ts > ? AND c.recipe = ?",
+                (now - window_days * 86400, recipe)).fetchone())
+        else:
+            n, first = (lambda r: (r["n"], r["t"]))(conn.execute(
+                "SELECT COUNT(*) n, MIN(ts) t FROM events WHERE event='done' AND ts > ?",
+                (now - window_days * 86400,)).fetchone())
+        if n:
+            rate_days = min(window_days, max(1.0, (now - first) / 86400))
+            rate_per_day = n / rate_days
+            break
     remaining = by_state.get("pending", 0) + by_state.get("leased", 0)
     workers = [dict(r) for r in conn.execute(
             "SELECT w.*,"
@@ -5204,7 +5224,10 @@ def status(conn, now: int | None = None, recipe: str | None = None) -> dict[str,
         "done_last_24h": done_24h,
         "remaining": remaining,
         # None, not a fabricated infinity: with no completions the rate is unknown.
-        "eta_days": round(remaining / done_24h, 1) if done_24h else None,
+        "eta_days": round(remaining / rate_per_day, 1) if rate_per_day else None,
+        # What the ETA rests on, so the page can say "at 9/day over 7 days".
+        "eta_per_day": round(rate_per_day, 1) if rate_per_day else None,
+        "eta_window_days": round(rate_days) if rate_days else None,
         # Seen in the last 24h, not "the 50 most recent": a Phoenix pool alone can
         # exceed 50, and a count cap silently aged live workers off the dashboard.
         # Plus what each one is holding right now. The workers table itself has no

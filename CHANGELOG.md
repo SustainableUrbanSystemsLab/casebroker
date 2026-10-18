@@ -8,6 +8,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.49.11] - 2026-10-18
+
+### Fixed
+- **The campaign ETA no longer needs a completion in the last 24 hours.** Its rate came from one day, so
+  65 done and none today read "ETA unknown", and one busy hour swung the estimate. It now uses the last 7
+  days (30 when the week was empty), dividing by the time since that window's first completion rather than
+  the whole window, so a young campaign is not diluted. `/v1/status` gains `eta_per_day` and `eta_window_days`.
+
 ## [0.49.10] - 2026-10-18
 
 ## [0.49.9] - 2026-10-18
