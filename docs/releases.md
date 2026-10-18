@@ -91,7 +91,7 @@ beside Build is where a recipe that never leaves pending is explained.
 | `none declared` | its lease names no recipes: an E3D from before declarations, or a `--runner` script. It is handed what the policy's *Recipes for nodes that declare none* says, or **anything** when that is unset — a Radiance case included, which it gives back with exit 69 and stops |
 
 Above the table, one line per recipe the queue holds: *rad6R0P2-fft-v2: 48
-pending · 2 leased · 3 of 20 workers declare it*. In red when no worker does.
+pending · 2 leased · 3 of 20 declared*. In red when no worker does.
 
 ## The guards
 
