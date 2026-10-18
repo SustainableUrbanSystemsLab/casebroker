@@ -5001,7 +5001,11 @@
     // Velocity & ETA text
     $("etaText").textContent = (st.recipe ? String(st.recipe) + ": " : "") + (st.eta_days != null
       ? `Estimated completion: ~${st.eta_days} day(s) at current throughput (${st.done_last_24h.toLocaleString()} completed in last 24h)`
-      : (st.done_last_24h ? `${st.done_last_24h.toLocaleString()} completed in last 24h (insufficient history for ETA)` : "No completions yet — ETA unknown"));
+      : (st.done_last_24h ? `${st.done_last_24h.toLocaleString()} completed in last 24h (insufficient history for ETA)` : (doneCount
+          // 24 done, none in the last day read "No completions yet": the ETA
+          // needs a day's throughput, not any completion at all.
+          ? `${doneCount.toLocaleString()} done, none in the last 24h — ETA unknown`
+          : "No completions yet — ETA unknown")));
 
     if (st.expired_leases > 0) {
       const seconds = st.expired_lease_release_in_seconds;

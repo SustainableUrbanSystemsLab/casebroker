@@ -8,6 +8,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.49.6] - 2026-10-18
+
+### Fixed
+- **The ETA line no longer says "No completions yet" over a campaign with cases done.** It tested only the last
+  24 hours, so 24 done and none today read as none ever. It now says how many are done and that none finished in
+  the last 24h.
+
 ## [0.49.5] - 2026-10-18
 
 ### Fixed
