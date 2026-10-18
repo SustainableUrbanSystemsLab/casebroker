@@ -91,7 +91,7 @@ def test_the_progress_text_is_a_block_so_it_cannot_run_into_the_case_id():
     span put them flush against each other -- "v2-05b5c7e73e5ddcb2step 3/5: …" is
     what that looked like on screen."""
     html = (ROOT / "casebroker" / "static" / "dashboard.html").read_text(encoding="utf-8")
-    cell = html[html.index("function progressCell(line)"):]
+    cell = html[html.index("function progressCell(line, bare)"):]
     cell = cell[:cell.index("\n  }")]
     # Keyed on the hazard, not on the tag: the caption's label and percentage are
     # spans INSIDE a flex row of their own and cannot touch the case id. What may
