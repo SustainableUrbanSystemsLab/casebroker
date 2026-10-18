@@ -1026,6 +1026,11 @@
     color: var(--text-secondary);
   }
   .chip.mono { font-family: var(--font-mono); font-size: 11px; }
+  .chip-btn { cursor: pointer; color: var(--text-muted); font-weight: 500; }
+  .chip-btn:hover { color: var(--text-primary); border-color: var(--text-muted); }
+  /* One line wherever there is room for it; a phone may wrap. */
+  #etaText { white-space: nowrap; }
+  @media (max-width: 640px) { #etaText { white-space: normal; } }
 
   /* Code & Mono */
   code, pre {
@@ -8504,6 +8509,12 @@
   /// declares"). A worker that declares none is handed what the release policy's
   /// `undeclared_recipes` names, or anything when that is unset; the tooltip says
   /// which, from the catalog's last answer.
+  const expandedRecipes = new Set();
+  window.toggleRecipes = (id) => {
+    if (!expandedRecipes.delete(id)) expandedRecipes.add(id);
+    if (lastStatus) renderStatus(lastStatus);
+  };
+
   function recipesCell(w, st) {
     if (!w.recipes || !w.recipes.length) {
       const r = lastReleases;
@@ -8520,12 +8531,16 @@
     const has = new Set(w.recipes);
     // Two chips and a "+N": a node declares five or six, identical down the
     // whole column, and the full list is one hover away.
+    // The "+N" opens the rest in place; which rows are open survives the
+    // 60 s re-render, since the table is rebuilt from scratch each time.
     const SHOWN = 2;
-    const chips = w.recipes.slice(0, SHOWN).map((x) =>
+    const open = expandedRecipes.has(w.worker_id);
+    const chips = (open ? w.recipes : w.recipes.slice(0, SHOWN)).map((x) =>
       `<span class="chip mono" title="${esc(x)}">${esc(shortRecipe(x))}</span>`);
     if (w.recipes.length > SHOWN) {
-      chips.push(`<span class="chip mono" style="color:var(--text-muted)" title="${esc(w.recipes.map(shortRecipe).join("\n"))}">`
-        + `+${w.recipes.length - SHOWN}</span>`);
+      chips.push(`<button type="button" class="chip chip-btn mono" onclick="toggleRecipes('${esc(w.worker_id)}')" `
+        + `aria-expanded="${open}" title="${open ? "Show fewer" : esc(w.recipes.slice(SHOWN).map(shortRecipe).join("\n"))}">`
+        + `${open ? "less" : `+${w.recipes.length - SHOWN}`}</button>`);
     }
     for (const [x, pending, leased] of queuedRecipes(st)) {
       if (has.has(x)) continue;
