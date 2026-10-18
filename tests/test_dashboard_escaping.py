@@ -125,7 +125,7 @@ def test_progress_cell_escapes_the_line_it_draws():
     worker credential writes -- and it reaches the DOM twice: as the bar's title
     and as the text under it."""
     src = DASH.read_text(encoding="utf-8")
-    m = re.search(r"function progressCell\(line\)\s*\{(.+?)\n  \}", src, re.S)
+    m = re.search(r"function progressCell\(line(?:, bare)?\)\s*\{(.+?)\n  \}", src, re.S)
     assert m, "progressCell() not found"
     body = m.group(1)
     # Every interpolation of the line itself must go through esc(); the only other
