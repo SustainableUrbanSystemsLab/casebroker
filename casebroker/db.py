@@ -6026,6 +6026,52 @@ def quarantine_not_on_land(conn, is_land, dry_run: bool = True,
 
 
 @_locked
+def park_cases(conn, case_ids: list[str], reason: str, dry_run: bool = True,
+               limit: int = 50) -> dict[str, Any]:
+    """Quarantine named PENDING cases, with the reason as their error: the inverse
+    of ``reopen_cases``, which finds them again by that reason.
+
+    For cases that must not run although nothing failed. 2026-10-19: the sampler's
+    scan had mirrored every western tile across the equator, and 280 pending
+    cases sat at the wrong latitude. cancel pulls only a leased case, land-audit
+    only one off land, purge deletes the trail -- so there was no way to stop them.
+
+    Pending only. A leased case is a live solve and goes through cancel (admin,
+    on purpose); done and quarantined cases are left as they are. ``limit``
+    bounds the WRITES, in case_id order, as it does for reopen.
+    """
+    rows = conn.execute(
+        "SELECT case_id, state FROM cases WHERE case_id IN (%s) ORDER BY case_id"
+        % ",".join("?" for _ in case_ids), list(case_ids)).fetchall()
+    hit = [r["case_id"] for r in rows if r["state"] == "pending"]
+    skipped: dict[str, int] = {}
+    for r in rows:
+        if r["state"] != "pending":
+            skipped[r["state"]] = skipped.get(r["state"], 0) + 1
+    to_park = hit[:limit]
+    out: dict[str, Any] = {"matched": len(hit), "parked": 0, "skipped": skipped,
+                           "unknown": len(set(case_ids)) - len(rows),
+                           "capped": len(hit) > len(to_park), "dry_run": dry_run}
+    if dry_run or not to_park:
+        return out
+    now = _now()
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        for cid in to_park:
+            # state='pending' again in the WHERE: a case leased since the scan is left alone.
+            cur = conn.execute("UPDATE cases SET state='quarantined', last_error=?, updated_at=?"
+                               " WHERE case_id=? AND state='pending'", (reason[:4000], now, cid))
+            if cur.rowcount:
+                _event(conn, cid, None, "quarantined", reason[:500], now)
+                out["parked"] += 1
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    return out
+
+
+@_locked
 def reopen_cases(conn, *, error_contains: str | None = None,
                  case_ids: list[str] | None = None,
                  dry_run: bool = True, limit: int = 50,
