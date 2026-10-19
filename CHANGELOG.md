@@ -8,6 +8,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.49.14] - 2026-10-19
+
+### Added
+- **`POST /v1/cases/park` quarantines named pending cases**, with the reason as their error; `reopen
+  ?error_contains=<reason>` undoes it. Leased cases are skipped (that is `cancel`), as are done and
+  quarantined ones; `dry_run` defaults to true and `limit` bounds the writes. Needed 2026-10-19: the
+  sampler-v3 scan mirrored every western tile across the equator, and nothing could take the 280 pending
+  misplaced cases out of the queue by id.
+
 ## [0.49.13] - 2026-10-18
 
 ### Changed

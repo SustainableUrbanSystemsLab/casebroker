@@ -1915,6 +1915,16 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         return db.quarantine_not_on_land(conn, footprints.on_land,
                                          dry_run=dry_run, limit=limit)
 
+    @app.post("/v1/cases/park", dependencies=[WriteAuth])
+    def park_cases(case_id: list[str] = Query(..., min_length=1, max_length=5000),
+                   reason: str = Query(..., min_length=1, max_length=300),
+                   dry_run: bool = True, limit: int = 50) -> dict[str, Any]:
+        """Quarantine named PENDING cases with `reason` as their error; `reopen`
+        with `error_contains=<reason>` undoes it. A leased case is skipped (that
+        is `cancel`), as are done and quarantined ones. `dry_run` defaults to
+        TRUE and `limit` bounds the writes, as for reopen."""
+        return db.park_cases(conn, case_id, reason, dry_run=dry_run, limit=limit)
+
     @app.post("/v1/cases/reopen", dependencies=[WriteAuth])
     def reopen_cases(error_contains: str | None = None, dry_run: bool = True,
                      limit: int = 50,
