@@ -1613,6 +1613,21 @@
     <button class="subtle" id="focusTokenBtn" style="color:inherit;text-decoration:underline">Enter Token &rarr;</button>
   </div>
 
+  <!-- A broker can run with BOTH env tokens and accounts; /healthz's "auth"
+       posture prefers "token" when that's set, so the banner above only ever
+       offers the token box. Anyone who holds a username/password instead
+       still needs a visible way in, not just the gear icon. -->
+  <div id="signInNotice" class="notice-banner" role="status" style="display:none;">
+    <div style="display:flex;align-items:center;gap:8px">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path>
+        <circle cx="12" cy="7" r="4"></circle>
+      </svg>
+      <span>Have an account instead? Sign in to confirm devices and manage the campaign.</span>
+    </div>
+    <button class="subtle" id="focusSignInBtn" style="color:inherit;text-decoration:underline">Sign in &rarr;</button>
+  </div>
+
   <!-- First run, on the page rather than only behind the gear: a broker with
        no account is the one state where the operator cannot be expected to go
        looking for a drawer. Everything else about the connection lives in
@@ -2266,13 +2281,20 @@
          only its hash is stored -- a credential the server can redisplay is one
          an attacker can read out of the database. -->
     <section id="tab-machines" class="drawer-pane" role="tabpanel" hidden>
+      <!-- Machines that ran `E3D --setup-sim-node` and are waiting. The node
+           prints the same code it sends here; matching the two is what stops
+           someone else's request being approved by mistake. An operator may
+           confirm these -- the code on screen is the actual verification --
+           even though the rest of this tab (issuing a raw credential, the
+           fleet's build) stays admin-only below. -->
+      <div id="pairingPanel" style="display:none;">
+        <div class="panel-title-group" style="margin-bottom:4px;"><h2>Device requests</h2></div>
+        <div class="panel-subtitle">Confirm only if the code shown here matches the one the machine is showing.</div>
+        <div id="pairingList" style="margin-top:12px;"></div>
+      </div>
       <div id="machines" style="display:none;">
         <div class="panel-title-group" style="margin-bottom:4px;"><h2>Machines</h2></div>
         <div class="panel-subtitle">One credential per worker. Revoking one leaves the rest running.</div>
-        <!-- Machines that ran `E3D --setup-sim-node` and are waiting. The
-             node prints the same code it sends here; matching the two is what
-             stops someone else's request being approved by mistake. -->
-        <div id="pairingList" style="margin-top:12px;"></div>
         <div class="row" style="margin-top:12px;">
           <div class="field" style="flex:1; min-width:220px;">
             <label for="newMachine">Worker id
@@ -2356,7 +2378,7 @@
         <div><button id="relRegisterBtn" type="button">Register</button></div>
       </div>
       <div id="machinesLocked" class="panel-subtitle">
-        Sign in as an admin to issue and revoke machine credentials.
+        Sign in as an admin or operator to confirm a device, or as an admin to issue and revoke machine credentials.
       </div>
     </section>
 
@@ -8333,8 +8355,12 @@
     // with _may_write_as(("admin", "operator")), and an operator running the
     // campaign is exactly who notices that the draw put cases in the ocean.
     const canWrite = signedIn && ["admin", "operator"].includes(authState.role);
+    // Confirming a device is the one machine-tab action an operator may take
+    // (see require_pairing in app.py) -- the rest of the tab, issuing a raw
+    // credential and the fleet's build, stays admin-only.
+    $("pairingPanel").style.display = canWrite ? "" : "none";
     $("machines").style.display = isAdmin ? "" : "none";
-    $("machinesLocked").style.display = isAdmin ? "none" : "";
+    $("machinesLocked").style.display = (isAdmin || canWrite) ? "none" : "";
     $("users").style.display = isAdmin ? "" : "none";
     $("usersLocked").style.display = isAdmin ? "none" : "";
     $("sharing").style.display = isAdmin ? "" : "none";
@@ -8348,7 +8374,8 @@
     // A signed-in human has no use for the bearer-token form; it stays in the
     // DOM because everything still reads $("token").value.
     $("connectForm").style.display = signedIn ? "none" : "";
-    if (isAdmin) { loadMachines(); loadPairings(); loadUsers(); loadShares(); } else machineCount = null;
+    if (isAdmin) { loadMachines(); loadUsers(); loadShares(); } else machineCount = null;
+    if (canWrite) loadPairings();
     loadReleases();
     renderWizard();
     pushRefresh();     // who is signed in decides what push may offer
@@ -10230,12 +10257,16 @@
              : "This broker requires a bearer token to display live campaign "
                + "telemetry and cases.");
         $("focusTokenBtn").textContent = accounts ? "Sign in \u2192" : "Enter Token \u2192";
+        // "token" posture wins over "accounts" above (a broker can have both),
+        // so this is the only hint that logging in is also an option here.
+        $("signInNotice").style.display = (!accounts && health.accounts) ? "flex" : "none";
         $("statusEmpty").textContent = how + " to view live campaign data.";
         $("casesEmpty").textContent = how + " to browse cases.";
         return;
       }
 
       $("authNotice").style.display = "none";
+      $("signInNotice").style.display = "none";
       const st = await statusP;
       lastStatus = st;
       statusBroker = broker;
@@ -10292,6 +10323,8 @@
       } else if (e.status === 401) {
         setConn("bad", "unauthorized (401)");
         $("authNotice").style.display = "flex";
+        $("signInNotice").style.display =
+          (lastHealth && lastHealth.auth !== "accounts" && lastHealth.accounts) ? "flex" : "none";
         showErr("Authentication failed: invalid or expired bearer token");
       } else {
         setConn("bad", "disconnected");
@@ -10392,6 +10425,11 @@
     const accounts = lastHealth && lastHealth.auth === "accounts";
     openSettings(accounts ? "setup" : "connection");
     if (!accounts) $("token").focus();
+  });
+
+  $("focusSignInBtn").addEventListener("click", () => {
+    openSettings("setup");
+    $("authUsername").focus();
   });
 
   $("openSetupBtn").addEventListener("click", () => openSettings("setup"));

@@ -1,4 +1,4 @@
-"""A machine asks to join; an admin approves in the browser.
+"""A machine asks to join; an admin or operator approves in the browser.
 
 This is what `E3D --setup-sim-node` talks to. The enrolment it replaces
 had an admin type their password on every simulation node -- shared cluster
@@ -117,8 +117,22 @@ def test_a_denied_machine_gets_nothing(world):
     assert admin.post(f"/v1/pair/{code}/approve").json() == {"status": "denied"}
 
 
-@pytest.mark.parametrize("who", ["operator", "viewer", "anonymous"])
-def test_only_an_admin_may_approve(world, who):
+def test_an_operator_may_approve(world):
+    """Confirming a device whose code is already on screen, not minting one blind."""
+    admin, node, _ = world
+    r, raw = _start(node)
+    code = r.json()["user_code"]
+    other = TestClient(admin.app)
+    admin.post("/v1/users", json={"username": "op", "password": "another-long-one",
+                                  "role": "operator"})
+    other.post("/v1/auth/login", json={"username": "op", "password": "another-long-one"})
+    assert [p["user_code"] for p in other.get("/v1/pair/pending").json()["pending"]] == [code]
+    assert other.post(f"/v1/pair/{code}/approve").json() == {"status": "approved"}
+    assert _poll(node, code, raw).json()["status"] == "approved"
+
+
+@pytest.mark.parametrize("who", ["viewer", "anonymous"])
+def test_only_an_admin_or_operator_may_approve(world, who):
     """A credential that could approve machines could mint credentials."""
     admin, node, _ = world
     r, _raw = _start(node)

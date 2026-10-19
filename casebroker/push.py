@@ -149,6 +149,9 @@ class Kind:
     help: str                  # one line beside it; {silent_min} {stall_h} {burst_n} {burst_min}
     default: bool              # on for a browser that subscribes without choosing
     admin_only: bool = False
+    #: Narrows admin_only back open for operators too -- the role that may act on
+    #: this kind in the API (see require_pairing in app.py), not just view it.
+    operator_ok: bool = False
     urgency: str = "normal"    # RFC 8030: "high" may wake a phone in power saving
     ttl: int = DEFAULT_TTL
     many: str = ""             # the title of a batch: "{n} cases finished"
@@ -160,7 +163,7 @@ class Kind:
 EVENTS: tuple[Kind, ...] = (
     Kind("pair_request", "a machine asks to join",
          "approve or deny it under Settings > Machines; the request lapses in 10 minutes",
-         True, admin_only=True, urgency="high", ttl=db.PAIRING_TTL_SECONDS,
+         True, admin_only=True, operator_ok=True, urgency="high", ttl=db.PAIRING_TTL_SECONDS,
          many="{n} machines ask to join", many_url="/#settings=machines"),
     # Batched and silent after the first: the count on screen adds up (sw.js) until
     # it is dismissed, and the next finish after that makes a sound again.
@@ -227,19 +230,24 @@ def policy(conn) -> dict[str, bool]:
     return out
 
 
+def _kind_allowed(k: Kind, role: str | None) -> bool:
+    return not k.admin_only or role == "admin" or (k.operator_ok and role == "operator")
+
+
 def catalog(conn, role: str | None) -> list[dict[str, Any]]:
     on = policy(conn)
     return [{"key": k.key, "label": k.label, "help": _help(k), "default": k.default,
              "admin_only": k.admin_only, "broker": on[k.key],
-             "allowed": not k.admin_only or role == "admin"} for k in EVENTS]
+             "allowed": _kind_allowed(k, role)} for k in EVENTS]
 
 
 def events_for(requested: list[str] | None, role: str | None) -> list[str]:
     """What a subscription may hold: the kinds asked for (the defaults when none
     were), in catalog order, without the admin-only ones for anyone else -- dropped
-    silently, since the page offers them only to admins anyway."""
+    silently, since the page offers them only to admins (and operators where
+    ``operator_ok``) anyway."""
     want = {k.key for k in EVENTS if k.default} if requested is None else set(requested)
-    return [k.key for k in EVENTS if k.key in want and (not k.admin_only or role == "admin")]
+    return [k.key for k in EVENTS if k.key in want and _kind_allowed(k, role)]
 
 
 # -- what a browser may subscribe with ---------------------------------------------
@@ -723,7 +731,7 @@ def deliver(conn, notices: list[Notice], now: int, *, send=None, role_of=None) -
         want = set(sub["events"])
         for kind, items in groups.items():
             k = CATALOG[kind]
-            if kind not in want or not on[kind] or (k.admin_only and role != "admin"):
+            if kind not in want or not on[kind] or not _kind_allowed(k, role):
                 continue
             outcome = _deliver_one(conn, send, sub, compose(kind, items, now, role == "admin"),
                                    k.ttl, k.urgency, now)

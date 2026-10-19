@@ -65,14 +65,19 @@ There is no token to paste and nothing kept in local storage.
 > See [First run](operations.md#first-run-from-nothing-to-a-working-broker).
 
 **Three roles.** An `admin` can do everything. An **`operator`** runs the
-campaign — adds cases, leases, completes, fails, releases — and manages nothing:
-no accounts, no machine credentials, and no purging. A `viewer` reads and
-nothing else. Operator is the one most accounts should have; before it existed,
-`admin` was the only role that could write, which is how a deployment ends up
-with everyone an admin.
+campaign — adds cases, leases, completes, fails, releases — and manages almost
+nothing: no accounts, no raw machine credentials, no purging. The one exception
+is confirming a device: approving or denying a pairing request mints the
+credential, but the code it hands over was already generated on the box and
+shown on screen, so an operator watching the fleet grow can act on it without
+needing an admin to be around. A `viewer` reads and nothing else. Operator is
+the one most accounts should have; before it existed, `admin` was the only role
+that could write, which is how a deployment ends up with everyone an admin.
 
-A viewer or an operator sees neither the Users, the Sharing nor the Machines panel,
-because every action in them would be refused.
+A viewer sees neither the Users, the Sharing nor the Machines panel, because
+every action in them would be refused. An operator sees Machines too, but only
+its device-requests section — issuing or revoking a credential by hand, and the
+fleet's build, stay admin-only.
 
 ## Users: people, as opposed to machines
 
@@ -94,16 +99,20 @@ database, which is what recovers a deployment nobody can log into.
 
 ## Machines: one credential per box
 
-Signed in as an admin, **Machines** ▸ *Issue token* mints a credential for one
-machine, named after the worker id that box will run under.
+Signed in as an admin **or an operator**, **Machines** ▸ *Device requests*
+lists every machine waiting on `E3D setup-sim-node <broker-url>`: its code,
+host and platform. Approve it once that code matches what the box is showing,
+or deny it — the request lapses on its own in 10 minutes either way.
+
+Signed in as an admin, *Issue token* mints a credential for one machine by
+hand, named after the worker id that box will run under.
 
 The token is displayed **once**: a bearer credential for a script or a CI step
 acting as that name. A simulation node does not need one issued here -- it pairs
-itself (`E3D setup-sim-node <broker-url>`, a device code you approve on this page)
-and generates its own token, of which the broker keeps only the hash. Only an
-issued token's hash is stored too, so this is the only moment it exists in
-readable form — a credential the server could show you again is one an
-attacker could read out of the database.
+itself and generates its own token, of which the broker keeps only the hash
+(see *Device requests* above). Only an issued token's hash is stored too, so
+this is the only moment it exists in readable form — a credential the server
+could show you again is one an attacker could read out of the database.
 
 The list shows **last seen** per machine, which is the question a shared secret
 could never answer: which box is this, and is it still alive? **Revoke** takes
@@ -269,7 +278,7 @@ account's notices.
 
 | Kind | When | Default | Who |
 | --- | --- | --- | --- |
-| a machine asks to join | a node runs `E3D --setup-sim-node` and waits for approval (Settings ▸ Machines); lapses in 10 min | on | admins |
+| a machine asks to join | a node runs `E3D --setup-sim-node` and waits for approval (Settings ▸ Machines); lapses in 10 min | on | admins, operators |
 | cases finish | batched: at most one notice per half minute, and the count on screen adds up until it is dismissed | on | anyone |
 | a case is quarantined | its attempts ran out, or a node called the site broken. The land audit and a re-spec, which an operator ran, are not announced | on | anyone |
 | the broker drains a failing machine | `CASEBROKER_FAIL_BURST_CASES` cases failed on one machine within `CASEBROKER_FAIL_BURST_SECONDS` (an operator's own drain is not announced) | on | anyone |
