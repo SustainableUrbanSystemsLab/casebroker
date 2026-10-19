@@ -9883,6 +9883,7 @@
     const h = lastHealth;
     const signedIn = !!(authState && authState.user);
     const isAdmin = signedIn && authState.role === "admin";
+    const canWrite = signedIn && ["admin", "operator"].includes(authState.role);
     const target = dbTarget(lastStatus) || dbTarget(h);
     const states = (lastStatus && lastStatus.by_state) || null;
     const cases = states ? Object.values(states).reduce((a, b) => a + (b || 0), 0) : null;
@@ -9948,7 +9949,9 @@
       {
         title: "A credential per machine",
         done: machineCount !== null && machineCount > 0,
-        note: !isAdmin ? "Needs an admin session."
+        note: !canWrite ? "Needs an admin or operator session."
+            : !isAdmin ? "An operator can confirm a pending device under Machines; "
+                + "the full credential list needs an admin."
             : machineCount === null
               ? (machinesProbe === "failed" ? "Could not list this broker's machine credentials."
                  : pendingNote("Checking\u2026"))
@@ -9958,7 +9961,7 @@
               : "None yet. One per box \u2014 or one per CLUSTER, named after it: a "
                 + "credential called <code>phoenix</code> covers every "
                 + "<code>phoenix-&lt;job&gt;-&lt;task&gt;</code> id its SLURM tasks run as.",
-        action: isAdmin ? { label: "Open Machines", tab: "machines" } : null,
+        action: canWrite ? { label: "Open Machines", tab: "machines" } : null,
         hint: "A simulation node pairs itself: <code>E3D setup-sim-node &lt;broker-url&gt;</code> "
             + "on the box, then approve it on Machines. The raw token never leaves that machine.",
       },
