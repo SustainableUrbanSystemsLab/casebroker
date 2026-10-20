@@ -640,10 +640,7 @@ def test_an_operator_cannot_purge_the_campaign(admin):
     assert admin.get("/v1/cases").json()["total"] == 2, "nothing may have been removed"
 
 
-def test_an_operator_manages_neither_accounts_nor_machines(admin):
-    """An operator that could mint a machine credential would be an admin with
-    extra steps: the credential can write the campaign and outlives the account
-    that issued it, so revoking the person would not revoke what they left."""
+def test_an_operator_manages_no_accounts(admin):
     op = _as_operator(admin)
 
     assert op.get("/v1/users").status_code == 403
@@ -652,9 +649,22 @@ def test_an_operator_manages_neither_accounts_nor_machines(admin):
     assert op.post("/v1/users/ada/role", json={"role": "viewer"}).status_code == 403
     assert op.delete("/v1/users/ada").status_code == 403
 
-    assert op.get("/v1/workers/tokens").status_code == 403
-    assert op.post("/v1/workers/tokens", json={"name": "sneaky"}).status_code == 403
-    assert op.delete("/v1/workers/tokens/anything").status_code == 403
+
+def test_an_operator_issues_machine_credentials_but_revokes_none(admin):
+    """An operator runs the fleet like a GitHub maintainer (Patrick,
+    2026-10-20): adding a machine is routine, stopping one is an admin's call.
+    The credential outlives the operator's account, which is why the list
+    names who issued it -- an admin revokes it when the person leaves."""
+    op = _as_operator(admin)
+
+    r = op.post("/v1/workers/tokens", json={"name": "lab-op"})
+    assert r.status_code == 200, r.text
+    assert r.json()["token"]
+    listed = {t["name"]: t for t in op.get("/v1/workers/tokens").json()["tokens"]}
+    assert listed["lab-op"]["created_by"] == "bob"
+
+    assert op.delete("/v1/workers/tokens/lab-op").status_code == 403
+    assert admin.delete("/v1/workers/tokens/lab-op").status_code == 200
 
 
 def test_an_operator_can_still_change_their_own_password(admin):

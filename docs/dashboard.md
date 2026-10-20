@@ -65,19 +65,21 @@ There is no token to paste and nothing kept in local storage.
 > See [First run](operations.md#first-run-from-nothing-to-a-working-broker).
 
 **Three roles.** An `admin` can do everything. An **`operator`** runs the
-campaign — adds cases, leases, completes, fails, releases — and manages almost
-nothing: no accounts, no raw machine credentials, no purging. The one exception
-is confirming a device: approving or denying a pairing request mints the
-credential, but the code it hands over was already generated on the box and
-shown on screen, so an operator watching the fleet grow can act on it without
-needing an admin to be around. A `viewer` reads and nothing else. Operator is
+campaign and the fleet the way a GitHub *Maintain* role runs a repository:
+adds cases, leases, completes, fails, releases; confirms devices, issues machine
+credentials, makes read-only links, points the fleet or a canary at a build an
+admin registered, drains a node. Nothing an operator can do deletes, revokes,
+blocks or throws work away: revoking a credential or a link, registering or
+removing a build, the release policy and kill switch, switching nodes "now",
+accounts and purging are an admin's. A credential an operator issues outlives
+their account; the list names who issued it. A `viewer` reads and nothing else. Operator is
 the one most accounts should have; before it existed, `admin` was the only role
 that could write, which is how a deployment ends up with everyone an admin.
 
 A viewer sees neither the Users, the Sharing nor the Machines panel, because
-every action in them would be refused. An operator sees Machines too, but only
-its device-requests section — issuing or revoking a credential by hand, and the
-fleet's build, stay admin-only.
+every action in them would be refused. An operator sees Machines and Sharing
+without their Revoke and Remove buttons, the kill switch, the release policy,
+the build register box or the "now" switch mode.
 
 ## Users: people, as opposed to machines
 

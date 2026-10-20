@@ -109,8 +109,10 @@ pending · 2 leased · 3 of 20 declared*. In red when no worker does.
   target, a canary's target, or what a live worker is running (409 says
   which).
 - Pointing a fleet at code is remote execution by design, so **who may do it is
-  the security model**: every change needs an admin session, never a machine
-  token, and every one is in the audit trail — `release`, `setting`,
+  the security model**: every change needs a session, never a machine token.
+  An operator may set the target, move a canary, roll back and drain; registering
+  or removing a build, the policy, the kill switch and switching `now` need an
+  admin. Every change is in the audit trail — `release`, `setting`,
   `worker-target`, `promote`, `rollback`, `drain`, `update-failed`,
   `build-changed`, `shared-id`.
 
@@ -158,7 +160,10 @@ store, content-addressed like a case's parts, and only these are:
   before it (where *Roll back* goes), a canary's target, and any build a worker
   seen in the last 24 hours is running.
 
-The others are let go when a new file lands; their catalog rows stay, and the
+The others are let go when a new file lands, or at once by an admin: *Delete old
+build files* under Node builds (`POST /v1/releases/files/sweep?keep=N`, a report
+unless `dry_run=false`; `keep` defaults to the setting above, and the builds the
+fleet needs stay whatever `keep` says). Their catalog rows stay, and the
 panel says *files not held here* (red for the target or the previous one, which
 the fleet would need). Upload one again before pointing the fleet at it. Removing
 a build from the catalog removes its files, unless a build that stays is the same

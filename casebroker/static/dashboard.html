@@ -2187,7 +2187,7 @@
         <div id="shareList"></div>
       </div>
       <div id="sharingLocked" class="panel-subtitle">
-        Sign in as an admin to send a read-only link.
+        Sign in as an admin or operator to send a read-only link.
       </div>
     </section>
 
@@ -2283,10 +2283,11 @@
     <section id="tab-machines" class="drawer-pane" role="tabpanel" hidden>
       <!-- Machines that ran `E3D --setup-sim-node` and are waiting. The node
            prints the same code it sends here; matching the two is what stops
-           someone else's request being approved by mistake. An operator may
-           confirm these -- the code on screen is the actual verification --
-           even though the rest of this tab (issuing a raw credential, the
-           fleet's build) stays admin-only below. -->
+           someone else's request being approved by mistake. An operator runs
+           this tab like a GitHub maintainer: confirms devices, issues
+           credentials, points the fleet at a registered build. Whatever
+           revokes, removes, blocks or throws work away is marked data-admin
+           and shown to an admin only (require_operator in app.py). -->
       <div id="pairingPanel" style="display:none;">
         <div class="panel-title-group" style="margin-bottom:4px;"><h2>Device requests</h2></div>
         <div class="panel-subtitle">Confirm only if the code shown here matches the one the machine is showing.</div>
@@ -2310,8 +2311,9 @@
         <!-- Which CODE the fleet runs. The broker never serves the file: it names
              a build and the hash its file must have, and each node takes the file
              from its own release share and verifies it before running a byte.
-             Pointing a fleet at code is remote execution by design, which is why
-             this lives behind the same admin gate as issuing credentials. -->
+             Pointing a fleet at code is remote execution by design: an operator
+             may choose among builds an admin registered, never add or remove one,
+             change the policy, or pull the kill switch. -->
         <div class="panel-title-group" style="margin:22px 0 4px;"><h2>Node builds</h2></div>
         <div class="panel-subtitle">
           Publish a build to the nodes' release share, register it here, move ONE worker to it,
@@ -2328,7 +2330,7 @@
             <select id="relApply">
               <option value="case">after the case in flight</option>
               <option value="direction">after the current wind direction</option>
-              <option value="now">now (the case is given back)</option>
+              <option value="now" data-admin>now (the case is given back)</option>
             </select>
           </div>
           <!-- Disabled until the catalog has been read (renderReleases enables
@@ -2336,12 +2338,12 @@
                policy" would PUT those defaults over the real policy. -->
           <div><button id="relTargetBtn" type="button" disabled>Set target</button></div>
           <div><button id="relRollbackBtn" type="button" class="ghost" hidden>Roll back</button></div>
-          <div><button id="relKillBtn" type="button" class="ghost" hidden
+          <div data-admin><button id="relKillBtn" type="button" class="ghost" hidden
                        title="Refuse the current target to every node at its next lease, and point the fleet back at the build before it. For a build that has to stop now, not at each node's next ask.">Kill switch</button></div>
         </div>
         <!-- The fleet in one line: what everything below is about. -->
         <div id="relSummary" class="panel-subtitle" style="margin-top:10px;"></div>
-        <div class="row" style="margin-top:10px; align-items:flex-end;">
+        <div class="row" data-admin style="margin-top:10px; align-items:flex-end;">
           <div class="field" style="flex:1; min-width:260px;">
             <label for="relBlocked">Blocked builds
               <span class="label-hint">(comma-separated; a blocked build is refused new cases)</span>
@@ -2367,7 +2369,19 @@
           <div><button id="relPolicyBtn" type="button" disabled>Save policy</button></div>
         </div>
         <div id="relBuilds" style="margin-top:12px;"></div>
+        <!-- Each upload lets go of old builds' files by itself; this does it now, e.g.
+             after the store filled up. The builds stay listed. -->
+        <div class="row" data-admin style="margin-top:10px; align-items:flex-end;">
+          <div class="field" style="min-width:220px;">
+            <label for="relKeep">Keep files of the newest
+              <span class="label-hint">(builds; the target, the one before it, canaries and running builds always stay)</span>
+            </label>
+            <input type="number" id="relKeep" min="0" style="width:90px;" />
+          </div>
+          <div><button id="relSweepBtn" type="button" class="ghost">Delete old build files</button></div>
+        </div>
         <div id="relWorkers" style="margin-top:12px;"></div>
+        <div data-admin>
         <div class="field" style="margin-top:12px;">
           <label for="relPaste">Register a published build
             <span class="label-hint">(paste the <code class="inline">release.json</code> the E3D node build published, or run <code class="inline">casebroker release register release.json</code> from a terminal or a CI step)</span>
@@ -2376,9 +2390,10 @@
                     placeholder='[{"build":"1.14.0.827+0e9e6863","platform":"win-x64","file":"E3D-1.14.0.827+0e9e6863-win-x64.exe","sha256":"…"}]'></textarea>
         </div>
         <div><button id="relRegisterBtn" type="button">Register</button></div>
+        </div>
       </div>
       <div id="machinesLocked" class="panel-subtitle">
-        Sign in as an admin or operator to confirm a device, or as an admin to issue and revoke machine credentials.
+        Sign in as an admin or operator to confirm a device and issue machine credentials.
       </div>
     </section>
 
@@ -8355,26 +8370,30 @@
     // with _may_write_as(("admin", "operator")), and an operator running the
     // campaign is exactly who notices that the draw put cases in the ocean.
     const canWrite = signedIn && ["admin", "operator"].includes(authState.role);
-    // Confirming a device is the one machine-tab action an operator may take
-    // (see require_pairing in app.py) -- the rest of the tab, issuing a raw
-    // credential and the fleet's build, stays admin-only.
+    // An operator runs Machines and Sharing like a GitHub maintainer (see
+    // require_operator in app.py): adds, confirms, points. What revokes,
+    // removes, blocks or discards work carries data-admin and is an admin's.
     $("pairingPanel").style.display = canWrite ? "" : "none";
-    $("machines").style.display = isAdmin ? "" : "none";
-    $("machinesLocked").style.display = (isAdmin || canWrite) ? "none" : "";
+    $("machines").style.display = canWrite ? "" : "none";
+    $("machinesLocked").style.display = canWrite ? "none" : "";
+    document.querySelectorAll("[data-admin]").forEach((el) => {
+      if (el.tagName === "OPTION") el.disabled = !isAdmin; else el.style.display = isAdmin ? "" : "none";
+    });
     $("users").style.display = isAdmin ? "" : "none";
     $("usersLocked").style.display = isAdmin ? "none" : "";
-    $("sharing").style.display = isAdmin ? "" : "none";
-    $("sharingLocked").style.display = isAdmin ? "none" : "";
-    $("shareBtn").style.display = isAdmin ? "" : "none";
-    // A link made a moment ago is a credential: it does not outlive the admin's
-    // session on this page.
-    if (!isAdmin) { shareIssued = null; renderShareIssued(); }
+    $("sharing").style.display = canWrite ? "" : "none";
+    $("sharingLocked").style.display = canWrite ? "none" : "";
+    $("shareBtn").style.display = canWrite ? "" : "none";
+    // A link made a moment ago is a credential: it does not outlive the
+    // session that made it on this page.
+    if (!canWrite) { shareIssued = null; renderShareIssued(); }
     $("campaign").style.display = canWrite ? "" : "none";
     $("campaignLocked").style.display = canWrite ? "none" : "";
     // A signed-in human has no use for the bearer-token form; it stays in the
     // DOM because everything still reads $("token").value.
     $("connectForm").style.display = signedIn ? "none" : "";
-    if (isAdmin) { loadMachines(); loadUsers(); loadShares(); } else machineCount = null;
+    if (isAdmin) loadUsers();
+    if (canWrite) { loadMachines(); loadShares(); } else machineCount = null;
     if (canWrite) loadPairings();
     loadReleases();
     renderWizard();
@@ -8431,7 +8450,7 @@
   // and `admin` was the only role that could write.
   const ROLE_BLURB = {
     admin: "everything, including accounts, machine credentials and purging a campaign",
-    operator: "reads and writes the campaign; manages no accounts or credentials",
+    operator: "runs the campaign and the fleet like a GitHub maintainer: confirms devices, issues credentials and read-only links, points nodes at a registered build; revokes, removes and blocks nothing, manages no accounts",
     viewer: "reads the campaign and nothing else",
   };
 
@@ -8716,6 +8735,8 @@
     setBusy($("relBuilds"), false);
     $("relTargetBtn").disabled = false;
     $("relPolicyBtn").disabled = false;
+    if (r.release_keep) $("relKeep").placeholder = String(r.release_keep);
+    $("relSweepBtn").disabled = !r.release_files;
 
     // Roll back, and the kill switch, exist only once there is somewhere to go back to.
     const back = r.previous_target;
@@ -8826,7 +8847,7 @@
             <td class="num${b.unconverged ? " alert" : ""}">${(b.unconverged || 0).toLocaleString()}${pct(b.unconverged_rate)}</td>
             <td class="num${b.failed ? " alert" : ""}">${(b.failed || 0).toLocaleString()}${pct(b.failed_rate)}</td>
             <td class="num">${b.mean_wall_seconds ? esc(ageShort(b.mean_wall_seconds)) : "—"}</td>
-            <td>${rows.length && b.build !== r.target_build
+            <td>${rows.length && b.build !== r.target_build && isAdminNow()
                   ? `<button type="button" class="ghost" data-rel-remove="${esc(b.build)}">Remove</button>` : ""}</td>
           </tr>`;
         }).join("") + `</tbody></table></div>`;
@@ -8900,7 +8921,11 @@
   function wireReleases() {
     if (!$("relTargetBtn")) return;
     $("relTargetBtn").onclick = () => releaseCallForcing("/v1/releases/target",
-      { build: $("relTarget").value || null, apply: $("relApply").value }, "Fleet target saved");
+      // An operator leaves the switch mode alone when it reads "now" (an admin's
+      // choice, refused to an operator by the broker) rather than being refused.
+      { build: $("relTarget").value || null,
+        apply: $("relApply").value === "now" && !isAdminNow() ? undefined : $("relApply").value },
+      "Fleet target saved");
     $("relRollbackBtn").onclick = () => {
       const r = lastReleases || {};
       if (!window.confirm(`Point the fleet back at ${r.previous_target}?`)) return;
@@ -8911,6 +8936,19 @@
       if (!window.confirm(`Block ${r.target_build} for every node and point the fleet back at ${r.previous_target}?\n\n`
                           + "A node on it is refused new cases at its next lease; the case in flight finishes.")) return;
       releaseCall("/v1/releases/rollback", jsonBody("POST", { block: true }), "Blocked and rolled back");
+    };
+    $("relSweepBtn").onclick = async () => {
+      const k = $("relKeep").value.trim();
+      const q = k === "" ? "" : "&keep=" + encodeURIComponent(k);
+      try {
+        const plan = await userCall("/v1/releases/files/sweep?dry_run=true" + q, { method: "POST" });
+        if (!plan.files) { showToast("No old build files to delete"); return; }
+        if (!window.confirm(`Delete ${plan.files} file(s), ${formatBytes(plan.bytes)}, of ${plan.builds.join(", ")}?\n\n`
+                            + "The builds stay listed; upload one again before pointing the fleet at it.")) return;
+        const done = await userCall("/v1/releases/files/sweep?dry_run=false" + q, { method: "POST" });
+        showToast(`Deleted ${done.removed} file(s), ${formatBytes(plan.bytes)}`);
+      } catch (e) { showToast(e.message); }
+      await loadReleases();
     };
     $("relPolicyBtn").onclick = () => {
       // Empty is "any recipe" (the policy cleared); "none" is an empty list.
@@ -9015,7 +9053,10 @@
   /// This page's own address without its fragment: what a link starts from.
   function shareBase() { return location.origin + location.pathname; }
 
-  function canShare() { return !!(authState && authState.user && authState.role === "admin"); }
+  function canShare() { return !!(authState && authState.user && ["admin", "operator"].includes(authState.role)); }
+
+  /// Revoking, removing and blocking are an admin's (require_operator in app.py).
+  function isAdminNow() { return !!(authState && authState.user && authState.role === "admin"); }
 
   /// Where the page is, for a link to land on: never a drawer.
   function viewRoute() {
@@ -9119,7 +9160,7 @@
             '<td style="padding:6px 8px;">' + (l.last_used_at ? esc(relTime(l.last_used_at)) : "never") +
               (l.opened ? ' <span class="label-hint">opened ' + Number(l.opened) + '&times;</span>' : "") + '</td>' +
             '<td style="padding:6px 8px; text-align:right; white-space:nowrap;">' +
-              (live ? '<button type="button" data-share-revoke="' + Number(l.id) + '">Revoke</button>' : "") +
+              (live && isAdminNow() ? '<button type="button" data-share-revoke="' + Number(l.id) + '">Revoke</button>' : "") +
             '</td></tr>';
         }).join("") + '</tbody></table>';
     } catch (e) {
@@ -9272,7 +9313,7 @@
             '<td style="padding:6px 8px;">' +
               (t.last_seen_at ? relTime(t.last_seen_at) : "never") + '</td>' +
             '<td style="padding:6px 8px; text-align:right;">' +
-              (revoked ? "" :
+              (revoked || !isAdminNow() ? "" :
                 '<button type="button" onclick="revokeMachine(\'' + esc(t.name) + '\')">Revoke</button>') +
             '</td></tr>';
         }).join("") + '</tbody></table>';
@@ -9882,7 +9923,6 @@
   function wizardSteps() {
     const h = lastHealth;
     const signedIn = !!(authState && authState.user);
-    const isAdmin = signedIn && authState.role === "admin";
     const canWrite = signedIn && ["admin", "operator"].includes(authState.role);
     const target = dbTarget(lastStatus) || dbTarget(h);
     const states = (lastStatus && lastStatus.by_state) || null;
@@ -9950,8 +9990,6 @@
         title: "A credential per machine",
         done: machineCount !== null && machineCount > 0,
         note: !canWrite ? "Needs an admin or operator session."
-            : !isAdmin ? "An operator can confirm a pending device under Machines; "
-                + "the full credential list needs an admin."
             : machineCount === null
               ? (machinesProbe === "failed" ? "Could not list this broker's machine credentials."
                  : pendingNote("Checking\u2026"))
