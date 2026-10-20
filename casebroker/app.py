@@ -2139,6 +2139,7 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
             r["stored"] = size is not None
             r["bytes"] = size
         out["release_files"] = store is not None
+        out["release_keep"] = release_keep
         return out
 
     @app.get("/v1/node/release", dependencies=[WriteAuth])
@@ -2758,6 +2759,24 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
                     store.remove(old)
         except Exception as exc:                             # noqa: BLE001
             print(f"[releases] could not let go of old release files: {exc}", file=sys.stderr)
+
+    @app.post("/v1/releases/files/sweep")
+    def sweep_release_files(dry_run: bool = Query(True), keep: int | None = Query(None, ge=0),
+                            user=AdminAuth) -> dict[str, Any]:
+        """Delete the files of old builds now -- what each upload does on its own
+        (`_release_stored`), on an admin's demand: the builds beyond the newest ``keep``
+        (default CASEBROKER_RELEASE_KEEP_BUILDS) that nothing needs. Never the target,
+        the previous target, a canary's target or what a live worker runs
+        (db.release_files_to_drop). The catalog rows stay, so a build can be uploaded
+        again. Reports by default; ``dry_run=false`` deletes."""
+        st = _parts_store()
+        n = release_keep if keep is None else keep
+        sizes = {sha: size for sha in db.release_files_to_drop(conn, n)
+                 if (size := _held(sha)) is not None}
+        builds = sorted({r["build"] for r in db.list_releases(conn)["releases"] if r["sha256"] in sizes})
+        removed = 0 if dry_run else sum(bool(st.remove(sha)) for sha in sizes)
+        return {"dry_run": dry_run, "keep": n, "builds": builds, "files": len(sizes),
+                "bytes": sum(sizes.values()), "removed": removed}
 
     def _release_upload_state(sha: str, size: int) -> dict[str, Any]:
         st = _parts_store()

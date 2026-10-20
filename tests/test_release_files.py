@@ -242,6 +242,32 @@ def test_only_the_newest_builds_and_the_ones_in_use_keep_their_files(app, admin)
     assert any(r["build"] == B1 for r in admin.get("/v1/releases").json()["releases"])
 
 
+def test_an_admin_deletes_old_build_files_on_demand_and_nothing_the_fleet_needs(app, admin):
+    """Uploads let old files go by themselves; an admin can do it NOW (a full store),
+    with a report first. The catalog keeps the build, and an operator cannot."""
+    store = app.state.parts
+    files = {b: _register(admin, b) for b in (B1, B2)}
+    for b in (B1, B2):
+        _upload(admin, b, files[b])
+    admin.put("/v1/releases/target", json={"build": B2})
+
+    assert admin.post("/v1/releases/files/sweep").json()["files"] == 0, "the newest 2 are kept by default"
+    plan = admin.post("/v1/releases/files/sweep", params={"keep": 0}).json()
+    assert plan["dry_run"] and plan["builds"] == [B1] and plan["files"] == 1
+    assert plan["bytes"] == len(files[B1]) and plan["removed"] == 0
+    assert store.has(_sha(files[B1])), "a dry run deletes nothing"
+
+    admin.post("/v1/users", json={"username": "olga", "password": PW, "role": "operator"})
+    op = TestClient(app)
+    assert op.post("/v1/auth/login", json={"username": "olga", "password": PW}).status_code == 200
+    assert op.post("/v1/releases/files/sweep", params={"keep": 0, "dry_run": False}).status_code == 403
+
+    done = admin.post("/v1/releases/files/sweep", params={"keep": 0, "dry_run": False}).json()
+    assert done["removed"] == 1
+    assert not store.has(_sha(files[B1])) and store.has(_sha(files[B2])), "the target keeps its file"
+    assert any(r["build"] == B1 for r in admin.get("/v1/releases").json()["releases"])
+
+
 def test_the_target_keeps_its_file_however_many_builds_come_after_it(app, admin):
     store = app.state.parts
     first = _register(admin, B1)

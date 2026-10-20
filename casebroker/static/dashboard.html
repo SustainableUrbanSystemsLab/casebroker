@@ -2369,6 +2369,17 @@
           <div><button id="relPolicyBtn" type="button" disabled>Save policy</button></div>
         </div>
         <div id="relBuilds" style="margin-top:12px;"></div>
+        <!-- Each upload lets go of old builds' files by itself; this does it now, e.g.
+             after the store filled up. The builds stay listed. -->
+        <div class="row" data-admin style="margin-top:10px; align-items:flex-end;">
+          <div class="field" style="min-width:220px;">
+            <label for="relKeep">Keep files of the newest
+              <span class="label-hint">(builds; the target, the one before it, canaries and running builds always stay)</span>
+            </label>
+            <input type="number" id="relKeep" min="0" style="width:90px;" />
+          </div>
+          <div><button id="relSweepBtn" type="button" class="ghost">Delete old build files</button></div>
+        </div>
         <div id="relWorkers" style="margin-top:12px;"></div>
         <div data-admin>
         <div class="field" style="margin-top:12px;">
@@ -8724,6 +8735,8 @@
     setBusy($("relBuilds"), false);
     $("relTargetBtn").disabled = false;
     $("relPolicyBtn").disabled = false;
+    if (r.release_keep) $("relKeep").placeholder = String(r.release_keep);
+    $("relSweepBtn").disabled = !r.release_files;
 
     // Roll back, and the kill switch, exist only once there is somewhere to go back to.
     const back = r.previous_target;
@@ -8923,6 +8936,19 @@
       if (!window.confirm(`Block ${r.target_build} for every node and point the fleet back at ${r.previous_target}?\n\n`
                           + "A node on it is refused new cases at its next lease; the case in flight finishes.")) return;
       releaseCall("/v1/releases/rollback", jsonBody("POST", { block: true }), "Blocked and rolled back");
+    };
+    $("relSweepBtn").onclick = async () => {
+      const k = $("relKeep").value.trim();
+      const q = k === "" ? "" : "&keep=" + encodeURIComponent(k);
+      try {
+        const plan = await userCall("/v1/releases/files/sweep?dry_run=true" + q, { method: "POST" });
+        if (!plan.files) { showToast("No old build files to delete"); return; }
+        if (!window.confirm(`Delete ${plan.files} file(s), ${formatBytes(plan.bytes)}, of ${plan.builds.join(", ")}?\n\n`
+                            + "The builds stay listed; upload one again before pointing the fleet at it.")) return;
+        const done = await userCall("/v1/releases/files/sweep?dry_run=false" + q, { method: "POST" });
+        showToast(`Deleted ${done.removed} file(s), ${formatBytes(plan.bytes)}`);
+      } catch (e) { showToast(e.message); }
+      await loadReleases();
     };
     $("relPolicyBtn").onclick = () => {
       // Empty is "any recipe" (the policy cleared); "none" is an empty list.
