@@ -198,6 +198,49 @@ def test_triage_names_mpirun_refusing_root_in_a_direction(tmp_path):
     assert any(f.startswith("case_000: mpirun refused") for f in found), found
 
 
+# yang-24315048-0 (University of Arizona's Puma cluster), 2026-10-20, trimmed: rootless podman had
+# no subuid/subgid range for the account and its storage root defaulted to $HOME, which doesn't
+# support the xattrs overlay needs. 7 cases failed identically at 01_blockMesh within 17 minutes.
+BLOCKMESH_SETRESGID = """\
+Launching container CLI with command: set -o pipefail && cd /case/mesh && ... blockMesh 2>&1 | tee 01_blockMesh.txt
+Error: OCI runtime error: crun: setresgid to `1000`: Invalid argument
+Container execution finished with exit code 126
+"""
+
+PULL_XATTR = """\
+Trying to pull docker.io/dicehub/openfoam@sha256:d7bbd9e7105718e16971fa3918e3a43e03bca8ae54da00423ca90001d326760e...
+Error: unable to copy from source docker://dicehub/openfoam@sha256:...: copying system image from manifest list: writing blob: adding layer with blob "sha256:9ea8908f...": lsetxattr /home/u28/yangyy/.local/share/containers/storage/overlay/tempdirs/temp-dir-3323001720/0-addition: operation not supported
+Container execution finished with exit code 125
+"""
+
+
+def test_triage_names_rootless_podman_instead_of_a_mesh_that_never_started(tmp_path):
+    study = _study(tmp_path, checkmesh="", snappy="", pf="", runs={})
+    (study / "mesh" / "01_blockMesh.txt").write_text(BLOCKMESH_SETRESGID)
+    found = repro.signatures(repro.triage(study))
+
+    assert any("01_blockMesh.txt" in f and "uid can't be mapped" in f for f in found), found
+    # The mesh never started, so "never printed 'Finished meshing'" would send the reader to snappy.
+    assert not any("never printed 'Finished meshing'" in f for f in found), found
+
+
+def test_triage_names_both_rootless_podman_signatures_together(tmp_path):
+    study = _study(tmp_path, checkmesh="", snappy="", pf="", runs={})
+    (study / "mesh" / "01_blockMesh.txt").write_text(BLOCKMESH_SETRESGID)
+    (study / "mesh" / "00_pull.txt").write_text(PULL_XATTR)
+    [found] = repro.signatures(repro.triage(study))
+
+    assert "01_blockMesh.txt" in found and "00_pull.txt" in found
+    assert "uid can't be mapped" in found and "xattr support" in found
+
+
+def test_triage_is_silent_on_a_plain_mesh_failure(tmp_path):
+    # Control: an ordinary dead snappy must not also be read as rootless podman.
+    study = _study(tmp_path, checkmesh="", snappy=SNAPPY_DIED, pf="", runs={})
+    found = repro.signatures(repro.triage(study))
+    assert not any("rootless podman" in f for f in found), found
+
+
 # cod-pkast-7865's console, 2026-10-09 (dumped from the window: "error" untagged, wrapped), and
 # what a build from Eddy3D 1f0f6b4b on writes to a redirected log.
 CONSOLE_STALL = """\
