@@ -150,7 +150,7 @@ class Kind:
     default: bool              # on for a browser that subscribes without choosing
     admin_only: bool = False
     #: Narrows admin_only back open for operators too -- the role that may act on
-    #: this kind in the API (see require_pairing in app.py), not just view it.
+    #: this kind in the API (see require_operator in app.py), not just view it.
     operator_ok: bool = False
     urgency: str = "normal"    # RFC 8030: "high" may wake a phone in power saving
     ttl: int = DEFAULT_TTL

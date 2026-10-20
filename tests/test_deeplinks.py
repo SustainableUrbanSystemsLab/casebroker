@@ -105,9 +105,11 @@ def test_every_settings_tab_has_its_pane():
         assert f'id="tab-{name}"' in SRC, f"the {name} tab has no pane"
 
 
-def test_the_sharing_controls_are_for_admins_only():
-    """The server refuses everyone else; the page just must not offer it."""
+def test_the_sharing_controls_are_for_admins_and_operators_and_revoke_for_admins():
+    """The server refuses everyone else; the page just must not offer it. An
+    operator makes links, never takes one away (require_operator)."""
     load = _body("async function loadAuthState()", "\n  }\n\n  async function submitAuth")
-    assert '$("shareBtn").style.display = isAdmin ? "" : "none"' in load
-    assert '$("sharing").style.display = isAdmin ? "" : "none"' in load
-    assert "function canShare() { return !!(authState && authState.user && authState.role === \"admin\"); }" in SRC
+    assert '$("shareBtn").style.display = canWrite ? "" : "none"' in load
+    assert '$("sharing").style.display = canWrite ? "" : "none"' in load
+    assert 'function canShare() { return !!(authState && authState.user && ["admin", "operator"].includes(authState.role)); }' in SRC
+    assert "live && isAdminNow() ? '<button type=\"button\" data-share-revoke=" in SRC

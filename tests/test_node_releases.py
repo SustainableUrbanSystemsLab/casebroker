@@ -228,7 +228,7 @@ def test_the_target_in_use_cannot_be_deleted_out_from_under_the_fleet(admin):
     assert admin.delete(f"/v1/releases/{NEW}").status_code == 409
 
 
-def test_pointing_the_fleet_at_code_needs_an_ADMIN_never_a_machine_token(admin, tmp_path):
+def test_pointing_the_fleet_at_code_needs_a_SESSION_never_a_machine_token(admin, tmp_path):
     """This is remote code execution by design, so who may do it is the security
     model. A worker credential that could retarget the fleet would let one
     compromised workstation take the rest."""
@@ -240,6 +240,35 @@ def test_pointing_the_fleet_at_code_needs_an_ADMIN_never_a_machine_token(admin, 
                  lambda c: c.put("/v1/workers/x/target", headers=W, json={"build": NEW}),
                  lambda c: c.post("/v1/workers/x/drain", headers=W, json={})):
         assert call(anonymous).status_code in (401, 403)
+
+
+def test_an_operator_points_the_fleet_but_never_blocks_adds_or_removes_a_build(admin):
+    """Operator = a GitHub maintainer (Patrick, 2026-10-20): chooses among builds
+    an admin registered, moves a canary, drains a node -- and nothing that
+    blocks, removes, adds code or throws a case in flight away."""
+    for b in (OLD, NEW):
+        admin.post("/v1/releases", json={"build": b, "platform": "win-x64", "file": "f.exe", "sha256": SHA})
+    admin.post("/v1/users", json={"username": "olga", "password": PW, "role": "operator"})
+    op = TestClient(admin.app)
+    assert op.post("/v1/auth/login", json={"username": "olga", "password": PW}).status_code == 200
+
+    assert op.put("/v1/releases/target", json={"build": OLD}).status_code == 200
+    assert op.put("/v1/releases/target", json={"build": NEW, "apply": "direction"}).status_code == 200
+    assert op.post("/v1/releases/rollback", json={"block": False}).status_code == 200
+    # 404, not 403: the gate let it through and there is no such worker.
+    assert op.put("/v1/workers/nobody/target", json={"build": NEW}).status_code == 404
+    assert op.post("/v1/workers/nobody/drain", json={}).status_code == 404
+    assert op.post("/v1/workers/nobody/undrain").status_code == 404
+
+    assert op.put("/v1/releases/target", json={"build": NEW, "apply": "now"}).status_code == 403
+    assert op.post("/v1/releases/rollback", json={"block": True}).status_code == 403
+    assert op.post("/v1/releases", json={"build": "x", "platform": "win-x64", "file": "f.exe",
+                                         "sha256": SHA}).status_code == 403
+    assert op.delete(f"/v1/releases/{NEW}").status_code == 403
+    assert op.put("/v1/releases/policy", json={"require_build": True}).status_code == 403
+    after = admin.get("/v1/releases").json()
+    assert after["target_build"] == OLD and after["target_apply"] == "direction"
+    assert not after.get("blocked_builds"), "the refused kill switch blocked nothing"
 
 
 def test_every_change_to_what_the_fleet_runs_is_in_the_audit_trail(conn):
