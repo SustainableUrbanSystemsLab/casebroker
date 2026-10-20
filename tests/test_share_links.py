@@ -97,16 +97,24 @@ def test_a_link_needs_a_plain_label_and_a_sane_lifetime(admin, body):
     assert admin.get("/v1/shares").json()["shares"] == []
 
 
-def test_only_an_admin_can_make_list_or_revoke_links(app, admin):
+def test_an_operator_makes_and_lists_links_and_only_an_admin_revokes_one(app, admin):
+    """Sharing is routine for an operator; taking a link away is an admin's
+    (an operator revokes, removes and blocks nothing -- require_operator)."""
     link = make_link(admin)
     operator = login_as(app, admin, "olga", "operator")
     viewer = login_as(app, admin, "vic", "viewer")
     nobody = TestClient(app)
-    for who in (nobody, viewer, operator):
+    for who in (nobody, viewer):
         assert who.post("/v1/shares", json={"label": "x"}).status_code in (401, 403)
         assert who.get("/v1/shares").status_code in (401, 403)
         assert who.delete(f"/v1/shares/{link['id']}").status_code in (401, 403)
     assert len(admin.get("/v1/shares").json()["shares"]) == 1, "none of that changed anything"
+
+    mine = operator.post("/v1/shares", json={"label": "Bea"})
+    assert mine.status_code == 200, mine.text
+    assert len(operator.get("/v1/shares").json()["shares"]) == 2
+    assert operator.delete(f"/v1/shares/{link['id']}").status_code == 403
+    assert admin.delete(f"/v1/shares/{mine.json()['id']}").status_code == 200
 
 
 def test_a_machine_credential_cannot_make_links(app, admin):

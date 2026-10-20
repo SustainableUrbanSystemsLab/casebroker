@@ -109,8 +109,10 @@ pending · 2 leased · 3 of 20 declared*. In red when no worker does.
   target, a canary's target, or what a live worker is running (409 says
   which).
 - Pointing a fleet at code is remote execution by design, so **who may do it is
-  the security model**: every change needs an admin session, never a machine
-  token, and every one is in the audit trail — `release`, `setting`,
+  the security model**: every change needs a session, never a machine token.
+  An operator may set the target, move a canary, roll back and drain; registering
+  or removing a build, the policy, the kill switch and switching `now` need an
+  admin. Every change is in the audit trail — `release`, `setting`,
   `worker-target`, `promote`, `rollback`, `drain`, `update-failed`,
   `build-changed`, `shared-id`.
 

@@ -110,14 +110,14 @@ Three roles, and the differences are real rather than cosmetic:
 | Role | Can |
 | --- | --- |
 | `admin` | everything: run the campaign, **purge** it, create and delete accounts, change roles, issue and revoke machine credentials |
-| `operator` | **run** the campaign — add cases, lease, heartbeat, complete, fail, release, report fleet — and read all of it. `403` from `DELETE /v1/cases`, from `/v1/workers/tokens`, and from every `/v1/users` route **except changing their own password** |
+| `operator` | **run** the campaign and the fleet, like a GitHub *Maintain* role — add cases, lease, heartbeat, complete, fail, release, report fleet; confirm devices, issue machine credentials, make read-only links, point the fleet or a canary at a registered build, drain a node — and read all of it. Nothing destructive: `403` from `DELETE /v1/cases`, revoking a credential or a link, registering, removing or blocking a build (kill switch), the release policy, switching nodes `now`, and every `/v1/users` route **except changing their own password** |
 | `viewer` | read the campaign — status, case list, one case. `403` from every mutating endpoint, and the same `/v1/users` rule |
 
 **`operator` is the one most accounts should have.** Until it existed `admin`
 was the only role that could write, so "let this person run the campaign" and
 "let this person delete every account including yours" were the same grant —
 which is how deployments end up with everyone an admin. An operator does the
-daily work and manages nothing.
+daily work, adds what the fleet needs, and removes nothing.
 
 Two things stay with `admin` on purpose. **Purging** (`DELETE /v1/cases`) takes
 the cases, their events and their footprints, and is the one campaign operation
