@@ -8,6 +8,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.49.21] - 2026-10-20
+
+### Changed
+- **The canopy preview draws the runner's own crowns.** `/footprints` canopy carries `columns`: the 4 m
+  crown columns Eddy3D meshes, each the floor of its mean height, so `>= 2` is exactly the runner's
+  test. The plan view, the field view's tree outline and the geojson.io domain map draw them instead
+  of 21 m cells whose rounded mean reached 2 m -- a staircase that dropped scattered trees
+  (v2-022bfaf49d4a18a3, Hangzhou: 3.9 % of the core in columns under v1, matching Eddy3D's 3.8 %).
+- **The canopy model follows the recipe**: Meta/WRI CHMv2 (zoom-10 tiles) for `cyl-1008/of12-v7`, v1
+  otherwise; `source` names it and a cached preview from the other model is fetched again.
+  `PAYLOAD_VERSION` 7.
+
 ## [0.49.20] - 2026-10-20
 
 ## [0.49.19] - 2026-10-20

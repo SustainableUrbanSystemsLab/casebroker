@@ -124,3 +124,22 @@ def test_overture_fallback_is_off_by_default(monkeypatch):
         assert reloaded.OVERTURE_FALLBACK is False
     finally:
         importlib.reload(footprints)
+
+
+def test_the_canopy_model_follows_the_recipe():
+    """Mirrors Eddy3D's CampaignCaseConfig.CanopyModel: v2 crowns for of12-v7,
+    v1 for every other recipe -- a preview from the other model would draw
+    trees the case's mesh does not have."""
+    assert footprints.chm_model_for("cyl-1008/of12-v7")[0] == "meta-wri-chm-v2"
+    for recipe in ("cyl-1008/of12-v6", "cyl-1008/of12-v5", "cyl-1008/of12-v4",
+                   "surf-1008/rad6R0P2-fft-v2", "cyl-1008/of12-v8", None):
+        assert footprints.chm_model_for(recipe)[0] == "meta-wri-chm-v1", recipe
+
+
+def test_v2_tiles_are_zoom_ten_and_published():
+    """CHMv2 tiles are 32,768 cells at the same 1.194 m: zoom 10. Both keys
+    answered 200 from the bucket on 2026-10-20."""
+    _, base, z = footprints.CHM_V2
+    assert z == 10 and "/forests/v2/" in base
+    assert chm_tile_for(30.2377, 120.2454, z) == "1321210312"   # Hangzhou
+    assert chm_tile_for(48.137, 11.575, z) == "1202300022"      # Munich

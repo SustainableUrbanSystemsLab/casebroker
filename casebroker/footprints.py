@@ -41,6 +41,7 @@ the ceilings in :func:`_duck` and :data:`_GDAL_ENV` are for.
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import json
 import math
@@ -215,6 +216,8 @@ MAX_BUILDINGS = 20_000
 # every case anyone had already opened keep answering with neither, which looks
 # exactly like a site with no trees rather than a stale cache. A hit stamped
 # with anything other than the current value is treated as a miss.
+# 7: canopy carries the runner's 4 m `columns`, and its model follows the
+# recipe (v2 for cyl-1008/of12-v7); cached ones have neither.
 # 6: the payload names the source the case's MESH was built from
 # (`mesh_source`, `mesh_source_basis`); cached ones carry neither, and a panel
 # cannot label a picture it has no basis for.
@@ -223,7 +226,7 @@ MAX_BUILDINGS = 20_000
 # 3: any payload cached while a raster host was unreachable carries
 # "unavailable" for terrain and canopy, and until this version those were
 # cached like real answers. Bumping re-fetches every case exactly once.
-PAYLOAD_VERSION = 6
+PAYLOAD_VERSION = 7
 
 
 class TileNotPublished(Exception):
@@ -598,6 +601,29 @@ def terrain(lat: float, lon: float, half_m: float = DOMAIN_HALF_M,
 # one blob, and street trees are most of what shelters a pedestrian.
 CHM_BASE = ("https://dataforgood-fb-data.s3.amazonaws.com/forests/v1/"
             "alsgedi_global_v6_float/chm")
+# CHMv2 (DINOv3, March 2026): the same imagery where both exist, a model that
+# sees the street rows and courtyard trees v1 misses (Hangzhou core, 4 m columns
+# at or over 2 m: 3.9 % v1, 11.2 % v2). Same uint8 metres at 1.194 m in
+# EPSG:3857, but tiles named by ZOOM-10 quadkeys. Eddy3D's recipe
+# cyl-1008/of12-v7 meshes it; every earlier recipe meshes v1.
+CHM_V2_BASE = ("https://dataforgood-fb-data.s3.amazonaws.com/forests/v2/"
+               "global/dinov3_global_chm_v2_ml3/chm")
+# Which canopy model a recipe's crowns come from: (source id, tile base, zoom).
+# Mirrors Eddy3D's CampaignCaseConfig.CanopyModel exactly -- v2 for these
+# recipes, v1 for every other one, the thermal and MRT recipes included.
+CHM_V1 = ("meta-wri-chm-v1", CHM_BASE, 9)
+CHM_V2 = ("meta-wri-chm-v2", CHM_V2_BASE, 10)
+CHM_V2_RECIPES = frozenset({"cyl-1008/of12-v7"})
+
+
+def chm_model_for(recipe: str | None) -> tuple[str, str, int]:
+    """The canopy model the runner builds this recipe's crowns from."""
+    return CHM_V2 if recipe in CHM_V2_RECIPES else CHM_V1
+
+# The runner's crown columns: CanopyZones.VoxelM. A column is a crown where the
+# MEAN canopy height over its 4 m square is at least CANOPY_MIN_M -- that, and
+# nothing coarser, is the canopy the solve gets.
+COLUMN_M = 4.0
 # Below this the map is mostly shrub and grass noise rather than crown, and it
 # is the threshold canopy.py reports coverage above.
 CANOPY_MIN_M = 2.0
@@ -669,7 +695,7 @@ def vegetation_class(lat: float) -> dict[str, Any]:
 
 
 def canopy(lat: float, lon: float, half_m: float = CORE_HALF_M,
-           n: int = 48) -> dict:
+           n: int = 48, recipe: str | None = None) -> dict:
     """Where the trees are on this site, and how tall, over the mesh domain.
 
     ``grid`` is ``n*n`` canopy heights in whole metres, row-major from the
@@ -679,6 +705,16 @@ def canopy(lat: float, lon: float, half_m: float = CORE_HALF_M,
     crown volumes (upper 59% of the tree, 4 m columns) and meshes them as a
     ``canopy`` cellZone carrying ``f = 2*Cd*LAD``; it is a POROUS obstacle, not
     an STL solid, which is why a preview shows a field and not blocks.
+
+    ``columns`` is the runner's own crown map: ``n*n`` 4 m columns, base64 of
+    one uint8 per column (row-major from the north-west), the FLOOR of the
+    column's mean canopy height -- so ``>= 2`` is exactly the runner's
+    "mean >= 2 m" test. Drawing crowns from ``grid`` instead showed 21 m cells
+    whose rounded mean reached 2 m: a staircase that dropped every scattered
+    tree and was not what the solve meshes (v2-022bfaf49d4a18a3, 2026-10-20).
+
+    ``recipe`` picks the canopy MODEL the runner uses for it
+    (:func:`chm_model_for`); ``source`` says which one answered.
 
     A treeless site is a real answer and a common one. So is a site the product
     does not cover -- it has polar and open-ocean gaps -- and the two are
@@ -698,14 +734,19 @@ def canopy(lat: float, lon: float, half_m: float = CORE_HALF_M,
         return {"source": "unknown",
                 "detail": f"{type(e).__name__}: {str(e)[:140]}"}
 
-    tile = chm_tile_for(lat, lon)
-    url = f"/vsicurl/{CHM_BASE}/{tile}.tif"
+    source, base, zoom = chm_model_for(recipe)
+    tile = chm_tile_for(lat, lon, zoom)
+    url = f"/vsicurl/{base}/{tile}.tif"
+    ncol = round(2 * half_m / COLUMN_M)
+    # ~1 m for the core (1008 cells): the native resolution, and a whole number
+    # of fine cells per column (4) and per drawing cell (21 at n=48).
+    nfine = math.lcm(ncol * round(COLUMN_M), n)
     try:
-        # average, not bilinear: a 41 m preview cell spans ~34 native cells and
-        # the mean canopy height over the cell is what a crown-volume drag term
-        # integrates. Picking the nearest pixel would make the field flicker
-        # between 0 and a whole tree.
-        fine, covered = _read_window(url, lat, lon, half_m, n * OVERSAMPLE,
+        # average, not bilinear: the mean canopy height over a cell is what a
+        # crown-volume drag term integrates, and what the runner thresholds.
+        # Picking the nearest pixel would make the field flicker between 0 and
+        # a whole tree.
+        fine, covered = _read_window(url, lat, lon, half_m, nfine,
                                      Resampling.average)
     except Exception as e:                               # noqa: BLE001
         msg = str(e)
@@ -717,11 +758,15 @@ def canopy(lat: float, lon: float, half_m: float = CORE_HALF_M,
 
     fine = np.clip(np.nan_to_num(fine, nan=0.0), 0.0, None)
     a = _blockmean(fine, n)
+    cols = np.floor(_blockmean(fine, ncol)).clip(0, 255).astype(np.uint8)
     under = fine >= CANOPY_MIN_M
-    return {"source": "meta-wri-chm-v1", "licence": "CC BY 4.0",
+    return {"source": source, "licence": "CC BY 4.0",
             "vegetation": vegetation_class(lat),
             "native_res_m": 1.2, "tile": tile, "min_canopy_m": CANOPY_MIN_M,
             "half_m": half_m, "n": n, "covered": round(covered, 3),
+            "columns": {"n": ncol, "cell_m": COLUMN_M,
+                        "b64": base64.b64encode(cols.tobytes()).decode("ascii")},
+            "frac_columns": round(float((cols >= CANOPY_MIN_M).mean()), 4),
             "frac_canopy": round(float(under.mean()), 4),
             "max_height_m": round(float(fine.max()), 1),
             "mean_height_where_canopy_m": (round(float(fine[under].mean()), 1)

@@ -3301,8 +3301,8 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
             return footprints.GBA
         return mesh
 
-    def _building_query(lat: float, lon: float,
-                        source: str) -> tuple[dict[str, Any], bool]:
+    def _building_query(lat: float, lon: float, source: str,
+                        recipe: str | None = None) -> tuple[dict[str, Any], bool]:
         """The three layers for one site, the buildings from the source this
         case's mesh was built from.
 
@@ -3385,7 +3385,7 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         # finding out now. Neither raises: a dead raster host is a fact about
         # today, not about the site.
         fc["terrain"] = footprints.terrain(lat, lon)
-        fc["canopy"] = footprints.canopy(lat, lon)
+        fc["canopy"] = footprints.canopy(lat, lon, recipe=recipe)
         # "unavailable" and "unknown" are facts about TODAY -- a raster host that
         # did not answer, a library that is not there -- and caching them freezes
         # one bad moment into "this site has no terrain and no trees" for the
@@ -3435,6 +3435,11 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         source, basis = footprints.mesh_source(row["state"], metrics,
                                                row.get("updated_at"))
         meshed = {"mesh_source": source, "mesh_source_basis": basis}
+        spec = row.get("spec") or {}
+        if isinstance(spec, str):
+            spec = json.loads(spec)
+        recipe = row.get("recipe") or spec.get("recipe")
+        canopy_model = footprints.chm_model_for(recipe)[0]
 
         def cached() -> dict[str, Any] | None:
             if refresh:
@@ -3457,14 +3462,17 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
             # the switch carry no `source` at all: Overture.
             if (fc.get("source") or footprints.OVERTURE) != _drawn_from(source):
                 return None
+            # Nor a canopy from the other model: a case respecced onto (or off)
+            # a v2 recipe keeps its case_id, and its trees would stay v1's.
+            # "none" is a fact about the site under either model.
+            can = (fc.get("canopy") or {}).get("source")
+            if can not in ("none", canopy_model):
+                return None
             return {**fc, **meshed, "cached": True,
                     "fetched_at": hit["fetched_at"]}
 
         if (hit := cached()) is not None:
             return hit
-        spec = row.get("spec") or {}
-        if isinstance(spec, str):
-            spec = json.loads(spec)
         lat, lon = spec.get("lat"), spec.get("lon")
         if lat is None or lon is None:
             raise HTTPException(422, "case spec carries no lat/lon")
@@ -3486,7 +3494,7 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
             # how this branch started.
             try:
                 with footprints.exclusive():
-                    fc, transient = _building_query(lat, lon, source)
+                    fc, transient = _building_query(lat, lon, source, recipe)
             except footprints.GeoBusy as busy:
                 raise HTTPException(503, str(busy),
                                     headers={"Retry-After": "30"}) from busy

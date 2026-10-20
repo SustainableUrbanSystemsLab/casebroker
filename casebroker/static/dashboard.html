@@ -2665,7 +2665,7 @@
                        : g.coordinates.map((poly) => poly[0]);
     const terr = d.terrain || {}, can = d.canopy || {};
     const hasTerr = terr.source === "gedtm30" && Array.isArray(terr.grid);
-    const hasCan = can.source === "meta-wri-chm-v1" && Array.isArray(can.grid);
+    const hasCan = isCanopyModel(can) && Array.isArray(can.grid);
 
     // Both rasters arrive as a flat row-major grid over +-half_m, north-up. This
     // reads one back in metres east/north of the case centre, which is the frame
@@ -2706,7 +2706,7 @@
     const groundLayer = hasTerr
       ? cellRects(terr, "var(--warn)", (v) => 0.05 + 0.28 * (v / relief)) : "";
     const canopyLayer = hasCan
-      ? cellRects(can, "var(--accent)", (v) => v < 2 ? 0 : 0.25 + 0.5 * Math.min(1, v / canMax)) : "";
+      ? cellRects(canopyColumns(can), "var(--accent)", (v) => v < 2 ? 0 : 0.25 + 0.5 * Math.min(1, v / canMax)) : "";
 
     let withH = 0, noH = 0, paths = "";
     const sds = [];
@@ -3102,7 +3102,7 @@
     const canLine = (() => {
       if (hasCan && can.frac_canopy > 0) {
         const v = can.vegetation;
-        return `<div><span class="geo-swatch" style="background:var(--accent)"></span>trees — <b>${pct(can.frac_canopy)}%</b> under canopy, tallest <b>${can.max_height_m} m</b>, meshed as porous crowns, not solids</div>`
+        return `<div><span class="geo-swatch" style="background:var(--accent)"></span>trees — <b>${pct(can.frac_canopy)}%</b> under canopy${can.frac_columns != null ? `, <b>${pct(can.frac_columns)}%</b> of the core in 4 m crown columns` : ""}, tallest <b>${can.max_height_m} m</b>, meshed as porous crowns, not solids <span class="mono" style="font-size:11px">${esc(can.source)}</span></div>`
           + (v ? `<div><span class="geo-swatch" style="background:var(--accent);opacity:0.45"></span>all crowns as <b>${esc(v.label)}</b> — f = 2·Cd·LAD = <b>${v.f_per_m}</b> m⁻¹<div class="geo-note" style="margin-top:2px">One class for every tree here, by latitude alone (${esc(v.provenance)}).</div></div>` : "");
       }
       if (hasCan) return `<div><span class="geo-swatch" style="background:var(--accent);opacity:0.35"></span><b>no trees</b> — treeless site, no canopy zone</div>`;
@@ -3609,6 +3609,27 @@
 
   function wfCss(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
 
+  /// A /footprints canopy payload from either canopy model (meta-wri-chm-v1 / -v2).
+  function isCanopyModel(can) { return !!can && /^meta-wri-chm-v\d+$/.test(can.source || ""); }
+
+  /// The runner's own crown map out of a /footprints canopy payload: 4 m columns, each the FLOOR
+  /// of its mean canopy height, so `>= min_canopy_m` is exactly the runner's crown test. Shaped
+  /// like the payload itself ({n, half_m, grid}), so every drawing reads either. The 21 m `grid`
+  /// is not that map: a cell whose ROUNDED mean reached 2 m is a staircase that drops scattered
+  /// trees (v2-022bfaf49d4a18a3, 2026-10-20). Falls back to it for a payload without columns.
+  function canopyColumns(can) {
+    if (!can || !can.columns || !can.columns.b64 || !(can.columns.n > 0)) return can;
+    const views = canopyColumns.views || (canopyColumns.views = new WeakMap());
+    let view = views.get(can);
+    if (!view) {
+      const bin = atob(can.columns.b64), grid = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) grid[i] = bin.charCodeAt(i);
+      view = { ...can, n: can.columns.n, grid };
+      views.set(can, view);
+    }
+    return view;
+  }
+
   // The site's trees over the field, in green: where the Meta/WRI canopy model has crowns of at
   // least min_canopy_m (2 m), on the /footprints grid the Site Geometry panel draws -- the same
   // 1008 m core, ~21 m cells. A see-through green with a solid green edge: the field under a crown
@@ -3625,7 +3646,8 @@
   /// bare ground so a crown at the core's edge still closes, and a diagonal pair of crown cells
   /// is drawn as one region, the way their crowns touch.
   function wfCanopyOutline(can) {
-    if (!can || !Array.isArray(can.grid) || !(can.n > 1) || !(can.half_m > 0)) return [];
+    can = canopyColumns(can);
+    if (!can || !can.grid || !(can.n > 1) || !(can.half_m > 0)) return [];
     const n = can.n, half = can.half_m, step = 2 * half / n, cut = can.min_canopy_m || 2;
     const at = (r, c) => (r < 0 || c < 0 || r >= n || c >= n) ? 0 : (can.grid[r * n + c] || 0) >= cut ? 1 : 0;
     const X = (c) => -half + (c + 0.5) * step, Y = (r) => half - (r + 0.5) * step;
@@ -3681,6 +3703,7 @@
 
   /// The canopy height in metres at a point (metres east and north of the centre), 0 outside it.
   function wfCanopyAt(can, x, y) {
+    can = canopyColumns(can);
     const n = can.n, half = can.half_m, step = 2 * half / n;
     const c = Math.floor((x + half) / step), r = Math.floor((half - y) / step);
     return r < 0 || c < 0 || r >= n || c >= n ? 0 : (can.grid[r * n + c] || 0);
@@ -3773,7 +3796,7 @@
             const how = solved === "1" ? "in this solve as porous crowns"
               : solved === "0" ? "<b>not</b> in this solve: drawn for reference, the case was solved without trees"
               : "whether this solve included them is not recorded";
-            const cell = Math.round(2 * can.half_m / can.n);
+            const cols = canopyColumns(can), cell = Math.round(2 * cols.half_m / cols.n);
             return `<div><span style="display:inline-block;width:12px;height:12px;background:${WF_TREE_FILL};border:1.5px solid ${WF_TREE};border-radius:2px;vertical-align:-2px;margin-right:6px"></span>trees
               ${(can.frac_canopy * 100).toFixed(0)}% of the core, tallest ${can.max_height_m} m
               <span style="color:var(--text-muted)">(canopy ≥ ${can.min_canopy_m || 2} m, Meta/WRI, ${cell} m cells)</span> — ${how}</div>`;
@@ -5518,15 +5541,16 @@
     if (untagged.length) out.buildings.push(group(untagged, "buildings without a height", "#6b7280", 0));
 
     const can = geo.canopy || {};
-    if (can.source === "meta-wri-chm-v1" && Array.isArray(can.grid) && can.n > 0 && Array.isArray(geo.centre)) {
-      const n = can.n, half = can.half_m || CORE_HALF_M, step = 2 * half / n;
+    if (isCanopyModel(can) && Array.isArray(can.grid) && can.n > 0 && Array.isArray(geo.centre)) {
+      const cols = canopyColumns(can);
+      const n = cols.n, half = cols.half_m || CORE_HALF_M, step = 2 * half / n;
       const [lat0, lon0] = geo.centre;
       const my = 110540, mx = 111320 * Math.cos(lat0 * Math.PI / 180);
       const pt = (x, y) => [+(lon0 + x / mx).toFixed(6), +(lat0 + y / my).toFixed(6)];
       const min = can.min_canopy_m || 2;
       const v = can.vegetation;
       MAP_CANOPY_BANDS.forEach(([lo, hi, label, colour]) => {
-        const inBand = (r, c) => { const h = can.grid[r * n + c] || 0; return h >= Math.max(lo, min) && h < hi; };
+        const inBand = (r, c) => { const h = cols.grid[r * n + c] || 0; return h >= Math.max(lo, min) && h < hi; };
         // Row runs, and a run stacked on the same run of the row above grows into one
         // rectangle: 320 cells of this campaign's first Indian site became 116 polygons.
         const rects = [];
@@ -5555,7 +5579,7 @@
         });
         out.canopy.push({ type: "Feature",
           properties: { name: `tree canopy ${label} (${cells} cell${cells === 1 ? "" : "s"})`,
-                        canopy: `Meta/WRI canopy height, ${Math.round(step)} m cells averaged`,
+                        canopy: `${can.source}: the runner's ${Math.round(step)} m crown columns (mean height)`,
                         ...(v && v.label ? { vegetation: `${v.label}, f = 2 Cd LAD = ${v.f_per_m} per m` } : {}),
                         stroke: colour, "stroke-width": 0.5, fill: colour, "fill-opacity": 0.45 },
           geometry: { type: "MultiPolygon", coordinates: polys } });

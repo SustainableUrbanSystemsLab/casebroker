@@ -10,9 +10,9 @@ const slice = (name) => {
   if (from < 0) throw new Error(`${name} not found in dashboard.html`);
   return html.slice(from, html.indexOf('\n  }\n', from) + 4);
 };
-const ctx = {};
+const ctx = { atob };
 vm.createContext(ctx);
-vm.runInContext(slice('wfCanopyOutline') + slice('wfCanopyLoops') + slice('wfCanopyAt')
+vm.runInContext(slice('canopyColumns') + slice('wfCanopyOutline') + slice('wfCanopyLoops') + slice('wfCanopyAt')
   + '\nthis.outline = wfCanopyOutline; this.loops = wfCanopyLoops; this.at = wfCanopyAt;', ctx);
 
 const n = 6, half = 60, step = 2 * half / n;          // 20 m cells over +-60 m
@@ -72,5 +72,19 @@ assert.strictEqual(loops([[0, 0, 8], [4, 4, 8]]).length, 2);
 const wood = [];
 for (let r = 1; r <= 4; r++) for (let c = 1; c <= 4; c++) if (!(r === 2 && c === 2) && !(r === 3 && c === 3) && !(r === 2 && c === 3) && !(r === 3 && c === 2)) wood.push([r, c, 9]);
 assert.strictEqual(loops(wood).length, 2, 'the wood and its clearing');
+
+// The runner's 4 m columns win over the 21 m drawing grid when the payload carries them: here
+// the coarse grid is bare and one 10 m column is a crown at exactly the 2 m cut (the floor of its
+// mean), its neighbour at 1 m is not -- the outline is that one column, nowhere else.
+const cn = 12, cstep = 2 * half / cn, cols = new Uint8Array(cn * cn);
+cols[3 * cn + 5] = 2; cols[3 * cn + 6] = 1;
+const withCols = { ...can([]), columns: { n: cn, cell_m: cstep, b64: Buffer.from(cols).toString('base64') } };
+const colLine = ctx.outline(withCols);
+assert.strictEqual(colLine.length, 4, 'one column, one diamond');
+const [ccx, ccy] = [-half + 5.5 * cstep, half - 3.5 * cstep];
+assert.ok(colLine.flat().every(([x, y]) => Math.abs(x - ccx) <= cstep / 2 + 1e-9 && Math.abs(y - ccy) <= cstep / 2 + 1e-9),
+  'around the 2 m column, not the 1 m one beside it');
+assert.strictEqual(ctx.at(withCols, ccx, ccy), 2, 'the tooltip reads the column too');
+assert.strictEqual(ctx.at(withCols, ccx + cstep, ccy), 1);
 
 console.log('canopy outlines are closed, north up, and at the 2 m cut');

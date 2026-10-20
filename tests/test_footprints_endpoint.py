@@ -27,7 +27,7 @@ def broker(tmp_path):
 _seq = iter(range(1, 10_000))
 
 
-def _one_case(client, lat=33.75, lon=-84.39):
+def _one_case(client, lat=33.75, lon=-84.39, recipe="fixed-cyl-500/of12"):
     """Add one case on land and return its id.
 
     Tagged with a unique cluster and looked up by it rather than taking the
@@ -45,7 +45,7 @@ def _one_case(client, lat=33.75, lon=-84.39):
     tag = f"c{n}"
     lat = round(lat + n * 0.013, 6)
     client.post("/v1/cases", json=[{"lat": lat, "lon": lon,
-                                    "recipe": "fixed-cyl-500/of12",
+                                    "recipe": recipe,
                                     "city_cluster": tag, "lcz": "LCZ1",
                                     "spec": {"dirs": [0]}}])
     cases = client.get(f"/v1/cases?city_cluster={tag}&limit=1").json()["cases"]
@@ -270,3 +270,38 @@ def test_a_genuine_gap_is_still_cached(broker, monkeypatch):
     broker.get(f"/v1/cases/{cid}/footprints")
     assert broker.get(f"/v1/cases/{cid}/footprints").json()["cached"] is True
     assert calls["n"] == 1
+
+
+def test_a_cached_canopy_from_the_other_model_is_fetched_again(broker, monkeypatch):
+    """The canopy model follows the recipe (v2 for of12-v7). A preview cached
+    under one model is a miss once the case's recipe wants the other, the way a
+    cached building source is: served from the cache it would draw trees the
+    mesh does not have."""
+    monkeypatch.setattr(footprints, "fetch_gba",
+                        lambda lat, lon, **k: {"type": "FeatureCollection",
+                                               "features": [], "n": 0,
+                                               "source": "globalbuildingatlas",
+                                               "release": "GBA.LoD1",
+                                               "centre": [lat, lon]})
+    monkeypatch.setattr(footprints, "terrain",
+                        lambda *a, **k: {"source": "flat", "half_m": 1304.0})
+    asked = []
+
+    def canopy(lat, lon, recipe=None, **k):
+        asked.append(recipe)
+        return {"source": footprints.chm_model_for(recipe)[0], "n": 2,
+                "half_m": 504.0, "frac_canopy": 0.1, "max_height_m": 9.0,
+                "grid": [0, 3, 0, 0]}
+
+    monkeypatch.setattr(footprints, "canopy", canopy)
+    cid = _one_case(broker, recipe="cyl-1008/of12-v7")
+    first = broker.get(f"/v1/cases/{cid}/footprints").json()
+    assert first["canopy"]["source"] == "meta-wri-chm-v2"
+    assert asked == ["cyl-1008/of12-v7"]
+    assert broker.get(f"/v1/cases/{cid}/footprints").json()["cached"] is True
+
+    # The same cached row, now read for a recipe that meshes v1 crowns.
+    monkeypatch.setattr(footprints, "CHM_V2_RECIPES", frozenset())
+    again = broker.get(f"/v1/cases/{cid}/footprints").json()
+    assert again["cached"] is False and again["canopy"]["source"] == "meta-wri-chm-v1"
+    assert len(asked) == 2
