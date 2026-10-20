@@ -9,6 +9,8 @@ A central database of cases plus an HTTP work queue, so that many machines —
 PACE ICE, PACE Phoenix, the lab workstation, anyone else's box — can each ask
 *"what should I simulate next?"* and never collide.
 
+![The dashboard: campaign status, worker fleet and case browser, with example data](docs/images/dashboard.png)
+
 ## Where things are
 
 | Path | What |
