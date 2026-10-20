@@ -82,18 +82,19 @@ if command -v python3 >/dev/null && [ -f "$B/fleet_report.py" ]; then
     fi
 fi
 
-# EDDY3D_APPTAINER_CACHE: unset here, so ApptainerImageCache.CacheDir() defaults to node-local
-# scratch ($TMPDIR, wiped at job end -- each job re-pulls the ~GB image, same tradeoff the PACE
-# podman scripts already accept). Point it at group/project storage instead to avoid the re-pull
-# on every job -- fill in your own allocation's path; there is no single answer across accounts.
-# export EDDY3D_APPTAINER_CACHE=/xdisk/YOUR_GROUP/$USER/eddy3d-apptainer
-
 # --done needs somewhere OUTSIDE your 50 GB home quota for archives to accumulate in -- fill in
 # your own group/project storage path (hpcdocs.hpc.arizona.edu/resources/storage_transfer). --work
 # is node-local scratch on purpose: a case in flight is never resumed here, the next worker
 # continues it from the broker's copy.
-DONE=${E3D_DONE:?set E3D_DONE to a done-archive path outside your home quota, e.g. your group's storage}
+DONE=${E3D_DONE:?set E3D_DONE to a done-archive path outside your home quota, e.g. your group storage}
 mkdir -p "$DONE"
+
+# The OpenFOAM .sif and Apptainer's layer cache go beside the done archives (group storage), so a
+# job reuses the image instead of pulling GBs from Docker Hub again (shared NAT, pull rate limit).
+# E3D sets APPTAINER_CACHEDIR to <this>/layers itself; nothing else needs exporting -- not
+# EDDY3D_CONTAINER_CLI, which is the Podman/Docker override. Pulls land under a unique name and are
+# renamed (E3D 3e2ef807+), so parallel jobs share the cache safely.
+export EDDY3D_APPTAINER_CACHE=${EDDY3D_APPTAINER_CACHE:-$(dirname "$DONE")/apptainer-cache}
 WORK=${TMPDIR:-/tmp}/e3d-work; mkdir -p "$WORK"
 
 echo "node puma-${SLURM_JOB_ID} on $(hostname), $(nproc) cores, work=$WORK, chain prev=${CHAIN_PREV:-none}," \
