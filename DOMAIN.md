@@ -225,10 +225,15 @@ meshes**. Three layers, one payload:
   grid plus min/max/relief. `source` is `gedtm30`, `flat` (genuine nodata, so
   the builder will mesh a flat plane — usually a site not on land), or
   `unavailable` (the DTM host, not the site).
-- **`canopy`** — Meta/WRI 1 m canopy heights over the same domain, as a coarse
-  grid plus coverage and tallest tree. `source` is `meta-wri-chm-v1`, `none`
-  (the product publishes no tile here) or `unavailable`. A treeless site and an
-  uncovered one are different answers and are reported as such.
+- **`canopy`** — Meta/WRI 1 m canopy heights over the core, as a coarse 21 m
+  drawing grid, the runner's own 4 m crown `columns` (each the floor of its mean
+  height, so `>= 2` is exactly the runner's crown test), coverage and tallest
+  tree. Crowns are drawn from `columns`: the 21 m grid's rounded means dropped
+  scattered trees and drew staircases the mesh does not have. `source` is the
+  model the case's recipe meshes — `meta-wri-chm-v2` (CHMv2, zoom-10 tiles) for
+  `cyl-1008/of12-v7`, `meta-wri-chm-v1` otherwise — or `none` (the product
+  publishes no tile here) or `unavailable`. A treeless site and an uncovered
+  one are different answers and are reported as such.
 
 Both rasters span 1304 m rather than 520 m because that is what
 `site_geometry.build_site` reads: `half_t = HALF_M + buffer_m`, 504 + 800. The
@@ -278,8 +283,8 @@ usually a 404, but it can also be a real tile for the wrong part of the world,
 which returns buildings and produces a case that meshes, solves, and is somewhere
 else. `tests/test_gba_tiles.py` pins it.
 
-The canopy tile key has the same shape of trap. The Meta/WRI tiles are named by
-**zoom-9 Bing quadkey** — 40,075,017 m / 512 / 65,536 = 1.194 m, which is the
+The canopy tile key has the same shape of trap. The Meta/WRI v1 tiles are named by
+**zoom-9 Bing quadkey** (v2's by zoom 10) — 40,075,017 m / 512 / 65,536 = 1.194 m, which is the
 product's own resolution and fixes the zoom. A key one level out is still a
 valid quadkey naming a real object, so it fails by drawing someone else's trees.
 The broker computes the key rather than downloading the 15 MB `tiles.geojson`

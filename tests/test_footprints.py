@@ -71,7 +71,7 @@ def test_concurrent_opens_of_one_case_share_one_building_query(broker, monkeypat
     # ~2.5 s on a good network, past the 10 s joins below on a slow one. And a
     # read that fails is "unavailable", never cached, so the second request
     # queried again.
-    monkeypatch.setattr(footprints, "canopy", lambda lat, lon: {"source": "none"})
+    monkeypatch.setattr(footprints, "canopy", lambda lat, lon, **k: {"source": "none"})
     monkeypatch.setattr(footprints, "fetch", _no_overture)
     url = f"/v1/cases/{_one_case(broker)}/footprints"
 
@@ -159,7 +159,7 @@ def _sources(monkeypatch, fail=(), overture_enabled=True):
     monkeypatch.setattr(footprints, "fetch_gba", gba)
     monkeypatch.setattr(footprints, "fetch", overture)
     monkeypatch.setattr(footprints, "terrain", lambda lat, lon: {"source": "flat"})
-    monkeypatch.setattr(footprints, "canopy", lambda lat, lon: {"source": "none"})
+    monkeypatch.setattr(footprints, "canopy", lambda lat, lon, **k: {"source": "none"})
     # Overture is an optional extra and its path is off unless asked for. On, so
     # these can ask which source a case is drawn FROM rather than which one is
     # installed; test_a_case_meshed_from_overture_is_labelled_where_overture_is_off

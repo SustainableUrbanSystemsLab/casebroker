@@ -9,10 +9,17 @@ const html = fs.readFileSync('casebroker/static/dashboard.html', 'utf8');
 const from = html.indexOf('const CORE_HALF_M');
 const to = html.indexOf('  function placeHtml(');
 if (from < 0 || to < 0) throw new Error('map-link block not found in dashboard.html');
-const block = html.slice(from, to);
+// The canopy helpers live further up the page; the block reads crowns through them.
+const helper = (name) => {
+  const at = html.indexOf(`  function ${name}(`);
+  if (at < 0) throw new Error(`${name} not found in dashboard.html`);
+  const oneLine = html.indexOf('\n', at);
+  return html.slice(at, html.slice(at, oneLine).trimEnd().endsWith('}') ? oneLine + 1 : html.indexOf('\n  }\n', at) + 4);
+};
+const block = helper('isCanopyModel') + helper('canopyColumns') + html.slice(from, to);
 
 function load(src) {
-  const ctx = { GEO_KEEP: 16, settledGeometry: () => null, document: {}, CSS: { escape: (s) => s } };
+  const ctx = { atob, GEO_KEEP: 16, settledGeometry: () => null, document: {}, CSS: { escape: (s) => s } };
   vm.createContext(ctx);
   vm.runInContext(src + '\nthis.footprintMapUrl = footprintMapUrl;', ctx);
   return ctx.footprintMapUrl;
@@ -104,6 +111,19 @@ for (const f of byName(/^buildings/)) {
 // Nothing the query-string pass would split or blank reaches it raw.
 const hash = full.url.slice(full.url.indexOf('#') + 1);
 assert.ok(!/[&+#%](?![0-9A-F]{2})/.test(hash.replace(/%25/g, '')), 'no bare & + # or stray % in the fragment');
+
+// -- the runner's 4 m columns, when the payload carries them --------------------------------
+// The 21 m grid above says a 2 x 2 block; the columns (12 x 12 here, 10 m) say ONE column at the
+// 2 m cut and a v2 model. The map draws the columns, and names the model.
+const cn = 12, cols = new Uint8Array(cn * cn);
+cols[2 * cn + 3] = 2; cols[2 * cn + 4] = 1;
+const v2 = { ...geo, canopy: { ...geo.canopy, source: 'meta-wri-chm-v2',
+  columns: { n: cn, cell_m: 10, b64: Buffer.from(cols).toString('base64') } } };
+const colFc = readBack(footprintMapUrl(lat0, lon0, true, v2).url);
+const colTrees = colFc.features.filter((f) => /^tree canopy/.test(f.properties.name));
+assert.deepStrictEqual(colTrees.map((f) => f.properties.name), ['tree canopy 2-10 m (1 cell)']);
+assert.match(colTrees[0].properties.canopy, /^meta-wri-chm-v2: the runner's 10 m crown columns/);
+assert.deepStrictEqual(colTrees[0].geometry.coordinates[0][0][0], ll(-60 + 3 * 10, 60 - 3 * 10), 'its own column, north up');
 
 // -- over budget: the buildings go, and the link says so -----------------------------------
 const tight = load(block.replace(/const MAP_URL_BUDGET = \d+;/, 'const MAP_URL_BUDGET = 4000;'));
