@@ -47,6 +47,15 @@ _CONTINUITY = re.compile(r"continuity errors : sum local = ([0-9.eE+-]+)")
 # OMPI_ALLOW_RUN_AS_ROOT variables. ICE job 6093036 (2026-10-07) failed three healthy cases with
 # it in two minutes, each charged as "meshing exited 1 ... 03_snappyHexMesh".
 _AS_ROOT = "mpirun has detected an attempt to run as root"
+# Rootless podman misconfigured for a shared cluster's filesystem -- not PACE-specific despite
+# surfacing there first (docs/pace-hpc.md section 3, docs/fleet.md "Rootless podman on a shared
+# cluster"). Two independent signatures: crun can't map the image's uid without a subuid/subgid
+# range, and the storage root (left at its $HOME default) sits on a filesystem without xattr
+# support. First seen off PACE on yang-24315048-0 (University of Arizona's Puma cluster),
+# 2026-10-20: 7 cases failed identically at 01_blockMesh within 17 minutes; the broker auto-drained
+# the worker before any were lost.
+_ROOTLESS_UID = "crun: setresgid to"
+_ROOTLESS_STORAGE = re.compile(r"lsetxattr .*: operation not supported")
 # The node's own watchdog giving its lease up (Eddy3D NodeWorker), and the stall report that a
 # build from 1f0f6b4b on prints after it. Keyed on the text, not the "[error]" tag: a log
 # redirected to a file carries the tag, a dump of the console window shows "error" and wraps.
@@ -72,6 +81,23 @@ def _as_root(where: str, logs: list[str]) -> str:
             f"OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1: a fault of that machine's container setup, not of "
             f"the case. Every case it leased fails the same way within seconds; slurm/podman-pace.sh "
             f"sets both. Give the attempts back with reopen.")
+
+
+def _rootless_podman(where: str, uid_files: list[str], storage_files: list[str]) -> str:
+    files = sorted(set(uid_files) | set(storage_files))
+    whats = []
+    if uid_files:
+        whats.append("the image's uid can't be mapped (no subuid/subgid range for this account)")
+    if storage_files:
+        whats.append("the storage root sits on a filesystem without xattr support (lsetxattr)")
+    return (f"{where} ({', '.join(files)}): rootless podman is not set up for this machine's "
+            f"filesystem -- {' and '.join(whats)}. A fault of the machine, not the case: point "
+            f"XDG_RUNTIME_DIR and the storage root at node-local or group scratch (never $HOME or "
+            f"NFS), add --storage-opt overlay.mount_program=fuse-overlayfs, and run the container "
+            f"as --user 0:0 unless a real subuid/subgid range exists. docs/fleet.md 'Rootless "
+            f"podman on a shared cluster' has the recipe -- not PACE-specific, despite surfacing "
+            f"there first. Every case it leases fails the same way within seconds; reopen the "
+            f"attempts once it's fixed.")
 
 
 def _node_stalls(node_log: pathlib.Path) -> list[str]:
@@ -113,7 +139,13 @@ def triage(study: str | os.PathLike, node_log: str | os.PathLike | None = None) 
     for mesh in sorted(p for p in root.glob("mesh*") if p.is_dir()):
         snappy = _read(mesh / "03_snappyHexMesh.txt")
         as_root = [p.name for p in sorted(mesh.glob("*.txt")) if _AS_ROOT in _read(p)]
-        if as_root:
+        mesh_texts = {p.name: _read(p) for p in sorted(mesh.glob("*.txt"))}
+        uid_files = [n for n, t in mesh_texts.items() if _ROOTLESS_UID in t]
+        storage_files = [n for n, t in mesh_texts.items() if _ROOTLESS_STORAGE.search(t)]
+        if uid_files or storage_files:
+            # Fails at 01_blockMesh, before snappy or as-root even get a chance to run.
+            out.append(_rootless_podman(mesh.name, uid_files, storage_files))
+        elif as_root:
             # Not "snappy never finished": it never started, and the mesh on disk is no mesher's.
             out.append(_as_root(mesh.name, as_root))
         elif snappy and "Finished meshing" not in snappy:

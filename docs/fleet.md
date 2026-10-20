@@ -4,9 +4,9 @@ How any Linux or Windows machine becomes a simulation node that pulls cases from
 the broker, solves them, reports progress, survives being stopped, and gets its
 finished cases to where they are kept. A node is `E3D.exe` -- the Eddy3D CLI, one
 self-contained file -- and nothing else; its side of the contract is Eddy3D's
-`docs/SIMULATION_NODE.md`, the broker's is [protocol.md](protocol.md). For the
-cluster-specific traps (SSH, quotas, Podman, billing) see
-[`pace-hpc.md`](pace-hpc.md).
+`docs/SIMULATION_NODE.md`, the broker's is [protocol.md](protocol.md). For PACE's own
+cluster-specific traps (SSH, quotas, billing) see [`pace-hpc.md`](pace-hpc.md); for rootless
+podman on a shared cluster generally -- any cluster, not just PACE -- see below.
 
 (Until 2026-10 a second kind of worker existed: `casebroker.worker` driving
 `runner/run_case.sh`, with `machine.env`, `start_worker.sh`/`.ps1` and
@@ -55,6 +55,37 @@ handed every case back -- and it is retired. Git history has it.)
    an 800-core-hour case for a week ([protocol.md](protocol.md#protocol-2-capabilities-machines-stages-handoffs)).
 
 That is the whole procedure. Everything below is what the pieces do.
+
+## Rootless podman on a shared cluster
+
+Step 1 says "Podman on PACE" because that's where this was first hit, but the failure is generic:
+any shared HPC account without a subuid/subgid range and without its own storage-capable
+filesystem hits the same two walls, on any cluster. Confirmed on a second, unrelated one:
+`yang-24315048-0` (University of Arizona's Puma cluster) failed 7 cases identically within 17
+minutes on 2026-10-20 and was auto-drained before any were lost (see "Where each thing can go
+wrong" below).
+
+Two independent failures, both from podman defaulting to a vanilla rootless setup that assumes an
+ordinary workstation, not a shared account:
+
+1. **`` crun: setresgid to `1000`: Invalid argument ``** -- the image's default user (uid 1000,
+   "openfoam") can't be mapped. A shared cluster account usually has no `/etc/subuid` range, so
+   podman falls back to a "rootless single mapping," which can only ever be the account's own uid.
+   Fix: run the container as `--user 0:0 -e HOME=/home/openfoam` (uid 0 maps trivially under a
+   single mapping -- not a real privilege escalation here), or get a real subuid/subgid range from
+   the cluster's admins.
+2. **`lsetxattr ...: operation not supported`** -- podman's storage root defaulted to
+   `$HOME/.local/share/containers/storage`, and that filesystem (NFS, a small-quota home share)
+   doesn't support the xattrs the overlay driver needs for copy-up. Fix: point both the storage
+   root and `XDG_RUNTIME_DIR` at node-local or group scratch, with
+   `--storage-opt overlay.mount_program=/usr/bin/fuse-overlayfs` (the kernel overlay driver needs
+   the single mapping above anyway; fuse-overlayfs doesn't).
+
+`docs/pace-hpc.md` section 3 has the concrete recipe (env vars, flags, `slurm/podman-pace.sh` as a
+worked shim) PACE needed; the same three things -- a writable `XDG_RUNTIME_DIR`, a storage root off
+scratch, and `--user 0:0` or a real subuid/subgid range -- apply to any shared cluster. `casebroker
+triage` names both signatures from a failed case's step logs (`01_blockMesh.txt` onward -- this
+fails before any real meshing starts), so read it before assuming the mesh or the case is at fault.
 
 ## Progress on the dashboard
 
