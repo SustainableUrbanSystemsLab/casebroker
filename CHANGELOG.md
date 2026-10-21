@@ -8,6 +8,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.49.26] - 2026-10-21
+
+### Fixed
+- **A worker's build chip no longer touches its "→ target · stuck" badge** in the Node builds
+  table; a 6 px margin replaces the bare space between them.
+
 ## [0.49.25] - 2026-10-21
 
 ## [0.49.24] - 2026-10-20
