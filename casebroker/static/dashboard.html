@@ -3121,7 +3121,9 @@
         const under = can.columns_under_buildings > 0
           ? `<div class="geo-note" style="margin-top:2px">${can.columns_under_buildings} crown columns the scene saw where a building stands today are left out, as the solve leaves them out.</div>` : "";
         return `<div><span class="geo-swatch" style="background:var(--accent)"></span>trees — <b>${pct(can.frac_canopy)}%</b> under canopy${can.frac_columns != null ? `, <b>${pct(can.frac_columns)}%</b> of the core in 4 m crown columns` : ""}, tallest <b>${can.max_height_m} m</b>, meshed as porous crowns, not solids <span class="mono" style="font-size:11px">${esc(can.source)}</span>${when}${under}</div>`
-          + (v ? `<div><span class="geo-swatch" style="background:var(--accent);opacity:0.45"></span>all crowns as <b>${esc(v.label)}</b> — f = 2·Cd·LAD = <b>${v.f_per_m}</b> m⁻¹<div class="geo-note" style="margin-top:2px">One class for every tree here, by latitude alone (${esc(v.provenance)}).</div></div>` : "");
+          + (v ? `<div><span class="geo-swatch" style="background:var(--accent);opacity:0.45"></span>all crowns as <b>${esc(v.label)}</b> — f = 2·Cd·LAD = <b>${v.f_per_m}</b> m⁻¹<div class="geo-note" style="margin-top:2px">${v.decided_by === "node:koppen"
+                ? `One class for every tree here. From of12-v7 the node picks it by the Köppen class of the nearest weather station; shown is the preview's latitude default (${esc(v.provenance)}) — the case's site report names the class used.`
+                : `One class for every tree here, by latitude alone (${esc(v.provenance)}).`}</div></div>` : "");
       }
       if (hasCan) return `<div><span class="geo-swatch" style="background:var(--accent);opacity:0.35"></span><b>no trees</b> — treeless site, no canopy zone</div>`;
       if (can.source === "none") return `<div style="color:var(--text-muted)">trees unknown — the canopy model publishes no tile here</div>`;

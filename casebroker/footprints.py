@@ -693,8 +693,17 @@ VEGETATION_BY_LATITUDE = (
 )
 
 
-def vegetation_class(lat: float) -> dict[str, Any]:
-    """The LAD/Cd the runner will apply to every crown on this site."""
+def vegetation_class(lat: float, recipe: str | None = None) -> dict[str, Any]:
+    """The LAD/Cd the runner will apply to every crown on this site.
+
+    Up to of12-v6 that is this table, by latitude. From of12-v7 the node picks
+    the row by the Köppen class of the nearest weather station that has one
+    (Eddy3D KoppenVegetation, off its bundled climate index) -- the same three
+    rows, a different cut, and one the broker cannot reproduce without that
+    index. So for those recipes the latitude row is shown as the PREVIEW's
+    guess and ``decided_by`` says the node decides; the case's site report
+    carries the class it used (``vegetation.koppen`` / ``.origin``).
+    """
     for limit, cls in VEGETATION_BY_LATITUDE:
         if abs(lat) < limit:
             out = dict(cls)
@@ -703,6 +712,8 @@ def vegetation_class(lat: float) -> dict[str, Any]:
         out = dict(VEGETATION_BY_LATITUDE[-1][1])
     out["source"] = "eddy3d-vegetation-library"
     out["provenance"] = "latitude-band default"
+    if drops_crowns_under_buildings(recipe):
+        out["decided_by"] = "node:koppen"
     # f = 2*Cd*LAD, the porosityForce the canopy cellZone carries.
     out["f_per_m"] = round(2 * out["cd"] * out["lad"], 4)
     out["cd_lad_per_m"] = round(out["cd"] * out["lad"], 4)
@@ -787,7 +798,7 @@ def canopy(lat: float, lon: float, half_m: float = CORE_HALF_M,
     except Exception:                                    # noqa: BLE001
         imagery_year = None
     return {"source": source, "licence": "CC BY 4.0",
-            "vegetation": vegetation_class(lat),
+            "vegetation": vegetation_class(lat, recipe),
             "native_res_m": 1.2, "tile": tile, "min_canopy_m": CANOPY_MIN_M,
             "imagery_year": imagery_year,
             "half_m": half_m, "n": n, "covered": round(covered, 3),

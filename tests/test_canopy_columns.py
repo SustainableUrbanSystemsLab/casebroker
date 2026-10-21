@@ -105,3 +105,14 @@ def test_the_scene_year_rides_along_when_the_date_raster_answers(monkeypatch):
     monkeypatch.setattr(footprints, "_read_window", down)
     c = footprints.canopy(30.2377, 120.2454)
     assert c["imagery_year"] is None and c["source"] == "meta-wri-chm-v1", "the date is best effort; the canopy is not"
+
+
+def test_from_v7_the_vegetation_class_is_the_nodes_and_the_preview_says_so():
+    """The node picks the row by Köppen from of12-v7 (Eddy3D KoppenVegetation);
+    the broker has no climate index, so it shows the latitude row as a guess
+    and marks it as the node's decision rather than claiming it."""
+    v6 = footprints.vegetation_class(55.68, "cyl-1008/of12-v6")
+    v7 = footprints.vegetation_class(55.68, "cyl-1008/of12-v7")
+    assert "decided_by" not in v6 and v6["label"] == "Conifer"
+    assert v7["decided_by"] == "node:koppen" and v7["label"] == "Conifer", "the row shown is still the table's"
+    assert footprints.vegetation_class(55.68) == v6, "no recipe: the table, as before"
