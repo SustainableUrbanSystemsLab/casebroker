@@ -8,6 +8,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.49.24] - 2026-10-20
+
+### Changed
+- **For v7, crowns where a building stands today are left out of the preview too**, by column
+  centre against the payload's own footprints (`columns_under_buildings` says how many), and the
+  canopy carries `imagery_year`, the scene's year at the site centre -- 2018.83 on Hangzhou, where
+  18 % of v2's crown columns stood under buildings built since.
+
 ## [0.49.23] - 2026-10-20
 
 ### Changed

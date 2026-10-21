@@ -3117,7 +3117,10 @@
     const canLine = (() => {
       if (hasCan && can.frac_canopy > 0) {
         const v = can.vegetation;
-        return `<div><span class="geo-swatch" style="background:var(--accent)"></span>trees — <b>${pct(can.frac_canopy)}%</b> under canopy${can.frac_columns != null ? `, <b>${pct(can.frac_columns)}%</b> of the core in 4 m crown columns` : ""}, tallest <b>${can.max_height_m} m</b>, meshed as porous crowns, not solids <span class="mono" style="font-size:11px">${esc(can.source)}</span></div>`
+        const when = can.imagery_year ? ` from a scene of ${Math.floor(can.imagery_year)}` : "";
+        const under = can.columns_under_buildings > 0
+          ? `<div class="geo-note" style="margin-top:2px">${can.columns_under_buildings} crown columns the scene saw where a building stands today are left out, as the solve leaves them out.</div>` : "";
+        return `<div><span class="geo-swatch" style="background:var(--accent)"></span>trees — <b>${pct(can.frac_canopy)}%</b> under canopy${can.frac_columns != null ? `, <b>${pct(can.frac_columns)}%</b> of the core in 4 m crown columns` : ""}, tallest <b>${can.max_height_m} m</b>, meshed as porous crowns, not solids <span class="mono" style="font-size:11px">${esc(can.source)}</span>${when}${under}</div>`
           + (v ? `<div><span class="geo-swatch" style="background:var(--accent);opacity:0.45"></span>all crowns as <b>${esc(v.label)}</b> — f = 2·Cd·LAD = <b>${v.f_per_m}</b> m⁻¹<div class="geo-note" style="margin-top:2px">One class for every tree here, by latitude alone (${esc(v.provenance)}).</div></div>` : "");
       }
       if (hasCan) return `<div><span class="geo-swatch" style="background:var(--accent);opacity:0.35"></span><b>no trees</b> — treeless site, no canopy zone</div>`;
@@ -5594,7 +5597,7 @@
         });
         out.canopy.push({ type: "Feature",
           properties: { name: `tree canopy ${label} (${cells} cell${cells === 1 ? "" : "s"})`,
-                        canopy: `${can.source}: the runner's ${Math.round(step)} m crown columns (mean height)`,
+                        canopy: `${can.source}: the runner's ${Math.round(step)} m crown columns (mean height)${can.imagery_year ? `, scene of ${Math.floor(can.imagery_year)}` : ""}`,
                         ...(v && v.label ? { vegetation: `${v.label}, f = 2 Cd LAD = ${v.f_per_m} per m` } : {}),
                         stroke: colour, "stroke-width": 0.5, fill: colour, "fill-opacity": 0.45 },
           geometry: { type: "MultiPolygon", coordinates: polys } });

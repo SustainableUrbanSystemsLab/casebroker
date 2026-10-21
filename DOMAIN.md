@@ -233,7 +233,12 @@ meshes**. Three layers, one payload:
   model the case's recipe meshes — `meta-wri-chm-v2` (CHMv2, zoom-10 tiles) for
   `cyl-1008/of12-v7`, `meta-wri-chm-v1` otherwise — or `none` (the product
   publishes no tile here) or `unavailable`. A treeless site and an uncovered
-  one are different answers and are reported as such.
+  one are different answers and are reported as such. For a recipe that drops
+  crowns where a building stands today (v7), `columns` is redone against the
+  payload's own footprints and `columns_under_buildings` counts what went;
+  `imagery_year` is the scene's decimal year at the centre (best effort, from
+  Meta's 0.01° acquisition-date raster), because the map is 2018 nearly
+  everywhere and the buildings are not.
 
 Both rasters span 1304 m rather than 520 m because that is what
 `site_geometry.build_site` reads: `half_t = HALF_M + buffer_m`, 504 + 800. The
