@@ -8,6 +8,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.49.27] - 2026-10-21
+
+### Fixed
+- **The "→ target · stuck" badge no longer sits flush under a worker's build chip** in the Node
+  builds table: it wraps below the chip, and a 4 px top margin now separates them (0.49.26 added
+  a sideways margin instead, which was not the gap that was missing).
+
 ## [0.49.26] - 2026-10-21
 
 ### Fixed

@@ -1013,9 +1013,9 @@
   .badge.leased { background: var(--primary-light); color: var(--primary); }
   .badge.pending { background: var(--warn-light); color: var(--warn); }
   .badge.quarantined { background: var(--bad-light); color: var(--bad); }
-  /* A worker's build chip and its "→ target · stuck" badge share a cell; a bare
-     space left them touching. */
-  code.inline + .badge { margin-left: 6px; }
+  /* A worker's build chip and its "→ target · stuck" badge share a cell, and the
+     badge wraps under the chip; with no gap the two touched. */
+  code.inline + .badge { margin-top: 4px; }
 
   .chip {
     display: inline-flex;
