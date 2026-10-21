@@ -3421,6 +3421,9 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         # today, not about the site.
         fc["terrain"] = footprints.terrain(lat, lon)
         fc["canopy"] = footprints.canopy(lat, lon, recipe=recipe)
+        # v7 on: the runner drops a crown where one of THESE buildings stands.
+        if footprints.drops_crowns_under_buildings(recipe):
+            fc["canopy"] = footprints.drop_columns_under_buildings(fc["canopy"], fc, lat, lon)
         # "unavailable" and "unknown" are facts about TODAY -- a raster host that
         # did not answer, a library that is not there -- and caching them freezes
         # one bad moment into "this site has no terrain and no trees" for the

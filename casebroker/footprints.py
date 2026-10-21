@@ -620,6 +620,21 @@ def chm_model_for(recipe: str | None) -> tuple[str, str, int]:
     """The canopy model the runner builds this recipe's crowns from."""
     return CHM_V2 if recipe in CHM_V2_RECIPES else CHM_V1
 
+
+def drops_crowns_under_buildings(recipe: str | None) -> bool:
+    """Whether the runner drops a crown column where a building stands today
+    (Eddy3D CampaignCaseConfig.DropsCrownsUnderBuildings): the same recipes
+    that mesh v2. The map is older than the footprints; on Hangzhou 18 % of
+    v2's crown columns stood in one, on Berlin -- older buildings -- 1 %."""
+    return recipe in CHM_V2_RECIPES
+
+
+# When the scene under a point was taken, as a decimal year since 2000 on a
+# 0.01 degree grid: float32, EPSG:4326, one 144 KB strip per read. Published
+# beside v1; v2 reuses most of its scenes (Hangzhou: 2018-10-28 under both).
+CHM_ACQUISITION_DATE = ("https://dataforgood-fb-data.s3.amazonaws.com/forests/v1/"
+                        "alsgedi_global_v6_float/CHM_acquisition_date.tif")
+
 # The runner's crown columns: CanopyZones.VoxelM. A column is a crown where the
 # MEAN canopy height over its 4 m square is at least CANOPY_MIN_M -- that, and
 # nothing coarser, is the canopy the solve gets.
@@ -678,8 +693,17 @@ VEGETATION_BY_LATITUDE = (
 )
 
 
-def vegetation_class(lat: float) -> dict[str, Any]:
-    """The LAD/Cd the runner will apply to every crown on this site."""
+def vegetation_class(lat: float, recipe: str | None = None) -> dict[str, Any]:
+    """The LAD/Cd the runner will apply to every crown on this site.
+
+    Up to of12-v6 that is this table, by latitude. From of12-v7 the node picks
+    the row by the Köppen class of the nearest weather station that has one
+    (Eddy3D KoppenVegetation, off its bundled climate index) -- the same three
+    rows, a different cut, and one the broker cannot reproduce without that
+    index. So for those recipes the latitude row is shown as the PREVIEW's
+    guess and ``decided_by`` says the node decides; the case's site report
+    carries the class it used (``vegetation.koppen`` / ``.origin``).
+    """
     for limit, cls in VEGETATION_BY_LATITUDE:
         if abs(lat) < limit:
             out = dict(cls)
@@ -688,6 +712,8 @@ def vegetation_class(lat: float) -> dict[str, Any]:
         out = dict(VEGETATION_BY_LATITUDE[-1][1])
     out["source"] = "eddy3d-vegetation-library"
     out["provenance"] = "latitude-band default"
+    if drops_crowns_under_buildings(recipe):
+        out["decided_by"] = "node:koppen"
     # f = 2*Cd*LAD, the porosityForce the canopy cellZone carries.
     out["f_per_m"] = round(2 * out["cd"] * out["lad"], 4)
     out["cd_lad_per_m"] = round(out["cd"] * out["lad"], 4)
@@ -760,9 +786,21 @@ def canopy(lat: float, lon: float, half_m: float = CORE_HALF_M,
     a = _blockmean(fine, n)
     cols = np.floor(_blockmean(fine, ncol)).clip(0, 255).astype(np.uint8)
     under = fine >= CANOPY_MIN_M
+    # The year of the scene, so a tree that is not there any more can be read
+    # as the 2018 tree it is. Best effort: its absence is not the canopy's.
+    try:
+        # +-600 m: just over one 0.01 degree cell, so the window is never rounded to
+        # no pixel at all (a 20 m box was, and the year read as unavailable everywhere).
+        year, _ = _read_window(f"/vsicurl/{CHM_ACQUISITION_DATE}", lat, lon, 600.0, 1,
+                               Resampling.nearest)
+        imagery_year = (round(2000 + float(year[0, 0]), 2)
+                        if np.isfinite(year[0, 0]) and year[0, 0] > 0 else None)
+    except Exception:                                    # noqa: BLE001
+        imagery_year = None
     return {"source": source, "licence": "CC BY 4.0",
-            "vegetation": vegetation_class(lat),
+            "vegetation": vegetation_class(lat, recipe),
             "native_res_m": 1.2, "tile": tile, "min_canopy_m": CANOPY_MIN_M,
+            "imagery_year": imagery_year,
             "half_m": half_m, "n": n, "covered": round(covered, 3),
             "columns": {"n": ncol, "cell_m": COLUMN_M,
                         "b64": base64.b64encode(cols.tobytes()).decode("ascii")},
@@ -772,6 +810,47 @@ def canopy(lat: float, lon: float, half_m: float = CORE_HALF_M,
             "mean_height_where_canopy_m": (round(float(fine[under].mean()), 1)
                                            if under.any() else 0.0),
             "grid": [int(round(v)) for v in a.ravel().tolist()]}
+
+
+def drop_columns_under_buildings(canopy: dict, buildings: dict, lat: float, lon: float) -> dict:
+    """The runner's rule on the preview's columns: a 4 m column whose centre
+    lies inside one of ``buildings``' footprints (a /footprints
+    FeatureCollection, lon/lat) is no crown. Returns the canopy payload with
+    its ``columns`` and ``frac_columns`` redone and ``columns_under_buildings``
+    counting what went; untouched when it carries no columns or no building.
+    """
+    cols = canopy.get("columns")
+    feats = (buildings or {}).get("features") or []
+    if not cols or not cols.get("b64") or not feats:
+        return canopy
+    import numpy as np
+    from rasterio import features
+    from rasterio.transform import from_origin
+
+    n, half = int(cols["n"]), float(canopy["half_m"])
+    cell = 2 * half / n
+    my = 110_540.0
+    mx = 111_320.0 * math.cos(math.radians(lat))
+    shapes = []
+    for f in feats:
+        g = f.get("geometry") or {}
+        polys = g.get("coordinates") if g.get("type") == "MultiPolygon" else [g.get("coordinates")]
+        for p in polys or []:
+            if not p:
+                continue
+            rings = [[((x - lon) * mx, (y - lat) * my) for x, y in ring] for ring in p]
+            shapes.append(({"type": "Polygon", "coordinates": rings}, 1))
+    # rasterize burns a cell whose CENTRE is inside the polygon: the runner's test.
+    built = features.rasterize(shapes, out_shape=(n, n), transform=from_origin(-half, half, cell, cell),
+                               fill=0, dtype="uint8").astype(bool)
+    grid = np.frombuffer(base64.b64decode(cols["b64"]), np.uint8).reshape(n, n).copy()
+    crown = grid >= CANOPY_MIN_M
+    dropped = int((crown & built).sum())
+    grid[built] = 0
+    return {**canopy,
+            "columns": {**cols, "b64": base64.b64encode(grid.tobytes()).decode("ascii")},
+            "frac_columns": round(float((grid >= CANOPY_MIN_M).mean()), 4),
+            "columns_under_buildings": dropped}
 
 
 # -- Is this case even on land? ----------------------------------------------
