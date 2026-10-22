@@ -297,3 +297,46 @@ def test_the_cli_says_whether_everything_is_on_the_broker(tmp_path, capsys):
         assert rc == 0 and "every finished case is on the broker" in out
     finally:
         server.should_exit = True
+
+
+def test_a_case_held_in_full_without_its_receipt_is_healed_when_a_node_asks_what_is_wanted(conn):
+    """Two parts recorded at once under Postgres each judged the receipt without the other's row,
+    so a case the store held in full stayed on the custody list (v2-03dbf8e9df5eef7e, 2026-10-12):
+    the node's sweep had nothing left to send and nothing wrote the receipt."""
+    db.add_cases(conn, [case(8)])
+    lease = db.lease(conn, "ice-1", now=T0, recipes=[WIND])[0]
+    mesh = "c" * 64
+    db.report_part(conn, lease.lease_id, lease.case_id, "mesh", f"{lease.case_id}.mesh.tar.gz", mesh,
+                   size=100, now=T0)
+    assert db.complete(conn, lease.lease_id, f"file:///done/{lease.case_id}.tar.gz", sha256=SHA, nbytes=123,
+                       now=T0 + 1)
+    db.record_blob(conn, lease.case_id, "mesh", mesh, 100, now=T0 + 2)
+    db.record_blob(conn, lease.case_id, "archive", SHA, 123, now=T0 + 2)
+    conn.execute("DELETE FROM case_artifacts WHERE case_id=?", (lease.case_id,))  # the race's outcome
+    assert db.custody(conn, now=T0 + 100)["cases"][0]["missing"] == ["archive"]
+
+    assert db.heal_blob_receipts(conn, [lease.case_id, "c999"], now=T0 + 3) == [lease.case_id]
+    assert db.custody(conn, now=T0 + 100)["stored"] == 1
+    assert db.heal_blob_receipts(conn, [lease.case_id], now=T0 + 4) == []
+
+
+def test_a_case_missing_a_part_is_not_healed(conn):
+    db.add_cases(conn, [case(9)])
+    lease = db.lease(conn, "ice-1", now=T0, recipes=[WIND])[0]
+    db.report_part(conn, lease.lease_id, lease.case_id, "mesh", f"{lease.case_id}.mesh.tar.gz", "c" * 64,
+                   size=100, now=T0)
+    assert db.complete(conn, lease.lease_id, f"file:///done/{lease.case_id}.tar.gz", sha256=SHA, nbytes=123,
+                       now=T0 + 1)
+    db.record_blob(conn, lease.case_id, "archive", SHA, 123, now=T0 + 2)
+    assert db.heal_blob_receipts(conn, [lease.case_id]) == []
+    assert "archive" in db.custody(conn, now=T0 + 100)["cases"][0]["missing"]
+
+
+def test_the_wanted_route_heals_receipts(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(db, "heal_blob_receipts", lambda conn, ids, now=None: calls.append(list(ids)) or [])
+    app = create_app(str(tmp_path / "a.sqlite"), ["w"], ["r"])
+    with TestClient(app) as client:
+        r = client.post("/v1/parts/wanted", json={"case_ids": ["x"]}, headers={"Authorization": "Bearer w"})
+        assert r.status_code == 200
+    assert calls == [["x"]]

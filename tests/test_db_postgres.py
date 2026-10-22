@@ -1190,6 +1190,42 @@ def test_the_broker_records_the_parts_it_holds_and_the_receipt_they_make():
     dropped = db.drop_blob(conn, case_id, "mesh", by="ada")
     assert dropped == {"sha256": mesh, "bytes": 10, "still_referenced": False}
     assert not [r for r in db.case_receipts(conn, case_id) if r["location"] == "broker"]
+def test_two_parts_recorded_at_once_still_make_the_receipt(monkeypatch):
+    """Postgres's BEGIN locks nothing, so the last two parts of a case landing together each
+    judged the receipt before the other committed, and neither wrote it: 14 done cases the store
+    held in full stayed on the custody list (2026-10-12). Here both are held inside the receipt
+    check until the other arrives or 2 s pass -- without the case-row lock both arrive, with it
+    the second waits at the lock."""
+    conn = fresh_conn()
+    recipe = prefix("blobrace")
+    [case_id] = seed(1, "blobrace", recipe=recipe)
+    lease = db.lease(conn, prefix("w-blobrace"), recipes=[recipe])[0]
+    mesh, archive = "cc" * 32, "dd" * 32
+    assert db.report_part(conn, lease.lease_id, case_id, "mesh", f"{case_id}.mesh.tar.gz", mesh, 10) == "ok"
+    assert db.complete(conn, lease.lease_id, f"file:///done/{case_id}.tar.gz", archive, 5, {}, case_id=case_id)
+
+    real, inside, lock = db._blob_receipt, [], threading.Lock()
+    both = threading.Event()
+
+    def held(c, cid, by, now):
+        with lock:
+            inside.append(cid)
+            if len(inside) == 2:
+                both.set()
+        both.wait(timeout=2)
+        return real(c, cid, by, now)
+
+    monkeypatch.setattr(db, "_blob_receipt", held)
+    pool = db.connect(DSN, pool=2)  # the broker's own object: a plain connection serialises in-process
+    threads = [threading.Thread(target=db.record_blob, args=(pool, case_id, "mesh", mesh, 10)),
+               threading.Thread(target=db.record_blob, args=(pool, case_id, "archive", archive, 5))]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+    assert [r["location"] for r in db.case_receipts(conn, case_id)].count("broker") == 1
+
+
 # -- the pedestrian field, kept uncompressed ---------------------------------
 
 def test_a_field_blob_is_stored_uncompressed_and_a_cell_reads_in_place():

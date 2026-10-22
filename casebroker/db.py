@@ -4028,6 +4028,10 @@ def record_blob(conn, case_id: str, part: str, sha256: str, size: int, by: str |
     now = now or _now()
     conn.execute("BEGIN IMMEDIATE")
     try:
+        # Postgres's BEGIN locks nothing: two parts landing together would each judge the
+        # receipt without the other's row and neither write it. The case row serialises them.
+        if isinstance(conn, PgConnection):
+            conn.execute("SELECT case_id FROM cases WHERE case_id=? FOR UPDATE", (case_id,))
         conn.execute(
             "INSERT INTO case_blobs(case_id, part, sha256, bytes, stored_at, stored_by) VALUES (?,?,?,?,?,?)"
             " ON CONFLICT(case_id, part) DO UPDATE SET sha256=excluded.sha256, bytes=excluded.bytes,"
@@ -4120,6 +4124,37 @@ def parts_wanted(conn, case_ids: list[str]) -> dict[str, dict[str, Any]]:
         # The mesh first: it is what a node continuing the case needs; the archive last.
         row["wanted"].sort(key=lambda w: (w["part"] == BLOB_ARCHIVE, w["part"] != "mesh", w["part"]))
     return out
+
+
+@_locked
+def heal_blob_receipts(conn, case_ids: list[str], now: int | None = None) -> list[str]:
+    """Write the broker archive receipt of each done case that the store already holds in
+    full but that has none -- two parts recorded at once under Postgres before record_blob
+    locked the case row each judged the case without the other. Returns the cases healed."""
+    ids = list(dict.fromkeys(i for i in case_ids if isinstance(i, str) and i))[:PARTS_WANTED_MAX]
+    if not ids:
+        return []
+    marks = ",".join("?" for _ in ids)
+    have = {r["case_id"] for r in conn.execute(
+        "SELECT case_id FROM case_artifacts WHERE kind='archive' AND location='broker'"
+        " AND case_id IN (%s)" % marks, ids).fetchall()}
+    todo = [r["case_id"] for r in conn.execute(
+        "SELECT case_id FROM case_blobs WHERE part=? AND case_id IN (%s)" % marks,
+        [BLOB_ARCHIVE, *ids]).fetchall() if r["case_id"] not in have]
+    now = now or _now()
+    healed = []
+    for case_id in todo:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            if isinstance(conn, PgConnection):
+                conn.execute("SELECT case_id FROM cases WHERE case_id=? FOR UPDATE", (case_id,))
+            if _blob_receipt(conn, case_id, "heal", now):
+                healed.append(case_id)
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+    return healed
 
 
 @_locked
