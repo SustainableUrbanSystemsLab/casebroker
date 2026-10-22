@@ -1063,6 +1063,11 @@
     white-space: nowrap;
     vertical-align: bottom;
   }
+  /* Middle truncation: the head takes the ellipsis, the tail never shrinks,
+     so the "…" lands between them and the distinguishing suffix stays visible. */
+  code.case-id .mt { display: flex; min-width: 0; }
+  code.case-id .mt-h { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+  code.case-id .mt-t { flex: none; white-space: nowrap; }
   pre {
     padding: 12px 14px;
     overflow-x: auto;
@@ -7704,7 +7709,7 @@
         <tr class="caseRow${open ? " open" : ""}" data-id="${esc(c.case_id)}">
           <td>
             <div style="display:flex; align-items:center; gap:6px;">
-              <code class="inline case-id" title="${esc(c.case_id)}">${esc(c.case_id)}</code>
+              <code class="inline case-id" title="${esc(c.case_id)}"><span class="mt"><span class="mt-h">${esc(c.case_id.slice(0, -6))}</span><span class="mt-t">${esc(c.case_id.slice(-6))}</span></span></code>
             </div>
           </td>
           <td>${badge(c.state)}</td>

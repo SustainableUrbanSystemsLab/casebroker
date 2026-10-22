@@ -8,6 +8,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.49.30] - 2026-10-22
+
 ## [0.49.29] - 2026-10-22
 
 ### Added
