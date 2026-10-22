@@ -5235,12 +5235,13 @@
       $("workersBody").innerHTML = workers.map((w) => {
         const cond = workerCondition(w, nowS);
         const condTitle = cond.key === "unfit"
-          ? `${w.unfit}${cond.since ? ` (since ${relTime(cond.since)})` : ""}`
+          ? `Cannot run cases: the node's own check refuses work (a full disk, a container engine that is not running, no MPI), so it leases nothing until that is fixed. ${w.unfit}${cond.since ? ` (since ${relTime(cond.since)})` : ""}`
           : cond.key === "refusing"
-            ? `It asks what to run (last asked ${relTime(w.release_asked_at)}) but last asked for a case ${relTime(w.last_seen)}: `
+            ? `Not taking cases: it asks what to run (last asked ${relTime(w.release_asked_at)}) but last asked for a case ${relTime(w.last_seen)}: `
               + "its own check is refusing work -- a full disk, a container engine that is not running, no MPI. "
               + "Its console says which; a node on an E3D build from 2026-10-10 on says it here."
-            : cond.key === "active" ? "heard from in the last 5 minutes" : "not heard from for 5 minutes or more";
+            : cond.key === "active" ? "Active: this node asked the broker for work in the last 5 minutes, so it is running and reachable. Whether it is being handed cases is a separate matter (see Drained, Cannot run cases)."
+            : "Offline: not heard from for 5 minutes or more. The node is stopped, asleep, cut off from the broker, or its SLURM job ended. A case it held is taken back when its lease runs out.";
 
         return `
           <tr>
@@ -5260,7 +5261,7 @@
               <span class="badge ${cond.cls}" title="${esc(condTitle)}">${esc(cond.label)}</span>
               ${cond.key === "unfit"
                 ? `<div class="worker-unfit" title="${esc(condTitle)}">${esc(firstSentence(w.unfit))}${cond.since ? ` · since ${esc(relTime(cond.since))}` : ""}</div>` : ""}
-              ${w.drain ? `<span class="badge leased" title="${esc(w.drain_reason || "no new cases; the one in flight finishes")}">${w.current_case ? "Draining" : "Drained"}</span>` : ""}
+              ${w.drain ? `<span class="badge leased" title="${esc(drainTitle(w))}">${w.current_case ? "Draining" : "Drained"}</span>` : ""}
             </td>
             <td>${relTime(w.first_seen)}</td>
             <td>${relTime(w.last_seen)}</td>
@@ -7392,6 +7393,21 @@
   /// not for a case, which is how a build from before it could say so looks -- it refuses
   /// on its own side and, to the broker, only stops leasing. Otherwise heard from in the
   /// last 5 minutes (`active`), or not (`offline`).
+  /// What a drain means, who set it and how to undo it. The reason string is the broker's
+  /// own: "drained by the broker: ..." is the automatic rule (five cases failed on this machine
+  /// within ten minutes), anything else (or nothing) is an admin's Drain button.
+  function drainTitle(w) {
+    const what = w.current_case
+      ? "Draining: the case in flight finishes, then this node gets no new cases."
+      : "Drained: the node is up and asking, but the broker hands it no new cases.";
+    const auto = /^drained by the broker:/.test(w.drain_reason || "");
+    const who = auto
+      ? "Set automatically: several cases failed here in a short time, which points at the machine (full disk, stopped container daemon, leftover processes), not the sites."
+      : "Set by an admin (Machines > Drain), usually before a restart or an update.";
+    return `${what} ${who} It stays until someone presses Resume (Machines > Resume), including across node restarts and updates.` +
+      (w.drain_reason ? `\n\nReason: ${w.drain_reason}` : "");
+  }
+
   function workerCondition({ unfit, unfit_since, last_seen, release_asked_at, current_case }, now) {
     const seen = finite(last_seen) ? now - Number(last_seen) : Infinity;
     const asked = finite(release_asked_at) ? now - Number(release_asked_at) : Infinity;
@@ -8682,8 +8698,8 @@
     const behind = want && want !== w.build;
     const blocked = r && (r.blocked_builds || []).includes(w.build);
     let badges = "";
-    if (blocked) badges += ` <span class="badge quarantined" title="refused new cases">blocked</span>`;
-    if (w.update_failed) badges += ` <span class="badge quarantined" title="${esc(w.update_failed)}">update failed</span>`;
+    if (blocked) badges += ` <span class="badge quarantined" title="blocked: this build is on the kill-switch list, so the broker hands it no new cases. Move the node to another build.">blocked</span>`;
+    if (w.update_failed) badges += ` <span class="badge quarantined" title="${esc("update failed: the node tried the target build, could not start it and went back to its old one. " + w.update_failed)}">update failed</span>`;
     if (behind) {
       const since = w.target_build ? w.target_set_at : (r && r.target_since);
       const apply = (r && r.target_apply) || "case";
@@ -8698,7 +8714,7 @@
       else if (!w.release_asked_at) why = "it has never asked the broker what to run, so it cannot update itself: a Python worker, or an E3D.exe from before releases. Update it by hand";
       else why = `it asked ${relTime(w.release_asked_at)} and has not said what it is doing`;
       const how = w.target_build ? "canary target" : "fleet target";
-      badges += ` <span class="badge ${stuck ? "quarantined" : "pending"}" title="${esc(how + ". " + why + (stuck ? ". Behind for longer than a switch at the \"" + apply + "\" boundary should take" : ""))}">→ ${esc(shortBuild(want))}${age != null ? " · " + esc(ageShort(age)) : ""}${stuck ? " · stuck" : ""}</span>`;
+      badges += ` <span class="badge ${stuck ? "quarantined" : "pending"}" title="${esc(how + ". " + why + (stuck ? ". Stuck: it has been behind for " + ageShort(age) + ", longer than a switch at the \"" + apply + "\" boundary should take (" + ageShort(limit) + "). Look at the reason above" : ". Behind: it runs a different build than its target and will switch at the \"" + apply + "\" boundary"))}">→ ${esc(shortBuild(want))}${age != null ? " · " + esc(ageShort(age)) : ""}${stuck ? " · stuck" : ""}</span>`;
     }
     return `<code class="inline" title="${esc(w.platform || "")}">${esc(shortBuild(w.build))}</code>` + badges + conflict;
   }
