@@ -190,3 +190,30 @@ def test_refunds_are_capped_so_a_case_too_big_for_every_worker_still_quarantines
     # Three refunded stops, then three charged ones, then quarantine.
     assert [s for s, _ in states[:db.TIMEOUT_REFUNDS_MAX]] == ["pending"] * db.TIMEOUT_REFUNDS_MAX
     assert states[-1][0] == "quarantined"
+
+
+# case_068, verbatim tail: the node's Docker daemon cannot take --platform.
+ENGINE_BROKEN = (
+    "solve exited 1: case_068 (attempt 1/5) failed at step 00r_numerics_fast: Container command"
+    " failed with exit code 1.\n\"--platform\" is only supported on a Docker daemon with"
+    " experimental features enabled\ncase_068: no residual history and no solver log to judge from"
+    " - not retried; a harder numerics path cannot fix it.")
+
+
+def test_a_node_whose_container_engine_cannot_start_does_not_charge_the_case(conn):
+    t0 = 1_000_000
+    got = db.lease(conn, "w1", count=1, now=t0)[0]
+    assert db.fail(conn, got.lease_id, ENGINE_BROKEN, retryable=True, now=t0 + 60)
+    r = row(conn)
+    assert (r["state"], r["attempts"]) == ("pending", 0)
+
+
+def test_engine_refunds_are_capped_so_a_lone_case_still_quarantines(conn):
+    t = 1_000_000
+    for i in range(db.ENGINE_REFUNDS_MAX + 1):
+        # a fresh worker each time: the one that just failed it is on cooldown for the case
+        got = db.lease(conn, "w%d" % i, count=1, now=t)[0]
+        t += 60
+        assert db.fail(conn, got.lease_id, ENGINE_BROKEN, retryable=True, now=t)
+        t += 3600
+        assert row(conn)["attempts"] == (0 if i < db.ENGINE_REFUNDS_MAX else 1)

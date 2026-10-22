@@ -3069,6 +3069,26 @@ _MACHINE_RELEASE = "node cannot run cases"
 _STEP_TIMEOUT = re.compile(r"\bfailed at step \S+: [^\n]*?\btimed out after (\d+) minutes")
 
 
+# A node whose container CLI cannot start the solver at all fails every case the
+# same way before a solver line is written -- case_068 on a Windows node whose
+# Docker daemon lacked experimental features: '"--platform" is only supported on a
+# Docker daemon with experimental features enabled'. The case never ran, so the
+# attempt is given back (capped, so a lone case on such a node still ends in
+# quarantine); the failure itself still counts toward the worker's burst drain.
+_ENGINE_BROKEN = re.compile(r'"--platform" is only supported on a Docker daemon')
+ENGINE_REFUNDS_MAX = 3
+
+
+def _engine_refund(conn, case_id: str, error: str) -> bool:
+    """Is this failure a node whose container engine cannot start (see above)?"""
+    if not _ENGINE_BROKEN.search(error or ""):
+        return False
+    prior = conn.execute(
+        "SELECT COUNT(*) n FROM events WHERE case_id = ? AND event IN ('failed', 'quarantined')"
+        " AND detail LIKE ?", (case_id, "%is only supported on a Docker daemon%")).fetchone()["n"]
+    return prior < ENGINE_REFUNDS_MAX
+
+
 def _refund_timeout(conn, case_id: str, error: str, now: int) -> bool:
     """Is this failure a worker's own time limit on a case that was still moving?"""
     step = _STEP_TIMEOUT.search(error or "")
@@ -3111,6 +3131,10 @@ def fail(conn, lease_id: str, error: str, retryable: bool = True,
                    (_TIMEOUT_REFUND_TAG + "; attempt refunded: " + error)[:500], now)
             conn.execute("COMMIT")
             return True
+        if retryable and _engine_refund(conn, row["case_id"], error):
+            conn.execute("UPDATE cases SET attempts = MAX(attempts - 1, 0) WHERE case_id=?",
+                         (row["case_id"],))
+            row = {**row, "attempts": max(row["attempts"] - 1, 0)}
         exhausted = row["attempts"] >= row["max_attempts"]
         state = "pending" if (retryable and not exhausted) else "quarantined"
         conn.execute(
