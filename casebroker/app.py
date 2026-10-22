@@ -2671,6 +2671,7 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         in bulk the next time it can. Each case also lists the directions whose field the
         broker holds (``fields``), for the node to backfill the rest. Without a part store:
         ``enabled`` false and no part wanted, the fields still listed."""
+        db.heal_blob_receipts(conn, body.case_ids)
         found = db.parts_wanted(conn, body.case_ids)
         for row in found.values():
             # Without a store no part is wanted -- but the fields it holds still are listed:
