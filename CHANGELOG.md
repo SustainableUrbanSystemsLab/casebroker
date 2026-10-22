@@ -8,6 +8,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.49.29] - 2026-10-22
+
+### Added
+- **A worker's page: every case it took, and how each go ended.** The list icon beside a worker id
+  in the Worker Fleet (or `#worker=<id>`, optionally `&outcome=failed`) opens a drawer with the
+  worker's outcome counts as filters, the errors it keeps failing with (grouped), and one row per
+  case: outcome, time taken, attempts, where the case is now (another node may have finished it)
+  and the node's own words. `GET /v1/workers/{worker_id}/cases?outcome=&limit=&offset=` serves it,
+  read off the events trail, the only record that survives the lease.
+
+### Changed
+- **Status and Build badges say what they mean on hover**: Drained / Draining (who set it, how to
+  undo it, the reason), Active, Offline, Cannot run cases, blocked, update failed and stuck.
+
 ## [0.49.28] - 2026-10-22
 
 ## [0.49.27] - 2026-10-21

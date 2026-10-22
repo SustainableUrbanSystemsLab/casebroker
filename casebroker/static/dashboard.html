@@ -604,6 +604,14 @@
   .storage-meter > span { display: block; height: 100%; background: var(--brand); }
   .storage-meter.warn > span { background: #d97706; }
   .storage-meter.full > span { background: #dc2626; }
+  /* Worker drawer: the cases one machine took (GET /v1/workers/{id}/cases). */
+  #workerBody table { width: 100%; border-collapse: collapse; font-size: 12.5px; margin-top: 12px; }
+  #workerBody th, #workerBody td { text-align: left; padding: 5px 8px 5px 0; vertical-align: top;
+                                   border-bottom: 1px solid var(--border-subtle); }
+  #workerBody .w-err { max-width: 340px; overflow-wrap: anywhere; color: var(--text-secondary); }
+  .w-filters { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
+  .w-filters button[aria-pressed="true"] { background: var(--primary-light); border-color: var(--primary); }
+  .w-pager { display: flex; align-items: center; gap: 8px; margin-top: 12px; color: var(--text-secondary); font-size: 12.5px; }
   .storage-bar { height: 4px; border-radius: 2px; background: var(--brand); opacity: 0.55; min-width: 1px; }
   #storageBody table { width: 100%; border-collapse: collapse; font-size: 12.5px; margin-top: 18px; }
   #storageBody th, #storageBody td { text-align: left; padding: 7px 6px; border-bottom: 1px solid var(--border);
@@ -1926,6 +1934,23 @@
     </button>
   </div>
   <div class="drawer-body" id="storageBody"></div>
+</aside>
+
+<!-- Worker: every case one machine took and how each go ended -- the page to open when
+     a node misbehaves. Read-only; opened from a worker's row (#worker=<id>). -->
+<div id="workerScrim" class="drawer-scrim"></div>
+<aside id="workerDrawer" class="drawer" role="dialog" aria-modal="true"
+       aria-labelledby="workerTitle" aria-hidden="true">
+  <div class="drawer-head">
+    <h2 id="workerTitle">Worker</h2>
+    <button id="workerRefresh" class="subtle" style="margin-left:auto" type="button">Refresh</button>
+    <button id="workerClose" class="subtle icon-btn" aria-label="Close worker" title="Close (Esc)">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+        <line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line>
+      </svg>
+    </button>
+  </div>
+  <div class="drawer-body" id="workerBody"></div>
 </aside>
 
 <!-- Dataset: the campaign as a training set -- counts, and every metric's
@@ -4175,6 +4200,8 @@
   // deep-links:pure begin
   const ROUTE_DEFAULT_SORT = "updated_at";
   const ROUTE_MAX_OFFSET = 10000000;
+  // What the worker drawer can be filtered to (db.WORKER_OUTCOMES).
+  const ROUTE_OUTCOMES = ["done", "failed", "quarantined", "released", "stale-released", "cancelled", "running"];
 
   /// The key=value pairs of a fragment. A leading "#" is dropped, and a "/" or
   /// "?" right after it, which is how people write these by hand.
@@ -4209,6 +4236,11 @@
     if (p.has("settings")) r.settings = allowed.tabs.includes(p.get("settings")) ? p.get("settings") : "setup";
     if (p.has("storage")) r.storage = true;
     if (p.has("dataset")) r.dataset = true;
+    const worker = text("worker", 128);
+    if (worker) {
+      r.worker = worker;
+      if (ROUTE_OUTCOMES.includes(p.get("outcome"))) r.outcome = p.get("outcome");
+    }
     return r;
   }
 
@@ -4224,6 +4256,10 @@
     if (r.settings) p.set("settings", r.settings);
     if (r.storage) p.set("storage", "1");
     if (r.dataset) p.set("dataset", "1");
+    if (r.worker) {
+      p.set("worker", r.worker);
+      if (r.outcome) p.set("outcome", r.outcome);
+    }
     // %20 for a space (mail clients linkify it; "+" they may not), and ":" kept
     // as it is -- a label filter reads key:value.
     const s = p.toString().replace(/\+/g, "%20").replace(/%3A/gi, ":");
@@ -4290,6 +4326,10 @@
     if (settingsOpen()) r.settings = settingsTab;
     if (storageOpen()) r.storage = true;
     if (datasetOpen()) r.dataset = true;
+    if (workerOpen()) {
+      r.worker = workerId;
+      if (workerOutcome) r.outcome = workerOutcome;
+    }
     return r;
   }
 
@@ -4309,6 +4349,11 @@
     }
     if (r.storage) { if (!storageOpen()) openStorage(); } else if (storageOpen()) closeStorage();
     if (r.dataset) { if (!datasetOpen()) openDataset(); } else if (datasetOpen()) closeDataset();
+    if (r.worker) {
+      if (!workerOpen() || workerId !== r.worker || workerOutcome !== (r.outcome || "")) openWorker(r.worker, r.outcome || "");
+    } else if (workerOpen()) {
+      closeWorker();
+    }
   }
 
   /// Make the page show a route. `boot`: nothing has loaded yet, so only the
@@ -5248,6 +5293,9 @@
             <td>
               <div style="display:flex;align-items:center;gap:6px">
                 <code class="inline">${esc(w.worker_id)}</code>
+                <button class="copy-btn" data-worker-open="${esc(w.worker_id)}" title="Cases this worker took: outcomes, errors, attempts" aria-label="Cases this worker took">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="8" y1="6" x2="21" y2="6"></line><line x1="8" y1="12" x2="21" y2="12"></line><line x1="8" y1="18" x2="21" y2="18"></line><line x1="3" y1="6" x2="3.01" y2="6"></line><line x1="3" y1="12" x2="3.01" y2="12"></line><line x1="3" y1="18" x2="3.01" y2="18"></line></svg>
+                </button>
                 <button class="copy-btn" onclick="copyText('${esc(w.worker_id)}', 'Worker ID copied')" title="Copy Worker ID">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
                 </button>
@@ -9109,7 +9157,7 @@
   /// Where the page is, for a link to land on: never a drawer.
   function viewRoute() {
     const r = currentRoute();
-    delete r.settings; delete r.storage; delete r.dataset;
+    delete r.settings; delete r.storage; delete r.dataset; delete r.worker; delete r.outcome;
     return r;
   }
 
@@ -9681,6 +9729,114 @@
   // The campaign as a training set (GET /v1/dataset, through the page's one
   // cached copy above): how many cases, how they split, and every metric's
   // distribution over all cases or one LCZ. Same drawer pattern as storage.
+  // -- Worker: the cases one machine took ----------------------------------------
+  const WORKER_PAGE = 50;
+  const WORKER_BADGE = { done: "done", failed: "pending", quarantined: "quarantined", released: "leased",
+                         "stale-released": "quarantined", cancelled: "pending", running: "leased" };
+  const WORKER_MEANS = {
+    done: "finished here", failed: "failed here and went back to the queue for another try",
+    quarantined: "failed here for good (out of attempts, or a fatal error)",
+    released: "this node handed it back (stopping, or its own checks refused it)",
+    "stale-released": "the lease ran out with no word from this node, so the broker took it back",
+    cancelled: "an operator cancelled it while this node held it",
+    running: "leased here and no end recorded: in flight now, or the node never reported the end",
+  };
+  let workerId = "", workerOutcome = "", workerOffset = 0, workerGen = 0;
+
+  function workerOpen() { return $("workerDrawer").classList.contains("open"); }
+
+  function openWorker(id, outcome) {
+    if (!workerOpen()) returnFocusTo = document.activeElement;
+    workerId = id; workerOutcome = outcome || ""; workerOffset = 0;
+    $("workerTitle").textContent = "Worker " + id;
+    $("workerScrim").classList.add("open");
+    const d = $("workerDrawer");
+    d.classList.add("open"); d.inert = false; d.setAttribute("aria-hidden", "false");
+    $("workerClose").focus();
+    loadWorker();
+    syncRoute();
+  }
+
+  function closeWorker() {
+    $("workerScrim").classList.remove("open");
+    const d = $("workerDrawer");
+    d.classList.remove("open"); d.inert = true; d.setAttribute("aria-hidden", "true");
+    workerGen++;                                 // an answer still on the wire is not for anybody now
+    if (returnFocusTo && returnFocusTo.focus) returnFocusTo.focus();
+    syncRoute();
+  }
+
+  async function loadWorker() {
+    const body = $("workerBody");
+    const gen = ++workerGen;
+    body.classList.add("is-stale");
+    setBusy(body, true);
+    setPending($("workerRefresh"), true);
+    let d;
+    try {
+      d = await api("/v1/workers/" + encodeURIComponent(workerId) + "/cases?limit=" + WORKER_PAGE
+        + "&offset=" + workerOffset + (workerOutcome ? "&outcome=" + encodeURIComponent(workerOutcome) : ""));
+    } catch (e) {
+      if (gen !== workerGen) return;
+      body.classList.remove("is-stale"); setBusy(body, false); setPending($("workerRefresh"), false);
+      body.innerHTML = `<div class="storage-sub">Could not read this worker's cases: ${esc(e.message)}</div>`;
+      return;
+    }
+    if (gen !== workerGen) return;
+    body.classList.remove("is-stale"); setBusy(body, false); setPending($("workerRefresh"), false);
+    renderWorker(d);
+  }
+
+  function renderWorker(d) {
+    const w = d.worker || {};
+    const total = Object.values(d.counts).reduce((a, b) => a + b, 0);
+    const facts = [w.host, w.cluster, w.platform, w.build,
+      w.first_seen ? "first seen " + relTime(w.first_seen) : "", w.last_seen ? "last seen " + relTime(w.last_seen) : ""]
+      .filter(Boolean).map((x) => `<span class="chip mono">${esc(x)}</span>`).join(" ");
+    const flags = (w.drain ? `<span class="badge leased" title="${esc(drainTitle(w))}">Drained</span> ` : "")
+      + (w.unfit ? `<span class="badge quarantined" title="${esc(w.unfit)}">Cannot run cases</span>` : "");
+    const chip = (key, label, n) => `<button type="button" class="ghost" data-w-outcome="${esc(key)}"`
+      + ` aria-pressed="${workerOutcome === key ? "true" : "false"}"`
+      + (key ? ` title="${esc(WORKER_MEANS[key] || "")}"` : "") + `>${esc(label)} ${Number(n).toLocaleString()}</button>`;
+    const filters = chip("", "All", total) + Object.keys(WORKER_MEANS).filter((k) => d.counts[k])
+      .map((k) => chip(k, k, d.counts[k])).join("");
+    const errors = d.errors.length ? `<h3 style="margin:16px 0 0;font-size:13px">What it keeps failing with</h3><table><thead><tr>`
+      + `<th class="num">Times</th><th>Error</th><th>Latest</th></tr></thead><tbody>`
+      + d.errors.map((e) => `<tr><td class="num">${e.n}</td><td class="w-err"><code>${esc(e.error)}</code></td>`
+        + `<td>${relTime(e.latest)}</td></tr>`).join("") + `</tbody></table>` : "";
+    const rows = d.cases.map((c) => {
+      const took = c.started_at && c.ended_at >= c.started_at && c.outcome !== "running"
+        ? ageShort(c.ended_at - c.started_at) : "—";
+      const elsewhere = c.held_by && c.held_by !== workerId ? `<div class="note">held by ${esc(c.held_by)}</div>` : "";
+      const why = c.detail || "";
+      return `<tr>
+        <td><a href="#case=${esc(encodeURIComponent(c.case_id))}"><code>${esc(c.case_id)}</code></a>`
+          + (c.takes > 1 ? ` <span class="chip" title="this worker took it ${c.takes} times">×${c.takes}</span>` : "")
+          + `<div class="note">${esc([c.recipe, c.city_cluster].filter(Boolean).join(" · "))}</div></td>
+        <td><span class="badge ${WORKER_BADGE[c.outcome] || "pending"}" title="${esc(WORKER_MEANS[c.outcome] || "")}">${esc(c.outcome)}</span></td>
+        <td>${took}</td>
+        <td>${relTime(c.ended_at)}</td>
+        <td>${c.attempts != null ? c.attempts + "/" + c.max_attempts : "—"}</td>
+        <td>${esc(c.state || "—")}${elsewhere}</td>
+        <td class="w-err" title="${esc(why)}">${esc(why.length > 160 ? why.slice(0, 160) + "…" : why)}</td></tr>`;
+    }).join("");
+    const first = d.total ? d.offset + 1 : 0, last = d.offset + d.cases.length;
+    $("workerBody").innerHTML = `
+      <div>${facts}</div>${flags ? `<div style="margin-top:6px">${flags}</div>` : ""}
+      <div class="w-filters">${filters}</div>
+      ${errors}
+      <table><thead><tr><th>Case</th><th>Outcome</th><th>Took</th><th>Ended</th><th>Attempts</th>
+        <th>Case now</th><th>Detail</th></tr></thead>
+        <tbody>${rows || `<tr><td colspan="7" class="storage-sub">No cases${workerOutcome ? " with that outcome" : ""}.</td></tr>`}</tbody></table>
+      <div class="w-pager">
+        <button type="button" class="ghost" data-w-page="-1" ${d.offset ? "" : "disabled"}>Newer</button>
+        <span>${first}–${last} of ${Number(d.total).toLocaleString()}, newest first</span>
+        <button type="button" class="ghost" data-w-page="1" ${last < d.total ? "" : "disabled"}>Older</button>
+      </div>
+      <div class="storage-sub" style="margin-top:10px">The last thing the broker's event trail says about this worker and each
+        case. "Case now" is where the case is today, which another worker may have changed.</div>`;
+  }
+
   function datasetOpen() { return $("datasetDrawer").classList.contains("open"); }
 
   function openDataset() {
@@ -10526,6 +10682,19 @@
     if (settingsOpen()) closeSettings(); else openSettings();
   });
   $("settingsClose").addEventListener("click", closeSettings);
+  $("workerClose").addEventListener("click", closeWorker);
+  $("workerScrim").addEventListener("click", closeWorker);
+  $("workerRefresh").addEventListener("click", loadWorker);
+  $("workerBody").addEventListener("click", (e) => {
+    const f = e.target.closest("[data-w-outcome]");
+    const pg = e.target.closest("[data-w-page]");
+    if (f) { workerOutcome = f.getAttribute("data-w-outcome"); workerOffset = 0; loadWorker(); syncRoute(); }
+    else if (pg && !pg.disabled) { workerOffset = Math.max(0, workerOffset + Number(pg.getAttribute("data-w-page")) * WORKER_PAGE); loadWorker(); }
+  });
+  document.addEventListener("click", (e) => {
+    const b = e.target.closest("[data-worker-open]");
+    if (b) openWorker(b.getAttribute("data-worker-open"), "");
+  });
   $("storageBtn").addEventListener("click", () => (storageOpen() ? closeStorage() : openStorage()));
   $("storageClose").addEventListener("click", closeStorage);
   $("storageScrim").addEventListener("click", closeStorage);
@@ -10562,7 +10731,8 @@
   $("settingsScrim").addEventListener("click", closeSettings);
   document.addEventListener("keydown", (e) => {
     if (e.key !== "Escape") return;
-    const open = storageOpen() || settingsOpen() || datasetOpen();
+    const open = storageOpen() || settingsOpen() || datasetOpen() || workerOpen();
+    if (workerOpen()) closeWorker();
     if (storageOpen()) closeStorage();
     if (settingsOpen()) closeSettings();
     if (datasetOpen()) closeDataset();

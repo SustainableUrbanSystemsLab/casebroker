@@ -37,6 +37,8 @@ const views = [
   { sort: 'attempts', dir: 'asc', offset: 50 },
   { settings: 'users' },
   { settings: 'sharing', storage: true, dataset: true },
+  { worker: 'AR-256GB' },
+  { worker: 'AR-256GB', outcome: 'quarantined' },
   { state: 'leased', offset: 25, storage: true },
 ];
 for (const v of views) {
@@ -115,3 +117,10 @@ assert.match(decodeURIComponent(shareMailto(url, null)), /until I take it back/)
 
 console.log(`deep links: ${views.length} views round-trip; hostile fragments are dropped; ` +
             'a share secret never survives into a route; the link and the mail read back');
+
+// -- the worker drawer ---------------------------------------------------------------
+assert.deepStrictEqual(parse('#worker=AR-256GB&outcome=failed'), { worker: 'AR-256GB', outcome: 'failed' });
+assert.deepStrictEqual(parse('#worker=w1&outcome=%3Cscript%3E'), { worker: 'w1' }, 'an outcome the page does not offer is dropped');
+assert.deepStrictEqual(parse('#outcome=failed'), {}, 'an outcome without a worker names nothing');
+assert.deepStrictEqual(parse('#worker=' + 'x'.repeat(129)), {}, 'a worker id longer than the broker allows is dropped');
+console.log('worker route ok');

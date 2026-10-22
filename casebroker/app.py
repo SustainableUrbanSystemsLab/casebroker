@@ -2291,6 +2291,17 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
             raise HTTPException(409, str(e))
         return _catalog()
 
+    @app.get("/v1/workers/{worker_id}/cases", dependencies=[ReadAuth])
+    def worker_cases(worker_id: str, outcome: str | None = Query(None, max_length=32),
+                     limit: int = 50, offset: int = 0) -> dict[str, Any]:
+        """Every case this worker took, newest first, with how its last go ended
+        and the errors it keeps hitting: the page to open when a machine misbehaves.
+        ``outcome`` is one of ``db.WORKER_OUTCOMES``."""
+        out = db.worker_cases(conn, worker_id, outcome=outcome, limit=limit, offset=offset)
+        if out is None:
+            raise HTTPException(404, f"no worker named {worker_id!r}")
+        return out
+
     @app.put("/v1/workers/{worker_id}/target")
     def set_worker_target(worker_id: str, body: TargetIn, user=OperatorAuth) -> dict[str, Any]:
         """The canary: move ONE worker to a build, ahead of the fleet."""

@@ -5511,6 +5511,100 @@ def list_errors(conn, limit: int = 2000) -> dict[str, Any]:
             "cases": cases}
 
 
+# What a case's trail can say about one worker, newest-last: it took the case
+# ('leased', or 'resumed' after a node restart) and then how that ended.
+_WORKER_TRAIL = ("leased", "resumed", "done", "failed", "quarantined", "released",
+                 "stale-released", "cancelled")
+# worker_cases(outcome=...): the last thing the trail says, "running" being a lease
+# nothing has ended (in flight now, or the broker never heard the end).
+WORKER_OUTCOMES = ("done", "failed", "quarantined", "released", "stale-released",
+                   "cancelled", "running")
+
+
+@_locked
+def worker_cases(conn, worker_id: str, outcome: str | None = None,
+                 limit: int = 50, offset: int = 0) -> dict[str, Any] | None:
+    """Every case one worker took, newest first, each with how its last go ended.
+
+    For debugging a machine: "which cases did this node fail, and with what".
+    The events trail is the only record that survives the lease (``fail`` and
+    ``complete`` null ``cases.lease_worker``), so the page is read off it: one row per
+    case, the LAST thing the trail says about this worker and that case, plus the
+    case's current state, which can have moved on since (another worker finished it).
+
+    ``outcome`` keeps cases whose last word is that event (``WORKER_OUTCOMES``);
+    anything else is no filter, so a stale bookmark shows rows rather than none.
+    None when the broker has never heard of the worker, so the route can say 404.
+
+    shortcut: events has no worker_id index, so this reads every trail row of the
+    kinds above (a few per case); add (worker_id, id) when that is slow.
+    """
+    limit = max(1, min(int(limit), 200))
+    offset = max(0, int(offset))
+    w = conn.execute(
+        "SELECT worker_id, host, cluster, platform, build, first_seen, last_seen, cases_done,"
+        " cases_failed, drain, drain_reason, unfit FROM workers WHERE worker_id = ?",
+        (worker_id,)).fetchone()
+    kinds = ",".join("?" * len(_WORKER_TRAIL))
+    # The newest trail row per case, for this worker: its id says the last word.
+    last = ("SELECT MAX(id) FROM events WHERE worker_id = ? AND case_id IS NOT NULL"
+            " AND event IN (" + kinds + ") GROUP BY case_id")
+    base = [worker_id, *_WORKER_TRAIL]
+    tally = {r["event"]: r["n"] for r in conn.execute(
+        "SELECT event, COUNT(*) n FROM events WHERE id IN (" + last + ") GROUP BY event", base)}
+    if w is None and not tally:
+        return None
+    counts = {k: 0 for k in WORKER_OUTCOMES}
+    for event, n in tally.items():
+        counts["running" if event in ("leased", "resumed") else event] += n
+    keep, params = "", list(base)
+    if outcome in WORKER_OUTCOMES:
+        kept = ("leased", "resumed") if outcome == "running" else (outcome,)
+        keep = " AND event IN (" + ",".join("?" * len(kept)) + ")"
+        params += kept
+    total = conn.execute("SELECT COUNT(*) n FROM events WHERE id IN (" + last + ")" + keep,
+                         params).fetchone()["n"]
+    ends = [dict(r) for r in conn.execute(
+        "SELECT id, case_id, ts, event, detail FROM events WHERE id IN (" + last + ")" + keep +
+        " ORDER BY id DESC LIMIT ? OFFSET ?", params + [limit, offset])]
+    ids = [e["case_id"] for e in ends]
+    info: dict[str, Any] = {}
+    if ids:
+        marks = ",".join("?" * len(ids))
+        for r in conn.execute(
+                "SELECT case_id, recipe, city_cluster, split, state, attempts, max_attempts,"
+                " lease_worker, last_error, result_bytes, mesh_cells, updated_at FROM cases"
+                " WHERE case_id IN (" + marks + ")", ids):
+            info[r["case_id"]] = dict(r)
+        for r in conn.execute(
+                "SELECT case_id, COUNT(*) n, MAX(ts) last_at FROM events WHERE worker_id = ?"
+                " AND event = 'leased' AND case_id IN (" + marks + ") GROUP BY case_id",
+                [worker_id, *ids]):
+            info.setdefault(r["case_id"], {}).update(takes=r["n"], started_at=r["last_at"])
+    rows = []
+    for e in ends:
+        c = info.get(e["case_id"], {})
+        rows.append({
+            "case_id": e["case_id"],
+            "outcome": "running" if e["event"] in ("leased", "resumed") else e["event"],
+            "ended_at": e["ts"], "detail": e["detail"],
+            "started_at": c.get("started_at"), "takes": c.get("takes", 0),
+            "recipe": c.get("recipe"), "city_cluster": c.get("city_cluster"),
+            "split": c.get("split"), "state": c.get("state"),
+            "attempts": c.get("attempts"), "max_attempts": c.get("max_attempts"),
+            "held_by": c.get("lease_worker"), "last_error": c.get("last_error"),
+            "mesh_cells": c.get("mesh_cells"), "updated_at": c.get("updated_at"),
+        })
+    # The same few messages again and again is the finding: group the errors.
+    errors = [dict(r) for r in conn.execute(
+        "SELECT SUBSTR(detail, 1, 160) AS error, COUNT(*) n, MAX(ts) latest FROM events"
+        " WHERE worker_id = ? AND event IN ('failed', 'quarantined') AND detail IS NOT NULL"
+        " GROUP BY SUBSTR(detail, 1, 160) ORDER BY n DESC, latest DESC LIMIT 8", (worker_id,))]
+    return {"worker": dict(w) if w else {"worker_id": worker_id},
+            "counts": counts, "errors": errors, "cases": rows,
+            "total": total, "limit": limit, "offset": offset}
+
+
 @_locked
 def get_case(conn, case_id: str) -> dict[str, Any] | None:
     row = conn.execute("SELECT " + _CASE_COLS + " FROM cases WHERE case_id=?",
