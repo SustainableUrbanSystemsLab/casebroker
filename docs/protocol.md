@@ -129,6 +129,7 @@ than silent. Creating the first account closes it.
 | `POST /v1/users/{username}/role` | Promote or demote. Refuses to demote the last admin. **Admin** |
 | `POST /v1/users/{username}/password` | Change your own (needs `current_password`) or, as an admin, reset someone else's. Revokes every session that account holds |
 | `DELETE /v1/users/{username}` | Remove an account and its sessions. Refuses the last admin |
+| `GET /v1/workers/{id}/cases` | Every case that worker took, newest first, with how its last go ended, its error text, and the errors it keeps hitting. `?outcome=` (`done`, `failed`, `quarantined`, `released`, `stale-released`, `cancelled`, `running`), `limit`, `offset`. `404` for a worker the broker never heard of. Any reader |
 | `GET /v1/workers/tokens` | Every machine credential, with `last_seen_at`. **Admin** |
 | `POST /v1/workers/tokens` | Mint one machine's credential and return it **once** — only its hash is stored. **Admin** |
 | `DELETE /v1/workers/tokens/{name}` | Revoke one machine, effective on its next request. **Admin** |
