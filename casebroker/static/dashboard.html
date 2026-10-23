@@ -2580,7 +2580,20 @@
     g = { t0: performance.now(), data: null, error: null };
     // Settles either way and never rejects: the outcome lives on `g`, where a
     // panel rebuilt after the fact can still read it.
-    g.promise = api(`/v1/cases/${encodeURIComponent(caseId)}/footprints`).then(
+    // The first look runs three remote queries on the broker and can outlast the
+    // proxy in front of it (502/503/504); the broker finishes and caches anyway,
+    // so asking again a few seconds later usually gets the cached answer.
+    const fetchGeo = async (left) => {
+      try { return await api(`/v1/cases/${encodeURIComponent(caseId)}/footprints`); }
+      catch (e) {
+        if (left > 0 && [502, 503, 504].includes(e.status)) {
+          await new Promise((r) => setTimeout(r, (e.retryAfter || 5) * 1000));
+          return fetchGeo(left - 1);
+        }
+        throw e;
+      }
+    };
+    g.promise = fetchGeo(2).then(
       (d) => { g.data = d; },
       (e) => { g.error = e; });
     geoLoads.delete(key);
@@ -4834,6 +4847,8 @@
     if (!res.ok) {
       let body = "";
       try { body = (await res.text()).slice(0, 200); } catch (e) {}
+      // A proxy's error page (Cloudflare's 502/504) is HTML: never worth pasting.
+      if (/^\s*<(!doctype|html)/i.test(body)) body = "the proxy in front of the broker returned an error page";
       const err = new Error(`${res.status} ${res.statusText} — ${body || "(no body)"}`);
       err.status = res.status;
       // Seconds, when the broker says when to ask again (a 503 from

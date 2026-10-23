@@ -8,6 +8,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.49.32] - 2026-10-22
+
+### Fixed
+- **Site geometry no longer shows a Cloudflare error page.** A 502/503/504 on `/footprints` (the first
+  look outlasting the proxy) is retried twice, and any HTML error body is replaced by one plain line.
+
 ## [0.49.31] - 2026-10-22
 
 ## [0.49.30] - 2026-10-22
