@@ -216,6 +216,9 @@ MAX_BUILDINGS = 20_000
 # every case anyone had already opened keep answering with neither, which looks
 # exactly like a site with no trees rather than a stale cache. A hit stamped
 # with anything other than the current value is treated as a miss.
+# 8: a cyl-1008/of12-v8 case previews CHMv2 crowns with the ones under
+# buildings dropped, as the node meshes it; payloads cached before this were
+# drawn from v1 with every crown kept (the recipe table had stopped at v7).
 # 7: canopy carries the runner's 4 m `columns`, and its model follows the
 # recipe (v2 for cyl-1008/of12-v7); cached ones have neither.
 # 6: the payload names the source the case's MESH was built from
@@ -226,7 +229,7 @@ MAX_BUILDINGS = 20_000
 # 3: any payload cached while a raster host was unreachable carries
 # "unavailable" for terrain and canopy, and until this version those were
 # cached like real answers. Bumping re-fetches every case exactly once.
-PAYLOAD_VERSION = 7
+PAYLOAD_VERSION = 8
 
 
 class TileNotPublished(Exception):
@@ -604,16 +607,23 @@ CHM_BASE = ("https://dataforgood-fb-data.s3.amazonaws.com/forests/v1/"
 # CHMv2 (DINOv3, March 2026): the same imagery where both exist, a model that
 # sees the street rows and courtyard trees v1 misses (Hangzhou core, 4 m columns
 # at or over 2 m: 3.9 % v1, 11.2 % v2). Same uint8 metres at 1.194 m in
-# EPSG:3857, but tiles named by ZOOM-10 quadkeys. Eddy3D's recipe
-# cyl-1008/of12-v7 meshes it; every earlier recipe meshes v1.
+# EPSG:3857, but tiles named by ZOOM-10 quadkeys. Eddy3D's cylinder recipes
+# from cyl-1008/of12-v7 on mesh it; every earlier recipe meshes v1.
 CHM_V2_BASE = ("https://dataforgood-fb-data.s3.amazonaws.com/forests/v2/"
                "global/dinov3_global_chm_v2_ml3/chm")
 # Which canopy model a recipe's crowns come from: (source id, tile base, zoom).
 # Mirrors Eddy3D's CampaignCaseConfig.CanopyModel exactly -- v2 for these
 # recipes, v1 for every other one, the thermal and MRT recipes included.
+#
+# The node's rule is "a cylinder recipe at or after of12-v7 in its lineage
+# (v4, v5, v6, v7, v8), by EXACT name" (CampaignCaseConfig.DropsCrownsUnderBuildings),
+# so this set is every cylinder recipe from v7 on, and a wind recipe the node
+# gains is added here in the same change. of12-v8 (2026-10-20, v7 without the
+# eddy-viscosity cap) was not, and until 2026-11-01 every v8 case previewed
+# v1 crowns with the ones under buildings kept -- trees its mesh does not have.
 CHM_V1 = ("meta-wri-chm-v1", CHM_BASE, 9)
 CHM_V2 = ("meta-wri-chm-v2", CHM_V2_BASE, 10)
-CHM_V2_RECIPES = frozenset({"cyl-1008/of12-v7"})
+CHM_V2_RECIPES = frozenset({"cyl-1008/of12-v7", "cyl-1008/of12-v8"})
 
 
 def chm_model_for(recipe: str | None) -> tuple[str, str, int]:

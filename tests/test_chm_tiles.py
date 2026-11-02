@@ -127,13 +127,19 @@ def test_overture_fallback_is_off_by_default(monkeypatch):
 
 
 def test_the_canopy_model_follows_the_recipe():
-    """Mirrors Eddy3D's CampaignCaseConfig.CanopyModel: v2 crowns for of12-v7,
-    v1 for every other recipe -- a preview from the other model would draw
-    trees the case's mesh does not have."""
-    assert footprints.chm_model_for("cyl-1008/of12-v7")[0] == "meta-wri-chm-v2"
+    """Mirrors Eddy3D's CampaignCaseConfig.CanopyModel: v2 crowns for every
+    cylinder recipe from of12-v7 on (the node's rule is "at least v7" in its
+    lineage), v1 for every other recipe -- a preview from the other model would
+    draw trees the case's mesh does not have. This test once pinned of12-v8 to
+    v1, the day v8 appeared on the node, and the drift went unnoticed for twelve
+    days: a recipe the node gains is added to CHM_V2_RECIPES, and here, together."""
+    for recipe in ("cyl-1008/of12-v7", "cyl-1008/of12-v8"):
+        assert footprints.chm_model_for(recipe)[0] == "meta-wri-chm-v2", recipe
+        assert footprints.drops_crowns_under_buildings(recipe), recipe
     for recipe in ("cyl-1008/of12-v6", "cyl-1008/of12-v5", "cyl-1008/of12-v4",
-                   "surf-1008/rad6R0P2-fft-v2", "cyl-1008/of12-v8", None):
+                   "surf-1008/rad6R0P2-fft-v2", "mrt-1008/rad6R0P2-solarcal-v1", None):
         assert footprints.chm_model_for(recipe)[0] == "meta-wri-chm-v1", recipe
+        assert not footprints.drops_crowns_under_buildings(recipe), recipe
 
 
 def test_v2_tiles_are_zoom_ten_and_published():
