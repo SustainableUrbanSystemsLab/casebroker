@@ -47,7 +47,8 @@ RECIPE = "surf-1008/rad6R0P2-fft-v2"
 # one, so while a case of it is pending or leased that node keeps archiving it.
 WITHDRAWN = ("surf-1008/rad6R0P2-fft-v1",)
 # Newest first: a site moved v4 -> v6 (POST /v1/cases/respec) holds both, and its wind case is the v6 one.
-WIND_RECIPES = ("cyl-1008/of12-v6", "cyl-1008/of12-v5", "cyl-1008/of12-v4")
+# v7 and v8 were never admitted; v9 (v8 with the core ground zones at level 4) is the next wind recipe.
+WIND_RECIPES = ("cyl-1008/of12-v9", "cyl-1008/of12-v8", "cyl-1008/of12-v7", "cyl-1008/of12-v6", "cyl-1008/of12-v5", "cyl-1008/of12-v4")
 PRIORITY = 200
 BATCH = 25
 STATIONS = 300

@@ -616,14 +616,15 @@ CHM_V2_BASE = ("https://dataforgood-fb-data.s3.amazonaws.com/forests/v2/"
 # recipes, v1 for every other one, the thermal and MRT recipes included.
 #
 # The node's rule is "a cylinder recipe at or after of12-v7 in its lineage
-# (v4, v5, v6, v7, v8), by EXACT name" (CampaignCaseConfig.DropsCrownsUnderBuildings),
+# (v4, v5, v6, v7, v8, v9), by EXACT name" (CampaignCaseConfig.DropsCrownsUnderBuildings),
 # so this set is every cylinder recipe from v7 on, and a wind recipe the node
 # gains is added here in the same change. of12-v8 (2026-10-20, v7 without the
 # eddy-viscosity cap) was not, and until 2026-11-01 every v8 case previewed
 # v1 crowns with the ones under buildings kept -- trees its mesh does not have.
+# of12-v9 (2026-11-04, v8 with the core ground zones at snappy level 4) is.
 CHM_V1 = ("meta-wri-chm-v1", CHM_BASE, 9)
 CHM_V2 = ("meta-wri-chm-v2", CHM_V2_BASE, 10)
-CHM_V2_RECIPES = frozenset({"cyl-1008/of12-v7", "cyl-1008/of12-v8"})
+CHM_V2_RECIPES = frozenset({"cyl-1008/of12-v7", "cyl-1008/of12-v8", "cyl-1008/of12-v9"})
 
 
 def chm_model_for(recipe: str | None) -> tuple[str, str, int]:

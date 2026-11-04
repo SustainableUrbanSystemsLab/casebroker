@@ -231,7 +231,7 @@ meshes**. Three layers, one payload:
   tree. Crowns are drawn from `columns`: the 21 m grid's rounded means dropped
   scattered trees and drew staircases the mesh does not have. `source` is the
   model the case's recipe meshes — `meta-wri-chm-v2` (CHMv2, zoom-10 tiles) for
-  the cylinder recipes from `cyl-1008/of12-v7` on (v7, v8), `meta-wri-chm-v1`
+  the cylinder recipes from `cyl-1008/of12-v7` on (v7, v8, v9), `meta-wri-chm-v1`
   otherwise — or `none` (the product
   publishes no tile here) or `unavailable`. A treeless site and an uncovered
   one are different answers and are reported as such. For a recipe that drops
