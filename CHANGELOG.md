@@ -8,6 +8,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.49.34] - 2026-11-03
+
+## [0.49.33] - 2026-11-01
+
+### Fixed
+- **Site geometry previews a `cyl-1008/of12-v8` case with the crowns its mesh has.** The canopy
+  model followed the recipe by an exact table that stopped at `of12-v7`, while the node meshes
+  CHMv2 and drops crowns under buildings for every cylinder recipe from v7 on; from 2026-10-20
+  every v8 case previewed v1 crowns with the ones under buildings kept. The table now carries v8,
+  the test pins both rules per recipe, and the footprints cache version moves so an already-opened
+  v8 case is drawn again.
+
 ## [0.49.32] - 2026-10-22
 
 ### Fixed
