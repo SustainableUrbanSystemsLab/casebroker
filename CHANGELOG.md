@@ -8,6 +8,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.49.35] - 2026-11-03
+
+### Added
+
+- **The wind recipe `cyl-1008/of12-v9` is known to the broker**: v8 with the core ground zones at
+  snappy level 4 (Eddy3D-Dev/Eddy3D#1270; the 1.75 m pedestrian sample no longer sits mid-cell). Site
+  geometry previews a v9 case with the CHMv2 crowns its mesh has (`CHM_V2_RECIPES`), and the thermal
+  admission ranks a site's v9 wind case above its v6 one (`admit_thermal.WIND_RECIPES`).
+
 ## [0.49.34] - 2026-11-03
 
 ## [0.49.33] - 2026-11-01

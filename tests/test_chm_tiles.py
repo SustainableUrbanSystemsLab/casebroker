@@ -133,7 +133,7 @@ def test_the_canopy_model_follows_the_recipe():
     draw trees the case's mesh does not have. This test once pinned of12-v8 to
     v1, the day v8 appeared on the node, and the drift went unnoticed for twelve
     days: a recipe the node gains is added to CHM_V2_RECIPES, and here, together."""
-    for recipe in ("cyl-1008/of12-v7", "cyl-1008/of12-v8"):
+    for recipe in ("cyl-1008/of12-v7", "cyl-1008/of12-v8", "cyl-1008/of12-v9"):
         assert footprints.chm_model_for(recipe)[0] == "meta-wri-chm-v2", recipe
         assert footprints.drops_crowns_under_buildings(recipe), recipe
     for recipe in ("cyl-1008/of12-v6", "cyl-1008/of12-v5", "cyl-1008/of12-v4",
