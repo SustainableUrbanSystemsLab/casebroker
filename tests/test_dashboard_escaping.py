@@ -44,6 +44,26 @@ def _interpolations():
             yield i, m.group(1).strip()
 
 
+def test_no_inline_handler_and_no_unescaped_data_attribute():
+    """esc() is HTML escaping, and an inline onclick="f('${esc(x)}')" is NOT an
+    HTML context for the value: the parser decodes &#39; back to ' before the
+    JavaScript is compiled, so a worker id with an apostrophe ran in the admin's
+    session on the next click of a copy button. The sweep below could not see it
+    because it accepts any esc( call regardless of where the result lands."""
+    page = DASH.read_text(encoding="utf-8")
+    assert "onclick=" not in page, "wire buttons by data-attribute, never an inline handler"
+    # What may land in a data attribute without esc(): a CSS.escape()d id, a
+    # choice between string literals, or one of these locals, which this file
+    # picks from its own literals (geoControls' act, BROWSER_EVENTS' k).
+    literal_locals = {"act", "k"}
+    bad = [f"dashboard.html:{i}: {m.group(0)}"
+           for i, line in enumerate(page.splitlines(), 1)
+           for m in re.finditer(r'data-[\w-]+="\$\{(?!esc\()([^}]*)\}', line)
+           if not (m.group(1).startswith("CSS.escape(") or '? "' in m.group(1)
+                   or m.group(1).strip() in literal_locals)]
+    assert not bad, "data attribute built from unescaped text:\n  " + "\n  ".join(bad)
+
+
 def test_no_server_supplied_field_reaches_the_dom_unescaped():
     bad = []
     for lineno, expr in _interpolations():

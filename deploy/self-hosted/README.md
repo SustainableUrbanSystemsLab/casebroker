@@ -28,7 +28,13 @@ proxy :443 ─► `127.0.0.1:8010` ─► broker ─► `postgres:5432`.
 4. **Create the project.** `docker compose up -d` in the project folder.
 5. **Reverse proxy.** Create a rule: source HTTPS `<broker-host>` :443, destination HTTP
    `localhost` :8010. Custom headers: add `X-Forwarded-Proto` = `https`
-   (the broker sets the session cookie's Secure flag from it).
+   (the broker sets the session cookie's Secure flag from it). Leave the
+   request headers otherwise untouched: the broker keys its login, share-link
+   and pairing throttles on Cloudflare's `CF-Connecting-IP` when the socket
+   peer is a private address, because from inside the container every caller
+   on the internet arrives from the docker bridge -- without that header one
+   bucket holds the whole world, and 25 bad logins from anywhere lock every
+   human out.
 6. **DNS.** Cloudflare ▸ your zone ▸ a proxied record for the broker host,
    the same as the server's other proxied hostnames.
 7. **CI.** Repo ▸ Settings ▸ Variables ▸ `BROKER_URL` =

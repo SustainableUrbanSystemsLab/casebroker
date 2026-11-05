@@ -38,7 +38,8 @@ import os
 import re
 import shutil
 import threading
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 SHA256 = re.compile(r"[0-9a-f]{64}")
@@ -98,6 +99,8 @@ class PartStore:
         self._locks_guard = threading.Lock()
         self._verifying: set[str] = set()
         self._failed: dict[str, str] = {}
+        self._usage: Usage | None = None
+        self._usage_at = 0.0
 
     # -- paths -----------------------------------------------------------------
 
@@ -152,6 +155,23 @@ class PartStore:
         incoming = sum(p.stat().st_size for p in self.incoming.iterdir() if p.is_file())
         return Usage(n, size, incoming, shutil.disk_usage(self.root).free, self.reserve_bytes, self.max_bytes)
 
+    def _usage_cached(self) -> Usage:
+        """usage() stats every object in the store (175k files at 5k cases), and
+        admit() asked for it on EVERY chunk of every upload -- one 8.5 GB case was
+        270 full walks, inside the request pool that also serves leases.
+        complete() and remove() keep the stored count current between walks;
+        shortcut: incoming_bytes is as of the last walk, so a burst of
+        concurrent uploads can overshoot max_bytes by what arrives in 60 s."""
+        now = time.monotonic()
+        if self._usage is None or now - self._usage_at >= 60:
+            self._usage, self._usage_at = self.usage(), now
+        return self._usage
+
+    def _account(self, objects: int, bytes: int) -> None:
+        if self._usage is not None:
+            self._usage = replace(self._usage, objects=self._usage.objects + objects,
+                                  bytes=self._usage.bytes + bytes)
+
     # -- writing -----------------------------------------------------------------
 
     def admit(self, sha256: str, size: int) -> int:
@@ -176,7 +196,7 @@ class PartStore:
             raise PartStoreError(507, "the part store is full", free_bytes=free,
                                  reserve_bytes=self.reserve_bytes, needed_bytes=still)
         if self.max_bytes is not None:
-            u = self.usage()
+            u = self._usage_cached()
             if u.bytes + u.incoming_bytes + still > self.max_bytes:
                 raise PartStoreError(507, "the part store is at its size limit",
                                      used_bytes=u.bytes + u.incoming_bytes,
@@ -242,6 +262,7 @@ class PartStore:
         with open(path, "rb+") as f:
             os.fsync(f.fileno())
         os.replace(path, target)
+        self._account(objects=1, bytes=size)
         try:
             dirfd = os.open(target.parent, os.O_RDONLY)
             try:
@@ -286,8 +307,11 @@ class PartStore:
 
     def remove(self, sha256: str) -> bool:
         """Delete a stored part's file. The caller has checked nothing refers to it."""
+        p = self.object_path(sha256)
         try:
-            self.object_path(sha256).unlink()
-            return True
+            size = p.stat().st_size
+            p.unlink()
         except FileNotFoundError:
             return False
+        self._account(objects=-1, bytes=-size)
+        return True

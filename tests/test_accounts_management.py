@@ -341,6 +341,31 @@ def test_without_a_bootstrap_secret_first_run_stays_open(fresh):
 
 # -- online guessing ----------------------------------------------------------
 
+def test_behind_the_host_proxy_each_visitor_gets_its_own_bucket(tmp_path):
+    """As deployed, every internet caller reaches the broker from the docker
+    bridge, so the address bucket held the whole world and one curl loop locked
+    every human out. Cloudflare's CF-Connecting-IP is honoured when the socket
+    peer is private; it is ignored from a public peer, where a caller could
+    have written it."""
+    app = create_app(db_path=str(tmp_path / "p.sqlite"), tokens=[], readonly_tokens=[])
+    TestClient(app).post("/v1/auth/setup", json={"username": "ada", "password": PW})
+    proxied = TestClient(app, client=("172.18.0.1", 40000))
+    bad = {"username": "ada", "password": "wrong-password-here"}
+    for _ in range(26):
+        proxied.post("/v1/auth/login", json=bad, headers={"CF-Connecting-IP": "203.0.113.5"})
+    assert proxied.post("/v1/auth/login", json=bad,
+                        headers={"CF-Connecting-IP": "203.0.113.5"}).status_code == 429
+    assert proxied.post("/v1/auth/login", json={"username": "bob", "password": "x"},
+                        headers={"CF-Connecting-IP": "203.0.113.6"}).status_code == 401
+    # 8.8.8.8, not a documentation range: ipaddress counts 198.51.100/24 as private.
+    direct = TestClient(app, client=("8.8.8.8", 40000))
+    for _ in range(26):
+        direct.post("/v1/auth/login", json={"username": "eve", "password": "x"},
+                    headers={"CF-Connecting-IP": "203.0.113.%d" % _})
+    assert direct.post("/v1/auth/login", json={"username": "eve", "password": "x"},
+                       headers={"CF-Connecting-IP": "203.0.113.99"}).status_code == 429
+
+
 def test_repeated_failed_logins_are_throttled(admin):
     admin.post("/v1/auth/logout")
     codes = [_login(admin, "ada", "wrong-password-here").status_code

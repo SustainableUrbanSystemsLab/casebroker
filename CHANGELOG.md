@@ -8,6 +8,35 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.49.36] - 2026-11-04
+
+### Fixed
+
+- **Two stored XSS in the dashboard, reachable by any paired node.** The copy buttons built
+  `onclick="copyText('${esc(x)}')"` from a worker id, a result URI, a sha256 and a machine name; the
+  HTML parser decodes `esc()`'s `&#39;` back to an apostrophe before the handler is compiled, so a
+  node leasing as `w'+…+'` ran script in the admin's session on the next click. Every such button
+  is now wired by `data-` attribute through one capture-phase listener, and no `onclick=` is left in
+  the page (`tests/test_dashboard_escaping.py` refuses one). The wind-field card printed the umag
+  header's `uref`, `zref` and `z0` raw: the broker now coerces them to numbers like the other header
+  keys, and the page escapes them.
+- **`POST /v1/cases/{id}/cancel` and the container-engine refund answered 500 on Postgres.** The same
+  `MAX(attempts - 1, 0)` that release() was cured of (0.8.0) lived on in `cancel_case` (both branches)
+  and in `fail()`'s `--platform` refund, tested on SQLite only; "pull off" never worked in
+  production, and a node whose Docker cannot start the solver was never drained. `CASE WHEN` now,
+  with a Postgres test.
+- **One curl loop could lock every human out, and stop every machine pairing.** The login,
+  share-link and pairing throttles keyed on the socket address, which behind Cloudflare and the
+  host's reverse proxy is the docker bridge for every caller on the internet. `CF-Connecting-IP` is
+  honoured when the peer is a private address (deploy/self-hosted/README.md).
+- **A link could write a phantom unfit worker onto the fleet table.** `GET /v1/node/release`
+  writes, and a logged-in operator's `SameSite=Lax` cookie rides a cross-site GET. It now takes a
+  bearer token only, which is all a node ever had.
+- **The part store walked every stored file on every upload chunk.** `admit()` measured the whole
+  store (175k files at 5k cases) to check the size cap on each 32 MiB chunk -- 270 walks per case,
+  inside the pool that also serves leases. It now measures once a minute and keeps the count
+  current as parts land and leave.
+
 ## [0.49.35] - 2026-11-03
 
 ### Added

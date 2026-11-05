@@ -88,6 +88,22 @@ def app(tmp_path):
     return create_app(db_path=str(tmp_path / "a.sqlite"), tokens=["w"], readonly_tokens=["r"])
 
 
+def test_a_login_cannot_ask_what_a_node_should_run(tmp_path):
+    """GET /v1/node/release writes -- a worker row, `unfit`, a failed update --
+    and the session cookie is SameSite=Lax, which a browser sends on a
+    cross-site top-level GET. So a link in a chat could put a phantom unfit
+    worker on the fleet table under a logged-in operator. Only a bearer token
+    passes it; a node never holds a session, so nothing real is refused."""
+    human = TestClient(create_app(db_path=str(tmp_path / "s.sqlite"), tokens=[], readonly_tokens=[]))
+    assert human.post("/v1/auth/setup", json={"username": "ada", "password": "correct horse battery"}).status_code == 200
+    ask = {"worker_id": "phantom-1", "platform": "win-x64", "build": "1.0+a", "unfit": DISK}
+    assert human.get("/v1/node/release", params=ask).status_code == 401
+    assert human.get("/v1/status").json()["workers"] == []
+    token = human.post("/v1/workers/tokens", json={"name": "phantom"}).json()["token"]
+    assert human.get("/v1/node/release", params=ask,
+                     headers={"Authorization": f"Bearer {token}"}).status_code == 200
+
+
 def test_the_reason_reaches_the_workers_list_and_a_worker_that_only_asks_stays_on_it(app):
     node = TestClient(app)
     node.headers.update({"Authorization": "Bearer w"})

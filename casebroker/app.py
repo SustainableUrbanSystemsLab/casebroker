@@ -27,6 +27,7 @@ import email.utils
 import gzip
 import hashlib
 import hmac
+import ipaddress
 import json
 import contextlib
 import os
@@ -884,6 +885,19 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
                        "but not change it")
         raise HTTPException(status_code=401, detail="log in, or send a valid bearer token")
 
+    def require_node(request: Request) -> None:
+        """For GET /v1/node/release: a node asks it with a bearer token, and it
+        WRITES (a worker row, `unfit`, a failed update). A session cookie must
+        not pass it. The cookie is SameSite=Lax, which a browser sends on a
+        cross-site top-level GET, so a link in a chat would put a phantom unfit
+        worker on the fleet table under whoever is logged in. Nodes never hold
+        a session, so refusing one here strands nothing."""
+        if _auth_is_open() or _machine_principal(request) \
+                or _env_token_ok(_supplied_token(request), tokens):
+            return
+        raise HTTPException(status_code=401,
+                            detail="a node asks this with its bearer token; a login does not")
+
     def require_purge(request: Request) -> None:
         """For DELETE /v1/cases, which retires a whole campaign.
 
@@ -1423,16 +1437,35 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
     LOGIN_FAIL_MAX_KEYS = 4096
 
     def _client_addr(request: Request) -> str:
-        return request.client.host if request.client else "?"
+        """The caller's address, for the anonymous throttles.
+
+        The SOCKET address, not X-Forwarded-For: that header's leftmost value
+        is supplied by the caller, so keying on it would let an attacker rotate
+        it and evade the throttle entirely. But as deployed (Cloudflare -> the
+        host's reverse proxy -> this container, deploy/self-hosted) the socket
+        peer is the docker bridge for EVERY caller on the internet, so one
+        bucket held the whole world: 25 bad logins from anywhere locked every
+        human out for five minutes, and ten pairing requests stopped every
+        machine from pairing. Cloudflare OVERWRITES CF-Connecting-IP with the
+        visitor's address, so it is honoured -- only when the peer is a private
+        or loopback address, i.e. a proxy on this host; a broker facing the
+        network directly ignores it.
+        shortcut: a caller who reaches the host proxy without going through
+        Cloudflare can forge the header and rotate buckets; the per-username
+        bucket and the scrypt semaphore still bound what that buys. A trusted
+        proxy list is the upgrade if the origin is ever reachable that way.
+        """
+        peer = request.client.host if request.client else "?"
+        forwarded = request.headers.get("cf-connecting-ip", "").strip()
+        if forwarded:
+            try:
+                if ipaddress.ip_address(peer).is_private:
+                    return forwarded
+            except ValueError:          # "testclient", or no address at all
+                pass
+        return peer
 
     def _throttle_key(request: Request, username: str) -> str:
-        # The SOCKET address deliberately, not X-Forwarded-For -- unlike the
-        # Secure-cookie decision, which reads X-Forwarded-Proto. A forwarded
-        # header's leftmost value is supplied by the caller, so keying on it
-        # would let an attacker rotate it and evade the throttle entirely,
-        # which is worse than the cost of not using it: behind a
-        # TLS-terminating proxy every caller shares one apparent address, so
-        # one attacker can throttle the others for that username.
         return f"{username}|{_client_addr(request)}"
 
     @app.post("/v1/auth/login")
@@ -2142,7 +2175,7 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         out["release_keep"] = release_keep
         return out
 
-    @app.get("/v1/node/release", dependencies=[WriteAuth])
+    @app.get("/v1/node/release", dependencies=[Depends(require_node)])
     def node_release(request: Request, worker_id: str, platform: str | None = None,
                      build: str | None = None, failed_build: str | None = None,
                      failed_reason: str | None = None, state: str | None = None,

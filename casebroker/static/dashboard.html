@@ -3850,7 +3850,7 @@
           <div>${h.height_m} m above grade · ${h.nx}×${h.ny} points at ${h.spacing_m} m ·
                north up, the 1008 m sampled core</div>
           <div>U<sub>ref</sub> ${d.u_ref ? `${d.u_ref.toFixed(2)} m/s` : "—"}
-               <span style="color:var(--text-muted)">(inlet ${d.uref ?? "?"} m/s at ${d.zref ?? "?"} m, z₀ ${d.z0 ?? "?"} m)</span></div>
+               <span style="color:var(--text-muted)">(inlet ${esc(d.uref ?? "?")} m/s at ${esc(d.zref ?? "?")} m, z₀ ${esc(d.z0 ?? "?")} m)</span></div>
           ${Number.isFinite(d.lambda_f) ? `<div title="the façade this wind meets, projected across it, per unit of the core's plan area">λ<sub>f</sub> ${d.lambda_f.toFixed(3)}
                <span style="color:var(--text-muted)">(frontal area index, this direction)</span></div>` : ""}
           ${cov != null ? `<div>${(cov * 100).toFixed(1)}% of the core is air here; blank is inside a building</div>` : ""}
@@ -5316,7 +5316,7 @@
                 <button class="copy-btn" data-worker-open="${esc(w.worker_id)}" title="Cases this worker took: outcomes, errors, attempts" aria-label="Cases this worker took">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="8" y1="6" x2="21" y2="6"></line><line x1="8" y1="12" x2="21" y2="12"></line><line x1="8" y1="18" x2="21" y2="18"></line><line x1="3" y1="6" x2="3.01" y2="6"></line><line x1="3" y1="12" x2="3.01" y2="12"></line><line x1="3" y1="18" x2="3.01" y2="18"></line></svg>
                 </button>
-                <button class="copy-btn" onclick="copyText('${esc(w.worker_id)}', 'Worker ID copied')" title="Copy Worker ID">
+                <button class="copy-btn" data-copy="${esc(w.worker_id)}" data-copied="Worker ID copied" title="Copy Worker ID">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
                 </button>
               </div>
@@ -7157,7 +7157,7 @@
               <dt>Case ID</dt>
               <dd class="mono">
                 ${esc(c.case_id)}
-                <button class="copy-btn" onclick="copyText('${esc(c.case_id)}', 'Case ID copied')" title="Copy Case ID">
+                <button class="copy-btn" data-copy="${esc(c.case_id)}" data-copied="Case ID copied" title="Copy Case ID">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
                 </button>
                 <!-- data-* and the table's one delegated listener, never an inline
@@ -7278,7 +7278,7 @@
               <dt>Result URI</dt>
               <dd class="mono">
                 <span style="overflow:hidden; text-overflow:ellipsis; max-width:200px;" title="${esc(c.result_uri || "")}">${esc(c.result_uri || "—")}</span>
-                ${c.result_uri ? `<button class="copy-btn" onclick="copyText('${esc(c.result_uri)}', 'Result URI copied')" title="Copy URI"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></button>` : ""}
+                ${c.result_uri ? `<button class="copy-btn" data-copy="${esc(c.result_uri)}" data-copied="Result URI copied" title="Copy URI"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></button>` : ""}
               </dd>
               <dt>File Size</dt>
               <dd>${c.parts_count
@@ -7289,12 +7289,12 @@
                 <span style="overflow:hidden; text-overflow:ellipsis; max-width:180px;" title="${esc(c.result_sha256 || "")}">
                   ${c.result_sha256 ? esc(String(c.result_sha256).slice(0, 14)) + "…" : "—"}
                 </span>
-                ${c.result_sha256 ? `<button class="copy-btn" onclick="copyText('${esc(c.result_sha256)}', 'SHA256 copied')" title="Copy SHA256"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></button>` : ""}
+                ${c.result_sha256 ? `<button class="copy-btn" data-copy="${esc(c.result_sha256)}" data-copied="SHA256 copied" title="Copy SHA256"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></button>` : ""}
               </dd>
             </dl>
 
             <div style="margin-top:12px; padding-top:10px; border-top:1px solid var(--border);">
-              <button class="subtle" onclick="copyText('${esc(curlSnippet)}', 'cURL command copied')" style="font-size:11.5px; width:100%; justify-content:center;">
+              <button class="subtle" data-copy="${esc(curlSnippet)}" data-copied="cURL command copied" style="font-size:11.5px; width:100%; justify-content:center;">
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"></polyline><line x1="12" y1="19" x2="20" y2="19"></line></svg>
                 Copy API curl command
               </button>
@@ -7314,7 +7314,7 @@
           </h3>
           <div id="geoWrap-${esc(c.case_id)}" class="geo-wrap">
             <button class="subtle geo-load" data-case="${esc(c.case_id)}" data-state="${esc(c.state)}"
-                    data-lat="${spec.lat ?? ""}" data-lon="${spec.lon ?? ""}">
+                    >
               Show building footprints
             </button>
           </div>
@@ -8672,7 +8672,7 @@
   /// `undeclared_recipes` names, or anything when that is unset; the tooltip says
   /// which, from the catalog's last answer.
   const expandedRecipes = new Set();
-  window.toggleRecipes = (id) => {
+  const toggleRecipes = (id) => {
     if (!expandedRecipes.delete(id)) expandedRecipes.add(id);
     if (lastStatus) renderStatus(lastStatus);
   };
@@ -8700,7 +8700,7 @@
     const chips = (open ? w.recipes : w.recipes.slice(0, SHOWN)).map((x) =>
       `<span class="chip mono" title="${esc(x)}">${esc(shortRecipe(x))}</span>`);
     if (w.recipes.length > SHOWN) {
-      chips.push(`<button type="button" class="chip chip-btn mono" onclick="toggleRecipes('${esc(w.worker_id)}')" `
+      chips.push(`<button type="button" class="chip chip-btn mono" data-toggle-recipes="${esc(w.worker_id)}" `
         + `aria-expanded="${open}" title="${open ? "Show fewer" : esc(w.recipes.slice(SHOWN).map(shortRecipe).join("\n"))}">`
         + `${open ? "less" : `+${w.recipes.length - SHOWN}`}</button>`);
     }
@@ -9430,7 +9430,7 @@
               (t.last_seen_at ? relTime(t.last_seen_at) : "never") + '</td>' +
             '<td style="padding:6px 8px; text-align:right;">' +
               (revoked || !isAdminNow() ? "" :
-                '<button type="button" onclick="revokeMachine(\'' + esc(t.name) + '\')">Revoke</button>') +
+                '<button type="button" data-revoke-machine="' + esc(t.name) + '">Revoke</button>') +
             '</td></tr>';
         }).join("") + '</tbody></table>';
     } catch (e) {
@@ -9471,7 +9471,7 @@
     }
   }
 
-  window.revokeMachine = async (name) => {
+  const revokeMachine = async (name) => {
     if (!confirm("Revoke " + name + "? It stops being able to lease on its next request.")) return;
     try {
       const r = await fetch($("broker").value.trim() + "/v1/workers/tokens/" +
@@ -10711,6 +10711,21 @@
     if (f) { workerOutcome = f.getAttribute("data-w-outcome"); workerOffset = 0; loadWorker(); syncRoute(); }
     else if (pg && !pg.disabled) { workerOffset = Math.max(0, workerOffset + Number(pg.getAttribute("data-w-page")) * WORKER_PAGE); loadWorker(); }
   });
+  // Buttons whose target text a NODE or an operator chose (worker ids, result
+  // URIs, machine names) are wired here, never through an inline handler
+  // attribute: the HTML parser decodes esc()'s &#39; back to an apostrophe
+  // BEFORE the handler's JavaScript is compiled, so inside a quoted string
+  // there the escape protects nothing.
+  document.addEventListener("click", (e) => {
+    const copy = e.target.closest("[data-copy]");
+    const rec = e.target.closest("[data-toggle-recipes]");
+    const rev = e.target.closest("[data-revoke-machine]");
+    if (!copy && !rec && !rev) return;
+    e.stopPropagation();
+    if (copy) window.copyText(copy.dataset.copy, copy.dataset.copied || "Copied to clipboard");
+    else if (rec) toggleRecipes(rec.dataset.toggleRecipes);
+    else revokeMachine(rev.dataset.revokeMachine);
+  }, true);
   document.addEventListener("click", (e) => {
     const b = e.target.closest("[data-worker-open]");
     if (b) openWorker(b.getAttribute("data-worker-open"), "");

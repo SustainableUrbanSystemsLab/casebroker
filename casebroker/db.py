@@ -3132,8 +3132,9 @@ def fail(conn, lease_id: str, error: str, retryable: bool = True,
             conn.execute("COMMIT")
             return True
         if retryable and _engine_refund(conn, row["case_id"], error):
-            conn.execute("UPDATE cases SET attempts = MAX(attempts - 1, 0) WHERE case_id=?",
-                         (row["case_id"],))
+            # CASE, not MAX(a, b): Postgres has no scalar MAX (see release() below).
+            conn.execute("UPDATE cases SET attempts = CASE WHEN attempts > 0 THEN attempts - 1 ELSE 0 END"
+                         " WHERE case_id=?", (row["case_id"],))
             row = {**row, "attempts": max(row["attempts"] - 1, 0)}
         exhausted = row["attempts"] >= row["max_attempts"]
         state = "pending" if (retryable and not exhausted) else "quarantined"
@@ -3473,7 +3474,9 @@ def decode_umag(blob: bytes) -> dict[str, Any]:
     body = len(raw) - 12 - hlen
     if body != 4 * nx * ny:
         raise ValueError(f"body is {body} bytes; a {nx} x {ny} float32 field is {4 * nx * ny}")
-    for k in ("deg", "coverage", "u_ref", "umag_p999"):
+    # uref/zref/z0 too: the dashboard prints them, and a header key that is not
+    # coerced here reaches its innerHTML as whatever the node wrote.
+    for k in ("deg", "coverage", "u_ref", "umag_p999", "uref", "zref", "z0"):
         v = header.get(k)
         if v is not None:
             try:
@@ -4900,12 +4903,14 @@ def cancel_case(conn, case_id: str, by: str | None, reason: str | None = None,
         if park:
             conn.execute(
                 "UPDATE cases SET state='quarantined', lease_id=NULL, lease_worker=NULL,"
-                " lease_expires=NULL, leased_at=NULL, attempts=MAX(attempts - 1, 0),"
+                " lease_expires=NULL, leased_at=NULL,"
+                " attempts=CASE WHEN attempts > 0 THEN attempts - 1 ELSE 0 END,"
                 " last_error=?, updated_at=? WHERE case_id=?", (said[:4000], now, case_id))
         else:
             conn.execute(
                 "UPDATE cases SET state='pending', lease_id=NULL, lease_worker=NULL,"
-                " lease_expires=NULL, leased_at=NULL, attempts=MAX(attempts - 1, 0),"
+                " lease_expires=NULL, leased_at=NULL,"
+                " attempts=CASE WHEN attempts > 0 THEN attempts - 1 ELSE 0 END,"
                 " updated_at=? WHERE case_id=?", (now, case_id))
         _event(conn, case_id, row["lease_worker"], "cancelled",
                said + (", parked" if park else ", requeued"), now)

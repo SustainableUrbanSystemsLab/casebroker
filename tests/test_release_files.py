@@ -204,7 +204,8 @@ def test_without_a_store_there_is_nothing_to_upload_or_fetch(tmp_path):
     assert c.post(f"/v1/releases/{B1}/linux-x64/upload",
                   json={"sha256": _sha(content), "bytes": len(content)}).status_code == 404
     c.put("/v1/releases/target", json={"build": B1})
-    told = c.get("/v1/node/release", params={"worker_id": "w", "platform": "linux-x64", "build": "x"}).json()
+    told = c.get("/v1/node/release", headers=_machine(c, "w"),
+                 params={"worker_id": "w", "platform": "linux-x64", "build": "x"}).json()
     assert told["url"] is None
     assert c.get("/v1/releases").json()["release_files"] is False
 

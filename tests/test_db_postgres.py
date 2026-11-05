@@ -810,6 +810,26 @@ def test_release_of_a_live_lease_over_a_real_connection():
 
 
 @scratch_only
+def test_cancel_and_the_engine_refund_over_a_real_connection():
+    """The same MAX(attempts - 1, 0) the release test above caught lived on in
+    cancel_case() (both branches) and in fail()'s container-engine refund, each
+    tested on SQLite only -- so on production "pull off" answered 500 and a node
+    whose Docker could not take --platform never had its failure recorded."""
+    recipe = prefix("r-cancel")
+    a, b, c = seed(3, "cancel", recipe=recipe)
+    w = prefix("w-cancel")
+    got = {l.case_id: l for l in db.lease(fresh_conn(), w, count=3, recipes=[recipe])}
+    assert set(got) == {a, b, c}
+    assert db.cancel_case(fresh_conn(), a, "ada", "wrong mesh settings")["state"] == "pending"
+    assert db.cancel_case(fresh_conn(), b, "ada", "a lake", park=True)["state"] == "quarantined"
+    assert (db.get_case(fresh_conn(), a)["attempts"], db.get_case(fresh_conn(), b)["attempts"]) == (0, 0)
+    engine_broken = 'solve exited 1: "--platform" is only supported on a Docker daemon with experimental features enabled'
+    assert db.fail(fresh_conn(), got[c].lease_id, engine_broken, retryable=True)
+    row = db.get_case(fresh_conn(), c)
+    assert (row["state"], row["attempts"]) == ("pending", 0)
+
+
+@scratch_only
 def test_a_fresh_claim_forgets_the_last_attempt_s_telemetry_over_a_real_connection():
     recipe = prefix("r-retry")
     (cid,) = seed(1, "retry", recipe=recipe)
