@@ -8,6 +8,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.49.37] - 2026-11-10
+
+### Fixed
+
+- Dashboard: the wind preview asks again by itself (three times, 1-3 s apart) when
+  the proxy in front of the broker answers a direction's field with 502/503/504,
+  instead of showing "502 retry" for a fetch that works on the next try.
+
 ## [0.49.36] - 2026-11-04
 
 ### Fixed

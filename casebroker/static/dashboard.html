@@ -3581,12 +3581,18 @@
     Promise.all(Array.from({ length: WF_PREFETCH }, worker)).finally(() => { s.prefetching = false; });
   }
 
-  async function wfFetchBlob(path) {
+  async function wfFetchBlob(path, left = 3) {
     const base = $("broker").value.replace(/\/+$/, "");
     const token = $("token").value.trim();
     const headers = {};
     if (token) headers["Authorization"] = "Bearer " + token;
     const r = await fetch(base + path, { headers });
+    // The proxy in front of the broker drops some of these (502/503/504) while the
+    // broker itself is fine: asking again works, so ask again before showing "retry".
+    if (left > 0 && [502, 503, 504].includes(r.status)) {
+      await new Promise((res) => setTimeout(res, (4 - left) * 1000));
+      return wfFetchBlob(path, left - 1);
+    }
     if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
     return wfDecodeUmag(await r.arrayBuffer());
   }
