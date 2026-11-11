@@ -134,10 +134,19 @@ OVERTURE_FALLBACK = os.environ.get(
 # VSI_CACHE keeps re-read blocks in memory instead of re-fetching them, capped
 # at 16 MB; DISABLE_READDIR stops GDAL probing for sidecar files that do not
 # exist on these buckets, which is several wasted round trips per open.
+#
+# GDAL sets no HTTP timeout of its own. A raster host that accepted the
+# connection and went quiet was still being waited on after 45 s (measured
+# 2026-11-11), holding the one preview slot -- every site preview in the broker
+# -- until the process restarted. Nothing received for 10 s is a dead read: it
+# fails in about 20 s (two attempts) and the layer says "unavailable". A slow
+# read that is still receiving is left alone. Real reads take 1-5 s.
 _GDAL_ENV = dict(GDAL_CACHEMAX=GDAL_CACHE_MB, VSI_CACHE=True,
                  VSI_CACHE_SIZE=16_777_216,
                  GDAL_DISABLE_READDIR_ON_OPEN="EMPTY_DIR",
-                 GDAL_HTTP_MAX_RETRY=2, GDAL_HTTP_RETRY_DELAY=1)
+                 GDAL_HTTP_MAX_RETRY=2, GDAL_HTTP_RETRY_DELAY=1,
+                 GDAL_HTTP_CONNECTTIMEOUT=10,
+                 GDAL_HTTP_LOW_SPEED_TIME=10, GDAL_HTTP_LOW_SPEED_LIMIT=1)
 
 
 @contextlib.contextmanager
@@ -341,7 +350,7 @@ def mesh_source(state: str, metrics: dict[str, Any] | None,
 
 
 def fetch_gba(lat: float, lon: float, half_m: float = HALF_M,
-              timeout: int = 300) -> dict[str, Any]:
+              timeout: int = 30) -> dict[str, Any]:
     """GBA footprints and predicted heights, as a compact FeatureCollection.
 
     ``h`` is the predicted height and ``v`` its variance. The variance is kept
@@ -365,7 +374,11 @@ def fetch_gba(lat: float, lon: float, half_m: float = HALF_M,
         # SECONDS: duckdb 1.5.5 describes http_timeout as "(in seconds)". This
         # used to pass timeout * 1000, turning the 300 s meant here into
         # 300,000 s, so a stalled read held its request for days instead of
-        # failing over.
+        # failing over. It caps each request whole, receiving or not (measured
+        # 2026-11-11), and http_retries makes four attempts: 300 s held a dead
+        # host's read -- and the preview slot -- for 20 minutes, past the 5 the
+        # dashboard waits. Whole reads took 4-7 s, Mumbai's 7,000 buildings
+        # included, so 30 s (DuckDB's own default) gives up in about 2 minutes.
         con.execute(f"SET http_timeout={int(timeout)};")
         try:
             rows = con.execute(

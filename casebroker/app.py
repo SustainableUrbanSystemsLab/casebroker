@@ -3460,6 +3460,10 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
                 err = later
             else:
                 fc["fallback_from"] = f"{drawn} unavailable: {str(err)[:120]}"
+                # A fact about today, which `cached()` refuses anyway. Written
+                # as cacheable, a background read handed it to a cache that
+                # would not serve it, and every poll started the read again.
+                transient = True
         if fc is None:
             # A reachability failure, unlike a missing tile, says nothing about
             # the site -- so it is reported and NOT cached, and the other two
