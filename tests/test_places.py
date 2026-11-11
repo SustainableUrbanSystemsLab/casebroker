@@ -1,4 +1,8 @@
 """A case says where it is: country by polygon, nearest town and its distance."""
+import pathlib
+import shutil
+import subprocess
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -46,3 +50,22 @@ def test_the_case_record_carries_it(tmp_path):
     cid = c.get("/v1/cases", headers=W).json()["cases"][0]["case_id"]
     place = c.get(f"/v1/cases/{cid}", headers=W).json()["place"]
     assert place["country"] == "Germany" and place["town"] == "Munich"
+
+
+def test_a_town_that_is_its_own_region_is_named_once():
+    """GeoNames files 728 towns under a region of their own name; the card read
+    "Addis Ababa, Addis Ababa". Runs the shipped placeHtml. The record keeps the region."""
+    assert places.locate(9.03, 38.74)["region"] == "Addis Ababa"
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed on this machine; the JS half cannot be executed here")
+    src = (pathlib.Path(places.__file__).parent / "static" / "dashboard.html").read_text(encoding="utf-8")
+    at = src.index("  function placeHtml(")
+    js = src[at:src.index("\n  }\n", at) + 4] + """
+const esc = (s) => s;
+const say = (town, region) => placeHtml({country: "X", town, region, town_km: 5}, {}, false, "c");
+console.log(say("Addis Ababa", "Addis Ababa") + say("Munich", "Bavaria"));
+"""
+    out = subprocess.run([node, "-e", js], capture_output=True, text=True, timeout=60)
+    assert out.returncode == 0, out.stderr
+    assert "Addis Ababa, Addis Ababa" not in out.stdout and "Munich, Bavaria" in out.stdout

@@ -172,9 +172,10 @@ def test_the_workers_table_knows_when_its_progress_line_was_written(tmp_path):
 
 
 def test_the_attempts_row_says_what_it_counts():
-    """It is a charged-FAILURE counter: a release refunds one and a worker
-    resuming its own case spends none, so a case can have run four times and read
-    "1 / 3". Labelling that "Attempts" reads as the opposite."""
+    """It counts attempts SPENT, not starts: a lease is charged when it is handed
+    out, a release refunds one and a worker resuming its own case spends none, so
+    a case can have run four times and read "1 / 3". Labelling that "Attempts"
+    reads as the opposite."""
     src = DASH.read_text(encoding="utf-8")
     assert "<dt>Attempts</dt>" not in src, "the bare label reads as a restart counter"
     assert "Attempts used" in src

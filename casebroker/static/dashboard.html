@@ -993,6 +993,8 @@
      line and let .table-wrap scroll sideways; long ids truncate instead. */
   @media (max-width: 640px) {
     .table-wrap td { white-space: nowrap; padding: 8px 10px; }
+    /* The expanded row is a td too: its cards inherited nowrap and ran off their edge. */
+    .table-wrap .caseDetail { white-space: normal; }
     .table-wrap th { padding: 8px 10px; }
     .table-wrap code.inline { display: inline-block; max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
     .table-wrap .chip { max-width: 160px; }
@@ -5811,16 +5813,17 @@
     const domain = Number.isFinite(lat) && Number.isFinite(lon) ? domainMapLink(caseId, lat, lon, cylDomain) : null;
     const map = domain
       ? ` <a href="https://www.openstreetmap.org/?mlat=${lat.toFixed(5)}&mlon=${lon.toFixed(5)}#map=14/${lat.toFixed(5)}/${lon.toFixed(5)}"
-             target="_blank" rel="noopener noreferrer" title="Open this site in OpenStreetMap">map ↗</a>
+             target="_blank" rel="noopener noreferrer" title="Open this site in OpenStreetMap" style="white-space:nowrap">map ↗</a>
          · <a class="domain-map" data-case="${esc(caseId || "")}" href="${esc(domain.url)}" target="_blank"
-             rel="noopener noreferrer" title="${esc(domain.title)}">domain ↗</a>` : "";
+             rel="noopener noreferrer" title="${esc(domain.title)}" style="white-space:nowrap">domain ↗</a>` : "";
     if (!p) return `<span style="display:block">${Number.isFinite(lat) ? `${lat.toFixed(4)}, ${lon.toFixed(4)}` : "—"}${map}</span>`;
     const country = p.country ? esc(p.country) + (p.country_source === "nearest town" ? " <span title=\"the site is just outside the 1:50m country outline (usually a coast); the country is the nearest town's\">(by nearest town)</span>" : "") : "no country (open water?)";
     let town = "";
     if (p.town) {
       const km = Number(p.town_km);
       town = km <= 25
-        ? ` · ${esc(p.town)}${p.region ? ", " + esc(p.region) : ""} <span style="color:var(--text-muted)">(${km.toFixed(1)} km)</span>`
+        // Not when the town is its own region: "Addis Ababa, Addis Ababa".
+        ? ` · ${esc(p.town)}${p.region && p.region !== p.town ? ", " + esc(p.region) : ""} <span style="color:var(--text-muted);white-space:nowrap">(${km.toFixed(1)} km)</span>`
         : ` · <span style="color:var(--text-muted)">nearest town ${esc(p.town)}, ${Math.round(km)} km away</span>`;
     }
     // One wrapper: .kv-list dd is a flex row, and loose text beside inline spans
@@ -7216,11 +7219,14 @@
               <dd>${esc(c.recipe || "—")}</dd>
               <!-- A move to another recipe is a new case (POST /v1/cases/respec):
                    the parked one says where its site went, the new one where it
-                   came from. Only the full record carries these. -->
+                   came from. Only the full record carries these. One wrapper, as
+                   in placeHtml: loose text beside a span is two flex items, and
+                   the recipe split as "of12-v / 6,". An inline-block keeps the
+                   id whole and takes it to the next line when it does not fit. -->
               ${c.moved_to ? `<dt title="this site was added again under another recipe; this case is parked">Moved to</dt>
-              <dd class="mono" title="${esc(moveNote(c.moved_to))}">${esc(c.moved_to.recipe || "—")} as <span style="white-space:nowrap">${esc(c.moved_to.case_id || "—")}</span></dd>` : ""}
+              <dd class="mono" title="${esc(moveNote(c.moved_to))}"><span style="display:block;word-break:normal;overflow-wrap:anywhere">${esc(c.moved_to.recipe || "—")} as <span style="display:inline-block;max-width:100%">${esc(c.moved_to.case_id || "—")}</span></span></dd>` : ""}
               ${c.moved_from ? `<dt title="this case is a site moved here from another recipe">Moved from</dt>
-              <dd class="mono" title="${esc(moveNote(c.moved_from))}">${esc(c.moved_from.recipe || "—")}, <span style="white-space:nowrap">${esc(c.moved_from.case_id || "—")}</span></dd>` : ""}
+              <dd class="mono" title="${esc(moveNote(c.moved_from))}"><span style="display:block;word-break:normal;overflow-wrap:anywhere">${esc(c.moved_from.recipe || "—")}, <span style="display:inline-block;max-width:100%">${esc(c.moved_from.case_id || "—")}</span></span></dd>` : ""}
               <!-- A case built on another waits for it (docs/mrt.md): leased to no
                    node until that one is done. Only the full record says where
                    the needed case stands. -->
@@ -7240,11 +7246,12 @@
               <dd>${c.priority}</dd>
               ${c.labels && Object.keys(c.labels).length ? `<dt title="posted with the case; click one to filter the browser by it">Labels</dt>
               <dd>${Object.entries(c.labels).map(([k, v]) => `<span class="chip mono" style="cursor:pointer" data-label="${esc(k)}:${esc(v)}" title="filter by ${esc(k)}:${esc(v)}">${esc(k)}: ${esc(v)}</span>`).join(" ")}</dd>` : ""}
-              <!-- Charged FAILURES, not starts: a release refunds one and a
-                   worker resuming its own case spends none, so a case can have
-                   run four times and read "1 / 3". The label said "Attempts",
-                   which reads as the opposite. -->
-              <dt title="failed attempts charged against this case; a released or resumed lease spends none">Attempts used</dt>
+              <!-- Attempts SPENT, not starts: each lease is charged when it is
+                   handed out, so a clean first run reads "1 / 3". A release
+                   refunds one and a worker resuming its own case spends none, so
+                   a case can have run four times and read "1 / 3" too. The label
+                   said "Attempts", which reads as the opposite. -->
+              <dt title="attempts spent on this case, the one running or finished included; a released or resumed lease spends none">Attempts used</dt>
               <dd>
                 <span class="${c.attempts > 1 ? "chip" : ""}" style="${c.attempts > 1 ? "color:var(--warn);" : ""}">
                   ${c.attempts} / ${c.max_attempts}

@@ -8,6 +8,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.49.39] - 2026-11-11
+
+### Fixed
+
+- Dashboard, Simulation Parameters card: "Moved to" and "Moved from" no longer split the
+  recipe mid-token ("of12-v / 6,") beside the case id; a town that is its own region is
+  named once, not "Addis Ababa, Addis Ababa"; the distance and the map links stay whole;
+  on a phone the case card's rows wrap instead of running off its edge; and the "Attempts
+  used" tooltip counts what the number counts, the running or finished attempt included.
+
 ## [0.49.38] - 2026-11-11
 
 ### Fixed
