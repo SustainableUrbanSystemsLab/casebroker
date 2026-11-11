@@ -72,7 +72,7 @@ def test_every_place_that_names_how_a_direction_ended_reads_the_verdict():
     assert "convergenceOf(" in solve and "conv.label" in solve, "the finished-directions list"
     inner = _body("function residualInner(")
     assert "convergenceOf(" in inner and "rs-verdict" in inner, "the note under the picker"
-    assert "rs-eps" in inner and "epsilon is drawn but never stops a solve" in inner
+    assert "rs-eps" in inner and "Epsilon is plotted but excluded from convergence checks" in inner
     # The picker names the basis too, not the bare word.
     assert "convergenceOf(fin[name].status" in inner
     # The old reading -- the word as the node sent it -- is only the fallback.
