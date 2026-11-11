@@ -8,6 +8,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.49.41] - 2026-11-11
+
+### Changed
+- Shorten dashboard copy and CLI help so controls, status and next steps are easier to scan.
+
 ## [0.49.40] - 2026-11-11
 
 ### Fixed

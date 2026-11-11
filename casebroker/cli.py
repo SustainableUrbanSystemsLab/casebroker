@@ -1,4 +1,4 @@
-"""``casebroker`` -- set up a broker, and work out why one is misbehaving.
+"""Set up, manage and diagnose a case broker.
 
 Two jobs. The first is credentials: generate a token, ask a deployment what a
 given one can actually do, and manage the human accounts that log into the
@@ -1182,17 +1182,17 @@ def main(argv: list[str] | None = None) -> int:
 
     n = tok.add_parser("new", help="generate a token")
     n.add_argument("--scope", choices=("write", "read"), default="write",
-                   help="which variable the hint text should name (default: write)")
+                   help="token scope for setup hints (default: write)")
     n.add_argument("--count", type=int, default=1)
     n.add_argument("--quiet", action="store_true", help="token only, no hint")
     n.set_defaults(func=cmd_new)
 
-    c = tok.add_parser("check", help="ask a broker what a token can do")
+    c = tok.add_parser("check", help="check token permissions")
     c.add_argument("--broker", required=True)
     c.add_argument("--token", default=None,
                    help="the token; '-' reads stdin; omitted reads the environment")
     c.add_argument("--expect", choices=("write", "read", "none"), default=None,
-                   help="exit non-zero unless the scope is this (for CI)")
+                   help="fail if scope differs (for CI)")
     c.set_defaults(func=cmd_check)
 
     fl = sub.add_parser("fleet", help="report squeue counts to the broker (run on a login node)")
@@ -1201,24 +1201,22 @@ def main(argv: list[str] | None = None) -> int:
     fl.add_argument("--token", default=None, help="write token; '-' reads stdin; omitted reads the environment")
     fl.add_argument("--user", default=None, help="squeue -u (default: $USER)")
     fl.add_argument("--name", default=None, help="only count jobs with this --job-name")
-    fl.add_argument("--detail", default=None, help="free text shown under the counts, e.g. the QOS")
+    fl.add_argument("--detail", default=None, help="note below counts, e.g. QOS")
     fl.set_defaults(func=cmd_fleet)
 
-    h = sub.add_parser("health", help="a broker's version and auth posture")
+    h = sub.add_parser("health", help="show broker version and authentication")
     h.add_argument("--broker", required=True)
     h.set_defaults(func=cmd_health)
 
-    d = sub.add_parser("doctor", help="check the database, the broker and the token, and "
-                                      "name whichever one is broken")
+    d = sub.add_parser("doctor", help="diagnose database, broker and token issues")
     d.add_argument("--broker", default=None, help="the service to check (optional)")
     d.add_argument("--token", default=None,
                    help="the token; '-' reads stdin; omitted reads the environment")
     d.add_argument("--dsn", default=None,
-                   help="a connection string to test in addition to the ones discovered")
+                   help="additional connection string to test")
     d.set_defaults(func=cmd_doctor)
 
-    ac = sub.add_parser("account", help="create and manage the human accounts that "
-                                       "log into the dashboard").add_subparsers(
+    ac = sub.add_parser("account", help="manage dashboard accounts").add_subparsers(
         dest="subcmd", required=True)
 
     def _account_common(p, *, role_default=None):
@@ -1230,18 +1228,18 @@ def main(argv: list[str] | None = None) -> int:
         return p
 
     acn = _account_common(ac.add_parser(
-        "create", help="create an account (the headless equivalent of first-run setup)"),
+        "create", help="create an account"),
         role_default="admin")
     acn.add_argument("--password-stdin", action="store_true",
                      help="read the password from stdin instead of prompting")
     acn.set_defaults(func=cmd_account_create)
 
-    acl = ac.add_parser("list", help="every account, with when it last logged in")
+    acl = ac.add_parser("list", help="list accounts and last login")
     acl.add_argument("--db", default=None)
     acl.set_defaults(func=cmd_account_list)
 
     acp = _account_common(ac.add_parser(
-        "passwd", help="set a password without knowing the old one -- the recovery path"))
+        "passwd", help="reset a password without the old one"))
     acp.add_argument("--password-stdin", action="store_true")
     acp.set_defaults(func=cmd_account_passwd)
 
@@ -1253,131 +1251,118 @@ def main(argv: list[str] | None = None) -> int:
     acd = _account_common(ac.add_parser("delete", help="remove an account and its sessions"))
     acd.set_defaults(func=cmd_account_delete)
 
-    rl = sub.add_parser("release", help="the builds the fleet runs: register, target, "
-                                        "promote a canary, roll back").add_subparsers(
+    rl = sub.add_parser("release", help="register, target, promote or roll back builds").add_subparsers(
         dest="subcmd", required=True)
 
     def _release_admin(p):
         p.add_argument("--broker", required=True)
         p.add_argument("--username", default=None, help="broker admin (default: prompt)")
         p.add_argument("--password-stdin", action="store_true",
-                       help="read the password from stdin (for a CI step)")
+                       help="read password from stdin")
         return p
 
     rr = _release_admin(rl.add_parser(
-        "register", help="register published builds from release.json "
-                         "([{build, platform, file, sha256}], as the E3D node build writes it)"))
+        "register", help="register builds from release.json ([{build, platform, file, sha256}])"))
     rr.add_argument("file", help="release.json; '-' reads stdin")
-    rr.add_argument("--notes", default=None, help="a line shown beside the build on the dashboard")
+    rr.add_argument("--notes", default=None, help="dashboard build note")
     rr.add_argument("--upload", default=None, metavar="DIR",
-                    help="also send each row's file from DIR to the broker, which then holds it "
-                         "for the nodes to fetch (they no longer need a release share)")
+                    help="upload build files from DIR for nodes to download from the broker")
     rr.set_defaults(func=cmd_release_register)
 
     rt = _release_admin(rl.add_parser("target", help="point the fleet at a build ('none' clears it)"))
     rt.add_argument("build")
     rt.add_argument("--apply", choices=("case", "direction", "now"), default=None,
-                    help="when nodes switch: after the case in flight, after the wind "
-                         "direction being solved, or now")
+                    help="switch after the current case, direction, or immediately")
     rt.add_argument("--force", action="store_true",
-                    help="even if a live platform has no file for it (those workers stay behind)")
+                    help="allow missing platform files; affected workers stay behind")
     rt.set_defaults(func=cmd_release_target)
 
-    rp = _release_admin(rl.add_parser("promote", help="a canary's build becomes the fleet's target"))
+    rp = _release_admin(rl.add_parser("promote", help="promote a canary build to fleet target"))
     rp.add_argument("worker_id")
     rp.set_defaults(func=cmd_release_promote)
 
-    rb = _release_admin(rl.add_parser("rollback", help="back to the target before this one"))
+    rb = _release_admin(rl.add_parser("rollback", help="restore the previous target"))
     rb.add_argument("--block", action="store_true",
-                    help="also refuse the current target to every node at once (the kill switch)")
+                    help="block the current target (kill switch)")
     rb.set_defaults(func=cmd_release_rollback)
 
-    cu = sub.add_parser("custody", help="is every finished case's data on the broker? "
-                                        "(archive, mesh, every direction, fields; exit 1 while not)")
+    cu = sub.add_parser("custody", help="check stored archives, meshes, directions and fields; exit 1 if incomplete")
     cu.add_argument("--broker", required=True)
     cu.add_argument("--username", default=None, help="log in as this account (any role); else a read token")
     cu.add_argument("--password-stdin", action="store_true", help="read the password from stdin")
     cu.add_argument("--token", default=None, help="read token; '-' reads stdin; omitted reads the environment")
     cu.add_argument("--under", default=None, metavar="PATH",
-                    help="list only cases whose result was left under this path, e.g. /storage/ice1")
+                    help="filter result paths, e.g. /storage/ice1")
     cu.add_argument("--older-than-hours", type=float, default=0,
-                    help="leave out cases finished more recently (still uploading)")
+                    help="exclude recent completions (may still be uploading)")
     cu.set_defaults(func=cmd_custody)
 
     ro = _release_admin(sub.add_parser(
-        "reopen", help="put quarantined cases back in the pool, attempts refunded (admin; a dry run "
-                       "unless --apply)"))
-    ro.add_argument("--error-contains", default=None, help="the case's last failure contains this")
+        "reopen", help="requeue quarantined cases and refund attempts (admin; dry run unless --apply)"))
+    ro.add_argument("--error-contains", default=None, help="filter by last error text")
     ro.add_argument("--case-id", action="append", default=None, help="a case by id (repeatable)")
     ro.add_argument("--limit", type=int, default=50, help="cases per batch (the broker's cap)")
-    ro.add_argument("--apply", action="store_true", help="reopen them (default: say what matches)")
+    ro.add_argument("--apply", action="store_true", help="reopen matches (default: preview)")
     ro.set_defaults(func=cmd_reopen)
 
-    pt = sub.add_parser("parts", help="what of a case its nodes already shipped "
-                                      "(mesh, finished directions)").add_subparsers(
+    pt = sub.add_parser("parts", help="manage uploaded meshes and directions").add_subparsers(
         dest="parts_cmd", required=True)
     pr = _release_admin(pt.add_parser(
-        "reset", help="forget a case's shipped parts so the next node meshes it afresh "
-                      "(only when the master holding its mesh is gone for good)"))
+        "reset", help="reset uploaded parts to remesh (only if the mesh holder is permanently lost)"))
     pr.add_argument("case_id")
     pr.set_defaults(func=cmd_parts_reset)
 
-    rls = rl.add_parser("list", help="the catalog, the target and where the fleet is")
+    rls = rl.add_parser("list", help="list builds, target and fleet status")
     rls.add_argument("--broker", required=True)
     rls.add_argument("--token", default=None,
                      help="read token; '-' reads stdin; omitted reads the environment")
     rls.set_defaults(func=cmd_release_list)
 
-    rp_ = sub.add_parser("repro", help="re-run one production case here, through the whole "
-                                       "node pipeline, against a throwaway local broker")
+    rp_ = sub.add_parser("repro", help="reproduce a production case locally with a temporary broker")
     rp_.add_argument("case_id")
-    rp_.add_argument("--e3d", required=True, help="the node executable (E3D.exe / E3D) to run it with")
+    rp_.add_argument("--e3d", required=True, help="node executable (E3D.exe / E3D)")
     rp_.add_argument("--broker", default=os.environ.get("CASEBROKER_URL", "https://casebroker.eddy3d.com"),
                      help="where the case lives (default: $CASEBROKER_URL, else production)")
     rp_.add_argument("--token", default=os.environ.get("CASEBROKER_TOKEN"),
                      help="token for --broker ('-' reads stdin; default $CASEBROKER_TOKEN)")
     rp_.add_argument("--root", default="repro", help="scratch root; each run gets a fresh subfolder")
     rp_.add_argument("--cpus", type=int, default=max(1, (os.cpu_count() or 2) // 4),
-                     help="MPI ranks (default: a quarter of the cores -- a live node may own the rest)")
+                     help="MPI ranks (default: ¼ of cores, reserving capacity for live nodes)")
     rp_.add_argument("--engine", default="auto", help="auto | docker | wsl | bluecfd; match the failing worker")
     rp_.add_argument("--port", type=int, default=8799)
     rp_.add_argument("--case-timeout", type=int, default=3 * 3600,
-                     help="seconds before the node stops the case (default 3 h: enough to mesh and "
-                          "reach a failure, not to solve 32 directions)")
+                     help="timeout in seconds (default: 3 h; for reproduction, not a full solve)")
     rp_.set_defaults(func=cmd_repro)
 
-    ex = sub.add_parser("export", help="pull a dataset snapshot from a broker: Parquet tables, a Zarr "
-                                       "store of every field, and a card (needs the export extra)")
+    ex = sub.add_parser("export", help="export Parquet tables, Zarr fields and a dataset card (requires export extra)")
     ex.add_argument("--broker", default=os.environ.get("CASEBROKER_URL"),
                     help="the broker to read (default: $CASEBROKER_URL)")
     ex.add_argument("--token", default=os.environ.get("CASEBROKER_TOKEN"),
                     help="a read token is enough ('-' reads stdin; default $CASEBROKER_TOKEN, "
                          "else $CASEBROKER_READ_TOKENS)")
     ex.add_argument("--out", required=True,
-                    help="the snapshot's folder; re-running into it fetches only what changed")
+                    help="output folder; repeat runs fetch changes only")
     ex.add_argument("--recipe", action="append", help="only this recipe (repeatable: any of them)")
     ex.add_argument("--split", action="append", help="only this split (repeatable: any of them)")
     ex.add_argument("--label", action="append",
-                    help="only cases carrying key:value, or key (repeatable: all of them)")
+                    help="filter by key:value or key (repeatable; match all)")
     ex.add_argument("--state", default="done", help="only cases in this state; 'all' for any (default: done)")
     ex.add_argument("--height-m", type=float, default=1.75,
-                    help="the field height to take, exactly (default: 1.75, the published one)")
-    ex.add_argument("--limit", type=int, default=None, help="at most N cases, the first by case_id")
-    ex.add_argument("--workers", type=int, default=4, help="cases downloaded at once (default: 4)")
+                    help="exact field height in metres (default: 1.75)")
+    ex.add_argument("--limit", type=int, default=None, help="first N cases by case_id")
+    ex.add_argument("--workers", type=int, default=4, help="parallel downloads (default: 4)")
     ex.add_argument("--no-fields", action="store_true",
-                    help="tables only: no field is downloaded and fields.zarr is left as it is")
+                    help="tables only; leave fields.zarr unchanged")
     ex.set_defaults(func=cmd_export)
 
-    tr = sub.add_parser("triage", help="read a failed study's logs for the known failure signatures")
+    tr = sub.add_parser("triage", help="scan study logs for known failures")
     tr.add_argument("study", help="the study directory (holds mesh*/ and case_*/)")
     tr.add_argument("--node-log", default=None,
-                    help="the node's own output for the run (repro writes node.log): where a case "
-                         "the node gave up on itself shows, which leaves nothing in the study")
+                    help="node log (repro: node.log); includes failures absent from study logs")
     tr.set_defaults(func=cmd_triage)
 
-    ar = sub.add_parser("archives", help="per case in a folder of archives: complete, waiting "
-                                          "for parts, or partial (shipped before its node stopped)")
-    ar.add_argument("done", help="a folder of case archives: a node's done folder, or a copy (e.g. E:/wind/done)")
+    ar = sub.add_parser("archives", help="classify archives: complete, waiting for parts, or partial after a node stop")
+    ar.add_argument("done", help="archive folder (e.g. E:/wind/done)")
     ar.add_argument("--state", choices=["complete", "waiting", "partial", "corrupt"],
                     help="only cases in this state")
     ar.add_argument("--verify", action="store_true",
@@ -1385,8 +1370,7 @@ def main(argv: list[str] | None = None) -> int:
     ar.add_argument("--json", action="store_true", help="one JSON document instead of lines")
     ar.set_defaults(func=cmd_archives)
 
-    idb = sub.add_parser("init-db", help="create or bring forward the schema without "
-                                         "starting the service")
+    idb = sub.add_parser("init-db", help="create or update the schema without starting the service")
     idb.add_argument("--db", default=None,
                      help="database path or DSN (default: discovered, like doctor)")
     idb.set_defaults(func=cmd_initdb)

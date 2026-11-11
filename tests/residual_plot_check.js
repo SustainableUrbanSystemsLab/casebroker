@@ -122,8 +122,8 @@ const inner = residualInner(rec, { current: evil, finished: { [evil]: { status: 
 check(!/<img/.test(inner), 'a direction name and its status are escaped in the picker and the legend');
 check(/<select class="rs-dir"/.test(inner) && /selected/.test(inner), 'with several directions there is a picker');
 const empty = residualInner(rec, null, { direction: null, directions: [], series: null });
-check(/No residual history yet/.test(empty) && !/<svg/.test(empty), 'a live case with no series says so');
-check(/sent none/.test(residualInner({ case_id: 'x', state: 'done' }, null, { directions: [], series: null })), 'a finished case with none says that instead');
+check(/Awaiting residual history from the node/.test(empty) && !/<svg/.test(empty), 'a live case with no series says so');
+check(/No residual history reported/.test(residualInner({ case_id: 'x', state: 'done' }, null, { directions: [], series: null })), 'a finished case with none says that instead');
 const coarse = residualInner(rec, { current: 'case_000' }, {
   direction: 'case_000', directions: [{ direction: 'case_000', source: 'reports', n: 3, end_time: 2000 }],
   series: { iterations: [10, 20, 30], fields: { p: [0.9, 0.5, 0.3] }, complete: false },
@@ -159,8 +159,8 @@ check(/case_349 · converged · shear</.test(cs), 'the picker names the basis');
 check(/<span class="vbadge ok">converged · shear<\/span>/.test(cs), 'the badge');
 check(/wall shear on every patch stopped moving/.test(cs) && /highest on a stop field: p 1\.15e-4/.test(cs),
   'the note says how it converged, and holds p, not epsilon, against the tolerance');
-check(/epsilon is drawn but never stops a solve/.test(cs), 'epsilon is explained where it is drawn');
-check(!/epsilon is drawn/.test(residualInner(finishedCase, solveDone, finishedData({ p: [1e-2, 1e-4] }))), 'and only where it is');
+check(/Epsilon is plotted but excluded from convergence checks/.test(cs), 'epsilon is explained where it is drawn');
+check(!/Epsilon is plotted/.test(residualInner(finishedCase, solveDone, finishedData({ p: [1e-2, 1e-4] }))), 'and only where it is');
 // A direction that merely reached the cap is not green.
 partsCache.set('v2-abc', { at: 0, verdicts: new Map([['case_349', {
   exit: 0, converged: false, verdict: 'ended-without-meeting-tolerances', last_residuals: { p: 3.2e-3 }, last_iteration: 2000, end_time: 2000 }]]) });
