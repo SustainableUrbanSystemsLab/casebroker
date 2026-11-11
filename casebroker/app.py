@@ -3362,6 +3362,12 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
     # wrote. Weak values: a case's lock lives only while a request holds it.
     footprints_locks: weakref.WeakValueDictionary = weakref.WeakValueDictionary()
     footprints_locks_guard = threading.Lock()
+    # The background reads `?background=1` started, by case, source and canopy
+    # model. A job leaves when its answer is cached; one the cache may not keep
+    # waits here for the poll that collects it. Guarded by footprints_locks_guard.
+    footprints_jobs: dict[tuple[str, str, str], dict[str, Any]] = {}
+    FOOTPRINTS_STAGES = ("buildings", "terrain", "canopy")
+    FOOTPRINTS_JOB_KEEP_SECONDS = 300.0
 
     def _drawn_from(mesh: str) -> str:
         """The source a case whose mesh is ``mesh`` is actually drawn from.
@@ -3382,7 +3388,8 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         return mesh
 
     def _building_query(lat: float, lon: float, source: str,
-                        recipe: str | None = None) -> tuple[dict[str, Any], bool]:
+                        recipe: str | None = None,
+                        stage=lambda name: None) -> tuple[dict[str, Any], bool]:
         """The three layers for one site, the buildings from the source this
         case's mesh was built from.
 
@@ -3440,6 +3447,7 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         first, other = ((overture, gba) if drawn == footprints.OVERTURE
                         else (gba, overture if footprints.OVERTURE_FALLBACK
                               else None))
+        stage("buildings")
         fc, err = attempt(first)
         if fc is not None and drawn != source:
             fc["fallback_from"] = (
@@ -3464,7 +3472,9 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         # be" -- and because finding out after 66 core-hours is worse than
         # finding out now. Neither raises: a dead raster host is a fact about
         # today, not about the site.
+        stage("terrain")
         fc["terrain"] = footprints.terrain(lat, lon)
+        stage("canopy")
         fc["canopy"] = footprints.canopy(lat, lon, recipe=recipe)
         # v7 on: the runner drops a crown where one of THESE buildings stands.
         if footprints.drops_crowns_under_buildings(recipe):
@@ -3481,7 +3491,8 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         return fc, transient
 
     @app.get("/v1/cases/{case_id}/footprints", dependencies=[ReadAuth])
-    def case_footprints(case_id: str, refresh: bool = False) -> dict[str, Any]:
+    def case_footprints(case_id: str, response: Response, refresh: bool = False,
+                        background: bool = False) -> dict[str, Any]:
         """Everything this case will be meshed from: buildings, terrain, trees.
 
         GeoJSON footprints with predicted heights, plus a GEDTM30 relief grid
@@ -3507,6 +3518,12 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         Cached after the first fetch; `refresh=true` forces a re-query, and so
         does a cached row written by an older build or drawn from a source this
         case would not be drawn from now.
+
+        `background=true` answers a cache miss at once: 202 with `pending`,
+        `stage`, `done` and `of`, while a thread does the reads; asking again
+        gets the progress and finally the payload. A first look can outlast the
+        proxy in front of the broker, and no request is open across it this way.
+        It ignores `refresh`, which would restart the read on every poll.
         """
         row = db.get_case(conn, case_id)
         if row is None:
@@ -3525,7 +3542,7 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         canopy_model = footprints.chm_model_for(recipe)[0]
 
         def cached() -> dict[str, Any] | None:
-            if refresh:
+            if refresh and not background:
                 return None
             hit = db.get_footprints(conn, case_id)
             if not hit:
@@ -3560,31 +3577,79 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
         if lat is None or lon is None:
             raise HTTPException(422, "case spec carries no lat/lon")
         lat, lon = float(lat), float(lon)
-        with footprints_locks_guard:
-            lock = footprints_locks.setdefault(case_id, threading.Lock())
-        with lock:
-            # Whoever held the lock before us may have just answered this case.
-            if (hit := cached()) is not None:
-                return hit
-            # ONE preview at a time across the process, because the memory
-            # ceilings are per call and not per process: every layer builds its
-            # own DuckDB with its own budget and its own GDAL cache, and this
-            # endpoint is sync, so it holds a threadpool slot for the 8-15
-            # seconds the remote reads take while the next caller starts its own
-            # everything. Two at once already asks for more than the instance
-            # has. 503 with Retry-After is the honest answer when the queue is
-            # full; the alternative is the platform killing the process, which is
-            # how this branch started.
+
+        def build(stage=lambda name: None) -> tuple[dict[str, Any], bool]:
+            """The payload, and whether it is a fact about today (so not cached)."""
+            with footprints_locks_guard:
+                lock = footprints_locks.setdefault(case_id, threading.Lock())
+            with lock:
+                # Whoever held the lock before us may have just answered this case.
+                if (hit := cached()) is not None:
+                    return hit, False
+                # ONE preview at a time across the process, because the memory
+                # ceilings are per call and not per process: every layer builds its
+                # own DuckDB with its own budget and its own GDAL cache, and this
+                # endpoint is sync, so it holds a threadpool slot for the 8-15
+                # seconds the remote reads take while the next caller starts its own
+                # everything. Two at once already asks for more than the instance
+                # has. 503 with Retry-After is the honest answer when the queue is
+                # full; the alternative is the platform killing the process, which is
+                # how this branch started.
+                try:
+                    with footprints.exclusive():
+                        fc, transient = _building_query(lat, lon, source, recipe, stage)
+                except footprints.GeoBusy as busy:
+                    raise HTTPException(503, str(busy),
+                                        headers={"Retry-After": "30"}) from busy
+                fc["payload_v"] = footprints.PAYLOAD_VERSION
+                if not transient:
+                    db.put_footprints(conn, case_id, json.dumps(fc), fc["n"])
+            return {**fc, **meshed, "cached": False}, transient
+
+        if not background:
+            return build()[0]
+
+        key = (case_id, _drawn_from(source), canopy_model)
+
+        def run(job: dict[str, Any]) -> None:
+            def stage(name: str) -> None:
+                job["stage"] = name
             try:
-                with footprints.exclusive():
-                    fc, transient = _building_query(lat, lon, source, recipe)
-            except footprints.GeoBusy as busy:
-                raise HTTPException(503, str(busy),
-                                    headers={"Retry-After": "30"}) from busy
-            fc["payload_v"] = footprints.PAYLOAD_VERSION
-            if not transient:
-                db.put_footprints(conn, case_id, json.dumps(fc), fc["n"])
-        return {**fc, **meshed, "cached": False}
+                payload, transient = build(stage)
+            except Exception as err:                     # noqa: BLE001
+                job["error"] = err
+            else:
+                if transient:
+                    job["result"] = payload
+                else:
+                    with footprints_locks_guard:
+                        footprints_jobs.pop(key, None)
+                    return
+            job["finished_at"] = time.monotonic()
+
+        with footprints_locks_guard:
+            job = footprints_jobs.get(key)
+            if job is None:
+                now = time.monotonic()
+                for old, j in list(footprints_jobs.items()):
+                    if now - j.get("finished_at", now) > FOOTPRINTS_JOB_KEEP_SECONDS:
+                        del footprints_jobs[old]
+                job = footprints_jobs[key] = {"stage": "queued"}
+                threading.Thread(target=run, args=(job,), daemon=True,
+                                 name=f"footprints-{case_id}").start()
+            elif "finished_at" in job:
+                del footprints_jobs[key]
+        if "finished_at" in job:
+            if "error" in job:
+                err = job["error"]
+                if isinstance(err, HTTPException):
+                    raise err
+                raise HTTPException(500, f"site preview failed: {str(err)[:160]}")
+            return job["result"]
+        response.status_code = 202
+        name = job["stage"]
+        return {"pending": True, "stage": name, "of": len(FOOTPRINTS_STAGES),
+                "done": FOOTPRINTS_STAGES.index(name) if name in FOOTPRINTS_STAGES else 0}
 
     @app.post("/v1/cases/{case_id}/cancel")
     def cancel_case(case_id: str, body: CancelIn, user=AdminAuth) -> dict[str, Any]:

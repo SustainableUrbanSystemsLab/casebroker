@@ -8,6 +8,8 @@ answers. That judgement is where the bugs were.
 from __future__ import annotations
 
 import json
+import threading
+import time
 
 import pytest
 from fastapi.testclient import TestClient
@@ -305,3 +307,64 @@ def test_a_cached_canopy_from_the_other_model_is_fetched_again(broker, monkeypat
     again = broker.get(f"/v1/cases/{cid}/footprints").json()
     assert again["cached"] is False and again["canopy"]["source"] == "meta-wri-chm-v1"
     assert len(asked) == 2
+
+
+def _poll(broker, url):
+    """Ask until the background read answers, keeping every progress reply."""
+    seen = []
+    for _ in range(500):
+        r = broker.get(url)
+        if r.status_code != 202:
+            return r, seen
+        seen.append(r.json())
+        time.sleep(0.01)
+    raise AssertionError(f"still pending: {seen[-1]}")
+
+
+def test_background_answers_at_once_and_reports_the_layer(broker, monkeypatch):
+    """A first look can outlast the proxy, so no request may wait for it."""
+    release = threading.Event()
+
+    def slow(lat, lon, **k):
+        assert release.wait(timeout=5)
+        raise footprints.TileNotPublished("w040_n10_w035_n05")
+    monkeypatch.setattr(footprints, "fetch_gba", slow)
+    _ocean(monkeypatch)
+    url = f"/v1/cases/{_one_case(broker)}/footprints?background=1"
+
+    r = broker.get(url)
+    assert r.status_code == 202 and r.json()["pending"] is True
+    for _ in range(500):
+        body = broker.get(url).json()
+        if body["stage"] == "buildings":
+            break
+        time.sleep(0.01)
+    assert body == {"pending": True, "stage": "buildings", "done": 0, "of": 3}
+    release.set()
+
+    r, _ = _poll(broker, url)
+    assert r.status_code == 200 and r.json()["tile_published"] is False
+    assert broker.get(url).json()["cached"] is True
+
+
+def test_background_delivers_an_uncacheable_answer_once(broker, monkeypatch):
+    """An outage is not cached, so the job itself has to carry it to the poll,
+    or the page would restart the read forever and never draw anything."""
+    monkeypatch.setattr(footprints, "fetch_gba",
+                        lambda lat, lon, **k: (_ for _ in ()).throw(
+                            RuntimeError("connection reset")))
+    _land(monkeypatch)
+    url = f"/v1/cases/{_one_case(broker)}/footprints?background=1"
+    r, _ = _poll(broker, url)
+    assert r.status_code == 200 and r.json()["cached"] is False
+    assert "connection reset" in r.json()["buildings_error"]
+    assert broker.get(url).status_code == 202     # collected: the next look reads again
+
+
+def test_background_reports_a_full_queue_like_the_blocking_path(broker, monkeypatch):
+    def busy():
+        raise footprints.GeoBusy("full")
+    monkeypatch.setattr(footprints, "exclusive", busy)
+    url = f"/v1/cases/{_one_case(broker)}/footprints?background=1"
+    r, _ = _poll(broker, url)
+    assert r.status_code == 503 and r.headers["Retry-After"] == "30"

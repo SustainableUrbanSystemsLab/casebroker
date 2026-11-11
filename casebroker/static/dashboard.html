@@ -2572,6 +2572,14 @@
   // different source than the one drawn while it was still pending.
   const geoLoads = new Map();   // case_id@state -> { t0, promise, data, error }
   const GEO_KEEP = 16;          // settled answers kept, so a re-render redraws instantly
+  const GEO_POLL_MS = 5 * 60 * 1000;   // how long a first look keeps asking
+  const GEO_STAGE = {
+    queued: "starting (site previews run one at a time)",
+    buildings: "step 1 of 3: reading the buildings",
+    terrain: "step 2 of 3: reading the terrain",
+    canopy: "step 3 of 3: reading the canopy",
+    reconnecting: "the broker is not answering, still asking",
+  };
 
   function footprintsFor(caseId, state, retry) {
     const key = `${caseId}@${state || ""}`;
@@ -2581,19 +2589,28 @@
     // Settles either way and never rejects: the outcome lives on `g`, where a
     // panel rebuilt after the fact can still read it.
     // The first look runs three remote queries on the broker and can outlast the
-    // proxy in front of it (502/503/504); the broker finishes and caches anyway,
-    // so asking again a few seconds later usually gets the cached answer.
-    const fetchGeo = async (left) => {
-      try { return await api(`/v1/cases/${encodeURIComponent(caseId)}/footprints`); }
-      catch (e) {
-        if (left > 0 && [502, 503, 504].includes(e.status)) {
-          await new Promise((r) => setTimeout(r, (e.retryAfter || 5) * 1000));
-          return fetchGeo(left - 1);
+    // proxy in front of it, so the broker reads in the background and this polls:
+    // no request stays open across the proxy, and each answer says how far it got.
+    // A gateway error (502/503/504) is the broker restarting or the proxy blinking.
+    // Asking again resumes or restarts the read, for as long as GEO_POLL_MS allows.
+    const fetchGeo = async () => {
+      const giveUp = performance.now() + GEO_POLL_MS;
+      for (;;) {
+        let wait = 1500;
+        try {
+          const d = await api(`/v1/cases/${encodeURIComponent(caseId)}/footprints?background=1`);
+          if (!d.pending) return d;
+          g.progress = d;
+        } catch (e) {
+          if (![502, 503, 504].includes(e.status) || performance.now() > giveUp) throw e;
+          g.progress = { ...g.progress, stage: "reconnecting" };
+          wait = (e.retryAfter || 5) * 1000;
         }
-        throw e;
+        if (performance.now() > giveUp) throw new Error("the broker did not finish reading this site in 5 minutes");
+        await new Promise((r) => setTimeout(r, wait));
       }
     };
-    g.promise = fetchGeo(2).then(
+    g.promise = fetchGeo().then(
       (d) => { g.data = d; },
       (e) => { g.error = e; });
     geoLoads.delete(key);
@@ -2624,6 +2641,10 @@
       // it by that position.
       const tickHtml = (what, why) => '<span class="geo-tick" style="display:block;font-size:12px;color:var(--text-muted)">'
         + `${what}… <span style="font-family:var(--font-mono)">${secs()}</span>`
+        + '<span class="progress-bar-wrap thin geo-bar" role="progressbar" aria-label="site geometry" aria-valuemin="0" aria-valuemax="3" aria-valuenow="0" style="margin-top:6px">'
+        + '<span class="progress-segment leased" style="width:0%"></span>'
+        + '<span class="progress-segment leased active" style="width:33.33%"></span></span>'
+        + '<span class="geo-stage" style="display:block;margin-top:3px"></span>'
         + `<span style="display:block;margin-top:3px;font-size:11px">${why}</span></span>`;
       const prev = settledGeometry(caseId);
       if (prev) {
@@ -2656,8 +2677,22 @@
       // and writes into its own element, never a page-wide id another panel
       // might also be using.
       const el = wrap.querySelector(".geo-tick span");
+      const bar = wrap.querySelector(".geo-bar");
+      const stageEl = wrap.querySelector(".geo-stage");
+      // Filled by finished layers, with a moving band over the one under way:
+      // the broker reports which layer it is on, not how far through it.
+      const showStage = () => {
+        const p = g.progress;
+        if (!p) return;
+        const done = p.done || 0, of = p.of || 3;
+        bar.setAttribute("aria-valuenow", done);
+        bar.children[0].style.width = `${done / of * 100}%`;
+        bar.children[1].style.width = `${100 / of}%`;
+        stageEl.textContent = GEO_STAGE[p.stage] || "";
+      };
+      showStage();
       const tick = setInterval(() => {
-        if (el.isConnected) el.textContent = secs();
+        if (el.isConnected) { el.textContent = secs(); showStage(); }
         else clearInterval(tick);
       }, 100);
       await g.promise;

@@ -8,6 +8,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.49.38] - 2026-11-11
+
+### Fixed
+
+- Site geometry: a first look no longer holds one request open across the proxy in front of
+  the broker. `GET /v1/cases/{id}/footprints?background=1` answers a cache miss at once with
+  202 and the layer it is on, while a thread reads; the dashboard polls for up to 5 minutes,
+  and rides out 502/503/504 from a restarting broker instead of giving up after 10 seconds.
+
+### Added
+
+- Dashboard: the Site Geometry panel shows a progress bar and the layer being read.
+
 ## [0.49.37] - 2026-11-10
 
 ### Fixed
