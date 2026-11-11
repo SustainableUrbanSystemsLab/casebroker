@@ -492,6 +492,21 @@ longer fits spills to disk and gets slower, which is the failure you want.
 Preview payloads are cached in the database per case, so the cost is paid once
 per case and never on a dashboard refresh.
 
+The GBA reader now runs in a short-lived child process, under the same preview
+semaphore and DuckDB memory budget. Its native libraries are released on exit;
+the resident figures above predate this isolation. A signal or a whole-read
+timeout becomes an uncached building-layer error, with the exit reason in the
+broker log, rather than restarting the service and losing its preview jobs.
+The child is killed and reaped before the preview slot is released. Terrain
+and canopy still run in the broker process.
+
+If a preview remains `queued` while requests intermittently return 502, check
+for repeated `Started server process` lines after `/footprints` returns 202.
+That is a restart loop, not proof of a full queue. Inspect the container's exit
+reason and OOM events before changing network timeouts. `scripts/preflight.sh`
+now checks the complete polling path inside the image, on a disposable broker;
+the image installs `uv.lock` so that its native dependencies match the suite.
+
 **`/healthz` is intentionally unauthenticated** (so infrastructure health checks
 work with no token) **and therefore must never return anything that could be a
 credential.** This was not a hypothetical: an early version of this service

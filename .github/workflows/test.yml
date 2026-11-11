@@ -155,6 +155,8 @@ jobs:
           assert c['frac_canopy'] > 0.05, c
           print('rasterio reads remote COGs from inside the image')
           "
+      - name: A full geometry preview must finish without restarting the broker
+        run: docker exec -i cb python - < scripts/geometry_smoke.py
       - name: Container logs (always)
         if: always()
         run: docker logs cb || true

@@ -368,3 +368,34 @@ def test_background_reports_a_full_queue_like_the_blocking_path(broker, monkeypa
     url = f"/v1/cases/{_one_case(broker)}/footprints?background=1"
     r, _ = _poll(broker, url)
     assert r.status_code == 503 and r.headers["Retry-After"] == "30"
+
+
+def test_a_dead_building_reader_keeps_the_broker_and_other_layers_alive(broker, monkeypatch):
+    """The production failure was a process death after 202, not a slow queue.
+    Exercise a real child exit through the background endpoint, then retry the
+    same case: the failed layer must neither poison the cache nor hold its slot.
+    """
+    import sys
+    from casebroker import geo_process
+
+    _land(monkeypatch)
+    run = geo_process._run
+    monkeypatch.setattr(geo_process, "_run", lambda *a, **k: run(
+        [sys.executable, "-c", "import os; os._exit(139)"], 5))
+    url = f"/v1/cases/{_one_case(broker)}/footprints?background=1"
+    response, _ = _poll(broker, url)
+    assert response.status_code == 200
+    body = response.json()
+    assert "exit 139" in body["buildings_error"]
+    assert body["terrain"]["source"] == "gedtm30"
+    assert body["canopy"]["source"] == "meta-wri-chm-v1"
+    assert broker.get("/healthz").status_code == 200
+
+    def recovered(lat, lon, **kwargs):
+        return {"type": "FeatureCollection", "features": [], "n": 0,
+                "source": footprints.GBA, "centre": [lat, lon]}
+    monkeypatch.setattr(footprints, "fetch_gba", recovered)
+    response, _ = _poll(broker, url)
+    assert response.status_code == 200
+    assert "buildings_error" not in response.json()
+    assert broker.get(url).json()["cached"] is True
