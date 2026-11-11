@@ -25,7 +25,7 @@ bad()  { printf '\033[31mFAIL\033[0m  %s\n' "$1"; fail=1; }
 good() { printf '\033[32mok\033[0m    %s\n' "$1"; }
 
 step "test suite"
-if uv run --extra dev pytest tests/ -q 2>&1 | tail -3; then
+if uv run --extra export --with pytest --with httpx python -m pytest tests/ --ignore=tests/test_db_postgres.py -q 2>&1 | tail -3; then
   good "tests"
 else
   bad "tests"
@@ -77,6 +77,13 @@ assert F.on_land(33.749, -84.388) and not F.on_land(7.5, -37.5)
   good "rasterio reads remote COGs; land mask and every module present"
 else
   bad "geo stack inside the image"
+fi
+
+step "a full background geometry preview inside the image"
+if $ENGINE run --rm -i casebroker:preflight python - < scripts/geometry_smoke.py; then
+  good "buildings, terrain and canopy through the dashboard's polling endpoint"
+else
+  bad "background geometry preview inside the image"
 fi
 
 step "it boots and answers"

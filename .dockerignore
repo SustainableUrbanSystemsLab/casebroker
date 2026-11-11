@@ -1,4 +1,4 @@
-# The image COPYs exactly three things -- pyproject.toml, README.md and
+# The image COPYs pyproject.toml, uv.lock, README.md and
 # casebroker/ -- but without this file the whole working tree is still packed up
 # and handed to the Docker daemon as build context first. That is 329 MB of
 # .venv plus the entire .git history, transferred on every build, for an image

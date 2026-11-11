@@ -8,6 +8,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.49.42] - 2026-11-11
+
+### Fixed
+
+- Isolated native building-reader faults from the broker process.
+  Requests for `v2-002c849ccb119c51` returned `202 queued` and were immediately
+  followed by service restarts, so retries repeated the crash for five minutes.
+  DuckDB now runs in a bounded child process: a crash or a whole-read timeout
+  reports an uncached building-layer error while terrain, canopy and the broker
+  remain available. The image now installs the dependency lock used by the
+  suite, and preflight/CI exercise a full background preview through HTTP,
+  including the building read that the previous image checks never called.
+
 ## [0.49.41] - 2026-11-11
 
 ### Changed

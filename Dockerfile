@@ -12,9 +12,13 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 RUN pip install --no-cache-dir uv
 WORKDIR /app
-COPY pyproject.toml README.md ./
+COPY pyproject.toml uv.lock README.md ./
 COPY casebroker ./casebroker
-RUN uv pip install --system --no-cache .
+# The suite resolves uv.lock. Resolving the open-ended requirements again here
+# shipped different native libraries (including a new DuckDB major) unnoticed.
+RUN uv sync --locked --no-dev --no-editable --no-cache
+ENV PATH="/app/.venv/bin:$PATH"
+ENV PYTHONFAULTHANDLER=1
 # duckdb fetches its httpfs and spatial extensions on first use, into $HOME, and
 # on a host with no persistent disk (Render, until 2026-10-06) that is a container
 # filesystem every deploy discards -- so the first

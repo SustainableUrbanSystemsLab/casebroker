@@ -351,6 +351,21 @@ def mesh_source(state: str, metrics: dict[str, Any] | None,
 
 def fetch_gba(lat: float, lon: float, half_m: float = HALF_M,
               timeout: int = 30) -> dict[str, Any]:
+    """Read buildings outside the web process; native faults must not kill leases.
+
+    A geometry request on the self-hosted broker repeatedly returned 202 and
+    restarted the whole service before its next poll. A thread cannot contain
+    a native crash, and per-request HTTP timeouts do not bound the whole query.
+    Keep the existing per-process preview slot while this child runs; its
+    memory budget is unchanged and its libraries are freed when it exits.
+    """
+    from .geo_process import read_buildings
+
+    return read_buildings(lat, lon, half_m, timeout)
+
+
+def _fetch_gba(lat: float, lon: float, half_m: float = HALF_M,
+               timeout: int = 30) -> dict[str, Any]:
     """GBA footprints and predicted heights, as a compact FeatureCollection.
 
     ``h`` is the predicted height and ``v`` its variance. The variance is kept
