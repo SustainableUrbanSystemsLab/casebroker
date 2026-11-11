@@ -1612,9 +1612,7 @@
         <line x1="12" y1="16" x2="12" y2="12"></line>
         <line x1="12" y1="8" x2="12.01" y2="8"></line>
       </svg>
-      <span><strong>Read-only view.</strong> This link can only view campaign status. It
-        cannot lease, complete, fail or release cases, or add new ones, even by calling
-        the API directly.</span>
+      <span><strong>Read-only view.</strong> View campaign status only; case changes are blocked, including through the API.</span>
     </div>
     <!-- Only for someone looking through a share link: it ends their view. -->
     <button class="subtle" id="leaveShare" type="button"
@@ -1626,7 +1624,7 @@
         <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
         <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
       </svg>
-      <span id="authNoticeText"><strong>Authentication Required:</strong> This broker requires a credential to display live campaign telemetry and cases.</span>
+      <span id="authNoticeText"><strong>Sign in required.</strong> Enter a credential to view status and cases.</span>
     </div>
     <button class="subtle" id="focusTokenBtn" style="color:inherit;text-decoration:underline">Enter Token &rarr;</button>
   </div>
@@ -1641,7 +1639,7 @@
         <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path>
         <circle cx="12" cy="7" r="4"></circle>
       </svg>
-      <span>Have an account instead? Sign in to confirm devices and manage the campaign.</span>
+      <span>Sign in to manage devices and the campaign.</span>
     </div>
     <button class="subtle" id="focusSignInBtn" style="color:inherit;text-decoration:underline">Sign in &rarr;</button>
   </div>
@@ -1656,8 +1654,7 @@
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
       </svg>
-      <span><strong>This broker has no account yet.</strong> The first one created
-        becomes its admin, and the form then closes for good.</span>
+      <span><strong>This broker has no account yet.</strong> Create the first admin account to finish setup.</span>
     </div>
     <button class="subtle" id="openSetupBtn" style="color:inherit;text-decoration:underline">Set it up &rarr;</button>
   </div>
@@ -1678,7 +1675,7 @@
            nobody can see is not a countdown. -->
       <div style="margin-left:auto; display:flex; align-items:center; gap:14px; flex-wrap:wrap;">
         <div id="expiredBannerWrap"></div>
-        <button id="refresh" type="button" title="Refresh now. The number is seconds to the next automatic refresh.">
+        <button id="refresh" type="button" title="Refresh now; countdown to auto-refresh.">
           <svg id="refreshIcon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
             <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/>
           </svg>
@@ -1701,7 +1698,7 @@
       <!-- High level visual progress bar -->
       <div class="campaign-progress">
         <div class="progress-header">
-          <span>Simulation Campaign Progress</span>
+          <span>Campaign progress</span>
           <span id="progressPct" style="font-family: var(--font-mono); color: var(--text-secondary);">0%</span>
         </div>
         <div class="progress-bar-wrap" id="campaignProgressBar">
@@ -1712,7 +1709,7 @@
         </div>
         <div class="progress-legend">
           <span class="legend-item"><span class="legend-dot" style="background:var(--accent)"></span> Done</span>
-          <span class="legend-item"><span class="legend-dot" style="background:var(--primary)"></span> Leased (In Flight)</span>
+          <span class="legend-item"><span class="legend-dot" style="background:var(--primary)"></span> Leased</span>
           <span class="legend-item"><span class="legend-dot" style="background:var(--warn)"></span> Pending</span>
           <span class="legend-item"><span class="legend-dot" style="background:var(--bad)"></span> Quarantined</span>
         </div>
@@ -1724,7 +1721,7 @@
       <!-- Split Matrix -->
       <div style="margin-top: 20px;">
         <h3 style="font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); margin: 0 0 10px;">
-          Dataset Split Breakdown
+          Dataset splits
         </h3>
         <div class="table-wrap">
           <table>
@@ -1754,7 +1751,7 @@
           <!-- A recipe is a training set: the counts, the ETA, the case browser and the
                dataset for one of them, or for all. Hidden while there is one. -->
           <select id="recipeScope" hidden style="font-size:12px;"
-                  title="Scope the counts, the ETA, the case browser and the dataset to one recipe"></select>
+                  title="Filter counts, ETA, cases and dataset by recipe"></select>
         </div>
         <div>
           <span id="expiredText" style="color: var(--warn); font-weight: 500;"></span>
@@ -1779,7 +1776,7 @@
       </div>
       <div class="panel-title-group">
         <button type="button" class="subtle" id="queuedToggle" hidden
-                title="Jobs the scheduler holds that have not started. They are counted in the badge either way.">Show queued jobs</button>
+                title="Queued jobs; included in the count when hidden.">Show queued jobs</button>
         <span class="chip" id="workerCountBadge">0 known</span>
       </div>
     </div>
@@ -1818,10 +1815,10 @@
             <line x1="16" y1="13" x2="8" y2="13"></line>
             <line x1="16" y1="17" x2="8" y2="17"></line>
           </svg>
-          Case Browser & Inspector
+          Cases
         </h2>
       </div>
-      <span class="label-hint">Click any row to inspect simulation spec & results</span>
+      <span class="label-hint">Select a case for details</span>
     </div>
 
     <!-- Filter Bar -->
@@ -1879,7 +1876,7 @@
 
       <div>
         <button id="copyErrors" type="button" class="subtle"
-                title="Copy every case's error, with its case ID and each failed attempt, as text for a bug report">
+                title="Copy case IDs, errors and failed attempts">
           Copy all errors
         </button>
       </div>
@@ -2162,9 +2159,7 @@
       <div id="sharing" style="display:none;">
         <div class="panel-title-group" style="margin-bottom:4px;"><h2>Share a read-only link</h2></div>
         <div class="panel-subtitle">
-          Anyone with the link can look at the campaign -- every case, its results and the fleet, what a
-          <b>viewer</b> account sees -- and change nothing. They need no account. You can take the link
-          back here at any time.
+          Anyone with the link can view all cases, results and workers without an account. Revoke it here anytime.
         </div>
 
         <div class="row" style="margin-top:14px;">
@@ -2198,7 +2193,7 @@
              it can be read; the box keeps it until the next link or a reload. -->
         <div id="shareIssued" class="detail-card" style="display:none; margin-top:16px;">
           <div class="panel-subtitle" style="margin-bottom:8px;">
-            <b>Send it now</b> -- only its hash is stored, so it cannot be shown again.
+            <b>Copy or send now.</b> This link is shown only once.
             <span id="shareIssuedFor"></span>
           </div>
           <input type="text" id="shareUrl" class="share-url" readonly spellcheck="false"
@@ -2209,12 +2204,10 @@
             <button id="shareNative" type="button" style="display:none">Share&hellip;</button>
           </div>
           <div id="shareLocalWarn" class="panel-subtitle" style="display:none; margin-top:8px; color:var(--warn);">
-            This page is open on an address that only works on this network or computer, so the
-            link will not open for someone elsewhere. Open the dashboard at its public address and
-            make the link there.
+            This address is local. Create the link from the public dashboard to share outside this network.
           </div>
           <div class="panel-subtitle" style="margin-top:8px;">
-            To see what they will see, open it in a private window: in this one you stay signed in.
+            Preview in a private window; this window stays signed in.
           </div>
         </div>
 
@@ -2234,19 +2227,13 @@
       <div id="campaign" style="display:none;">
         <div class="panel-title-group" style="margin-bottom:4px;"><h2>Campaign</h2></div>
         <div class="panel-subtitle">
-          Housekeeping over the whole case pool. Every action here reports before
-          it changes anything.
+          Preview campaign changes before applying them.
         </div>
 
         <div class="detail-card" style="margin-top:14px;">
           <h3>Sites that are not on land</h3>
           <div class="panel-subtitle" style="margin-bottom:10px;">
-            New cases are refused at <code class="inline">POST /v1/cases</code> if
-            the building atlas publishes no tile for them. Cases drawn
-            <em>before</em> that gate existed are still in the pool — the sampler's
-            LCZ raster reads snow, ice and open water as built classes, so the
-            draw placed sites in Antarctica and in the open ocean. Each one is 66
-            core-hours aimed at an empty flat plane.
+            Find older sites outside building-atlas coverage, including ocean and ice. New sites are checked on admission.
           </div>
           <div class="row" style="gap:8px; align-items:center;">
             <button id="landScanBtn" type="button" class="subtle">Scan the case pool</button>
@@ -2258,13 +2245,7 @@
         <div class="detail-card" style="margin-top:14px;">
           <h3>Cases a broken node quarantined</h3>
           <div class="panel-subtitle" style="margin-bottom:10px;">
-            Quarantine is meant to say "this site is broken everywhere". A node
-            that could not run anything — a stopped container daemon, no solver
-            installed — used to charge an attempt per lease instead, and three of
-            those park a site with nothing wrong with it. Reopening puts them
-            back in the pool with their attempts reset. Match on what the case
-            last failed with, so this undoes one broken machine rather than
-            releasing every genuinely degenerate site.
+            Reopen cases quarantined by node failures and reset their attempts. Filter by the last error to keep broken sites quarantined.
           </div>
           <div class="row" style="gap:8px; align-items:center;">
             <input type="text" id="reopenMatch" placeholder="last failure contains…"
@@ -2283,10 +2264,7 @@
         <div class="detail-card" style="margin-top:14px;">
           <h3>Move cases to another recipe</h3>
           <div class="panel-subtitle" style="margin-bottom:10px;">
-            For a site its recipe cannot build. Each one is added again under the
-            new recipe as a new case, which only nodes that know that recipe are
-            given, and the old case is parked with a pointer to it. A case a node
-            is working on is left alone — pull it off first.
+            Create replacement cases with a new recipe; quarantine and link the originals. Only compatible nodes receive them. Active cases must be cancelled first.
           </div>
           <div class="row" style="gap:8px; align-items:center; flex-wrap:wrap;">
             <input type="text" id="respecIds" placeholder="case ids, separated by spaces or commas"
@@ -2325,7 +2303,7 @@
            and shown to an admin only (require_operator in app.py). -->
       <div id="pairingPanel" style="display:none;">
         <div class="panel-title-group" style="margin-bottom:4px;"><h2>Device requests</h2></div>
-        <div class="panel-subtitle">Confirm only if the code shown here matches the one the machine is showing.</div>
+        <div class="panel-subtitle">Confirm only if this code matches the machine’s code.</div>
         <div id="pairingList" style="margin-top:12px;"></div>
       </div>
       <div id="machines" style="display:none;">
@@ -2334,7 +2312,7 @@
         <div class="row" style="margin-top:12px;">
           <div class="field" style="flex:1; min-width:220px;">
             <label for="newMachine">Worker id
-              <span class="label-hint">(the box's CASEBROKER_WORKER_ID; a cluster name covers every id under it)</span>
+              <span class="label-hint">(CASEBROKER_WORKER_ID, or a cluster name for all its workers)</span>
             </label>
             <input type="text" id="newMachine" placeholder="lab-ws-02" />
           </div>
@@ -2351,9 +2329,7 @@
              change the policy, or pull the kill switch. -->
         <div class="panel-title-group" style="margin:22px 0 4px;"><h2>Node builds</h2></div>
         <div class="panel-subtitle">
-          Publish a build to the nodes' release share, register it here, move ONE worker to it,
-          watch a few cases, then set it as the fleet's target. Nodes switch by themselves at the
-          boundary you choose; a case is never touched by two builds without the archive saying so.
+          Publish and register a build, test it on one worker, then set the fleet target. Nodes switch at the selected boundary; archives record build changes.
         </div>
         <div class="row" style="margin-top:12px; align-items:flex-end;">
           <div class="field" style="min-width:260px; flex:1;">
@@ -2363,9 +2339,9 @@
           <div class="field" style="min-width:210px;">
             <label for="relApply">Nodes switch</label>
             <select id="relApply">
-              <option value="case">after the case in flight</option>
+              <option value="case">after the current case</option>
               <option value="direction">after the current wind direction</option>
-              <option value="now" data-admin>now (the case is given back)</option>
+              <option value="now" data-admin>now (release the case)</option>
             </select>
           </div>
           <!-- Disabled until the catalog has been read (renderReleases enables
@@ -2374,7 +2350,7 @@
           <div><button id="relTargetBtn" type="button" disabled>Set target</button></div>
           <div><button id="relRollbackBtn" type="button" class="ghost" hidden>Roll back</button></div>
           <div data-admin><button id="relKillBtn" type="button" class="ghost" hidden
-                       title="Refuse the current target to every node at its next lease, and point the fleet back at the build before it. For a build that has to stop now, not at each node's next ask.">Kill switch</button></div>
+                       title="Block new leases for the current target and roll back to the previous build.">Kill switch</button></div>
         </div>
         <!-- The fleet in one line: what everything below is about. -->
         <div id="relSummary" class="panel-subtitle" style="margin-top:10px;"></div>
@@ -2409,7 +2385,7 @@
         <div class="row" data-admin style="margin-top:10px; align-items:flex-end;">
           <div class="field" style="min-width:220px;">
             <label for="relKeep">Keep files of the newest
-              <span class="label-hint">(builds; the target, the one before it, canaries and running builds always stay)</span>
+              <span class="label-hint">(target, previous target, canaries and running builds are kept)</span>
             </label>
             <input type="number" id="relKeep" min="0" style="width:90px;" />
           </div>
@@ -2419,7 +2395,7 @@
         <div data-admin>
         <div class="field" style="margin-top:12px;">
           <label for="relPaste">Register a published build
-            <span class="label-hint">(paste the <code class="inline">release.json</code> the E3D node build published, or run <code class="inline">casebroker release register release.json</code> from a terminal or a CI step)</span>
+            <span class="label-hint">(paste <code class="inline">release.json</code> or run <code class="inline">casebroker release register release.json</code>)</span>
           </label>
           <textarea id="relPaste" rows="4" spellcheck="false"
                     placeholder='[{"build":"1.14.0.827+0e9e6863","platform":"win-x64","file":"E3D-1.14.0.827+0e9e6863-win-x64.exe","sha256":"…"}]'></textarea>
@@ -2428,7 +2404,7 @@
         </div>
       </div>
       <div id="machinesLocked" class="panel-subtitle">
-        Sign in as an admin or operator to confirm a device and issue machine credentials.
+        Admin or operator sign-in required to manage devices.
       </div>
     </section>
 
@@ -2449,7 +2425,7 @@
       </label>
       <div id="notifyEvents" class="notify-events" style="margin:8px 0 0 26px;"></div>
       <div class="panel-subtitle" style="margin-top:6px;">
-        Announces only what happens after you switch it on, and only while this tab is open.
+        New events only, while this tab is open.
       </div>
 
       <!-- Push: the broker itself sends these, to a closed tab or a phone, so what
@@ -2464,8 +2440,7 @@
         <div id="pushEvents" class="notify-events push-events" style="margin-top:12px;"></div>
         <div id="pushPolicyBox" hidden style="margin-top:16px;">
           <div class="panel-subtitle" style="margin-bottom:6px;">
-            <strong>Broker-wide</strong> (admin) &mdash; a kind switched off here is sent to nobody,
-            whatever their device asked for.
+            <strong>Broker-wide</strong> (admin) &mdash; disabled events are muted for all devices.
           </div>
           <div id="pushPolicy" class="notify-events"></div>
         </div>
@@ -2669,7 +2644,7 @@
           + '</div>' + skelBar("70%") + '</div>'
           + '<div class="geo-legend">'
           + tickHtml("querying the building atlas, GEDTM30 and the canopy model",
-                     "the first look at a case reads three remote datasets, the buildings from the source its mesh was built from, then it is cached; later opens are instant")
+                     "First preview loads buildings, terrain and canopy; later views use the cache")
           + '<div style="margin-top:10px">' + skelLines(5, 80) + '</div></div></div>';
       }
       setBusy(wrap, true);
@@ -2727,7 +2702,7 @@
       "Meshed from Overture: this case finished before the geometry builder switched to GBA on 2026-09-08."],
     not_done: ["what the geometry builder meshes now", ""],
     unreported: ["assumed: this case's run did not say",
-      "This case's run did not report which source it meshed, so this is GBA, the builder's default since 2026-09-08. A run on an older checkout, or one reusing an earlier attempt's geometry, would have meshed Overture instead."],
+      "Mesh source unreported. GBA is assumed; older or reused geometry may use Overture."],
     unrecognized: ["assumed: this case's run named a source this page cannot draw",
       "This case's run reported a building source the broker does not recognise, so this is GBA, the builder's default."],
   };
@@ -3193,8 +3168,8 @@
     const pct = (x) => Math.round(100 * x);
     const terrLine = (() => {
       if (hasTerr) return `<div><span class="geo-swatch" style="background:var(--warn);opacity:0.5"></span>terrain — <b>${terr.relief_m} m</b> relief over the domain (${terr.min_m}–${terr.max_m} m)</div>`;
-      if (terr.source === "flat") return `<div><span class="geo-swatch" style="background:var(--warn)"></span><b>no terrain</b> — meshed flat<div class="geo-note" style="margin-top:2px">GEDTM30 is a land DTM, so no data here usually means this site is not on land.</div></div>`;
-      if (terr.source === "unavailable" || terr.source === "unknown") return `<div style="color:var(--warn)">terrain unavailable — <span class="mono" style="font-size:11px">${esc(terr.detail || "no detail")}</span><div class="geo-note" style="margin-top:2px">A fact about the host, not the site. Not cached — reopening this case retries.</div></div>`;
+      if (terr.source === "flat") return `<div><span class="geo-swatch" style="background:var(--warn)"></span><b>no terrain</b> — meshed flat<div class="geo-note" style="margin-top:2px">No GEDTM30 data; this site may be off land.</div></div>`;
+      if (terr.source === "unavailable" || terr.source === "unknown") return `<div style="color:var(--warn)">terrain unavailable — <span class="mono" style="font-size:11px">${esc(terr.detail || "no detail")}</span><div class="geo-note" style="margin-top:2px">Source unavailable. Reopen this case to retry.</div></div>`;
       return "";
     })();
     const canLine = (() => {
@@ -3202,15 +3177,15 @@
         const v = can.vegetation;
         const when = can.imagery_year ? ` from a scene of ${Math.floor(can.imagery_year)}` : "";
         const under = can.columns_under_buildings > 0
-          ? `<div class="geo-note" style="margin-top:2px">${can.columns_under_buildings} crown columns the scene saw where a building stands today are left out, as the solve leaves them out.</div>` : "";
-        return `<div><span class="geo-swatch" style="background:var(--accent)"></span>trees — <b>${pct(can.frac_canopy)}%</b> under canopy${can.frac_columns != null ? `, <b>${pct(can.frac_columns)}%</b> of the core in 4 m crown columns` : ""}, tallest <b>${can.max_height_m} m</b>, meshed as porous crowns, not solids <span class="mono" style="font-size:11px">${esc(can.source)}</span>${when}${under}</div>`
+          ? `<div class="geo-note" style="margin-top:2px">${can.columns_under_buildings} crown columns overlapping current buildings excluded, matching the solve.</div>` : "";
+        return `<div><span class="geo-swatch" style="background:var(--accent)"></span>trees — <b>${pct(can.frac_canopy)}%</b> under canopy${can.frac_columns != null ? `, <b>${pct(can.frac_columns)}%</b> of the core in 4 m crown columns` : ""}, tallest <b>${can.max_height_m} m</b>, meshed as porous crowns <span class="mono" style="font-size:11px">${esc(can.source)}</span>${when}${under}</div>`
           + (v ? `<div><span class="geo-swatch" style="background:var(--accent);opacity:0.45"></span>all crowns as <b>${esc(v.label)}</b> — f = 2·Cd·LAD = <b>${v.f_per_m}</b> m⁻¹<div class="geo-note" style="margin-top:2px">${v.decided_by === "node:koppen"
-                ? `One class for every tree here. From of12-v7 the node picks it by the Köppen class of the nearest weather station; shown is the preview's latitude default (${esc(v.provenance)}) — the case's site report names the class used.`
+                ? `One class for all trees. From of12-v7, the node uses the nearest station’s Köppen class. Preview: latitude default (${esc(v.provenance)}); actual class: site report.`
                 : `One class for every tree here, by latitude alone (${esc(v.provenance)}).`}</div></div>` : "");
       }
       if (hasCan) return `<div><span class="geo-swatch" style="background:var(--accent);opacity:0.35"></span><b>no trees</b> — treeless site, no canopy zone</div>`;
       if (can.source === "none") return `<div style="color:var(--text-muted)">trees unknown — the canopy model publishes no tile here</div>`;
-      if (can.source) return `<div style="color:var(--warn)">trees unavailable — <span class="mono" style="font-size:11px">${esc(can.detail || "no detail")}</span><div class="geo-note" style="margin-top:2px">A fact about the host, not the site. Not cached — reopening this case retries.</div></div>`;
+      if (can.source) return `<div style="color:var(--warn)">trees unavailable — <span class="mono" style="font-size:11px">${esc(can.detail || "no detail")}</span><div class="geo-note" style="margin-top:2px">Source unavailable. Reopen this case to retry.</div></div>`;
       return "";
     })();
     // Three ways to have no buildings, and they mean completely different
@@ -3220,9 +3195,9 @@
     // that the case is at sea. A reachability failure says nothing about the
     // site at all. An empty tile on land is a third answer again.
     const buildingLines = d.buildings_error
-      ? `<div style="color:var(--bad)"><span class="geo-swatch" style="background:var(--bad)"></span>buildings unavailable — the atlas could not be reached<div class="geo-note" style="margin-top:2px;color:var(--bad)">${esc(d.buildings_error)}</div><div class="geo-note" style="margin-top:2px">Not cached, so reopening this case retries. Terrain and trees below were fetched independently and are real.</div></div>`
+      ? `<div style="color:var(--bad)"><span class="geo-swatch" style="background:var(--bad)"></span>buildings unavailable — the atlas could not be reached<div class="geo-note" style="margin-top:2px;color:var(--bad)">${esc(d.buildings_error)}</div><div class="geo-note" style="margin-top:2px">Reopen to retry. Terrain and canopy were fetched separately.</div></div>`
       : d.tile_published === false
-      ? `<div><span class="geo-swatch" style="background:var(--text-muted)"></span><b>no buildings</b> — the atlas publishes no tile here<div class="geo-note" style="margin-top:2px">GlobalBuildingAtlas covers 922 tiles of a possible 2,592; the rest are ocean and ice. Tile <code class="inline">${esc(d.tile || "")}</code> is not one of them.</div></div>`
+      ? `<div><span class="geo-swatch" style="background:var(--text-muted)"></span><b>no buildings</b> — the atlas publishes no tile here<div class="geo-note" style="margin-top:2px">Tile <code class="inline">${esc(d.tile || "")}</code> is outside GBA coverage (ocean or ice).</div></div>`
       : gba
       ? `<div><span class="geo-swatch" style="background:var(--primary)"></span><b>${withH}</b> buildings, height predicted</div>`
         + (medSd != null ? `<div><span class="geo-swatch" style="background:var(--text-muted)"></span>median uncertainty <b>±${medSd.toFixed(1)} m</b> (GBA σ)${vHigh ? `, <b>${vHigh}</b> beyond ±5 m` : ""}; grey blocks exceed the published RMSE (1.5–8.9 m)</div>` : "")
@@ -3255,7 +3230,7 @@
         <div class="geo-views">
         <div class="geo-view">
           <svg class="geo-zoom" data-view="${esc(viewKey)}:plan" viewBox="0 0 ${S} ${S}" width="${S}" height="${S}" role="img"
-               aria-label="Plan view over the mesh domain: terrain relief shaded, tree canopy in green, building footprints in blue, with the sampled core and the domain edge.">
+               aria-label="Plan view: shaded terrain, green canopy, blue buildings, sampled core and domain boundary.">
             ${groundLayer}${canopyLayer}
             <rect x="${S/2-dom}" y="${S/2-dom}" width="${2*dom}" height="${2*dom}"
                   fill="none" stroke="var(--warn)" stroke-width="1.2"/>
@@ -3268,14 +3243,14 @@
         </div>
         <div class="geo-view">
           <svg class="geo-zoom" data-view="${esc(viewKey)}:iso" viewBox="0 0 ${ISO} ${ISO}" width="${ISO}" height="${ISO}" role="img"
-               aria-label="Isometric view at 45 degrees over the sampled core: buildings extruded from their roofs down through the terrain to a common slab, with see-through green crown volumes for trees. Blue blocks have ${gba ? "predicted" : "measured"} heights, grey blocks ${gba ? "have no height in GBA" : "were inferred"}.">
+               aria-label="Isometric core view: buildings extend to a shared slab; green volumes are tree crowns. Blue heights are ${gba ? "predicted" : "measured"}; grey heights ${gba ? "are missing in GBA" : "are inferred"}.">
             ${isoGround}${iso}
           </svg>
           ${geoControls("isometric view")}
         </div>
         <div class="geo-view">
           <svg class="geo-zoom" data-view="${esc(viewKey)}:elev" viewBox="0 0 ${EW} ${EH}" width="${EW}" height="${EH}" role="img"
-               aria-label="Side elevation looking north across the mesh domain: the terrain relief band, building roofs and tree canopy on one shared vertical scale in metres.">
+               aria-label="North-facing elevation: terrain, roofs and canopy on a shared height scale in metres.">
             ${elev}
           </svg>
           ${geoControls("elevation")}
@@ -3291,16 +3266,16 @@
           <div><span class="geo-swatch" style="border:1px solid var(--warn)"></span>${2*DOM_M} m mesh domain</div>
           <div class="geo-note" style="margin-top:6px">${sources}</div>
           ${overtureNote ? `<div class="geo-note" style="margin-top:2px">${overtureNote}</div>` : ""}
-          ${d.fallback_from ? `<div class="geo-note" style="color:var(--warn)">${d.mesh_source === "overture" ? "Overture" : "GBA"} could not be drawn (${esc(d.fallback_from)}), so this is ${name}'s picture, which need not match this case's mesh.</div>` : ""}
+          ${d.fallback_from ? `<div class="geo-note" style="color:var(--warn)">${d.mesh_source === "overture" ? "Overture" : "GBA"} unavailable (${esc(d.fallback_from)}). Showing ${name}; it may differ from the mesh.</div>` : ""}
           ${isMesh && basis[1] ? `<div class="geo-note">${basis[1]}</div>` : ""}
           <details class="geo-note" style="margin-top:2px">
             <summary style="cursor:pointer">How to read these</summary>
             <div style="margin-top:4px">Only the ${2 * CORE_M} m core carries buildings and trees; the buffer is terrain and inlet roughness.</div>
-            <div>The amber ground line is a section: solid for the highest ground in each column, dashed for the lowest, because a column spans ${2 * DOM_M} m north–south and one line would claim a cross-section it never took.</div>
-            <div>Buildings run from roof to a slab ${SLAB_M} m below the lowest ground, as <code class="inline">watertight.py</code> extrudes them — the elevation shows all of it, the isometric the first ${ISO_PIERCE_M} m.</div>
+            <div>Amber terrain lines: solid = column maximum, dashed = minimum, over ${2 * DOM_M} m north–south.</div>
+            <div>Buildings extend to a slab ${SLAB_M} m below minimum ground. Elevation shows the full depth; isometric shows ${ISO_PIERCE_M} m.</div>
             <div>Crowns are see-through because the upper 59% of each tree is a porous cellZone, f = 2·Cd·LAD.</div>
           </details>
-          ${atSea ? `<div class="geo-note" style="color:var(--bad)"><b>This case is not on land.</b> No building tile, no bare-earth terrain and no canopy tile, from three independent sources that disagree about almost everything else. The runner would mesh an empty flat plane here and solve it for 66 core-hours.</div>` : ""}
+          ${atSea ? `<div class="geo-note" style="color:var(--bad)"><b>This case is not on land.</b> Building, terrain and canopy sources all lack coverage. The solve would use an empty flat plane.</div>` : ""}
         </div>
       </div>`;
     wrap.querySelectorAll("svg.geo-zoom").forEach(geoRestore);
@@ -5256,8 +5231,8 @@
             ${c.queued === null || c.idle
               ? `<span><span class="fc-n">${c.idle}</span><span class="fc-lbl">idle</span></span>` : ""}
             ${c.queued !== null
-              ? `<span title="jobs the scheduler holds that have not started; the table below lists them"><span class="fc-n">${c.queued}</span><span class="fc-lbl">queued</span></span>` : ""}
-            ${c.unfit ? `<span title="their own check refuses work -- a full disk, a container engine that is not running; the Workers table says why"><span class="fc-n" style="color:var(--bad)">${c.unfit}</span><span class="fc-lbl">can't run</span></span>` : ""}
+              ? `<span title="Queued jobs listed below"><span class="fc-n">${c.queued}</span><span class="fc-lbl">queued</span></span>` : ""}
+            ${c.unfit ? `<span title="Self-check failed; see Workers for the cause"><span class="fc-n" style="color:var(--bad)">${c.unfit}</span><span class="fc-lbl">can't run</span></span>` : ""}
             ${c.offline ? `<span title="not heard from for 5 min or more"><span class="fc-n" style="color:var(--text-muted)">${c.offline}</span><span class="fc-lbl">offline</span></span>` : ""}
           </div>
           ${c.detail ? `<div class="fc-age" style="color:var(--text-muted);margin-top:3px">${esc(c.detail)}</div>` : ""}
@@ -5599,7 +5574,7 @@
         + `${esc(s.stage)}${s.seconds != null ? " " + esc(ageShort(s.seconds)) : ""}${open ? " …" : ""}</span>`;
     };
     return `<div class="detail-card" style="margin-bottom:14px;">
-        <h3>Stages <span class="label-hint" style="font-weight:400;">(from the lines the worker reported; a stage lasts as long as the lines it covers, so its length is the heartbeat's)</span></h3>
+        <h3>Stages <span class="label-hint" style="font-weight:400;">(durations estimated from worker heartbeats)</span></h3>
         ${attempts.map((a) => `<div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:6px;">`
           + (attempts.length > 1 ? `<span class="label-hint">attempt ${a}:</span>` : "")
           + segs.filter((s) => s.attempt === a).map(chip).join("") + `</div>`).join("")}
@@ -6680,8 +6655,8 @@
     const dirs = data.directions.slice().sort((a, b) => natural(a.direction, b.direction));
     if (!dirs.length) {
       return head + '<div class="ms-note">' + (live
-        ? "No residual history yet. The node sends the curve with its solve reports."
-        : "No residual history: the node that solved this case sent none.") + '</div>';
+        ? "Awaiting residual history from the node."
+        : "No residual history reported.") + '</div>';
     }
     const fin = solve && isObj(solve.finished) ? solve.finished : {};
     const running = (d) => live && solve && solve.current === d;
@@ -6727,7 +6702,7 @@
     }
     // The number that looks worst on a converged direction is epsilon's; say what it is.
     const epsilon = Object.keys(s.fields).includes("epsilon")
-      ? '<div class="ms-note rs-note rs-eps">epsilon is drawn but never stops a solve: with wall functions its residual typically floors near 1e-2 even when p, U and k reach machine zero.</div>'
+      ? '<div class="ms-note rs-note rs-eps">Epsilon is plotted but excluded from convergence checks; wall functions typically limit it to ~1e-2.</div>'
       : "";
     return head + '<div class="rs-head">' + picker + '<span class="rs-at" data-rest="' + esc(at) + '">' + esc(at) + '</span></div>'
       + ended + '<div class="rs-plot">' + plot + '</div>' + residualKeysHtml(s, off) + epsilon
@@ -7663,7 +7638,7 @@
     const left = eta.at - Math.floor(Date.now() / 1000);
     const clock = new Date(eta.at * 1000).toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit" });
     const text = left > 0 ? `ETA ~${formatDuration(left)} (${clock})` : "past its estimate";
-    return `<span style="color:var(--text-muted);font-size:10px;" title="solve end, extrapolated from ${Math.round(eta.measured_over_s / 60)} min of this lease's progress; an upper estimate, since a direction that converges stops early">${esc(text)}</span>`;
+    return `<span style="color:var(--text-muted);font-size:10px;" title="Solve ETA from ${Math.round(eta.measured_over_s / 60)} min of progress; early convergence may shorten it">${esc(text)}</span>`;
   }
 
   /// A dot for "the worker said something recently": green < 5 min, amber < 15,
@@ -8614,8 +8589,8 @@
   // and `admin` was the only role that could write.
   const ROLE_BLURB = {
     admin: "everything, including accounts, machine credentials and purging a campaign",
-    operator: "runs the campaign and the fleet like a GitHub maintainer: confirms devices, issues credentials and read-only links, points nodes at a registered build; revokes, removes and blocks nothing, manages no accounts",
-    viewer: "reads the campaign and nothing else",
+    operator: "manages cases, approves devices, issues credentials and links, selects registered builds; cannot revoke, delete, block or manage accounts",
+    viewer: "read-only campaign access",
   };
 
   function roleOptions(selected) {
@@ -8730,9 +8705,9 @@
       const r = lastReleases;
       const policy = r ? r.undeclared_recipes : undefined;
       const title = policy === undefined
-        ? "its lease names no recipes: an E3D from before declarations, or a --runner script. What it is handed depends on the release policy's undeclared_recipes"
+        ? "No recipes declared; assignments follow the undeclared_recipes policy"
         : policy === null
-          ? "its lease names no recipes, and no undeclared_recipes policy is set, so it is handed ANY recipe -- a Radiance case included, which such a worker gives back with exit 69 and stops. Set the policy (Node builds panel) before posting one"
+          ? "No recipes or fallback policy declared: any recipe may be assigned. Unsupported Radiance cases stop this worker (exit 69). Set the policy in Node builds first."
           : policy.length
             ? `its lease names no recipes; the policy hands such a worker ${policy.join(", ")}`
             : "its lease names no recipes, and the policy hands such a worker nothing";
@@ -8755,7 +8730,7 @@
     for (const [x, pending, leased] of queuedRecipes(st)) {
       if (has.has(x)) continue;
       chips.push(`<span class="chip mono" style="color:var(--text-muted);text-decoration:line-through" `
-        + `title="${esc(`${x}: ${pending} pending, ${leased} leased. This worker does not declare it, so it is never handed one. An E3D node declares the thermal recipe only where Radiance answers (the radiance-energyplus image through a container engine, or a native rad6R0P2 install): its console says which at start`)}">`
+        + `title="${esc(`${x}: ${pending} pending, ${leased} leased. Not declared; never assigned to this worker. Thermal recipes require Radiance (radiance-energyplus image or native rad6R0P2); check node startup output`)}">`
         + `${esc(shortRecipe(x))}</span>`);
     }
     return `<div style="display:flex;flex-wrap:wrap;gap:4px;min-width:120px">${chips.join("")}</div>`;
@@ -8806,9 +8781,9 @@
   function buildCell(w) {
     const now = Math.floor(Date.now() / 1000);
     const conflict = w.id_conflict && w.id_conflict_at && now - w.id_conflict_at < 86400
-      ? ` <span class="badge quarantined" title="its build flipped between ${esc(w.id_conflict)} within minutes (${esc(relTime(w.id_conflict_at))}): two clients share this worker id -- two nodes started under one name? Stop one of them.">shared id?</span>`
+      ? ` <span class="badge quarantined" title="Builds ${esc(w.id_conflict)} share this worker ID (${esc(relTime(w.id_conflict_at))}). Stop the duplicate node.">shared id?</span>`
       : "";
-    if (!w.build) return `<span style="color:var(--text-muted)" title="its client sent no build with the lease: an E3D.exe from before build identity, or a Python worker started without EDDY3D_CLI. The broker cannot move it; update it by hand once, and it declares itself from then on">undeclared</span>` + conflict;
+    if (!w.build) return `<span style="color:var(--text-muted)" title="Build unreported. Update this worker manually to enable managed updates.">undeclared</span>` + conflict;
     const r = lastReleases;
     const want = w.target_build || (r && r.target_build) || null;
     const behind = want && want !== w.build;
@@ -8827,7 +8802,7 @@
       if (w.update_failed) why = "it tried this build and rolled back";
       else if (noFile) why = `nothing to fetch: ${want} has no file for ${w.platform}`;
       else if (w.update_state) why = `it says: ${w.update_state} (${relTime(w.update_state_at)})`;
-      else if (!w.release_asked_at) why = "it has never asked the broker what to run, so it cannot update itself: a Python worker, or an E3D.exe from before releases. Update it by hand";
+      else if (!w.release_asked_at) why = "No update check received. Update this worker manually";
       else why = `it asked ${relTime(w.release_asked_at)} and has not said what it is doing`;
       const how = w.target_build ? "canary target" : "fleet target";
       badges += ` <span class="badge ${stuck ? "quarantined" : "pending"}" title="${esc(how + ". " + why + (stuck ? ". Stuck: it has been behind for " + ageShort(age) + ", longer than a switch at the \"" + apply + "\" boundary should take (" + ageShort(limit) + "). Look at the reason above" : ". Behind: it runs a different build than its target and will switch at the \"" + apply + "\" boundary"))}">→ ${esc(shortBuild(want))}${age != null ? " · " + esc(ageShort(age)) : ""}${stuck ? " · stuck" : ""}</span>`;
@@ -8972,7 +8947,7 @@
       }
       const needed = build === r.target_build || build === r.previous_target;
       const tip = needed
-        ? "a node told to move to this build can fetch it only from a release share until it is uploaded: casebroker release register <release.json> --upload <dir>"
+        ? "Release share required until uploaded: casebroker release register <release.json> --upload <dir>"
         : "never uploaded, or let go to make room for newer builds: upload it again before pointing the fleet at it";
       return `<div class="label-hint"${needed ? ' style="color:var(--bad)"' : ""} title="${esc(tip)}">`
         + (held.length ? `not held here for ${esc(missing.join(", "))}` : "files not held here") + `</div>`;
@@ -8997,7 +8972,7 @@
               + worse(b)
               + (who || notes ? `<div class="label-hint" style="margin-top:2px">${esc(who)}${notes ? ` — ${esc(notes)}` : ""}</div>` : "")
               + `</td>
-            <td class="mono" title="${b.first_seen ? esc(new Date(b.first_seen * 1000).toLocaleString()) : "no completed case and never published: nothing has dated this build yet"}">${b.first_seen ? esc(relTime(b.first_seen)) : "—"}</td>
+            <td class="mono" title="${b.first_seen ? esc(new Date(b.first_seen * 1000).toLocaleString()) : "No publication or completion date"}">${b.first_seen ? esc(relTime(b.first_seen)) : "—"}</td>
             <td>${(b.published || []).length ? esc(b.published.join(" ")) : `<span style="color:var(--text-muted)">not published</span>`}`
               + ((b.missing_platforms || []).length
                   ? `<div class="label-hint" style="color:var(--bad)" title="live workers on this platform would be told to move and could not">no file for ${esc(b.missing_platforms.join(", "))}</div>` : "")
@@ -9108,7 +9083,7 @@
         const plan = await userCall("/v1/releases/files/sweep?dry_run=true" + q, { method: "POST" });
         if (!plan.files) { showToast("No old build files to delete"); return; }
         if (!window.confirm(`Delete ${plan.files} file(s), ${formatBytes(plan.bytes)}, of ${plan.builds.join(", ")}?\n\n`
-                            + "The builds stay listed; upload one again before pointing the fleet at it.")) return;
+                            + "Builds remain listed; re-upload before targeting them.")) return;
         const done = await userCall("/v1/releases/files/sweep?dry_run=false" + q, { method: "POST" });
         showToast(`Deleted ${done.removed} file(s), ${formatBytes(plan.bytes)}`);
       } catch (e) { showToast(e.message); }
@@ -9180,7 +9155,7 @@
 
   async function resetUserPassword(username) {
     const pw = prompt("New password for " + username + " (at least 12 characters).\n"
-                      + "Every session this account holds is revoked.");
+                      + "All sessions will end.");
     if (pw === null) return;
     if (pw.length < 12) { showToast("Password must be at least 12 characters"); return; }
     try {
@@ -9245,7 +9220,7 @@
     $("shareHereRow").style.display = routeHash(route) ? "flex" : "none";
     $("shareHereText").textContent = route.case
       ? "Open it on case " + route.case
-      : "Open it on this view of the case list";
+      : "Open this case-list view";
   }
 
   function renderShareIssued() {
@@ -9267,7 +9242,7 @@
 
   async function createShare() {
     const label = $("shareLabel").value.trim();
-    if (!label) { showToast("Say who it is for first"); $("shareLabel").focus(); return; }
+    if (!label) { showToast("Enter a recipient label"); $("shareLabel").focus(); return; }
     const ttl = $("shareTtl").value;
     const btn = $("shareCreate");
     btn.disabled = true;
@@ -9280,7 +9255,7 @@
       shareIssued = { url: shareLinkUrl(shareBase(), d.token, route), label: d.label, expires_at: d.expires_at };
       renderShareIssued();
       $("shareLabel").value = "";
-      showToast("Link made -- send it now");
+      showToast("Link created; copy or send now");
       loadShares();
     } catch (e) {
       showToast(e.message);
@@ -9335,7 +9310,7 @@
   }
 
   async function revokeShare(id) {
-    if (!confirm("Revoke this link? It stops working on its holder's next click.")) return;
+    if (!confirm("Revoke this link? Access ends on the next request.")) return;
     try {
       await userCall("/v1/shares/" + encodeURIComponent(id), { method: "DELETE" });
       showToast("Link revoked");
