@@ -3645,6 +3645,161 @@ def _backfill_field(conn, case_id: str, direction: str, header: dict[str, Any], 
     return "ok"
 
 
+# -- re-probe: the same solution sampled again, replacing what a node sampled ---------------
+#
+# Eddy3D's of12-v9 nodes sampled the 1.75 m surface with cellPoint. Inside a cell that
+# touches the ground it interpolates toward the wall points' U = 0, and on sloped ground
+# that cell is up to 2.3 m tall where snapping merged two layers: the field carries thin
+# slow lines along every level-4 cell plane. Eddy3D 1.21.1 samples with
+# cellPointWallModified (wall points carry their cell's value) and names the scheme in
+# the umag/1 header. The fields from before are repaired without solving again: the
+# direction part the broker holds is that direction's final solution, sampled afresh.
+# (Eddy3D docs/domain/wind-cfd-meshing.md, "The 1.75 m sample's cell-plane lines on v9",
+# measured 2026-11-11.)
+
+#: The interpolation a re-probe samples with; the only one reprobe_field stores.
+REPROBE_SCHEME = "cellPointWallModified"
+#: What a stored field may say about its interpolation to be replaced: nothing (every
+#: build before Eddy3D 1.21.1) or cellPoint (a field backfilled from an old archive
+#: names the scheme its case's dictionary held).
+REPROBE_REPLACES = (None, "cellPoint")
+#: The ``source`` a re-probed field carries, so the stored header says how it was made.
+REPROBE_SOURCE = "eddy3d-reprobe"
+
+
+def reprobe_field(conn, case_id: str, direction: str, blob: bytes, by: str | None = None,
+                  dry_run: bool = False, now: int | None = None) -> tuple[str, dict[str, Any]]:
+    """Replace a stored pedestrian field with the SAME solution sampled again with
+    cellPointWallModified: the one way a field is replaced by anything but a new solve.
+
+    The blob has to say what it is, ``interpolation: cellPointWallModified`` and
+    ``source: eddy3d-reprobe``. It replaces only a field that names no interpolation
+    or names cellPoint. The replacement must use the same lattice: nx, ny, x0, y0,
+    spacing, height and bearing. The same points must hold a value. A re-probe
+    samples the same surface and only the values on it change, so a different NaN
+    pattern means a different surface, from another case or another crop.
+
+    The row keeps the solve's worker and report time; the event ``field_reprobed``
+    names who replaced it and both hashes. The replaced bytes are not kept: the
+    direction part, sampled with cellPoint, gives them back.
+
+    Returns ``(outcome, info)``. The outcome is one of:
+
+    * ``"ok"``: stored; with ``dry_run``, it would be.
+    * ``"unchanged"``: these exact bytes are stored already, e.g. a retry whose
+      answer was lost.
+    * ``"no_case"``.
+    * ``"no_field"``: nothing to replace; a missing field is backfilled instead.
+    * ``"already: <why>"``: the stored field was sampled with cellPointWallModified,
+      or with a scheme this does not replace.
+    * ``"differs: <why>"``: another lattice, or another NaN pattern.
+    * ``"not_reprobe: <why>"`` or ``"invalid: <why>"``.
+
+    ``info`` holds the stored field's sha256, size and interpolation, and the new
+    field's sha256 and size."""
+    if not PART_NAME.fullmatch(direction or "") or direction == "mesh":
+        return "invalid: not a direction name", {}
+    try:
+        header = decode_umag(blob)
+        blob = umag_container(blob)
+    except ValueError as exc:
+        return f"invalid: {exc}", {}
+    if header.get("direction") not in (None, direction):
+        return f"invalid: the blob says it is {header['direction']!r}, not {direction!r}", {}
+    if header.get("case_id") not in (None, case_id):
+        return f"invalid: the blob says it is {header['case_id']!r}, not {case_id!r}", {}
+    if header.get("interpolation") != REPROBE_SCHEME:
+        return (f"not_reprobe: the field says it was sampled with {header.get('interpolation')!r}; "
+                f"only a {REPROBE_SCHEME} re-probe replaces a stored field"), {}
+    if header.get("source") != REPROBE_SOURCE:
+        return (f"not_reprobe: its source is {header.get('source')!r}, not {REPROBE_SOURCE!r}; "
+                "a re-probed field says so in its header"), {}
+    import hashlib
+
+    import numpy as np
+
+    from . import umag
+    sha = hashlib.sha256(blob).hexdigest()
+    summary = field_summary(blob)
+    missing = np.isnan(umag.values(blob)[1])
+    return _reprobe_field(conn, case_id, direction, header, blob, sha, summary, missing, by,
+                          dry_run, now or _now())
+
+
+@_locked
+def _reprobe_field(conn, case_id: str, direction: str, header: dict[str, Any], blob: bytes, sha: str,
+                   summary: dict[str, Any], missing: Any, by: str | None, dry_run: bool,
+                   now: int) -> tuple[str, dict[str, Any]]:
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        if conn.execute("SELECT 1 FROM cases WHERE case_id=?", (case_id,)).fetchone() is None:
+            conn.execute("ROLLBACK")
+            return "no_case", {}
+        row = conn.execute(
+            "SELECT height_m, deg, nx, ny, x0, y0, spacing_m, sha256, bytes, blob, worker_id, reported_at"
+            " FROM case_fields WHERE case_id=? AND direction=? AND ABS(height_m - ?) < 1e-6",
+            (case_id, direction, header["height_m"])).fetchone()
+        if row is None:
+            conn.execute("ROLLBACK")
+            return "no_field", {}
+        old = umag_container(bytes(row["blob"]))
+        old_header = decode_umag(old)
+        info = {"replaced_sha256": row["sha256"], "replaced_bytes": row["bytes"],
+                "replaced_interpolation": old_header.get("interpolation"),
+                "sha256": sha, "bytes": len(blob)}
+        if row["sha256"] == sha:
+            conn.execute("ROLLBACK")
+            return "unchanged", info
+        why = _reprobe_refusal(row, old_header, old, header, missing)
+        if why or dry_run:
+            conn.execute("ROLLBACK")
+            return why or "ok", info
+        # Keyed on the STORED height, to the bit: the upsert's conflict target is exact,
+        # and a header height a rounding away would add a row beside the old one.
+        _insert_field(conn, case_id, direction, dict(header, height_m=row["height_m"]), blob, sha,
+                      summary, row["worker_id"], row["reported_at"])
+        _event(conn, case_id, by, "field_reprobed",
+               "%s @ %g m re-sampled with %s, replacing %s from build %s: sha256 %s (%d bytes)"
+               " replaced by %s (%d bytes)"
+               % (direction, row["height_m"], REPROBE_SCHEME,
+                  old_header.get("interpolation") or "a field naming no interpolation",
+                  old_header.get("eddy3d_build") or "unknown", row["sha256"], row["bytes"],
+                  sha, len(blob)), now)
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    return "ok", info
+
+
+def _reprobe_refusal(row, old_header: dict[str, Any], old: bytes, header: dict[str, Any],
+                     missing: Any) -> str | None:
+    """Why a re-probe may not replace the stored field ``row``, or None when it may."""
+    import numpy as np
+
+    from . import umag
+    scheme = old_header.get("interpolation")
+    if scheme == REPROBE_SCHEME:
+        return f"already: the stored field was sampled with {REPROBE_SCHEME}"
+    if scheme not in REPROBE_REPLACES:
+        return (f"already: the stored field says it was sampled with {scheme!r}; "
+                "a re-probe replaces cellPoint fields only")
+    for k in ("nx", "ny"):
+        if int(row[k]) != int(header[k]):
+            return f"differs: {k} is {int(header[k])} here and {int(row[k])} in the stored field"
+    for k in ("x0", "y0", "spacing_m"):
+        if not math.isclose(float(row[k]), float(header[k]), rel_tol=0.0, abs_tol=1e-6):
+            return f"differs: {k} is {float(header[k]):g} here and {float(row[k]):g} in the stored field"
+    if row["deg"] is not None and header.get("deg") is not None \
+            and not math.isclose(float(row["deg"]), float(header["deg"]), rel_tol=0.0, abs_tol=1e-6):
+        return f"differs: the bearing is {float(header['deg']):g} here and {float(row['deg']):g} in the stored field"
+    flipped = int((np.isnan(umag.values(old)[1]) != missing).sum())
+    if flipped:
+        return (f"differs: {flipped} of {missing.size} points hold a value in one field and not "
+                "the other; a re-probe samples the same surface")
+    return None
+
+
 # What a field record carries, without its bytes: the grid, the node's own numbers,
 # and the statistics the broker computed (field_summary) -- not data_offset, which is
 # how the broker reads the blob and nobody else's business.

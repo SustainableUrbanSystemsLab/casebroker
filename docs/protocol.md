@@ -333,6 +333,31 @@ is not done or already has the field (a solve's own is never replaced), 404 for 
 `POST /v1/parts/wanted` lists, per case, the directions whose field the broker holds
 (`fields`), so a sweeping node backfills the rest.
 
+**Re-probe.** `PUT /v1/cases/{id}/fields/{direction}/reprobe?dry_run=` (admin) replaces a
+stored field with the same solution sampled again with `cellPointWallModified`. It is the
+repair for the fields Eddy3D's v9 nodes sampled with `cellPoint` before 1.21.1: thin slow
+lines along every cell plane on sloped ground. Each comes from the direction part the
+broker holds, with no new solve. It is the only way a field is replaced by anything but a
+new solve, so it checks what it replaces:
+
+- **The body says what it is.** Its umag/1 header carries `interpolation:
+  cellPointWallModified` and `source: eddy3d-reprobe`; 422 otherwise.
+- **The stored field is an old one.** It names no interpolation (every build before
+  1.21.1) or names `cellPoint`; 409 otherwise.
+- **It is the same surface.** Same lattice (`nx`, `ny`, `x0`, `y0`, `spacing_m`, height,
+  bearing) and the same points hold a value; 409 otherwise. Only the values change.
+- **Something is stored.** 404 for no such case or no field to replace; a missing field
+  is backfilled.
+
+The row keeps the solve's `worker_id` and `reported_at`. The event `field_reprobed` names
+the admin and both sha256 hashes; the replaced bytes are not kept, since re-sampling the
+part with `cellPoint` gives them back. The answer carries `replaced_sha256`,
+`replaced_interpolation`, `sha256` and `unchanged`. The same bytes sent again answer 200
+`unchanged: true`, so a retry after a lost answer is safe. `dry_run=true` checks
+everything and stores nothing. `casebroker fields reprobe <folder> [--apply]` sends every
+`.umag` file under a folder to the case and direction its header names, as a dry run
+unless `--apply`.
+
 ### Parts the broker holds
 
 With `CASEBROKER_PARTS_DIR` set, a node uploads each part of a case to the broker as
@@ -371,7 +396,7 @@ Additive, like everything worker-facing short of a MAJOR: a node that sends none
 it is leased exactly as before, and a node reading an older broker finds none of it.
 
 **Capabilities.** `GET /healthz` carries `protocol: 2` and `features`, sorted:
-`field_backfill`, `fields`, `handoff`, `hardware`, `heartbeat_stage`,
+`field_backfill`, `field_reprobe`, `fields`, `handoff`, `hardware`, `heartbeat_stage`,
 `machine_scoped_leases`, `node_release`, `parts`, `parts_wanted`, `residuals`,
 `telemetry`, and `part_store` and `release_files` where a store is configured. A node reads it at start
 and after every outage. A feature listed is one whose 404 is a hiccup (a proxy during

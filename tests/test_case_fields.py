@@ -10,6 +10,7 @@ scope gets it back as the same bytes.
 from __future__ import annotations
 
 import gzip
+import hashlib
 import json
 import math
 import pathlib
@@ -21,7 +22,7 @@ from fastapi.testclient import TestClient
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
-from casebroker import dataset, db  # noqa: E402
+from casebroker import auth, dataset, db  # noqa: E402
 from casebroker.app import create_app  # noqa: E402
 
 V4 = "cyl-1008/of12-v4"
@@ -366,3 +367,206 @@ def test_the_route_answers_as_a_node_reads_it(tmp_path, monkeypatch):
     assert [f["direction"] for f in got] == ["case_000"]
     wanted = c.post("/v1/parts/wanted", headers=W, json={"case_ids": [case]}).json()
     assert wanted["cases"][case]["fields"] == ["case_000"], "what a sweeping node backfills is the rest"
+
+
+# -- re-probe: the same solution sampled again with cellPointWallModified -------------------
+#
+# Eddy3D's v9 nodes sampled the 1.75 m surface with cellPoint, which leaves thin slow lines
+# along every cell plane on sloped ground; 1.21.1 samples with cellPointWallModified and
+# says so in the header. reprobe_case.py samples the direction parts the broker holds again,
+# and this is the one way such a field replaces what a solve stored.
+
+CPWM = {"interpolation": "cellPointWallModified", "source": "eddy3d-reprobe"}
+REPROBED = [1.1, 2.2, float("nan"), 4.4, 5.9, 0.3]       # VALUES' NaN where VALUES has it
+PW = "a-sufficiently-long-passphrase"
+
+
+def _sha(blob: bytes) -> str:
+    """The sha256 the broker keeps: of the container, without the gzip."""
+    return hashlib.sha256(gzip.decompress(blob) if blob[:2] == b"\x1f\x8b" else blob).hexdigest()
+
+
+def _solved(c, values=VALUES, **extra):
+    """A case whose node stored case_000 under its lease, as v9 nodes did: no scheme named."""
+    lease = db.lease(c, "foam-1")[0]
+    assert db.put_field(c, lease.lease_id, CASE, "case_000", umag(values, **extra)) == "ok"
+    return db.case_field(c, CASE, "case_000")
+
+
+def _reprobed(c):
+    return [dict(r) for r in c.execute(
+        "SELECT worker_id, detail FROM events WHERE case_id=? AND event='field_reprobed'", (CASE,))]
+
+
+def test_a_reprobe_replaces_an_old_field_and_the_event_keeps_both_hashes(conn):
+    old = _solved(conn)
+    new = umag(REPROBED, **CPWM)
+    outcome, info = db.reprobe_field(conn, CASE, "case_000", new, by="ada")
+    assert outcome == "ok", outcome
+    assert info == {"replaced_sha256": old["sha256"], "replaced_bytes": old["bytes"],
+                    "replaced_interpolation": None, "sha256": _sha(new), "bytes": len(gzip.decompress(new))}
+    got = db.case_field(conn, CASE, "case_000")
+    assert got["blob"] == gzip.decompress(new), "stored uncompressed, as every field"
+    assert (got["worker_id"], got["reported_at"]) == (old["worker_id"], old["reported_at"]), \
+        "still the solve's field: its worker and its time"
+    assert got["umag_max"] == pytest.approx(5.9) and old["umag_max"] == pytest.approx(5.5), \
+        "the statistics follow the bytes"
+    assert len(db.case_fields(conn, CASE)) == 1, "replaced, not added beside"
+    (event,) = _reprobed(conn)
+    assert event["worker_id"] == "ada"
+    assert old["sha256"] in event["detail"] and info["sha256"] in event["detail"]
+
+
+def test_the_same_bytes_again_are_unchanged_and_a_second_reprobe_is_refused(conn):
+    _solved(conn)
+    new = umag(REPROBED, **CPWM)
+    assert db.reprobe_field(conn, CASE, "case_000", new, by="ada")[0] == "ok"
+    outcome, info = db.reprobe_field(conn, CASE, "case_000", new, by="ada")
+    assert outcome == "unchanged" and info["replaced_sha256"] == info["sha256"], "a retry whose answer was lost"
+    other = umag([9.0, 9.0, float("nan"), 9.0, 9.0, 9.0], **CPWM)
+    outcome, _ = db.reprobe_field(conn, CASE, "case_000", other, by="ada")
+    assert outcome == "already: the stored field was sampled with cellPointWallModified", outcome
+    assert db.case_field(conn, CASE, "case_000")["blob"] == gzip.decompress(new)
+    assert len(_reprobed(conn)) == 1
+
+
+@pytest.mark.parametrize("stored, expected", [
+    (None, "ok"),
+    ("cellPoint", "ok"),
+    ("cellPointWallModified", "already: the stored field was sampled with cellPointWallModified"),
+    ("cell", "already: the stored field says it was sampled with 'cell'"),
+])
+def test_what_the_stored_field_says_it_was_sampled_with_decides(conn, stored, expected):
+    """Nothing (every build before Eddy3D 1.21.1) or cellPoint (a field backfilled from an
+    old archive names the scheme its case's dictionary held) is replaced; nothing else is."""
+    old = _solved(conn, **({} if stored is None else {"interpolation": stored}))
+    outcome, info = db.reprobe_field(conn, CASE, "case_000", umag(REPROBED, **CPWM), by="ada")
+    assert outcome.startswith(expected), outcome
+    assert info["replaced_interpolation"] == stored
+    if expected != "ok":
+        assert db.case_field(conn, CASE, "case_000")["sha256"] == old["sha256"]
+
+
+@pytest.mark.parametrize("extra, why", [
+    ({}, "sampled with None"),
+    ({"interpolation": "cellPoint", "source": "eddy3d-reprobe"}, "sampled with 'cellPoint'"),
+    ({"interpolation": "cellPointWallModified"}, "its source is None"),
+    ({"interpolation": "cellPointWallModified", "source": "eddy3d-native"}, "its source is 'eddy3d-native'"),
+])
+def test_a_field_that_does_not_say_it_is_a_reprobe_is_refused(conn, extra, why):
+    old = _solved(conn)
+    outcome, info = db.reprobe_field(conn, CASE, "case_000", umag(REPROBED, **extra), by="ada")
+    assert outcome.startswith("not_reprobe:") and why in outcome, outcome
+    assert info == {} and db.case_field(conn, CASE, "case_000")["sha256"] == old["sha256"]
+
+
+@pytest.mark.parametrize("change, why", [
+    ({"nx": 6, "ny": 1}, "nx is 6 here and 3"),
+    ({"x0": 0.0}, "x0 is 0 here and -2"),
+    ({"spacing_m": 1.0}, "spacing_m is 1 here and 2"),
+    ({"deg": 11.25}, "the bearing is 11.25 here and 0"),
+])
+def test_a_reprobe_on_another_lattice_is_refused(conn, change, why):
+    old = _solved(conn)
+    outcome, _ = db.reprobe_field(conn, CASE, "case_000", umag(REPROBED, **{**CPWM, **change}), by="ada")
+    assert outcome.startswith("differs:") and why in outcome, outcome
+    assert db.case_field(conn, CASE, "case_000")["sha256"] == old["sha256"]
+
+
+def test_a_reprobe_with_another_nan_pattern_samples_another_surface(conn):
+    """Two samplings of one surface differ in their values only: a point that gains or
+    loses its value means another case's field, or another crop of the terrain."""
+    old = _solved(conn)
+    shifted = [1.1, float("nan"), 3.3, 4.4, 5.9, 0.3]
+    outcome, _ = db.reprobe_field(conn, CASE, "case_000", umag(shifted, **CPWM), by="ada")
+    assert outcome.startswith("differs: 2 of 6 points"), outcome
+    assert db.case_field(conn, CASE, "case_000")["sha256"] == old["sha256"]
+
+
+def test_a_reprobe_needs_a_stored_field_to_replace(conn):
+    _solved(conn)
+    nobody = umag(REPROBED, case_id="v2-nobody", **CPWM)
+    assert db.reprobe_field(conn, "v2-nobody", "case_000", nobody)[0] == "no_case"
+    assert db.reprobe_field(conn, CASE, "case_001", umag(REPROBED, direction="case_001", **CPWM))[0] == "no_field", \
+        "a missing field is backfilled, not re-probed"
+    assert db.reprobe_field(conn, CASE, "case_000", umag(REPROBED, height=1.5, **CPWM))[0] == "no_field", \
+        "a field at another height is another field"
+    assert db.reprobe_field(conn, CASE, "mesh", umag(REPROBED, direction="mesh", **CPWM))[0].startswith("invalid")
+    assert db.reprobe_field(conn, CASE, "case_000", umag(REPROBED, direction="case_009", **CPWM))[0] \
+        .startswith("invalid")
+    assert db.reprobe_field(conn, CASE, "case_000", b"not a field")[0].startswith("invalid")
+
+
+def test_a_header_height_a_rounding_away_replaces_the_stored_row_not_one_beside_it(conn):
+    """The row's key is (case, direction, height) to the bit; the lookup allows 1e-6 m.
+    A replacement keyed on the header's own height would add a second 1.75 m field."""
+    _solved(conn)
+    outcome, _ = db.reprobe_field(conn, CASE, "case_000", umag(REPROBED, height=1.75 + 1e-9, **CPWM), by="ada")
+    assert outcome == "ok", outcome
+    (only,) = db.case_fields(conn, CASE)
+    assert only["height_m"] == 1.75 and only["umag_max"] == pytest.approx(5.9)
+
+
+def test_a_dry_run_checks_everything_and_stores_nothing(conn):
+    old = _solved(conn)
+    outcome, info = db.reprobe_field(conn, CASE, "case_000", umag(REPROBED, **CPWM), by="ada", dry_run=True)
+    assert outcome == "ok" and info["replaced_sha256"] == old["sha256"]
+    assert db.case_field(conn, CASE, "case_000")["sha256"] == old["sha256"] and _reprobed(conn) == []
+    outcome, _ = db.reprobe_field(conn, CASE, "case_000", umag([1.0] * 6, **CPWM), by="ada", dry_run=True)
+    assert outcome.startswith("differs:"), "a dry run refuses what the real one would"
+
+
+def test_a_field_stored_gzip_wrapped_is_replaced_like_any_other(conn):
+    """Rows from before 0.28.0 hold the gzip stream the node sent."""
+    _solved(conn)
+    gz = umag(VALUES)
+    conn.execute("UPDATE case_fields SET blob = ?, bytes = ? WHERE case_id = ?", (gz, len(gz), CASE))
+    outcome, info = db.reprobe_field(conn, CASE, "case_000", umag(REPROBED, **CPWM), by="ada")
+    assert outcome == "ok" and info["replaced_bytes"] == len(gz), outcome
+    assert db.case_field(conn, CASE, "case_000")["blob"][:4] == b"UMAG"
+
+
+def test_the_reprobe_route_is_an_admins(tmp_path):
+    """Admin only: it replaces what a solve stored, and the replaced bytes are not kept."""
+    app = create_app(db_path=str(tmp_path / "rp.sqlite"), tokens=["w"], readonly_tokens=["r"])
+    side = db.connect(app.state.db_path)
+    for name, role in (("ada", "admin"), ("opal", "operator"), ("vic", "viewer")):
+        db.create_user(side, name, auth.hash_password(PW), role=role)
+    node = TestClient(app)
+    r = node.post("/v1/cases", headers=W, json=[{"lat": 33.8, "lon": -84.4, "recipe": V4, "city_cluster": "atl"}])
+    assert r.status_code == 200, r.text
+    lease = node.post("/v1/lease", headers=W, json={"worker_id": "foam-1"}).json()[0]
+    case = lease["case_id"]
+    old = umag(VALUES, case_id=case)
+    r = node.put(f"/v1/cases/{case}/fields/case_000", headers=W, params={"lease_id": lease["lease_id"]}, content=old)
+    assert r.status_code == 200, r.text
+
+    def logged_in(name):
+        c = TestClient(app)
+        assert c.post("/v1/auth/login", json={"username": name, "password": PW}).status_code == 200
+        return c
+
+    url = f"/v1/cases/{case}/fields/case_000/reprobe"
+    new = umag(REPROBED, case_id=case, **CPWM)
+    assert node.put(url, headers=W, content=new).status_code == 401, "a machine token is not enough"
+    assert logged_in("opal").put(url, content=new).status_code == 403, "nor an operator"
+    assert logged_in("vic").put(url, content=new).status_code == 403
+    admin = logged_in("ada")
+    r = admin.put(url, params={"dry_run": "true"}, content=new)
+    assert r.status_code == 200 and r.json()["dry_run"] is True, r.text
+    assert node.get(f"/v1/cases/{case}/fields/case_000", headers=R).content == gzip.decompress(old)
+
+    r = admin.put(url, content=new)
+    assert r.status_code == 200, r.text
+    got = r.json()
+    assert (got["unchanged"], got["replaced_sha256"], got["sha256"]) == (False, _sha(old), _sha(new))
+    assert got["replaced_interpolation"] is None
+    assert node.get(f"/v1/cases/{case}/fields/case_000", headers=R).content == gzip.decompress(new)
+    assert admin.put(url, content=new).json()["unchanged"] is True, "a retry is safe"
+    assert admin.put(url, content=umag([9.0] * 6, case_id=case, **CPWM)).status_code == 409
+    assert admin.put(url, content=umag(REPROBED, case_id=case)).status_code == 422, "it says it is no re-probe"
+    assert admin.put(url, content=b"").status_code == 422
+    one = umag(REPROBED, case_id=case, direction="case_001", **CPWM)
+    assert admin.put(f"/v1/cases/{case}/fields/case_001/reprobe", content=one).status_code == 404
+    nobody = umag(REPROBED, case_id="v2-nobody", **CPWM)
+    assert admin.put("/v1/cases/v2-nobody/fields/case_000/reprobe", content=nobody).status_code == 404
