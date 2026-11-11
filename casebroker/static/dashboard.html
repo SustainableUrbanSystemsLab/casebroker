@@ -2608,7 +2608,12 @@
           g.progress = { ...g.progress, stage: "reconnecting" };
           wait = (e.retryAfter || 5) * 1000;
         }
-        if (performance.now() > giveUp) throw new Error("the broker did not finish reading this site in 5 minutes");
+        // The stage it was stuck at tells a full queue (queued), a layer that will
+        // not answer, and a broker that is down (reconnecting) apart.
+        if (performance.now() > giveUp) {
+          throw new Error("the broker did not finish reading this site in 5 minutes (last stage: "
+            + ((g.progress && g.progress.stage) || "none") + ")");
+        }
         await new Promise((r) => setTimeout(r, wait));
       }
     };

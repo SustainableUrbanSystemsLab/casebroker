@@ -346,3 +346,56 @@ def test_when_the_mesh_source_cannot_be_read_the_other_answers_and_says_so(broke
 
     broker.get(f"/v1/cases/{case}/footprints")
     assert calls == ["overture", "gba", "overture", "gba"], "a fallback is retried, not cached"
+
+
+def test_a_raster_host_that_goes_quiet_is_given_up_on(monkeypatch):
+    """GDAL sets no HTTP timeout of its own: a raster host that accepted the
+    connection and then said nothing held the one preview slot, and with it
+    every site preview in the broker, until the process restarted. A GDAL
+    option spelled wrong is silently ignored, so this asks GDAL, on localhost."""
+    import socket
+    from casebroker import footprints
+    assert footprints._GDAL_ENV["GDAL_HTTP_LOW_SPEED_TIME"] > 0
+    monkeypatch.setitem(footprints._GDAL_ENV, "GDAL_HTTP_LOW_SPEED_TIME", 1)  # faster, same option
+    held, out = [], []
+    with socket.create_server(("127.0.0.1", 0)) as srv:
+        def accept():                    # every connection kept open, none answered
+            try:
+                while True:
+                    held.append(srv.accept()[0])
+            except OSError:
+                pass
+
+        def read():
+            try:
+                footprints._read_window(f"/vsicurl/http://127.0.0.1:{srv.getsockname()[1]}/x.tif",
+                                        33.7, -84.4, 500.0, 8, None)
+            except Exception as e:       # noqa: BLE001
+                out.append(str(e))
+        threading.Thread(target=accept, daemon=True).start()
+        reader = threading.Thread(target=read, daemon=True)
+        reader.start()
+        reader.join(30)
+    for c in held:
+        c.close()
+    assert out, "a read from a host that never answers is still waiting"
+    assert "too slow" in out[0]
+
+
+def test_a_fallback_reaches_a_background_poll(broker, monkeypatch):
+    """A background read hands a cacheable answer to the cache and leaves. A
+    fallback was written as cacheable while the cache refuses it, so every poll
+    found neither the job nor a hit, started the read again, and the page asked
+    until it gave up: "did not finish reading this site in 5 minutes"."""
+    calls = _sources(monkeypatch, fail=("overture",))
+    _case(broker, 32.0603, 118.7969)
+    case = _finish(broker, {"stage": "archived", "height_source": "overture"})
+    url = f"/v1/cases/{case}/footprints?background=1"
+    for _ in range(300):
+        r = broker.get(url)
+        if r.status_code != 202:
+            break
+        time.sleep(0.01)
+    assert r.status_code == 200, r.text
+    assert r.json()["fallback_from"].startswith("overture unavailable")
+    assert calls == ["overture", "gba"], "one read, delivered, not one per poll"

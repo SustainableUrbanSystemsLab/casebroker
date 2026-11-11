@@ -8,6 +8,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.49.40] - 2026-11-11
+
+### Fixed
+
+- Site geometry: one stalled read no longer stalls every site preview. GDAL set no HTTP
+  timeout, so a terrain or canopy host that accepted a connection and went quiet held the
+  one preview slot until the broker restarted, and every case opened meanwhile ended in
+  "did not finish reading this site in 5 minutes". A raster read now gives up after 10 s
+  with nothing received; a GBA request after 30 s instead of 300 (four attempts made that
+  20 minutes). A building fallback is no longer written as cacheable: the cache refused it,
+  so a background read handed its answer to nobody and every poll started it again. When
+  the dashboard does give up, it names the stage it was stuck at.
+
 ## [0.49.39] - 2026-11-11
 
 ### Fixed
