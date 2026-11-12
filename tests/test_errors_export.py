@@ -29,7 +29,7 @@ def _fail(c, worker, error, retryable=True):
 def test_no_errors_is_an_empty_answer_not_a_404(tmp_path):
     c = _client(tmp_path)
     _cases(c, 2)
-    assert c.get("/v1/errors", headers=R).json() == {"total": 0, "returned": 0,
+    assert c.get("/v1/errors", headers=R).json() == {"total": 0, "returned": 0, "parked": 0,
                                                      "truncated": False, "cases": []}
 
 
@@ -123,3 +123,43 @@ def test_a_stop_the_broker_forgave_and_a_machine_giving_up_are_in_the_history(tm
         ("released", "node cannot run cases"),
         ("failed", "transient"),
     ]
+
+
+def _park(c, ids, reason):
+    got = c.post("/v1/cases/park", params=[("case_id", i) for i in ids]
+                 + [("reason", reason), ("dry_run", "false")], headers=W).json()
+    assert got["parked"] == len(ids)
+
+
+def test_a_case_an_operator_parked_is_flagged_and_one_that_failed_first_is_not(tmp_path):
+    # 2026-11-12: 280 west-mirror cases parked by park_cases were 280 of 289 blocks in a
+    # pasted report, burying the nine real failures. Parked = no machine in the trail.
+    c = _client(tmp_path)
+    _cases(c, 3)
+    failed_then_parked = _fail(c, "a", "transient")          # back to pending, one attempt spent
+    pending = [x["case_id"] for x in c.get("/v1/cases?state=pending", headers=R).json()["cases"]]
+    assert failed_then_parked in pending and len(pending) == 3
+    _park(c, pending, "misplaced: sampler-v3 scan mirrored this western tile")
+
+    data = c.get("/v1/errors", headers=R).json()
+    flags = {x["case_id"]: x["parked"] for x in data["cases"]}
+    assert len(flags) == 3 and data["parked"] == 2
+    assert flags[failed_then_parked] is False, "an attempt that failed on a machine is a failure, parked or not"
+    assert sum(flags.values()) == 2
+
+
+def test_the_paste_names_parked_cases_once_per_reason_after_the_failures(tmp_path):
+    import shutil
+    import subprocess
+
+    import pytest
+
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed on this machine; the JS half cannot be executed here")
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1]
+    result = subprocess.run([node, str(root / "tests" / "errors_paste_check.js")],
+                            cwd=root, capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "errors paste ok" in result.stdout
