@@ -8,6 +8,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.49.43] - 2026-11-11
+
+### Added
+
+- Replaced stored pedestrian fields with a re-probe of the same solution:
+  `PUT /v1/cases/{id}/fields/{direction}/reprobe` (admin) and
+  `casebroker fields reprobe <folder> [--apply]`. Until Eddy3D 1.21.1 the of12-v9 nodes
+  sampled the 1.75 m surface with `cellPoint`, which leaves thin slow lines along every
+  level-4 cell plane on sloped ground; 751 fields of 31 cases were sampled that way.
+  Sampling the direction parts this broker holds again with `cellPointWallModified`
+  repairs them without a new solve, but nothing could store the result, because a
+  solve's field was never replaced. The route takes only a blob that says it is such a
+  re-probe, over a field that names no interpolation or `cellPoint`, on the same lattice
+  and with the same NaN pattern. The row keeps the solve's worker and report time, and
+  the `field_reprobed` event names the admin and both hashes. A dry run checks
+  everything and stores nothing, and the same bytes sent again answer `unchanged`.
+  `/healthz` lists `field_reprobe`.
+
 ## [0.49.42] - 2026-11-11
 
 ### Fixed

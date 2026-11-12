@@ -59,7 +59,7 @@ MAX_LEASE_SECONDS = 24 * 3600
 # when a set of worker-facing additions lands together; it is not the MAJOR
 # version, which only a break moves. `part_store` is added per deployment.
 PROTOCOL = 2
-FEATURES = ("field_backfill", "fields", "handoff", "hardware", "heartbeat_stage",
+FEATURES = ("field_backfill", "field_reprobe", "fields", "handoff", "hardware", "heartbeat_stage",
             "machine_scoped_leases", "node_release", "parts", "parts_wanted",
             "residuals", "telemetry")
 
@@ -2979,6 +2979,48 @@ def create_app(db_path: str | None = None, tokens: list[str] | None = None,
                                      "reported this direction is this credential's")
         if outcome == "no_case":
             raise HTTPException(404, "no such case")
+        raise HTTPException(422, outcome)
+
+    @app.put("/v1/cases/{case_id}/fields/{direction}/reprobe")
+    async def reprobe_field(case_id: str, direction: str, request: Request,
+                            dry_run: bool = False, user=AdminAuth) -> dict[str, Any]:
+        """A stored field replaced by the SAME solution sampled again with
+        cellPointWallModified: the repair for the fields Eddy3D's v9 nodes sampled with
+        cellPoint before 1.21.1, read off the direction parts this broker holds
+        (db.reprobe_field). Admin only: it replaces what a solve stored, and the replaced
+        bytes are not kept. The event field_reprobed records both hashes.
+
+        The body is a umag/1 blob whose header says ``interpolation:
+        cellPointWallModified`` and ``source: eddy3d-reprobe``, on the stored field's
+        lattice and with its NaN pattern. ``dry_run`` checks everything and stores
+        nothing. The same bytes sent twice answer ``unchanged``, so a retry is safe.
+
+        Errors:
+
+        * 404: no such case, or no field to replace (a missing one is backfilled).
+        * 409: the stored field was sampled with cellPointWallModified already, or the
+          lattice or NaN pattern differs.
+        * 413: the body is past the limit.
+        * 422: the body is not a re-probed field."""
+        blob = await request.body()
+        if len(blob) > db.FIELD_MAX_BYTES:
+            raise HTTPException(413, f"the field is {len(blob)} bytes; the limit is {db.FIELD_MAX_BYTES}")
+        if not blob:
+            raise HTTPException(422, "the body is empty; send the umag/1 blob as application/octet-stream")
+        # Off the event loop, as put_field (why there).
+        import anyio
+        outcome, info = await anyio.to_thread.run_sync(
+            lambda: db.reprobe_field(conn, case_id, direction, blob, by=user["username"], dry_run=dry_run))
+        if outcome in ("ok", "unchanged"):
+            return {"ok": True, "case_id": case_id, "direction": direction, "dry_run": dry_run,
+                    "unchanged": outcome == "unchanged", **info}
+        if outcome == "no_case":
+            raise HTTPException(404, "no such case")
+        if outcome == "no_field":
+            raise HTTPException(404, "the case has no field for this direction at this height to "
+                                     "replace; a missing field is backfilled (PUT .../backfill)")
+        if outcome.startswith(("already:", "differs:")):
+            raise HTTPException(409, outcome)
         raise HTTPException(422, outcome)
 
     @app.get("/v1/cases/{case_id}/fields", dependencies=[ReadAuth])

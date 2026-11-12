@@ -27,7 +27,7 @@ from fastapi.testclient import TestClient
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
-from casebroker import db  # noqa: E402
+from casebroker import auth, db  # noqa: E402
 from casebroker.app import create_app  # noqa: E402
 
 V4 = "cyl-1008/of12-v4"
@@ -46,7 +46,8 @@ def _on_loop() -> bool:
 def calls(monkeypatch):
     """(entry point, ran on the event loop) for every database call the routes make."""
     seen: list[tuple[str, bool]] = []
-    for name in ("put_field", "backfill_field", "worker_token_owner", "session_user", "blob_expected"):
+    for name in ("put_field", "backfill_field", "reprobe_field", "worker_token_owner", "session_user",
+                 "blob_expected"):
         real = getattr(db, name)
 
         def spy(*a, _real=real, _name=name, **kw):
@@ -67,12 +68,12 @@ def broker(tmp_path, monkeypatch):
     return c, lease["case_id"], lease["lease_id"], tmp_path / "a.sqlite"
 
 
-def _field(case_id: str, direction: str = "case_000") -> bytes:
+def _field(case_id: str, direction: str = "case_000", values=(1.0, 2.0, 3.0, 4.0, 5.5, 0.0), **extra) -> bytes:
     header = {"format": "umag/1", "case_id": case_id, "direction": direction, "deg": 0.0,
               "height_m": 1.75, "nx": 3, "ny": 2, "x0": -2.0, "y0": -1.0, "spacing_m": 2.0,
-              "coverage": 0.8, "u_ref": 3.1, "umag_p999": 5.5}
+              "coverage": 0.8, "u_ref": 3.1, "umag_p999": 5.5, **extra}
     hb = json.dumps(header, separators=(",", ":")).encode()
-    body = struct.pack("<6f", 1.0, 2.0, 3.0, 4.0, 5.5, 0.0)
+    body = struct.pack("<6f", *values)
     return gzip.compress(b"UMAG" + struct.pack("<II", 1, len(hb)) + hb + body, mtime=0)
 
 
@@ -96,6 +97,22 @@ def test_a_backfilled_field_is_stored_off_the_event_loop(broker, calls):
     r = c.put(f"/v1/cases/{case}/fields/case_000/backfill", headers=W, content=_field(case))
     assert r.status_code == 200, r.text
     assert ("backfill_field", False) in calls, calls
+    assert _on_the_loop(calls) == [], calls
+
+
+def test_a_reprobed_field_is_stored_off_the_event_loop(broker, calls):
+    c, case, lease_id, path = broker
+    r = c.put(f"/v1/cases/{case}/fields/case_000", headers=W, params={"lease_id": lease_id},
+              content=_field(case))
+    assert r.status_code == 200, r.text
+    db.create_user(db.connect(str(path)), "ada", auth.hash_password("a-sufficiently-long-passphrase"))
+    r = c.post("/v1/auth/login", json={"username": "ada", "password": "a-sufficiently-long-passphrase"})
+    assert r.status_code == 200, r.text
+    reprobed = _field(case, values=(1.1, 2.2, 3.3, 4.4, 5.9, 0.3),
+                      interpolation="cellPointWallModified", source="eddy3d-reprobe")
+    r = c.put(f"/v1/cases/{case}/fields/case_000/reprobe", content=reprobed)
+    assert r.status_code == 200, r.text
+    assert ("reprobe_field", False) in calls, calls
     assert _on_the_loop(calls) == [], calls
 
 

@@ -1284,6 +1284,45 @@ def test_a_field_blob_is_stored_uncompressed_and_a_cell_reads_in_place():
     conn.execute("DELETE FROM case_fields WHERE case_id = ?", (case_id,))
 
 
+def test_a_field_is_reprobed_on_postgres():
+    """The re-probe's transaction on the engine production runs: the stored blob read back
+    from bytea, the row replaced in place under its exact height, the event written."""
+    import gzip
+    import json
+    import struct
+
+    conn = fresh_conn()
+    recipe = prefix("reprobe")
+    (case_id,) = seed(1, "reprobe", recipe=recipe)
+    lease = db.lease(conn, prefix("w-reprobe"), recipes=[recipe])[0]
+    assert lease.case_id == case_id
+
+    def container(values, **extra):
+        header = {"format": "umag/1", "case_id": case_id, "direction": "case_000", "deg": 0.0,
+                  "height_m": 1.75, "nx": 3, "ny": 2, "x0": -2.0, "y0": -1.0, "spacing_m": 2.0, **extra}
+        hb = json.dumps(header).encode()
+        return b"UMAG" + struct.pack("<II", 1, len(hb)) + hb + struct.pack("<6f", *values)
+
+    nan = float("nan")
+    cpwm = {"interpolation": "cellPointWallModified", "source": "eddy3d-reprobe"}
+    old = container([1.0, 2.0, nan, 4.0, 5.5, 0.0])
+    assert db.put_field(conn, lease.lease_id, case_id, "case_000", gzip.compress(old)) == "ok"
+    shifted = container([nan, 2.2, 3.3, 4.4, 5.9, 0.3], **cpwm)
+    assert db.reprobe_field(conn, case_id, "case_000", shifted, by=prefix("admin"))[0].startswith("differs: 2 of 6")
+    new = container([1.1, 2.2, nan, 4.4, 5.9, 0.3], **cpwm)
+    outcome, info = db.reprobe_field(conn, case_id, "case_000", new, by=prefix("admin"))
+    assert outcome == "ok", outcome
+    assert info["replaced_interpolation"] is None and info["bytes"] == len(new)
+    got = db.case_field(conn, case_id, "case_000")
+    assert got["blob"] == new and got["worker_id"] == prefix("w-reprobe")
+    assert len(db.case_fields(conn, case_id)) == 1, "replaced in place, not added beside"
+    assert db.reprobe_field(conn, case_id, "case_000", new, by=prefix("admin"))[0] == "unchanged"
+    events = conn.execute("SELECT worker_id FROM events WHERE case_id = ? AND event = 'field_reprobed'",
+                          (case_id,)).fetchall()
+    assert [e["worker_id"] for e in events] == [prefix("admin")]
+    conn.execute("DELETE FROM case_fields WHERE case_id = ?", (case_id,))
+
+
 def test_a_field_is_asked_questions_in_place_on_postgres():
     """What differs by engine in the field queries: substr() of a bytea at an offset
     computed from a column (CAST to integer, or Postgres finds no substr(bytea, bigint)),

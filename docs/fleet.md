@@ -232,6 +232,21 @@ column is `STORAGE EXTERNAL`). Rows stored before are gzip-wrapped; the first tw
 `lambda_f`**, the frontal area index of the direction it was solved for, read off the
 site report the node sent (protocol.md, "Telemetry and the dataset").
 
+**A field a v9 node sampled with `cellPoint`** (every build before Eddy3D 1.21.1) is
+repaired without a new solve. Eddy3D's `reprobe_case.py` samples the direction parts the
+broker holds again with `cellPointWallModified`, and an admin replaces the stored fields
+with the result, a dry run first:
+
+```
+scripts/broker-admin.sh fields reprobe <folder of .umag files>
+scripts/broker-admin.sh fields reprobe <folder of .umag files> --apply
+```
+
+Each file goes to the case and direction its header names. The broker refuses a file that
+does not say it is a re-probe, one over a field already sampled with
+`cellPointWallModified`, and one on another lattice or with another NaN pattern
+(protocol.md, "Re-probe").
+
 U at 1.5 m and 1.75 m above grade, on a regular 2 m grid over the 1008 m core
 (504 x 504 points), for every direction: `pedestrian/U.npz` (`U[direction,
 height, y, x, (ux, uy, uz)]`, float32, NaN inside buildings, row 0 = south),

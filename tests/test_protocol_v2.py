@@ -53,7 +53,7 @@ def test_healthz_says_what_this_broker_supports(tmp_path):
     h = c.get("/healthz").json()
     assert h["protocol"] == 2
     assert h["features"] == sorted(h["features"])
-    for name in ("telemetry", "residuals", "parts", "fields", "field_backfill", "parts_wanted",
+    for name in ("telemetry", "residuals", "parts", "fields", "field_backfill", "field_reprobe", "parts_wanted",
                  "node_release", "heartbeat_stage", "handoff", "hardware", "machine_scoped_leases"):
         assert name in h["features"], name
     assert "part_store" not in h["features"], "no store configured"

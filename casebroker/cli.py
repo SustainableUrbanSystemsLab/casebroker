@@ -1000,6 +1000,98 @@ def cmd_parts_reset(args) -> int:
     return 0
 
 
+# -- fields: stored pedestrian fields replaced by a re-probe of the same solution ----------
+
+def _umag_header(blob: bytes) -> dict:
+    """The JSON header of a umag/1 blob, gzip-wrapped or not; ValueError otherwise."""
+    import gzip
+    import struct
+    if blob[:2] == b"\x1f\x8b":
+        blob = gzip.decompress(blob)
+    if len(blob) < 12 or blob[:4] != b"UMAG":
+        raise ValueError("not a umag/1 container")
+    (hlen,) = struct.unpack("<I", blob[8:12])
+    header = json.loads(blob[12:12 + hlen].decode("utf-8"))
+    if not isinstance(header, dict):
+        raise ValueError("its header is not a JSON object")
+    return header
+
+
+def cmd_fields_reprobe(args) -> int:
+    """Replace stored pedestrian fields with re-probed ones, as an admin (PUT
+    /v1/cases/{id}/fields/{dir}/reprobe): the same solution sampled again with
+    cellPointWallModified, as Eddy3D's reprobe_case.py writes it. Each .umag file
+    named, or found under a folder named, goes to the case and direction its header
+    names. Without --apply the broker only checks each one and says what it would
+    replace. Bytes it holds already answer "unchanged", so an interrupted run is
+    simply run again."""
+    from urllib.parse import quote
+    files: list[pathlib.Path] = []
+    for p in args.paths:
+        path = pathlib.Path(p)
+        if path.is_dir():
+            files += sorted(path.rglob("*.umag"))
+        elif path.is_file():
+            files.append(path)
+        else:
+            print("no such file or folder: %s" % p, file=sys.stderr)
+            return 2
+    jobs = []
+    for f in files:
+        try:
+            header = _umag_header(f.read_bytes())
+        except (OSError, ValueError) as exc:
+            print("%s: %s" % (f, exc), file=sys.stderr)
+            return 2
+        if not header.get("case_id") or not header.get("direction"):
+            print("%s: its header names no case_id and direction" % f, file=sys.stderr)
+            return 2
+        jobs.append((f, str(header["case_id"]), str(header["direction"])))
+    if not jobs:
+        print("no .umag files in %s" % ", ".join(args.paths), file=sys.stderr)
+        return 2
+    opener = _admin_session(args)
+    if opener is None:
+        return 1
+    bad = 0
+    try:
+        status, health = _call(opener, args.broker, "GET", "/healthz")
+        if status == 200 and "field_reprobe" not in (health.get("features") or []):
+            print("this broker (%s) has no re-probe route yet" % health.get("version", "?"), file=sys.stderr)
+            return 1
+        for f, case_id, direction in jobs:
+            where = "/v1/cases/%s/fields/%s/reprobe%s" % (
+                quote(case_id, safe=""), quote(direction, safe=""), "" if args.apply else "?dry_run=true")
+            body = f.read_bytes()
+            for missed in range(6):
+                try:
+                    status, got = _put_bytes(opener, args.broker, where, body, timeout=120)
+                except OSError as exc:                   # URLError, a reset connection, a timeout
+                    status, got = 0, {"detail": str(getattr(exc, "reason", None) or exc)}
+                if status not in _HICCUPS:
+                    break
+                print("  %s %s: %s; trying again in %d s" % (case_id, direction, got.get("detail", status),
+                                                            5 * (missed + 1)), file=sys.stderr)
+                _pause(5 * (missed + 1))
+            if status != 200:
+                bad += 1
+                print("%s %s: refused (%s): %s" % (case_id, direction, status, got.get("detail", "")),
+                      file=sys.stderr)
+            elif got.get("unchanged"):
+                print("%s %s: unchanged, the broker holds %s already" % (case_id, direction, got["sha256"][:12]))
+            else:
+                print("%s %s: %s %s (%s) with %s" % (
+                    case_id, direction, "replaced" if args.apply else "would replace",
+                    str(got.get("replaced_sha256"))[:12],
+                    got.get("replaced_interpolation") or "no interpolation named", str(got.get("sha256"))[:12]))
+        print("%d of %d field(s) %s" % (
+            len(jobs) - bad, len(jobs),
+            "replaced or held already" if args.apply else "can replace the stored one; dry run: pass --apply"))
+    finally:
+        _call(opener, args.broker, "POST", "/v1/auth/logout")
+    return 0 if bad == 0 else 1
+
+
 def cmd_repro(args) -> int:
     from . import repro
     token = _resolve_token(args.token, "write")
@@ -1311,6 +1403,17 @@ def main(argv: list[str] | None = None) -> int:
         "reset", help="reset uploaded parts to remesh (only if the mesh holder is permanently lost)"))
     pr.add_argument("case_id")
     pr.set_defaults(func=cmd_parts_reset)
+
+    fd = sub.add_parser("fields", help="manage stored pedestrian fields").add_subparsers(
+        dest="fields_cmd", required=True)
+    fr = _release_admin(fd.add_parser(
+        "reprobe", help="replace stored fields with re-probed ones (admin; dry run unless --apply)"))
+    fr.add_argument("paths", nargs="+", metavar="PATH",
+                    help=".umag files, or folders searched for them; each goes to the case and "
+                         "direction its header names")
+    fr.add_argument("--apply", action="store_true",
+                    help="replace the fields (default: the broker checks each and says what it would replace)")
+    fr.set_defaults(func=cmd_fields_reprobe)
 
     rls = rl.add_parser("list", help="list builds, target and fleet status")
     rls.add_argument("--broker", required=True)
