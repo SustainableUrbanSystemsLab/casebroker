@@ -4156,24 +4156,31 @@
   // nothing is rendered -- it only ever reaches the clipboard.
   window.formatErrors = (data, broker) => {
     const iso = (t) => t ? new Date(t * 1000).toISOString().replace(".000Z", "Z") : "?";
+    // A case an operator PARKED (park_cases: quarantined, no machine in its trail)
+    // never failed. Field case, 2026-11-12: 280 parked west-mirror cases were 280 of
+    // the 289 blocks in a paste, and the nine real failures were somewhere in the
+    // middle. Parked cases are named once per reason, at the end.
+    const failed = data.cases.filter((c) => !c.parked);
+    const parked = data.cases.filter((c) => c.parked);
     const lines = [
       `casebroker errors -- ${broker} -- ${new Date().toISOString()}`,
       `${data.total} case(s) with an error` +
-        (data.truncated ? ` (first ${data.returned} shown; quarantined first, then most recent)` : ""),
+        (data.truncated ? ` (first ${data.returned} shown; quarantined first, then most recent)` : "") +
+        (parked.length ? ` -- ${failed.length} failed, ${parked.length} parked by an operator (listed at the end)` : ""),
     ];
     // The same message on hundreds of cases is one bug, and saying so up front
     // is what makes a 2,000-case paste readable.
     const counts = new Map();
-    for (const c of data.cases) {
+    for (const c of failed) {
       const key = (c.last_error || "").trim().split("\n")[0].slice(0, 160);
       counts.set(key, (counts.get(key) || 0) + 1);
     }
     const top = [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 15);
-    if (data.cases.length > 1) {
+    if (failed.length > 1) {
       lines.push("", "Most common first lines:");
       for (const [msg, n] of top) lines.push(`  ${String(n).padStart(5)} x  ${msg}`);
     }
-    for (const c of data.cases) {
+    for (const c of failed) {
       lines.push("", "=".repeat(72),
         // Concatenated, not interpolated: tests/test_dashboard_escaping.py treats every
         // template literal holding a server field as markup, and this file should not
@@ -4191,6 +4198,23 @@
           // The final attempt's text is last_error above; repeat only what differs.
           if (detail && !(c.last_error || "").startsWith(detail)) lines.push("    " + detail.replace(/\n/g, "\n    "));
         }
+      }
+    }
+    if (parked.length) {
+      const byReason = new Map();
+      for (const c of parked) {
+        const key = (c.last_error || "").trim();
+        if (!byReason.has(key)) byReason.set(key, []);
+        byReason.get(key).push(c);
+      }
+      lines.push("", "=".repeat(72), "Parked by an operator -- never failed, not run:");
+      for (const [reason, group] of [...byReason.entries()].sort((a, b) => b[1].length - a[1].length)) {
+        const last = Math.max(...group.map((c) => c.updated_at || 0));
+        lines.push("", "  " + group.length + " x  " + reason, "    parked " + iso(last));
+        // Ids only, eight to a line: enough to reopen or look one up, and 280 of them
+        // stay 35 lines rather than 2,500.
+        const ids = group.map((c) => c.case_id).sort();
+        for (let i = 0; i < ids.length; i += 8) lines.push("    " + ids.slice(i, i + 8).join(" "));
       }
     }
     return lines.join("\n") + "\n";

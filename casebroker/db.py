@@ -5691,8 +5691,18 @@ def list_errors(conn, limit: int = 2000) -> dict[str, Any]:
                 [_TIMEOUT_REFUND_TAG + "%", _MACHINE_RELEASE + "%", *chunk]).fetchall():
             d = dict(e)
             by_id[d.pop("case_id")]["history"].append(d)
+    # Parked by an operator (park_cases), not failed: quarantined with no machine
+    # anywhere in its trail. Field case, 2026-11-12: the 280 cases the sampler's
+    # west mirror put at -lat were 280 of the 289 in a pasted report, one full block
+    # each, burying the nine that had actually failed. The paste now names a parked
+    # case once per reason. A case parked AFTER real failures has a worker in its
+    # trail and stays a failure -- those attempts happened.
+    for c in cases:
+        h = c["history"]
+        c["parked"] = bool(c["state"] == "quarantined" and h
+                           and all(x["worker_id"] is None and x["event"] == "quarantined" for x in h))
     return {"total": total, "returned": len(cases), "truncated": total > len(cases),
-            "cases": cases}
+            "parked": sum(c["parked"] for c in cases), "cases": cases}
 
 
 # What a case's trail can say about one worker, newest-last: it took the case
